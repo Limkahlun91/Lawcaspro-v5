@@ -390,16 +390,17 @@ describe("Milestone printer connector", () => {
     expect(acting?.status).toBe("configured");
   });
 
-  it("POST /api/cases/:caseId/documents/print returns PDF when outputFormat=pdf", async () => {
+  it("POST /api/cases/:caseId/documents/print enqueues one-item job", async () => {
     hasTemplate = true;
     const res = await request(app)
       .post("/api/cases/3/documents/print")
       .send({ printKey: "acting_letter", outputFormat: "pdf" });
-    expect(res.status).toBe(201);
-    expect(String(res.headers["content-type"] ?? "")).toMatch(/application\/pdf/i);
-    expect(String(res.headers["content-disposition"] ?? "")).toMatch(/\.pdf/i);
-    expect(Buffer.isBuffer(res.body)).toBe(true);
-    expect((res.body as Buffer).length).toBeGreaterThan(100);
+    expect(res.status).toBe(202);
+    expect(res.body?.ok).toBe(true);
+    expect(res.body?.mode).toBe("job");
+    expect(typeof res.body?.jobId).toBe("string");
+    expect(res.body?.total).toBe(1);
+    expect(res.body?.caseId).toBe(3);
   });
 
   it("POST /api/cases/:caseId/documents/print rejects without permission", async () => {

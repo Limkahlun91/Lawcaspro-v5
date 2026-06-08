@@ -34,6 +34,8 @@ import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { DateOnlyInput, formatYmdToDmy, normalizeDateOnlyFromApi } from "@/components/date-only-input";
 import { downloadBlob } from "@/lib/download";
+import { getApiFailureCodeFromError } from "@/lib/api-failure";
+import { getGenerationJobDownloadManifest, getGenerationJobStatus, runNextGenerationJob } from "@/lib/document-generation-client";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
 import { DEFAULT_ALLOWED_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
@@ -499,25 +501,123 @@ export default function CaseDetail() {
   });
   const printMutation = useMutation({
     mutationFn: async (payload: { printKey: string }) => {
-      const res = await apiRequest(`/cases/${caseId}/documents/print`, {
+      const startedAt = Date.now();
+      const resp = await apiFetchJson<unknown>(`/cases/${caseId}/documents/print`, {
         method: "POST",
-        timeoutMs: 120000,
+        timeoutMs: 20000,
         body: JSON.stringify({ ...payload, outputFormat: "pdf" }),
       });
-      const blob = await res.blob();
-      const cd = res.headers.get("content-disposition") ?? "";
-      const m = /filename\*=UTF-8''([^;]+)|filename=\"?([^\";]+)\"?/i.exec(cd);
-      const fileNameRaw = m?.[1] ?? m?.[2] ?? "download.pdf";
-      const fileName = decodeURIComponent(String(fileNameRaw).trim());
-      const docId = Number(res.headers.get("x-case-document-id") ?? NaN);
-      return { blob, fileName, docId };
-    },
-    onSuccess: async ({ blob, fileName, docId }, vars) => {
-      queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
-      if (Number.isFinite(docId)) {
-        queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
+      const jobId =
+        resp && typeof resp === "object" && typeof (resp as any).jobId === "string"
+          ? String((resp as any).jobId)
+          : "";
+      if (!jobId) throw new Error("print jobId missing");
+
+      const wait = (ms: number): Promise<void> =>
+        new Promise((r) => window.setTimeout(r, ms));
+
+      const getProgress = (snapshot: any): { total: number; success: number; failed: number; pending: number; running: number } => {
+        const p = snapshot?.progress;
+        if (p && typeof p === "object") {
+          return {
+            total: Number(p.total ?? 0),
+            success: Number(p.success ?? 0),
+            failed: Number(p.failed ?? 0),
+            pending: Number(p.pending ?? 0),
+            running: Number(p.running ?? 0),
+          };
+        }
+        return {
+          total: Number(snapshot?.totalCount ?? 0),
+          success: Number(snapshot?.successCount ?? 0),
+          failed: Number(snapshot?.failedCount ?? 0),
+          pending: Number(snapshot?.pendingCount ?? 0),
+          running: Number(snapshot?.runningCount ?? 0),
+        };
+      };
+
+      const isComplete = (snapshot: any): boolean => {
+        const p = getProgress(snapshot);
+        return p.total > 0 && p.pending === 0 && p.running === 0 && p.success + p.failed === p.total;
+      };
+
+      const getFailureSummary = (snapshot: any): string => {
+        const items = Array.isArray(snapshot?.items) ? snapshot.items : [];
+        const failed = items.find((i: any) => String(i?.status ?? "") === "failed");
+        const msg = failed && typeof failed.errorMessage === "string" ? failed.errorMessage : "";
+        return msg || (typeof snapshot?.errorSummary === "string" ? snapshot.errorSummary : "") || "Generation failed";
+      };
+
+      let snapshot: any = await getGenerationJobStatus(jobId);
+      for (let attempt = 1; attempt <= 12 && !isComplete(snapshot); attempt++) {
+        try {
+          snapshot = await runNextGenerationJob(jobId);
+        } catch (err) {
+          const code = getApiFailureCodeFromError(err) ?? "";
+          const status =
+            err && typeof err === "object" && "status" in (err as any) && typeof (err as any).status === "number"
+              ? Number((err as any).status)
+              : null;
+          if (code === "RUN_NEXT_IN_FLIGHT") {
+            await wait(2500);
+            snapshot = await getGenerationJobStatus(jobId);
+            continue;
+          }
+          if (status === 409) {
+            await wait(1200);
+            snapshot = await getGenerationJobStatus(jobId);
+            continue;
+          }
+          throw err;
+        }
+        await wait(250);
+        snapshot = await getGenerationJobStatus(jobId);
       }
-      downloadBlob(blob, fileName);
+
+      snapshot = await getGenerationJobStatus(jobId);
+      if (!isComplete(snapshot)) {
+        const elapsed = Date.now() - startedAt;
+        throw new Error(`Generation still running after ${Math.round(elapsed / 1000)}s`);
+      }
+      const p = getProgress(snapshot);
+      if (p.failed > 0 || p.success === 0) {
+        throw new Error(getFailureSummary(snapshot));
+      }
+
+      let manifest: any = null;
+      for (let attempt = 1; attempt <= 6; attempt++) {
+        try {
+          manifest = await getGenerationJobDownloadManifest(jobId);
+          break;
+        } catch (err) {
+          const code = getApiFailureCodeFromError(err) ?? "";
+          if (code === "JOB_NOT_READY_FOR_DOWNLOAD") {
+            await wait(800);
+            continue;
+          }
+          throw err;
+        }
+      }
+      const files = manifest && typeof manifest === "object" && Array.isArray((manifest as any).files) ? ((manifest as any).files as any[]) : [];
+      const first = files.find((f) => String(f?.status ?? "") === "success" && typeof f?.signedUrl === "string" && String(f?.signedUrl).trim());
+      if (first?.signedUrl) {
+        const url = String(first.signedUrl);
+        const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`Download failed (${resp.status})`);
+        const blob = await resp.blob();
+        const name = typeof first.fileName === "string" && first.fileName.trim() ? String(first.fileName) : "download.pdf";
+        downloadBlob(blob, name);
+        return { jobId, fileName: name };
+      }
+
+      const zipRes = await apiRequest(`/documents/jobs/${jobId}/download`, { timeoutMs: 180000 });
+      const zipBlob = await zipRes.blob();
+      const fallbackName = `print-${jobId}.zip`;
+      downloadBlob(zipBlob, fallbackName);
+      return { jobId, fileName: fallbackName };
+    },
+    onSuccess: async ({ fileName }, vars) => {
+      queryClient.invalidateQueries({ queryKey: ["case-documents", caseId] });
       toast({ title: "Downloaded" });
 
       if (vars?.printKey === "acting_letter") {

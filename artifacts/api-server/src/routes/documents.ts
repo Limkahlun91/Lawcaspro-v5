@@ -24681,10 +24681,95 @@ router.get(
       latestByType.set(dt, row);
     }
 
+    const showMasterDocuments = await (async () => {
+      try {
+        const firmRows = await queryRows(
+          r,
+          sql`SELECT show_master_documents FROM firms WHERE id = ${req.firmId!} LIMIT 1`,
+        );
+        const v = (firmRows[0] as any)?.show_master_documents;
+        return v !== false;
+      } catch (err) {
+        const info = extractDbErrorInfo(err);
+        if (info.sqlstate === "42703") return true;
+        return true;
+      }
+    })();
+    const masterRows = showMasterDocuments
+      ? await queryRows(
+          r,
+          sql`SELECT id, name, category, file_name, file_type, created_at
+            FROM platform_documents
+            WHERE is_active = true
+              AND (firm_id IS NULL OR firm_id = ${req.firmId!})
+            ORDER BY created_at DESC
+            LIMIT 200`,
+        )
+      : [];
+    const normalizeText = (s: string): string =>
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    const includesAll = (hay: string, tokens: string[]): boolean => {
+      const h = normalizeText(hay);
+      return tokens.every((t) => h.includes(normalizeText(t)));
+    };
+    const findMasterFor = (cfg: {
+      documentType: string;
+      label: string;
+    }): Record<string, unknown> | null => {
+      if (!masterRows.length) return null;
+      const dtTokens = String(cfg.documentType || "")
+        .split(/[_\s]+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 3);
+      const labelTokens = String(cfg.label || "")
+        .split(/[_\s]+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 3);
+      const tokens = Array.from(new Set([...dtTokens, ...labelTokens]));
+      for (const row of masterRows) {
+        const id =
+          typeof (row as any).id === "number"
+            ? Number((row as any).id)
+            : NaN;
+        if (!Number.isFinite(id) || id <= 0) continue;
+        const fileType = String((row as any).file_type ?? "").toLowerCase();
+        if (fileType && fileType !== "docx" && fileType !== "pdf") continue;
+        const name = String((row as any).name ?? "");
+        const category = String((row as any).category ?? "");
+        const fileName = String((row as any).file_name ?? "");
+        if (!isMasterDocumentLetterLike({ name, category, fileName })) continue;
+        const hay = `${name} ${fileName} ${category}`;
+        if (tokens.length > 0 && !includesAll(hay, tokens)) continue;
+        return row as Record<string, unknown>;
+      }
+      return null;
+    };
+
     const result = printKeys.map((k) => {
       const cfg = PRINT_ACTIONS[k];
       const tpl = latestByType.get(cfg.documentType) ?? null;
       if (!tpl) {
+        const master = findMasterFor(cfg);
+        if (master) {
+          return {
+            printKey: k,
+            documentType: cfg.documentType,
+            label: cfg.label,
+            status: "configured",
+            template: {
+              source: "master",
+              id: master.id,
+              name: master.name,
+              kind: "master",
+              isTemplateCapable: true,
+              fileName: master.file_name,
+            },
+          };
+        }
         return {
           printKey: k,
           documentType: cfg.documentType,
@@ -24703,6 +24788,7 @@ router.get(
           status: "template_not_template_kind",
           hint: "Configured record is not marked as Template-like. Edit it in Documents → Firm Documents.",
           template: {
+            source: "firm",
             id: tpl.id,
             name: tpl.name,
             kind: tpl.kind,
@@ -24719,6 +24805,7 @@ router.get(
           status: "template_not_capable",
           hint: "Template is not template-capable (must be .docx). Re-upload or edit as DOCX template.",
           template: {
+            source: "firm",
             id: tpl.id,
             name: tpl.name,
             kind: tpl.kind,
@@ -24733,6 +24820,7 @@ router.get(
         label: cfg.label,
         status: "configured",
         template: {
+          source: "firm",
           id: tpl.id,
           name: tpl.name,
           kind: tpl.kind,
@@ -24776,12 +24864,7 @@ router.post(
     const documentName =
       typeof body.documentName === "string" ? body.documentName.trim() : "";
     const letterheadId = normalizeLetterheadId((body as any).letterheadId);
-    const requestedOutputFormat =
-      body.outputFormat === "docx"
-        ? "docx"
-        : body.outputFormat === "pdf"
-          ? "pdf"
-          : "pdf";
+    const requestedOutputFormat = "pdf";
 
     const cache = createRequestCache();
     const [context, templateRows] = await Promise.all([
@@ -24838,7 +24921,7 @@ router.post(
     const bankToken = bankNameRaw ? normalizeBankToken(bankNameRaw) : "";
     const bankTokens = bankToken ? bankToken.split(" ").filter(Boolean) : [];
 
-    const template =
+    const firmTemplate =
       printKey === "letter_forward_bank_execution" && bankTokens.length > 0
         ? (matchedByCaseType.find((t) => {
             const name = String((t as any).name ?? "").toLowerCase();
@@ -24849,7 +24932,89 @@ router.post(
             );
           }) ?? matchedByCaseType[0])
         : matchedByCaseType[0];
-    if (!template) {
+
+    const showMasterDocuments = await (async () => {
+      try {
+        const firmRows = await queryRows(
+          r,
+          sql`SELECT show_master_documents FROM firms WHERE id = ${req.firmId!} LIMIT 1`,
+        );
+        const v = (firmRows[0] as any)?.show_master_documents;
+        return v !== false;
+      } catch (err) {
+        const info = extractDbErrorInfo(err);
+        if (info.sqlstate === "42703") return true;
+        return true;
+      }
+    })();
+    const normalizeText = (s: string): string =>
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    const includesAll = (hay: string, tokens: string[]): boolean => {
+      const h = normalizeText(hay);
+      return tokens.every((t) => h.includes(normalizeText(t)));
+    };
+
+    let templateSource: "firm" | "master" = "firm";
+    let firmTemplateId: number | null = null;
+    let platformDocumentId: number | null = null;
+
+    if (firmTemplate) {
+      const id =
+        typeof (firmTemplate as any).id === "number"
+          ? Number((firmTemplate as any).id)
+          : NaN;
+      if (Number.isFinite(id) && id > 0) firmTemplateId = Math.trunc(id);
+    }
+    if (!firmTemplateId && showMasterDocuments) {
+      const dtTokens = String(cfg.documentType || "")
+        .split(/[_\s]+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 3);
+      const labelTokens = String(cfg.label || "")
+        .split(/[_\s]+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 3);
+      const tokens = Array.from(new Set([...dtTokens, ...labelTokens]));
+      const masterRows = await queryRows(
+        r,
+        sql`SELECT id, name, category, file_name, file_type
+          FROM platform_documents
+          WHERE is_active = true
+            AND (firm_id IS NULL OR firm_id = ${req.firmId!})
+          ORDER BY created_at DESC
+          LIMIT 200`,
+      );
+      const picked = masterRows.find((row) => {
+        const id =
+          typeof (row as any).id === "number" ? Number((row as any).id) : NaN;
+        if (!Number.isFinite(id) || id <= 0) return false;
+        const fileType = String((row as any).file_type ?? "").toLowerCase();
+        if (fileType && fileType !== "docx" && fileType !== "pdf") return false;
+        const name = String((row as any).name ?? "");
+        const category = String((row as any).category ?? "");
+        const fileName = String((row as any).file_name ?? "");
+        if (!isMasterDocumentLetterLike({ name, category, fileName })) return false;
+        const hay = `${name} ${fileName} ${category}`;
+        if (tokens.length > 0 && !includesAll(hay, tokens)) return false;
+        return true;
+      });
+      if (picked) {
+        const id =
+          typeof (picked as any).id === "number"
+            ? Number((picked as any).id)
+            : NaN;
+        if (Number.isFinite(id) && id > 0) {
+          templateSource = "master";
+          platformDocumentId = Math.trunc(id);
+        }
+      }
+    }
+
+    if (!firmTemplateId && !platformDocumentId) {
       const msg =
         `找不到對應的 ${cfg.label} 模板` +
         (caseType ? `（Case Type=${caseType}）` : "");
@@ -24862,253 +25027,87 @@ router.post(
       return;
     }
 
-    const templateId =
-      typeof (template as any).id === "number"
-        ? Number((template as any).id)
-        : NaN;
-    const runId = await createGenerationRun(r, {
-      firm_id: req.firmId!,
-      case_id: caseId,
-      template_source: "firm",
-      template_id: Number.isNaN(templateId) ? null : templateId,
-      template_version_id: null,
-      platform_document_id: null,
-      document_name: documentName || cfg.label,
-      render_mode: "print",
-      status: "running",
-      rendered_variables_snapshot: null,
-      checklist_snapshot: null,
-      readiness_snapshot: null,
-      triggered_by: req.userId!,
-      error_code: null,
-      error_message: null,
-    });
-
+    const jobId = randomUUID();
+    const templateRefId =
+      templateSource === "firm" ? firmTemplateId : platformDocumentId;
+    const templateIdsArr =
+      templateSource === "firm" ? [templateRefId] : ([] as any[]);
+    const masterIdsArr =
+      templateSource === "master" ? [templateRefId] : ([] as any[]);
+    const jobConfig = {
+      action: "download",
+      outputFormat: requestedOutputFormat,
+      force: true,
+      blind: true,
+      createdRoleId: req.roleId ?? null,
+      templates: [{ source: templateSource, id: templateRefId }],
+      source: "milestone_printer",
+      printKey,
+      documentName: documentName || cfg.label,
+      letterheadId,
+    };
     try {
-      const out = await generateFirmDocument({
+      await queryRows(
         r,
-        firmId: req.firmId!,
-        actorId: req.userId!,
+        sql`
+          INSERT INTO document_generation_jobs (
+            id, firm_id, job_type, status, action, case_ids, template_ids, platform_document_ids, config,
+            total_count, success_count, failed_count, pending_count,
+            created_by, created_at, last_heartbeat_at, timeout_at, runner_attempts
+          ) VALUES (
+            ${jobId}::uuid, ${req.firmId!}, 'milestone_printer', 'pending', 'download',
+            ${JSON.stringify([caseId])}::jsonb, ${JSON.stringify(templateIdsArr)}::jsonb, ${JSON.stringify(masterIdsArr)}::jsonb, ${JSON.stringify(jobConfig)}::jsonb,
+            1, 0, 0, 1,
+            ${req.userId as any}, now(), now(), NULL, 0
+          )
+        `,
+      );
+      await queryRows(
+        r,
+        sql`
+          INSERT INTO document_generation_job_items (job_id, firm_id, case_id, template_source, template_id, platform_document_id, status)
+          VALUES (${jobId}::uuid, ${req.firmId!}, ${caseId}, ${templateSource}, ${templateSource === "firm" ? templateRefId : null}, ${templateSource === "master" ? templateRefId : null}, 'pending')
+        `,
+      );
+      await writeAuditLog({
+        firmId: req.firmId,
+        actorId: req.userId,
         actorType: req.userType,
+        action: "documents.milestone.print.enqueued",
+        entityType: "document_generation_job",
+        entityId: undefined,
+        detail: `jobId=${jobId} caseId=${caseId} printKey=${printKey} templateSource=${templateSource} templateId=${templateRefId} output=pdf`,
         ipAddress: req.ip,
-        userAgent: String(req.headers["user-agent"] ?? ""),
+        userAgent: req.headers["user-agent"],
+      });
+      res.status(202).json({
+        ok: true,
+        mode: "job",
+        jobId,
+        total: 1,
         caseId,
-        templateId,
-        documentName: documentName || cfg.label,
-        letterheadId,
-        runId,
-        outputFormat: requestedOutputFormat,
-        preloadedCaseContext: context as any,
-        preloadedTemplate: template as any,
-        requestCache: cache,
+        templateId: templateSource === "firm" ? templateRefId : null,
+        platformDocumentId: templateSource === "master" ? templateRefId : null,
+        templateSource,
+        documentType: cfg.documentType,
       });
-      const outBytes = out.outputBytes;
-      const outContentType = out.outputContentType;
-      if (!Buffer.isBuffer(outBytes) || outBytes.length === 0) {
-        throw new DocumentGenerationError(
-          500,
-          "OUTPUT_MISSING",
-          "Generated output missing",
-        );
-      }
-      const createdId = out.caseDocumentId;
-      const outFileName = String(
-        (out.caseDocument as any)?.fileName ??
-          (out.caseDocument as any)?.file_name ??
-          "",
-      );
-      if (!outFileName) {
-        throw new DocumentGenerationError(
-          500,
-          "OUTPUT_FILENAME_MISSING",
-          "Generated file name missing",
-        );
-      }
-      await writeAuditLog({
-        firmId: req.firmId,
-        actorId: req.userId,
-        actorType: req.userType,
-        action: "documents.case.print",
-        entityType: "case_document",
-        entityId: createdId ?? undefined,
-        detail: `caseId=${caseId} printKey=${printKey} templateId=${templateId} name=${documentName || cfg.label} letterhead=${letterheadId ?? "default"} output=${requestedOutputFormat}`,
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
-      });
-      await finishGenerationRunSuccess(
-        r,
-        req.firmId!,
-        runId,
-        createdId,
-        out.renderedVars,
-        out.checklistSnapshot,
-        out.readinessSnapshot,
-      );
-      await writeAuditLog({
-        firmId: req.firmId,
-        actorId: req.userId,
-        actorType: req.userType,
-        action: "documents.generation.succeeded",
-        entityType: "document_generation_run",
-        entityId: runId,
-        detail: `caseId=${caseId} templateSource=firm templateId=${templateId} renderMode=print`,
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
-      });
-      if (createdId) res.setHeader("x-case-document-id", String(createdId));
-      res.setHeader(
-        "Content-Disposition",
-        contentDispositionAttachment(outFileName),
-      );
-      if (typeof outContentType === "string" && outContentType.trim()) {
-        res.setHeader("Content-Type", outContentType);
-      }
-      res.status(201).send(outBytes);
-    } catch (err: unknown) {
-      const cfgErr = getSupabaseStorageConfigError(err);
-      if (cfgErr) {
-        logger.error(
-          {
-            err,
-            path: req.path,
-            firmId: req.firmId,
-            userId: req.userId,
-            caseId,
-            printKey,
-          },
-          "[documents] supabase_storage_not_configured",
-        );
-        res
-          .status(cfgErr.statusCode)
-          .json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
-        await finishGenerationRunFailed(
-          r,
-          req.firmId!,
-          runId,
-          "STORAGE_NOT_CONFIGURED",
-          cfgErr.error,
-        );
-        await writeAuditLog({
-          firmId: req.firmId,
-          actorId: req.userId,
-          actorType: req.userType,
-          action: "documents.generation.failed",
-          entityType: "document_generation_run",
-          entityId: runId,
-          detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=STORAGE_NOT_CONFIGURED`,
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
-        });
-        return;
-      }
-      if (err instanceof StorageRequestTimeoutError) {
-        res.status(503).json({
-          error: "連線至 Supabase 儲存空間超時",
-          code: "STORAGE_TIMEOUT",
-        });
-        await finishGenerationRunFailed(
-          r,
-          req.firmId!,
-          runId,
-          "STORAGE_TIMEOUT",
-          "連線至 Supabase 儲存空間超時",
-        );
-        await writeAuditLog({
-          firmId: req.firmId,
-          actorId: req.userId,
-          actorType: req.userType,
-          action: "documents.generation.failed",
-          entityType: "document_generation_run",
-          entityId: runId,
-          detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=STORAGE_TIMEOUT`,
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
-        });
-        return;
-      }
-      if (err instanceof ObjectNotFoundError) {
-        res.status(404).json({
-          error: "Template file not found",
-          code: "TEMPLATE_FILE_NOT_FOUND",
-        });
-        await finishGenerationRunFailed(
-          r,
-          req.firmId!,
-          runId,
-          "TEMPLATE_FILE_NOT_FOUND",
-          "Template file not found",
-        );
-        await writeAuditLog({
-          firmId: req.firmId,
-          actorId: req.userId,
-          actorType: req.userType,
-          action: "documents.generation.failed",
-          entityType: "document_generation_run",
-          entityId: runId,
-          detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=TEMPLATE_FILE_NOT_FOUND`,
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
-        });
-        return;
-      }
-      if (err instanceof DocumentGenerationError) {
-        res.status(err.statusCode).json({
-          error: err.message,
-          code: err.code,
-          ...(err.payload ? err.payload : {}),
-        });
-        await finishGenerationRunFailed(
-          r,
-          req.firmId!,
-          runId,
-          err.code,
-          err.message,
-        );
-        await writeAuditLog({
-          firmId: req.firmId,
-          actorId: req.userId,
-          actorType: req.userType,
-          action: "documents.generation.failed",
-          entityType: "document_generation_run",
-          entityId: runId,
-          detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=${err.code}`,
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
+    } catch (err) {
+      const info = extractDbErrorInfo(err);
+      if (info.sqlstate === "42703" || info.sqlstate === "42P01") {
+        res.status(409).json({
+          error:
+            "Database schema is outdated. Please apply latest migrations.",
+          code: "SCHEMA_OUTDATED",
         });
         return;
       }
       logger.error(
-        {
-          err,
-          path: req.path,
-          firmId: req.firmId,
-          userId: req.userId,
-          caseId,
-          printKey,
-        },
-        "[documents] print_failed",
+        { err, firmId: req.firmId, userId: req.userId, caseId, printKey },
+        "[documents] milestone_print_enqueue_failed",
       );
-      res.status(503).json({
-        error: "Service temporarily unavailable. Please retry.",
-        code: "PRINT_FAILED",
-      });
-      await finishGenerationRunFailed(
-        r,
-        req.firmId!,
-        runId,
-        "PRINT_FAILED",
-        "Service temporarily unavailable. Please retry.",
-      );
-      await writeAuditLog({
-        firmId: req.firmId,
-        actorId: req.userId,
-        actorType: req.userType,
-        action: "documents.generation.failed",
-        entityType: "document_generation_run",
-        entityId: runId,
-        detail: `caseId=${caseId} templateSource=firm templateId=${templateId} code=PRINT_FAILED`,
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
+      res.status(500).json({
+        error: "Failed to enqueue print job",
+        code: "ENQUEUE_FAILED",
       });
     }
   },
