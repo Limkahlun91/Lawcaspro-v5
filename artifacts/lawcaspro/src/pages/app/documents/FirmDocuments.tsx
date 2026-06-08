@@ -28,6 +28,7 @@ import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { downloadBlob } from "@/lib/download";
 import { DEFAULT_ALLOWED_MIME_TYPES, DOCX_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
+import { useAuth } from "@/lib/auth-context";
 
 const PdfMappingEditor = lazy(() => import("@/components/PdfMappingEditor"));
 
@@ -58,15 +59,20 @@ interface FirmDocument {
 }
 
 const ACCEPTED_EXTENSIONS = [
-  ".docx", ".doc", ".pdf", ".jpg", ".jpeg", ".png",
+  ".pdf", ".docx", ".jpg", ".jpeg", ".png", ".webp",
 ];
 
-async function uploadFile(file: File): Promise<{ objectPath: string }> {
+async function uploadFile(file: File, args: { firmId: number }): Promise<{ objectPath: string }> {
   const v = validateUploadFile(file, { allowedMimeTypes: [...DEFAULT_ALLOWED_MIME_TYPES, ...DOCX_MIME_TYPES] });
   if (!v.ok) throw new Error(v.message);
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const requestedObjectPath = `/objects/templates/firms/${args.firmId}/document-templates/${crypto.randomUUID()}-${safeName}`;
   const formData = new FormData();
   formData.append("file", file);
-  return await apiFetchJson("/storage/upload", { method: "POST", body: formData });
+  return await apiFetchJson<{ objectPath: string }>(
+    `/storage/upload?objectPath=${encodeURIComponent(requestedObjectPath)}`,
+    { method: "POST", body: formData },
+  );
 }
 
 function formatFileSize(bytes: number | null) {
@@ -153,6 +159,7 @@ export default function FirmDocuments() {
   const { toast } = useToast();
   const qc = useQueryClient();
   const uploadRef = useRef<HTMLInputElement>(null);
+  const { user } = useAuth();
 
   const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
   const [createFolderOpen, setCreateFolderOpen] = useState(false);
@@ -300,13 +307,14 @@ export default function FirmDocuments() {
     setIsUploading(true);
     setUploadProgress({ current: 0, total: selectedFiles.length });
     try {
+      if (!user?.firmId) throw new Error("Missing firm context");
       for (let i = 0; i < selectedFiles.length; i++) {
         const f = selectedFiles[i]!;
         setUploadProgress({ current: i + 1, total: selectedFiles.length });
         const ext = f.name.includes(".") ? f.name.split(".").pop()!.toLowerCase() : "";
-        const kind = ext === "docx" ? docKind : "reference";
+        const kind = ext === "docx" || ext === "pdf" ? docKind : "reference";
         const nameToUse = selectedFiles.length === 1 ? docName.trim() : baseNameFromFileName(f.name);
-        const uploaded = await uploadFile(f);
+        const uploaded = await uploadFile(f, { firmId: user.firmId });
 
         await apiFetchJson("/document-templates", {
           method: "POST",

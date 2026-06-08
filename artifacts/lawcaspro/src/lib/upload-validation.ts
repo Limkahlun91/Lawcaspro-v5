@@ -9,7 +9,7 @@ export const DEFAULT_ALLOWED_MIME_TYPES = [
 
 export const DOCX_MIME_TYPES = [
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/msword",
+  "application/vnd.ms-word.document.macroEnabled.12",
 ] as const;
 
 export function validateUploadFile(
@@ -28,7 +28,7 @@ export function validateUploadFile(
   const allowedByExt = (() => {
     const extAllowed: string[] = [];
     if (allowSet.has("application/vnd.openxmlformats-officedocument.wordprocessingml.document")) extAllowed.push(".docx");
-    if (allowSet.has("application/msword")) extAllowed.push(".doc");
+    if (allowSet.has("application/vnd.ms-word.document.macroEnabled.12")) extAllowed.push(".docm");
     if (allowSet.has("application/pdf")) extAllowed.push(".pdf");
     if (allowSet.has("image/jpeg")) extAllowed.push(".jpg", ".jpeg");
     if (allowSet.has("image/png")) extAllowed.push(".png");
@@ -42,7 +42,16 @@ export function validateUploadFile(
       allowSet.size === DEFAULT_ALLOWED_MIME_TYPES.length &&
       DEFAULT_ALLOWED_MIME_TYPES.every((t) => allowSet.has(t))
     ) {
-      return { ok: false, message: "Only DOCX, PDF, JPG, PNG, or WebP files are allowed" };
+      return { ok: false, message: "Only PDF, JPG, PNG, or WebP files are allowed" };
+    }
+    if (
+      allowSet.has("application/vnd.openxmlformats-officedocument.wordprocessingml.document") &&
+      allowSet.has("application/pdf") &&
+      allowSet.has("image/jpeg") &&
+      allowSet.has("image/png") &&
+      allowSet.has("image/webp")
+    ) {
+      return { ok: false, message: "Only PDF, DOCX, JPG, PNG, or WebP files are allowed" };
     }
     if (allowSet.size === 1 && allowSet.has(DOCX_MIME_TYPES[0])) {
       return { ok: false, message: "Only DOCX files are allowed" };

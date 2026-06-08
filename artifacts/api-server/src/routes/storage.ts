@@ -14,6 +14,7 @@ import {
 import { requireAuth, requireFounder, type AuthRequest } from "../lib/auth.js";
 import { ApiError, sendError, sendOk } from "../lib/api-response.js";
 import { queryOne } from "../lib/http.js";
+import { validateStorageUploadFile } from "../lib/storageUploadValidation.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -46,7 +47,7 @@ const DEFAULT_ALLOWED_MIME_TYPES = new Set([
 const TEMPLATE_ALLOWED_MIME_TYPES = new Set([
   ...DEFAULT_ALLOWED_MIME_TYPES,
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/msword",
+  "application/vnd.ms-word.document.macroEnabled.12",
 ]);
 
 const upload = multer({
@@ -60,19 +61,22 @@ const upload = multer({
     const lower = originalName.toLowerCase();
     const ext =
       lower.endsWith(".docx") ? "docx"
-      : lower.endsWith(".doc") ? "doc"
+      : lower.endsWith(".docm") ? "docm"
       : lower.endsWith(".pdf") ? "pdf"
       : lower.endsWith(".jpeg") ? "jpeg"
       : lower.endsWith(".jpg") ? "jpg"
       : lower.endsWith(".png") ? "png"
       : lower.endsWith(".webp") ? "webp"
       : "";
-    const extAllowed = allowTemplateTypes
-      ? ext === "docx" || ext === "doc" || ext === "pdf" || ext === "jpg" || ext === "jpeg" || ext === "png" || ext === "webp"
-      : ext === "pdf" || ext === "jpg" || ext === "jpeg" || ext === "png" || ext === "webp";
-    if (!allowed.has(file.mimetype) && !extAllowed) {
-      const err = new Error("UNSUPPORTED_FILE_TYPE");
+    const validation = validateStorageUploadFile({
+      objectPath: requestedObjectPath,
+      originalName,
+      mimetype: file.mimetype,
+    });
+    if (validation.ok === false) {
+      const err = new Error(validation.message);
       (err as any).code = "UNSUPPORTED_FILE_TYPE";
+      (err as any).statusCode = 415;
       cb(err);
       return;
     }
@@ -206,9 +210,14 @@ router.post(
         return;
       }
       if (err && typeof err === "object" && (err as any).code === "UNSUPPORTED_FILE_TYPE") {
-        const requestedObjectPath = queryOne((req as any).query, "objectPath");
-        const allowTemplateTypes = typeof requestedObjectPath === "string" && requestedObjectPath.startsWith("/objects/templates/");
-        const message = allowTemplateTypes ? "Only DOCX, PDF, JPG, PNG, or WebP files are allowed" : "Only PDF, JPG, PNG, or WebP files are allowed";
+        const message =
+          typeof (err as any).message === "string" && (err as any).message.trim().length
+            ? String((err as any).message)
+            : (() => {
+                const requestedObjectPath = queryOne((req as any).query, "objectPath");
+                const allowTemplateTypes = typeof requestedObjectPath === "string" && requestedObjectPath.startsWith("/objects/templates/");
+                return allowTemplateTypes ? "Only PDF, DOCX, JPG, PNG, or WebP files are allowed" : "Only PDF, JPG, PNG, or WebP files are allowed";
+              })();
         sendError(res as any, new ApiError({ status: 415, code: "UNSUPPORTED_MEDIA_TYPE", message, retryable: false }));
         return;
       }
