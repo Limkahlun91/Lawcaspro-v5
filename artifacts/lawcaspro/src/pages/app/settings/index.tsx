@@ -943,8 +943,8 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
   const queryClient = useQueryClient();
   const projectsQuery = useListProjects({ page: 1, limit: 200 }, { query: { enabled: canRead, staleTime: 5 * 60 * 1000 } });
   const developersQuery = useListDevelopers({ page: 1, limit: 200 }, { query: { enabled: canRead, staleTime: 5 * 60 * 1000 } });
-  const projects = projectsQuery.data?.data ?? [];
-  const developers = developersQuery.data?.data ?? [];
+  const projects = Array.isArray((projectsQuery.data as any)?.data) ? ((projectsQuery.data as any).data as any[]) : [];
+  const developers = Array.isArray((developersQuery.data as any)?.data) ? ((developersQuery.data as any).data as any[]) : [];
 
   const deriveShortCode = useMemo(() => {
     return (nameRaw: unknown, options?: { maxLen?: number; mode?: "initials" | "token" }) => {
@@ -1103,10 +1103,19 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
           </div>
           ) : null}
 
+          {!canRead ? (
+            <div className="text-sm text-slate-500 py-6 text-center">You do not have permission to view File Reference settings.</div>
+          ) : null}
+
           {settingsQuery.isError ? (
             <QueryFallback title="Unable to load settings" error={settingsQuery.error} onRetry={() => settingsQuery.refetch()} isRetrying={settingsQuery.isFetching} />
           ) : settingsQuery.isLoading ? (
             <div className="text-slate-500 py-6 text-center">Loading...</div>
+          ) : canRead && rows.length === 0 ? (
+            <div className="py-8 text-center text-slate-600">
+              <div className="font-medium">No rules yet</div>
+              <div className="text-sm text-slate-500">Add a default rule or a project-specific rule to start.</div>
+            </div>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -1137,7 +1146,7 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                       </td>
                       <td className="px-4 py-2 text-slate-700">
                         {(() => {
-                          const ct = row.caseType.trim().toLowerCase();
+                          const ct = String(row.caseType ?? "").trim().toLowerCase();
                           if (ct.startsWith("project:")) {
                             const pid = Number(ct.split(":")[1]);
                             const proj = projects.find((p: any) => Number(p.id) === pid);
@@ -1173,7 +1182,7 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                       </td>
                       <td className="px-4 py-2 font-mono text-xs text-slate-700">
                         {(() => {
-                          const ct = row.caseType.trim().toLowerCase();
+                          const ct = String(row.caseType ?? "").trim().toLowerCase();
                           const now = new Date();
                           const lawyer = "FYS";
                           const clerk = "GHY";
@@ -1325,9 +1334,11 @@ export default function Settings() {
     }
   );
 
-  const { data: rolesRes, isLoading: loadingRoles } = useListRoles({
+  const rolesQuery = useListRoles({
     query: { queryKey: getListRolesQueryKey(), enabled: canManageRoles },
   });
+  const rolesRes = rolesQuery.data;
+  const loadingRoles = rolesQuery.isLoading;
   const updateUserMutation = useUpdateUser();
   const updateRoleMutation = useUpdateRole();
   const deleteUserMutation = useDeleteUser();
@@ -1753,8 +1764,17 @@ export default function Settings() {
       {canManageRoles && activeTab === "Roles & Permissions" && (
         <div className="space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {loadingRoles ? (
+            {rolesQuery.isError ? (
+              <div className="col-span-2">
+                <QueryFallback title="Unable to load roles" error={rolesQuery.error} onRetry={() => rolesQuery.refetch()} isRetrying={rolesQuery.isFetching} />
+              </div>
+            ) : loadingRoles ? (
               <div className="col-span-2 p-8 text-center text-slate-500">Loading roles...</div>
+            ) : (rolesRes ?? []).length === 0 ? (
+              <div className="col-span-2 p-8 text-center text-slate-600">
+                <div className="font-medium">No roles found</div>
+                <div className="text-sm text-slate-500">Create roles first, then configure permissions.</div>
+              </div>
             ) : (
               (rolesRes ?? []).map((role: any) => (
                 <Card key={role.id} className="cursor-pointer" onClick={() => {
