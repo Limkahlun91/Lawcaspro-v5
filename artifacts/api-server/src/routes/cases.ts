@@ -4135,6 +4135,262 @@ router.patch("/cases/:caseId/approval", requireAuthHandler, requireFirmUserHandl
   res.json({ ok: true });
 }));
 
+router.get("/cases/reference-suggestions", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+  const qpSchema = z.object({
+    caseId: z.coerce.number().int().positive().optional(),
+    caseType: z.string().trim().min(1).max(40).optional(),
+    projectId: z.coerce.number().int().positive().optional(),
+    developerId: z.coerce.number().int().positive().optional(),
+    referenceNo: z.string().trim().min(1).max(80).optional(),
+  });
+  const qp = qpSchema.safeParse({
+    caseId: one(req.query.caseId as any),
+    caseType: one(req.query.caseType as any),
+    projectId: one(req.query.projectId as any),
+    developerId: one(req.query.developerId as any),
+    referenceNo: one(req.query.referenceNo as any),
+  });
+  if (!qp.success) {
+    res.status(400).json({ error: "Validation failed", fields: qp.error.flatten().fieldErrors });
+    return;
+  }
+
+  const escapeRegex = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  const deriveShortCode = (nameRaw: unknown, options?: { maxLen?: number; mode?: "initials" | "token" }): string => {
+    const name = typeof nameRaw === "string" ? nameRaw.trim() : "";
+    if (!name) return "NA";
+    const maxLen = Math.max(2, Math.min(12, options?.maxLen ?? 6));
+    const mode = options?.mode ?? "initials";
+
+    if (mode === "token") {
+      const token = name
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, "")
+        .slice(0, maxLen);
+      return token || "NA";
+    }
+
+    const parts = name
+      .toUpperCase()
+      .replace(/[^A-Z0-9\s]+/g, " ")
+      .split(/\s+/)
+      .filter(Boolean);
+    const letters = parts.map((p) => p.slice(0, 1)).join("").slice(0, maxLen);
+    if (letters.length >= 2) return letters;
+    const fallback = parts.join("").slice(0, maxLen);
+    return fallback || "NA";
+  };
+
+  const now = new Date();
+  const yy = String(now.getFullYear()).slice(-2);
+
+  let caseId = qp.data.caseId ?? null;
+  let caseType = (qp.data.caseType ?? "").trim().toLowerCase();
+  let projectId = qp.data.projectId ?? null;
+  let developerId = qp.data.developerId ?? null;
+  let projectName = "";
+  let developerName = "";
+  let lawyerInitials = "";
+  let clerkInitials = "";
+
+  if (caseId) {
+    const [c] = await r
+      .select({
+        id: casesTable.id,
+        caseType: casesTable.caseType,
+        projectId: casesTable.projectId,
+        developerId: casesTable.developerId,
+      })
+      .from(casesTable)
+      .where(and(
+        eq(casesTable.id, caseId),
+        eq(casesTable.firmId, req.firmId!),
+        sql`${casesTable.deletedAt} IS NULL`,
+      ))
+      .limit(1);
+    if (!c) {
+      res.status(404).json({ error: "Case not found" });
+      return;
+    }
+    caseType = String(c.caseType ?? "").trim().toLowerCase();
+    projectId = c.projectId ?? null;
+    developerId = c.developerId ?? null;
+
+    if (developerId) {
+      const [dev] = await r
+        .select({ name: developersTable.name })
+        .from(developersTable)
+        .where(and(eq(developersTable.id, developerId), eq(developersTable.firmId, req.firmId!)))
+        .limit(1);
+      developerName = String(dev?.name ?? "").trim();
+    }
+    if (projectId) {
+      const [proj] = await r
+        .select({ name: projectsTable.name })
+        .from(projectsTable)
+        .where(and(eq(projectsTable.id, projectId), eq(projectsTable.firmId, req.firmId!)))
+        .limit(1);
+      projectName = String(proj?.name ?? "").trim();
+    }
+
+    const assignments = await r
+      .select({
+        roleInCase: caseAssignmentsTable.roleInCase,
+        initials: usersTable.initials,
+        name: usersTable.name,
+        assignedAt: caseAssignmentsTable.assignedAt,
+      })
+      .from(caseAssignmentsTable)
+      .leftJoin(usersTable, eq(caseAssignmentsTable.userId, usersTable.id))
+      .where(and(
+        eq(caseAssignmentsTable.caseId, caseId),
+        sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
+      ))
+      .orderBy(asc(caseAssignmentsTable.assignedAt))
+      .limit(20);
+
+    for (const a of assignments) {
+      const role = String(a.roleInCase ?? "").trim().toLowerCase();
+      const initials = String(a.initials ?? "").trim().toUpperCase();
+      const derived = initials || deriveShortCode(a.name, { maxLen: 5, mode: "initials" });
+      if (!lawyerInitials && role === "lawyer") lawyerInitials = derived;
+      if (!clerkInitials && role === "clerk") clerkInitials = derived;
+    }
+  }
+
+  const normalizedCaseType = caseType || "developer_sales";
+  const developerCode = deriveShortCode(developerName || undefined, { maxLen: 5, mode: "initials" });
+  const projectCode = deriveShortCode(projectName || undefined, { maxLen: 12, mode: "token" });
+
+  let prefix = "CON";
+  if (normalizedCaseType === "developer_sales") {
+    prefix = `CON/${developerCode}-${projectCode}`;
+  } else if (normalizedCaseType === "subsale") {
+    prefix = "CON/SS";
+  } else if (normalizedCaseType === "perfection") {
+    prefix = "CON/PFT";
+  } else {
+    prefix = "CON";
+  }
+
+  const likePrefix = `${prefix}/%`;
+  const rows = await r
+    .select({
+      referenceNo: casesTable.referenceNo,
+      caseType: casesTable.caseType,
+      projectId: casesTable.projectId,
+      developerId: casesTable.developerId,
+      approvedAt: casesTable.approvedAt,
+      updatedAt: casesTable.updatedAt,
+      createdAt: casesTable.createdAt,
+    })
+    .from(casesTable)
+    .where(and(
+      eq(casesTable.firmId, req.firmId!),
+      sql`${casesTable.deletedAt} IS NULL`,
+      sql`${casesTable.referenceNo} IS NOT NULL`,
+      sql`${casesTable.referenceNo} LIKE ${likePrefix}`,
+    ))
+    .orderBy(desc(casesTable.updatedAt), desc(casesTable.createdAt))
+    .limit(200);
+
+  const refSet = new Set<string>();
+  const refRecords: Array<{
+    ref: string;
+    caseType: string;
+    projectId: number | null;
+    developerId: number | null;
+    updatedAtMs: number;
+  }> = [];
+
+  for (const row of rows) {
+    const ref = String(row.referenceNo ?? "").trim();
+    if (!ref) continue;
+    if (refSet.has(ref)) continue;
+    refSet.add(ref);
+    const updatedAtMs = row.updatedAt ? new Date(row.updatedAt).getTime() : (row.createdAt ? new Date(row.createdAt).getTime() : 0);
+    refRecords.push({
+      ref,
+      caseType: String(row.caseType ?? "").trim().toLowerCase(),
+      projectId: row.projectId ?? null,
+      developerId: row.developerId ?? null,
+      updatedAtMs,
+    });
+  }
+
+  const runRegex = new RegExp(`^${escapeRegex(prefix)}/(\\d+)/(\\d{2})\\(`);
+  let maxRun = 0;
+  for (const rr of refRecords) {
+    const m = rr.ref.match(runRegex);
+    if (!m) continue;
+    const run = Number(m[1]);
+    const year = String(m[2]);
+    if (year !== yy) continue;
+    if (Number.isFinite(run) && run > maxRun) maxRun = Math.trunc(run);
+  }
+  const nextRun = maxRun > 0 ? maxRun + 1 : 1000;
+  const lawyerCodeSafe = (lawyerInitials || "NA").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) || "NA";
+  const clerkCodeSafe = (clerkInitials || "NA").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) || "NA";
+  const suggestedReference = `${prefix}/${nextRun}/${yy}(${lawyerCodeSafe})${clerkCodeSafe}`;
+
+  const scoreRef = (rr: typeof refRecords[number], idx: number): number => {
+    let score = 0;
+    if (rr.caseType === normalizedCaseType) score += 100;
+    if (projectId && rr.projectId === projectId) score += 50;
+    if (developerId && rr.developerId === developerId) score += 25;
+    if (rr.ref.includes(`/${yy}(`)) score += 20;
+    score += Math.max(0, 200 - idx);
+    return score;
+  };
+
+  const previousReferences = refRecords
+    .map((rr, idx) => ({ ref: rr.ref, score: scoreRef(rr, idx), updatedAtMs: rr.updatedAtMs }))
+    .sort((a, b) => (b.score - a.score) || (b.updatedAtMs - a.updatedAtMs))
+    .slice(0, 25)
+    .map((x) => x.ref);
+
+  let duplicateWarning: { isDuplicate: boolean; existingCaseId?: number } | null = null;
+  if (qp.data.referenceNo) {
+    const refToCheck = qp.data.referenceNo.trim();
+    if (refToCheck) {
+      const [dup] = await r
+        .select({ id: casesTable.id })
+        .from(casesTable)
+        .where(and(
+          eq(casesTable.firmId, req.firmId!),
+          eq(casesTable.referenceNo, refToCheck),
+          sql`${casesTable.deletedAt} IS NULL`,
+          caseId ? sql`${casesTable.id} <> ${caseId}` : sql`true`,
+        ))
+        .limit(1);
+      if (dup?.id) duplicateWarning = { isDuplicate: true, existingCaseId: dup.id };
+      else duplicateWarning = { isDuplicate: false };
+    }
+  }
+
+  res.json({
+    suggestedReference,
+    previousReferences,
+    duplicateWarning,
+    meta: {
+      prefix,
+      year: yy,
+      nextRun,
+      developerCode,
+      projectCode,
+      lawyerCode: lawyerCodeSafe,
+      clerkCode: clerkCodeSafe,
+    },
+  });
+}));
+
 router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
   if (!r) {
@@ -4179,12 +4435,27 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
     res.status(409).json({ error: "Case is not pending approval" });
     return;
   }
+  const trimmedReferenceNo = body.data.referenceNo.trim();
+  const [dup] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(
+      eq(casesTable.firmId, req.firmId!),
+      eq(casesTable.referenceNo, trimmedReferenceNo),
+      sql`${casesTable.deletedAt} IS NULL`,
+      sql`${casesTable.id} <> ${params.data.caseId}`,
+    ))
+    .limit(1);
+  if (dup) {
+    res.status(409).json({ error: "Reference Number already exists in this firm" });
+    return;
+  }
   try {
     await r
       .update(casesTable)
       .set({
         approvalStatus: "approved",
-        referenceNo: body.data.referenceNo.trim(),
+        referenceNo: trimmedReferenceNo,
         approvedBy: req.userId ?? null,
         approvedAt: new Date(),
         approvalNote: body.data.approvalNote ?? null,

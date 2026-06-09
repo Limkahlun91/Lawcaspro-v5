@@ -17,6 +17,15 @@ import { getListCasesQueryKey } from "@workspace/api-client-react";
 
 type ApprovalStatus = "pending_approval" | "rejected" | "approved";
 
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebounced(value), Math.max(0, delayMs));
+    return () => window.clearTimeout(t);
+  }, [value, delayMs]);
+  return debounced;
+}
+
 function fmtIsoToYmd(iso: string | null | undefined): string {
   if (!iso) return "—";
   const s = String(iso);
@@ -143,6 +152,28 @@ export default function AccountingFileListing() {
   const [reviewCaseId, setReviewCaseId] = useState<number | null>(null);
   const [reviewReferenceNo, setReviewReferenceNo] = useState("");
   const [reviewNote, setReviewNote] = useState("");
+
+  const debouncedReferenceNo = useDebouncedValue(reviewReferenceNo, 250).trim();
+  const referenceSuggestionsQuery = useQuery<{
+    suggestedReference: string;
+    previousReferences: string[];
+    duplicateWarning: { isDuplicate: boolean; existingCaseId?: number } | null;
+  }>({
+    queryKey: ["cases", "reference-suggestions", reviewCaseId, debouncedReferenceNo],
+    enabled: Boolean(reviewOpen && reviewCaseId && isPendingTab),
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      if (reviewCaseId) params.set("caseId", String(reviewCaseId));
+      if (debouncedReferenceNo) params.set("referenceNo", debouncedReferenceNo);
+      const suffix = params.toString() ? `?${params.toString()}` : "";
+      return await apiFetchJson(`/cases/reference-suggestions${suffix}`);
+    },
+    retry: false,
+  });
+
+  const previousReferenceSuggestions = referenceSuggestionsQuery.data?.previousReferences ?? [];
+  const suggestedReference = referenceSuggestionsQuery.data?.suggestedReference ?? "";
+  const duplicateWarning = referenceSuggestionsQuery.data?.duplicateWarning;
 
   const approveMutation = useMutation({
     mutationFn: async (vars: { caseId: number; referenceNo: string; approvalNote: string }) => {
@@ -359,7 +390,34 @@ export default function AccountingFileListing() {
                 onChange={(e) => setReviewReferenceNo(e.target.value)}
                 disabled={!isPendingTab || approveMutation.isPending || rejectMutation.isPending}
                 placeholder="Enter Reference Number"
+                list="case-reference-suggestions"
               />
+              <datalist id="case-reference-suggestions">
+                {suggestedReference ? <option value={suggestedReference} /> : null}
+                {previousReferenceSuggestions.map((r) => (
+                  <option key={r} value={r} />
+                ))}
+              </datalist>
+              {isPendingTab ? (
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-xs text-slate-500">
+                    {referenceSuggestionsQuery.isLoading ? "Loading suggestions…" : suggestedReference ? `Suggested: ${suggestedReference}` : "Suggested: —"}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!suggestedReference || !isPendingTab || approveMutation.isPending || rejectMutation.isPending || reviewReferenceNo.trim() === suggestedReference}
+                    onClick={() => setReviewReferenceNo(suggestedReference)}
+                  >
+                    Use Suggested Reference
+                  </Button>
+                </div>
+              ) : null}
+              {isPendingTab && duplicateWarning?.isDuplicate ? (
+                <div className="text-xs text-amber-700">
+                  Warning: This Reference Number already exists in this firm. Please change it before approving.
+                </div>
+              ) : null}
               {!isPendingTab ? <div className="text-xs text-slate-500">Reference Number can only be set while Open File Pending Approval.</div> : null}
             </div>
             <div className="md:col-span-12 space-y-1.5">
@@ -395,6 +453,10 @@ export default function AccountingFileListing() {
                 if (!isPendingTab) return;
                 if (!reviewReferenceNo.trim()) {
                   toast({ title: "Reference Number is required", variant: "destructive" });
+                  return;
+                }
+                if (duplicateWarning?.isDuplicate) {
+                  toast({ title: "Duplicate Reference Number", description: "Please change the Reference Number before approving.", variant: "destructive" });
                   return;
                 }
                 approveMutation.mutate({ caseId: reviewCaseId, referenceNo: reviewReferenceNo.trim(), approvalNote: reviewNote });
