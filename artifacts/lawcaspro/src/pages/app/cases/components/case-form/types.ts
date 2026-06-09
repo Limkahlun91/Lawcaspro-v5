@@ -20,6 +20,7 @@ export type PurchaserForm = {
   isCompany: boolean;
   name: string;
   icOrCompanyNo: string;
+  tin: string;
   tel: string;
   email: string;
   postcode: string;
@@ -33,6 +34,7 @@ export type BorrowerForm = {
   id: string;
   name: string;
   ic: string;
+  tin: string;
   hp: string;
   email: string;
   postcode: string;

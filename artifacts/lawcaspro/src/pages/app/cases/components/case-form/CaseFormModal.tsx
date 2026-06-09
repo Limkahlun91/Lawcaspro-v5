@@ -7,7 +7,7 @@ import { toMoneyNumber } from "@/lib/money";
 import { toastError } from "@/lib/toast-error";
 import { CaseForm, createDefaultCaseFormValues } from "./CaseForm";
 import type { CaseFormValues, CaseType, Encumbrances, LandCondition, LoanPartyType, PerfectionType, PurchaseMode, TitleCategory } from "./types";
-import { composeMalaysiaAddress, joinAddressLines } from "./address";
+import { composeMalaysiaAddress, joinAddressLines, splitAddressToLines } from "./address";
 import { getStateFromPostcode } from "@/utils/my-address-helper";
 import { useAuth } from "@/lib/auth-context";
 
@@ -36,6 +36,7 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
     isCompany: false,
     name: String(p?.clientName ?? ""),
     icOrCompanyNo: String(p?.icNo ?? ""),
+    tin: String(p?.tin ?? ""),
     tel: String(p?.phone ?? ""),
     email: String(p?.email ?? ""),
     postcode: (() => {
@@ -48,7 +49,7 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
       const pc = m ? m[1] : "";
       return pc ? (getStateFromPostcode(pc) ?? "") : "";
     })(),
-    addressLines: { line1: "", line2: "", line3: "", line4: "", line5: "" },
+    addressLines: splitAddressToLines(String(p?.address ?? "")),
     address: String(p?.address ?? ""),
   }));
 
@@ -57,6 +58,7 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
     id: crypto.randomUUID(),
     name: String(b?.name ?? ""),
     ic: String(b?.ic ?? ""),
+    tin: String(b?.tin ?? ""),
     hp: String(b?.hp ?? ""),
     email: String(b?.email ?? ""),
     postcode: (() => {
@@ -69,7 +71,7 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
       const pc = m ? m[1] : "";
       return pc ? (getStateFromPostcode(pc) ?? "") : "";
     })(),
-    addressLines: { line1: "", line2: "", line3: "", line4: "", line5: "" },
+    addressLines: splitAddressToLines(String(b?.address ?? "")),
     address: String(b?.address ?? ""),
   })) : [v.borrowers[0]];
 
@@ -169,11 +171,12 @@ export function buildCasePayloadFromFormValues(values: CaseFormValues): Record<s
       isCompany: Boolean(p.isCompany),
       name: p.name.trim(),
       ic: p.icOrCompanyNo.trim() ? p.icOrCompanyNo.trim() : null,
+      tin: p.tin.trim() ? p.tin.trim() : null,
       phone: p.tel.trim() ? p.tel.trim() : null,
       email: p.email.trim() ? p.email.trim() : null,
       address: (() => {
-        const composed = composeMalaysiaAddress({ lines: p.addressLines, postcode: p.postcode, city: p.city, state: p.state });
-        return (p.address.trim() ? p.address.trim() : composed.address).trim() || null;
+        const composed = joinAddressLines(p.addressLines);
+        return (composed.trim() ? composed.trim() : p.address.trim()).trim() || null;
       })(),
     }))
     .filter((p) => p.name.length > 0);
@@ -182,6 +185,7 @@ export function buildCasePayloadFromFormValues(values: CaseFormValues): Record<s
     .map((b) => ({
       name: b.name.trim(),
       ic: b.ic.trim() ? b.ic.trim() : null,
+      tin: b.tin.trim() ? b.tin.trim() : null,
       hp: b.hp.trim() ? b.hp.trim() : null,
       email: b.email.trim() ? b.email.trim() : null,
       address: (() => {

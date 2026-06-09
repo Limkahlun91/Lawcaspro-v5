@@ -7,7 +7,7 @@ function parseNumericString(input: string): number {
   if (!trimmed) return 0;
 
   const negative = trimmed.startsWith("-") || (trimmed.startsWith("(") && trimmed.endsWith(")"));
-  const match = trimmed.match(/\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?/);
+  const match = trimmed.match(/\d+(?:,\d{3})*(?:\.\d+)?/);
   if (!match) return 0;
 
   const normalized = match[0].replace(/,/g, "");

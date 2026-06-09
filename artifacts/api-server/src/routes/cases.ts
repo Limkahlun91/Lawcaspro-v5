@@ -723,6 +723,7 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
             id: clientsTable.id,
             name: clientsTable.name,
             icNo: clientsTable.icNo,
+            tin: clientsTable.tin,
             phone: clientsTable.phone,
             email: clientsTable.email,
             address: clientsTable.address,
@@ -739,6 +740,7 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
       clientId: p.clientId,
       clientName: client?.name ?? "Unknown",
       icNo: client?.icNo ?? null,
+      tin: client?.tin ?? null,
       phone: client?.phone ?? null,
       email: client?.email ?? null,
       address: client?.address ?? null,
@@ -3578,6 +3580,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         const trimmedName = String(p.name ?? "").trim();
         if (!trimmedName) continue;
         const trimmedIc = typeof p.ic === "string" ? p.ic.trim() : null;
+        const trimmedTin = typeof (p as any).tin === "string" ? String((p as any).tin).trim() : null;
         const trimmedPhone = typeof p.phone === "string" ? p.phone.trim() : null;
         const trimmedEmail = typeof p.email === "string" ? p.email.trim() : null;
         const trimmedAddress = typeof p.address === "string" ? p.address.trim() : null;
@@ -3613,14 +3616,15 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         if (existingClientId) {
           resolvedPurchaserIds.push(existingClientId);
           purchasersReused++;
-          if (trimmedPhone || trimmedEmail || trimmedAddress) {
+          if (trimmedTin || trimmedPhone || trimmedEmail || trimmedAddress) {
             const [existing] = await r
-              .select({ id: clientsTable.id, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
+              .select({ id: clientsTable.id, tin: clientsTable.tin, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
               .from(clientsTable)
               .where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.id, existingClientId)))
               .limit(1);
             if (existing) {
               const patch: Record<string, unknown> = {};
+              if (trimmedTin && !String(existing.tin ?? "").trim()) patch.tin = trimmedTin;
               if (trimmedPhone && !String(existing.phone ?? "").trim()) patch.phone = trimmedPhone;
               if (trimmedEmail && !String(existing.email ?? "").trim()) patch.email = trimmedEmail;
               if (trimmedAddress && !String(existing.address ?? "").trim()) patch.address = trimmedAddress;
@@ -3634,6 +3638,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
             firmId: req.firmId!,
             name: trimmedName,
             icNo: trimmedIc,
+            tin: trimmedTin,
             phone: trimmedPhone,
             email: trimmedEmail,
             address: trimmedAddress,
@@ -3651,14 +3656,16 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       }
     }
 
-    const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> => {
+    const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; tin?: string; hp?: string; email?: string; address: string }> => {
       if (!Array.isArray(raw)) return [];
-      const out: Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> = [];
+      const out: Array<{ name: string; ic?: string; tin?: string; hp?: string; email?: string; address: string }> = [];
       for (const v of raw) {
         const name = typeof (v as any)?.name === "string" ? String((v as any).name).trim() : "";
         if (!name) continue;
         const icRaw = (v as any)?.ic;
         const ic = typeof icRaw === "string" ? icRaw.trim() : "";
+        const tinRaw = (v as any)?.tin;
+        const tin = typeof tinRaw === "string" ? tinRaw.trim() : "";
         const hpRaw = (v as any)?.hp;
         const hp = typeof hpRaw === "string" ? hpRaw.trim() : "";
         const emailRaw = (v as any)?.email;
@@ -3666,6 +3673,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         const addressRaw = (v as any)?.address;
         const address = typeof addressRaw === "string" ? addressRaw.trim() : "";
         const base = ic ? { name, ic, address } : { name, address };
+        if (tin) (base as any).tin = tin;
         if (hp) (base as any).hp = hp;
         if (email) (base as any).email = email;
         out.push(base as any);
@@ -3676,7 +3684,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     const normalizedRequestedBorrowers = normalizeBorrowers(requestedBorrowers);
     const isLoan = purchaseMode === "loan";
     const effectiveLoanPartyType: "1st_party" | "3rd_party" = isLoan ? (loanPartyType ?? "1st_party") : "1st_party";
-    let borrowersToStore: Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> = [];
+    let borrowersToStore: Array<{ name: string; ic?: string; tin?: string; hp?: string; email?: string; address: string }> = [];
 
     if (isLoan) {
       if (effectiveLoanPartyType === "1st_party") {
@@ -3684,20 +3692,22 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
           borrowersToStore = [];
         } else {
         const rows = await r
-          .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
+          .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, tin: clientsTable.tin, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
           .from(clientsTable)
           .where(and(eq(clientsTable.firmId, req.firmId!), inArray(clientsTable.id, resolvedPurchaserIds)));
-        const byId = new Map<number, { name: string; ic: string | null; phone: string | null; email: string | null; address: string | null }>();
-        for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, phone: row.phone ?? null, email: row.email ?? null, address: row.address ?? null });
+        const byId = new Map<number, { name: string; ic: string | null; tin: string | null; phone: string | null; email: string | null; address: string | null }>();
+        for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, tin: (row as any).tin ?? null, phone: row.phone ?? null, email: row.email ?? null, address: row.address ?? null });
         borrowersToStore = resolvedPurchaserIds
           .map((id) => {
             const v = byId.get(id);
             const name = v?.name?.trim() ?? "";
             const ic = v?.ic ? String(v.ic).trim() : "";
+            const tin = v?.tin ? String(v.tin).trim() : "";
             const hp = v?.phone ? String(v.phone).trim() : "";
             const email = v?.email ? String(v.email).trim() : "";
             const address = v?.address ? String(v.address).trim() : "";
             const base = ic ? { name, ic, address } : { name, address };
+            if (tin) (base as any).tin = tin;
             if (hp) (base as any).hp = hp;
             if (email) (base as any).email = email;
             return base as any;
@@ -5167,6 +5177,7 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
           isCompany: z.boolean().optional().nullable(),
           name: z.string().trim().min(1),
           ic: z.string().trim().optional().nullable(),
+          tin: z.string().trim().optional().nullable(),
           phone: z.string().trim().optional().nullable(),
           email: z.string().trim().optional().nullable(),
           address: z.string().trim().optional().nullable(),
@@ -5186,6 +5197,7 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
         z.object({
           name: z.string().trim().min(1),
           ic: z.string().trim().optional().nullable(),
+          tin: z.string().trim().optional().nullable(),
           hp: z.string().trim().optional().nullable(),
           email: z.string().trim().optional().nullable(),
           address: z.string().trim().optional().nullable(),
@@ -5419,6 +5431,7 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
           const trimmedName = String(p.name ?? "").trim();
           if (!trimmedName) continue;
           const trimmedIc = typeof p.ic === "string" ? p.ic.trim() : null;
+          const trimmedTin = typeof (p as any).tin === "string" ? String((p as any).tin).trim() : null;
           const trimmedPhone = typeof (p as any).phone === "string" ? String((p as any).phone).trim() : null;
           const trimmedEmail = typeof (p as any).email === "string" ? String((p as any).email).trim() : null;
           const trimmedAddress = typeof (p as any).address === "string" ? String((p as any).address).trim() : null;
@@ -5442,14 +5455,15 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
 
           if (existingClientId) {
             resolvedPurchaserIds.push(existingClientId);
-            if (trimmedPhone || trimmedEmail || trimmedAddress) {
+            if (trimmedTin || trimmedPhone || trimmedEmail || trimmedAddress) {
               const [existing] = await r
-                .select({ id: clientsTable.id, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
+                .select({ id: clientsTable.id, tin: clientsTable.tin, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
                 .from(clientsTable)
                 .where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.id, existingClientId)))
                 .limit(1);
               if (existing) {
                 const patch: Record<string, unknown> = {};
+                if (trimmedTin && !String(existing.tin ?? "").trim()) patch.tin = trimmedTin;
                 if (trimmedPhone && !String(existing.phone ?? "").trim()) patch.phone = trimmedPhone;
                 if (trimmedEmail && !String(existing.email ?? "").trim()) patch.email = trimmedEmail;
                 if (trimmedAddress && !String(existing.address ?? "").trim()) patch.address = trimmedAddress;
@@ -5463,6 +5477,7 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
               firmId: req.firmId!,
               name: trimmedName,
               icNo: trimmedIc,
+              tin: trimmedTin,
               phone: trimmedPhone,
               email: trimmedEmail,
               address: trimmedAddress,
@@ -5481,14 +5496,16 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
       }
     }
 
-    const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> => {
+    const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; tin?: string; hp?: string; email?: string; address: string }> => {
       if (!Array.isArray(raw)) return [];
-      const out: Array<{ name: string; ic?: string; hp?: string; email?: string; address: string }> = [];
+      const out: Array<{ name: string; ic?: string; tin?: string; hp?: string; email?: string; address: string }> = [];
       for (const v of raw) {
         const name = typeof (v as any)?.name === "string" ? String((v as any).name).trim() : "";
         if (!name) continue;
         const icRaw = (v as any)?.ic;
         const ic = typeof icRaw === "string" ? icRaw.trim() : "";
+        const tinRaw = (v as any)?.tin;
+        const tin = typeof tinRaw === "string" ? tinRaw.trim() : "";
         const hpRaw = (v as any)?.hp;
         const hp = typeof hpRaw === "string" ? hpRaw.trim() : "";
         const emailRaw = (v as any)?.email;
@@ -5496,6 +5513,7 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
         const addressRaw = (v as any)?.address;
         const address = typeof addressRaw === "string" ? addressRaw.trim() : "";
         const base = ic ? { name, ic, address } : { name, address };
+        if (tin) (base as any).tin = tin;
         if (hp) (base as any).hp = hp;
         if (email) (base as any).email = email;
         out.push(base as any);
@@ -5514,20 +5532,22 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
         const ids = wantsUpdatePurchasers ? resolvedPurchaserIds : [];
         if (ids.length > 0) {
           const rows = await r
-            .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
+            .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, tin: clientsTable.tin, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
             .from(clientsTable)
             .where(and(eq(clientsTable.firmId, req.firmId!), inArray(clientsTable.id, ids)));
-          const byId = new Map<number, { name: string; ic: string | null; phone: string | null; email: string | null; address: string | null }>();
-          for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, phone: row.phone ?? null, email: row.email ?? null, address: row.address ?? null });
+          const byId = new Map<number, { name: string; ic: string | null; tin: string | null; phone: string | null; email: string | null; address: string | null }>();
+          for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, tin: row.tin ?? null, phone: row.phone ?? null, email: row.email ?? null, address: row.address ?? null });
           const borrowersToStore = ids
             .map((id) => {
               const v = byId.get(id);
               const name = v?.name?.trim() ?? "";
               const ic = v?.ic ? String(v.ic).trim() : "";
+              const tin = v?.tin ? String(v.tin).trim() : "";
               const hp = v?.phone ? String(v.phone).trim() : "";
               const email = v?.email ? String(v.email).trim() : "";
               const address = v?.address ? String(v.address).trim() : "";
               const base = ic ? { name, ic, address } : { name, address };
+              if (tin) (base as any).tin = tin;
               if (hp) (base as any).hp = hp;
               if (email) (base as any).email = email;
               return base as any;

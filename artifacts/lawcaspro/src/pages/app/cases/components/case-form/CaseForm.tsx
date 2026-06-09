@@ -9,8 +9,9 @@ import { Separator } from "@/components/ui/separator";
 import { Plus, Trash2 } from "lucide-react";
 import { useListDevelopers, useListProjects } from "@workspace/api-client-react";
 import { AddressLinesFields } from "./AddressLinesFields";
+import { HistoryInput } from "./HistoryInput";
 import { PricingBreakdown } from "./PricingBreakdown";
-import { composeMalaysiaAddress, emptyAddressLines, joinAddressLines, normalizeMalaysiaPostcodeInput } from "./address";
+import { composeMalaysiaAddress, emptyAddressLines, joinAddressLines, normalizeAddressText, normalizeMalaysiaPostcodeInput } from "./address";
 import type { BorrowerForm, CaseFormValues, CaseType, Encumbrances, LandCondition, LoanPartyType, PerfectionType, PurchaserForm, PurchaseMode, TitleCategory } from "./types";
 import { calculateLoanAmounts } from "@/lib/loan-amounts";
 import { amountToEnglishWords, formatRMAmount, toMoneyNumber } from "@/lib/money";
@@ -39,6 +40,7 @@ function newPurchaser(): PurchaserForm {
     isCompany: false,
     name: "",
     icOrCompanyNo: "",
+    tin: "",
     tel: "",
     email: "",
     postcode: "",
@@ -54,6 +56,7 @@ function newBorrower(): BorrowerForm {
     id: crypto.randomUUID(),
     name: "",
     ic: "",
+    tin: "",
     hp: "",
     email: "",
     postcode: "",
@@ -133,6 +136,7 @@ export function CaseForm(props: {
   const [activeTab, setActiveTab] = useState<"spa" | "loan" | "property">("spa");
   const [developerManuallyChanged, setDeveloperManuallyChanged] = useState(false);
   const [titleManuallyChanged, setTitleManuallyChanged] = useState(false);
+  const [purchasePriceManuallyChanged, setPurchasePriceManuallyChanged] = useState(false);
   const [postcodeWarnings, setPostcodeWarnings] = useState<Record<string, string>>({});
 
   const { data: projectsRes } = useListProjects({ limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
@@ -175,13 +179,18 @@ export function CaseForm(props: {
   }, [selectedProject]);
 
   useEffect(() => {
+    if (!v.purchasePrice.trim()) setPurchasePriceManuallyChanged(false);
+  }, [v.purchasePrice]);
+
+  useEffect(() => {
     const apdl = toMoneyNumber(v.apdlPrice);
     const dev = toMoneyNumber(v.developerDiscount);
     const bumi = toMoneyNumber(v.bumiputraDiscount);
     if (!v.apdlPrice && !v.developerDiscount && !v.bumiputraDiscount) return;
+    if (purchasePriceManuallyChanged) return;
     const computed = apdl - dev - bumi;
     set({ ...v, purchasePrice: Math.max(0, computed).toFixed(2) });
-  }, [v.apdlPrice, v.developerDiscount, v.bumiputraDiscount]);
+  }, [v.apdlPrice, v.developerDiscount, v.bumiputraDiscount, purchasePriceManuallyChanged]);
 
   useEffect(() => {
     if (v.purchaseMode !== "loan") return;
@@ -192,6 +201,7 @@ export function CaseForm(props: {
         id: crypto.randomUUID(),
         name: p.name,
         ic: p.icOrCompanyNo,
+        tin: p.tin,
         hp: p.tel,
         email: p.email,
         postcode: p.postcode,
@@ -263,8 +273,8 @@ export function CaseForm(props: {
   const onComposePurchaserAddress = (id: string) => {
     const nextPurchasers = v.purchasers.map((p) => {
       if (p.id !== id) return p;
-      const composed = composeMalaysiaAddress({ lines: p.addressLines, postcode: p.postcode, city: p.city, state: p.state });
-      return { ...p, address: composed.address, state: composed.derivedState ?? p.state };
+      const address = joinAddressLines(p.addressLines);
+      return { ...p, address };
     });
     set({ ...v, purchasers: nextPurchasers });
   };
@@ -409,15 +419,36 @@ export function CaseForm(props: {
               <div key={p.id} className="rounded-lg border p-3 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="text-sm font-semibold text-slate-900">Purchaser {idx + 1}</div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => set({ ...v, purchasers: v.purchasers.filter((x) => x.id !== p.id) })}
-                    disabled={submitting || v.purchasers.length <= 1}
-                  >
-                    <Trash2 className="h-4 w-4 mr-2" />Remove
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    {idx >= 1 ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          const source = v.purchasers[0];
+                          const nextLines = source ? source.addressLines : emptyAddressLines();
+                          const address = joinAddressLines(nextLines);
+                          set({
+                            ...v,
+                            purchasers: v.purchasers.map((x) => x.id === p.id ? { ...x, addressLines: nextLines, address } : x),
+                          });
+                        }}
+                        disabled={submitting || v.purchasers.length < 2}
+                      >
+                        Address as per Purchaser 1
+                      </Button>
+                    ) : null}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => set({ ...v, purchasers: v.purchasers.filter((x) => x.id !== p.id) })}
+                      disabled={submitting || v.purchasers.length <= 1}
+                    >
+                      <Trash2 className="h-4 w-4 mr-2" />Remove
+                    </Button>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
@@ -427,13 +458,17 @@ export function CaseForm(props: {
                     }} disabled={submitting} />
                     <Label>Is Company</Label>
                   </div>
-                  <div className="md:col-span-5 space-y-1.5">
+                  <div className="md:col-span-4 space-y-1.5">
                     <Label>Name</Label>
                     <Input value={p.name} onChange={(e) => set({ ...v, purchasers: v.purchasers.map((x) => x.id === p.id ? { ...x, name: e.target.value } : x) })} disabled={submitting} />
                   </div>
-                  <div className="md:col-span-4 space-y-1.5">
+                  <div className="md:col-span-3 space-y-1.5">
                     <Label>IC / Company No</Label>
                     <Input value={p.icOrCompanyNo} onChange={(e) => set({ ...v, purchasers: v.purchasers.map((x) => x.id === p.id ? { ...x, icOrCompanyNo: e.target.value } : x) })} disabled={submitting} />
+                  </div>
+                  <div className="md:col-span-2 space-y-1.5">
+                    <Label>TIN</Label>
+                    <Input value={p.tin} onChange={(e) => set({ ...v, purchasers: v.purchasers.map((x) => x.id === p.id ? { ...x, tin: e.target.value } : x) })} disabled={submitting} />
                   </div>
                 </div>
 
@@ -457,91 +492,11 @@ export function CaseForm(props: {
                   value={p.addressLines}
                   onChange={(next) => set({ ...v, purchasers: v.purchasers.map((x) => x.id === p.id ? { ...x, addressLines: next } : x) })}
                   onBlurCompose={() => onComposePurchaserAddress(p.id)}
+                  normalize={normalizeAddressText}
+                  historyKeyPrefix="purchaser.address"
                   disabled={submitting}
-                  maxLines={2}
+                  maxLines={5}
                 />
-
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-                  <div className="md:col-span-4 space-y-1.5">
-                    <Label>City</Label>
-                    <Input
-                      value={p.city}
-                      onChange={(e) => {
-                        const nextCity = e.target.value;
-                        const nextPurchasers = v.purchasers.map((x) => {
-                          if (x.id !== p.id) return x;
-                          const composed = composeMalaysiaAddress({ lines: x.addressLines, postcode: x.postcode, city: nextCity, state: x.state });
-                          return { ...x, city: nextCity, address: composed.address, state: composed.derivedState ?? x.state };
-                        });
-                        set({ ...v, purchasers: nextPurchasers });
-                      }}
-                      disabled={submitting}
-                      placeholder="e.g. Muar"
-                    />
-                  </div>
-                  <div className="md:col-span-4 space-y-1.5">
-                    <Label>Postcode</Label>
-                    <Input
-                      value={p.postcode}
-                      onChange={(e) => {
-                        const nextPostcode = normalizeMalaysiaPostcodeInput(e.target.value);
-                        const derived = nextPostcode.length === 5 ? getStateFromPostcode(nextPostcode) : null;
-                        const key = `purchaser:${p.id}`;
-                        setPostcodeWarnings((prev) => {
-                          const next = { ...prev };
-                          if (derived && p.state.trim() && p.state.trim() !== derived) next[key] = `Warning: Postcode ${nextPostcode} belongs to ${derived}`;
-                          else delete next[key];
-                          return next;
-                        });
-                        const nextPurchasers = v.purchasers.map((x) => {
-                          if (x.id !== p.id) return x;
-                          const nextState = derived ?? x.state;
-                          const composed = composeMalaysiaAddress({ lines: x.addressLines, postcode: nextPostcode, city: x.city, state: nextState });
-                          return { ...x, postcode: nextPostcode, state: derived ?? x.state, address: composed.address };
-                        });
-                        set({ ...v, purchasers: nextPurchasers });
-                      }}
-                      disabled={submitting}
-                      inputMode="numeric"
-                      placeholder="e.g. 84000"
-                    />
-                  </div>
-                  <div className="md:col-span-4 space-y-1.5">
-                    <Label>State</Label>
-                    <Select
-                      value={p.state}
-                      onValueChange={(nextState) => {
-                        const key = `purchaser:${p.id}`;
-                        const derived = p.postcode.length === 5 ? getStateFromPostcode(p.postcode) : null;
-                        setPostcodeWarnings((prev) => {
-                          const next = { ...prev };
-                          if (derived && nextState.trim() && nextState.trim() !== derived) next[key] = `Warning: Postcode ${p.postcode} belongs to ${derived}`;
-                          else delete next[key];
-                          return next;
-                        });
-                        const nextPurchasers = v.purchasers.map((x) => {
-                          if (x.id !== p.id) return x;
-                          const composed = composeMalaysiaAddress({ lines: x.addressLines, postcode: x.postcode, city: x.city, state: nextState });
-                          return { ...x, state: nextState, address: composed.address };
-                        });
-                        set({ ...v, purchasers: nextPurchasers });
-                      }}
-                      disabled={submitting || Boolean(p.postcode.length === 5 && getStateFromPostcode(p.postcode))}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select state" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {MALAYSIA_STATE_OPTIONS.map((s) => (
-                          <SelectItem key={s} value={s}>{s}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    {postcodeWarnings[`purchaser:${p.id}`] ? (
-                      <div className="text-xs text-amber-700 mt-1">{postcodeWarnings[`purchaser:${p.id}`]}</div>
-                    ) : null}
-                  </div>
-                </div>
               </div>
             ))}
           </div>
@@ -574,6 +529,7 @@ export function CaseForm(props: {
                         id: crypto.randomUUID(),
                         name: p.name,
                         ic: p.icOrCompanyNo,
+                        tin: p.tin,
                         hp: p.tel,
                         email: p.email,
                         postcode: p.postcode,
@@ -619,9 +575,13 @@ export function CaseForm(props: {
                         <Label>Name</Label>
                         <Input value={b.name} onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, name: e.target.value } : x) })} disabled={submitting} />
                       </div>
-                      <div className="md:col-span-6 space-y-1.5">
+                      <div className="md:col-span-3 space-y-1.5">
                         <Label>IC</Label>
                         <Input value={b.ic} onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, ic: e.target.value } : x) })} disabled={submitting} />
+                      </div>
+                      <div className="md:col-span-3 space-y-1.5">
+                        <Label>TIN</Label>
+                        <Input value={b.tin} onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, tin: e.target.value } : x) })} disabled={submitting} />
                       </div>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
@@ -644,8 +604,10 @@ export function CaseForm(props: {
                       value={b.addressLines}
                       onChange={(next) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, addressLines: next } : x) })}
                       onBlurCompose={() => onComposeBorrowerAddress(b.id)}
+                      normalize={normalizeAddressText}
+                      historyKeyPrefix="borrower.address"
                       disabled={submitting}
-                      maxLines={2}
+                      maxLines={5}
                     />
 
                     <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
@@ -758,6 +720,8 @@ export function CaseForm(props: {
                       value={v.branchAddressLines}
                       onChange={(next) => set({ ...v, branchAddressLines: next })}
                       onBlurCompose={onComposeBranchAddress}
+                      normalize={normalizeAddressText}
+                      historyKeyPrefix="loan.branchAddress"
                       disabled={submitting}
                     />
                   </div>
@@ -775,14 +739,14 @@ export function CaseForm(props: {
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
                   <div className="md:col-span-4 space-y-1.5">
                     <Label>Financing Sum</Label>
-                    <Input value={v.financingSum} onChange={(e) => set({ ...v, financingSum: e.target.value })} disabled={submitting} inputMode="decimal" />
+                    <HistoryInput storageKey="loan.financingSum" value={v.financingSum} onChange={(next) => set({ ...v, financingSum: next })} disabled={submitting} inputMode="decimal" />
                     {v.financingSum.trim() ? (
                       <div className="text-xs text-slate-500">Formatted: {formatRMAmount(v.financingSum)}</div>
                     ) : null}
                   </div>
                   <div className="md:col-span-4 space-y-1.5">
                     <Label>Others (MRTA/Legal Fees)</Label>
-                    <Input value={v.othersSum} onChange={(e) => set({ ...v, othersSum: e.target.value })} disabled={submitting} />
+                    <HistoryInput storageKey="loan.othersText" value={v.othersSum} onChange={(next) => set({ ...v, othersSum: next })} disabled={submitting} />
                     {v.othersSum.trim() ? (
                       loanAmounts.detectedAmounts.length > 0 ? (
                         <div className="space-y-1 text-xs text-slate-500">
@@ -809,231 +773,258 @@ export function CaseForm(props: {
         </TabsContent>
 
         <TabsContent value="property" className="space-y-4 pt-3">
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-            <div className="md:col-span-4 space-y-1.5">
-              <Label>Title Type</Label>
-              <Input value={v.property.titleTypeLabel} onChange={(e) => set({ ...v, property: { ...v.property, titleTypeLabel: e.target.value } })} disabled={submitting} placeholder={v.titleCategory === "strata" ? "Geran/GM" : v.titleCategory === "individual" ? "HS(D)/HS(M)" : ""} />
-            </div>
-            <div className="md:col-span-4 space-y-1.5">
-              <Label>Bandar / Mukim</Label>
-              <Input value={v.property.bandarMukim} onChange={(e) => set({ ...v, property: { ...v.property, bandarMukim: e.target.value } })} disabled={submitting} />
-            </div>
-            <div className="md:col-span-4 space-y-1.5">
-              <Label>Postcode</Label>
-              <Input
-                value={v.property.postcode}
-                onChange={(e) => {
-                  const nextPostcode = normalizeMalaysiaPostcodeInput(e.target.value);
-                  const derived = nextPostcode.length === 5 ? getStateFromPostcode(nextPostcode) : null;
-                  setPostcodeWarnings((prev) => {
-                    const next = { ...prev };
-                    if (derived && v.property.negeri.trim() && v.property.negeri.trim() !== derived) next["property"] = `Warning: Postcode ${nextPostcode} belongs to ${derived}`;
-                    else delete next["property"];
-                    return next;
-                  });
-                  const nextNegeri = derived ?? v.property.negeri;
-                  const composed = composeMalaysiaAddress({
-                    lines: v.property.propertyAddressLines,
-                    postcode: nextPostcode,
-                    city: v.property.bandarMukim,
-                    state: nextNegeri,
-                  });
-                  set({
-                    ...v,
-                    property: {
-                      ...v.property,
-                      postcode: nextPostcode,
-                      negeri: derived ?? v.property.negeri,
-                      propertyAddress: composed.address,
-                    },
-                  });
-                }}
-                disabled={submitting}
-                inputMode="numeric"
-                placeholder="e.g. 52100"
-              />
-            </div>
-            <div className="md:col-span-4 space-y-1.5">
-              <Label>Daerah</Label>
-              <Input value={v.property.daerah} onChange={(e) => set({ ...v, property: { ...v.property, daerah: e.target.value } })} disabled={submitting} />
-            </div>
-            <div className="md:col-span-4 space-y-1.5">
-              <Label>Negeri</Label>
-              <Select
-                value={v.property.negeri}
-                onValueChange={(nextState) => {
-                  const derived = v.property.postcode.length === 5 ? getStateFromPostcode(v.property.postcode) : null;
-                  setPostcodeWarnings((prev) => {
-                    const next = { ...prev };
-                    if (derived && nextState.trim() && nextState.trim() !== derived) next["property"] = `Warning: Postcode ${v.property.postcode} belongs to ${derived}`;
-                    else delete next["property"];
-                    return next;
-                  });
-                  const composed = composeMalaysiaAddress({
-                    lines: v.property.propertyAddressLines,
-                    postcode: v.property.postcode,
-                    city: v.property.bandarMukim,
-                    state: nextState,
-                  });
-                  set({ ...v, property: { ...v.property, negeri: nextState, propertyAddress: composed.address } });
-                }}
-                disabled={submitting || Boolean(v.property.postcode.length === 5 && getStateFromPostcode(v.property.postcode))}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select state" />
-                </SelectTrigger>
-                <SelectContent>
-                  {MALAYSIA_STATE_OPTIONS.map((s) => (
-                    <SelectItem key={s} value={s}>{s}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {postcodeWarnings["property"] ? (
-                <div className="text-xs text-amber-700 mt-1">{postcodeWarnings["property"]}</div>
-              ) : null}
-            </div>
-          </div>
+          <div className="rounded-lg border p-3 space-y-4">
+            <div className="text-sm font-medium text-slate-900">Property Unit / Parcel Details</div>
 
-          {v.titleCategory === "master" && (
             <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Parcel/Unit No</Label>
-                <Input value={v.property.parcelNo} onChange={(e) => set({ ...v, property: { ...v.property, parcelNo: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Area</Label>
-                <Input value={v.property.areaSqm} onChange={(e) => set({ ...v, property: { ...v.property, areaSqm: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Building No</Label>
-                <Input value={v.property.buildingNo} onChange={(e) => set({ ...v, property: { ...v.property, buildingNo: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Floor</Label>
-                <Input value={v.property.floorNo} onChange={(e) => set({ ...v, property: { ...v.property, floorNo: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Type</Label>
-                <Input value={v.property.propertyType} onChange={(e) => set({ ...v, property: { ...v.property, propertyType: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Accessory Parcel</Label>
-                <Input value={v.property.accessoryPetakNo} onChange={(e) => set({ ...v, property: { ...v.property, accessoryPetakNo: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Carpark No</Label>
-                <Input value={v.property.carparkNo} onChange={(e) => set({ ...v, property: { ...v.property, carparkNo: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Carpark Level</Label>
-                <Input value={v.property.carparkLevel} onChange={(e) => set({ ...v, property: { ...v.property, carparkLevel: e.target.value } })} disabled={submitting} />
-              </div>
-            </div>
-          )}
-
-          {v.titleCategory === "strata" && (
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Lot No</Label>
-                <Input value={v.property.lotNo} onChange={(e) => set({ ...v, property: { ...v.property, lotNo: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Hakmilik</Label>
-                <Input value={v.property.hakmilikNo} onChange={(e) => set({ ...v, property: { ...v.property, hakmilikNo: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Bangunan</Label>
-                <Input value={v.property.bangunanNo} onChange={(e) => set({ ...v, property: { ...v.property, bangunanNo: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Tingkat</Label>
-                <Input value={v.property.tingkatNo} onChange={(e) => set({ ...v, property: { ...v.property, tingkatNo: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Petak</Label>
-                <Input value={v.property.petakNo} onChange={(e) => set({ ...v, property: { ...v.property, petakNo: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Accessory Petak</Label>
-                <Input value={v.property.accessoryPetakNo} onChange={(e) => set({ ...v, property: { ...v.property, accessoryPetakNo: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Luas Petak</Label>
-                <Input value={v.property.landArea} onChange={(e) => set({ ...v, property: { ...v.property, landArea: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Luas Accessory</Label>
-                <Input value={v.property.accessoryArea} onChange={(e) => set({ ...v, property: { ...v.property, accessoryArea: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-12">
-                <AddressLinesFields
-                  label="Property Address"
-                  value={v.property.propertyAddressLines}
-                  onChange={(next) => set({ ...v, property: { ...v.property, propertyAddressLines: next } })}
-                  onBlurCompose={onComposePropertyAddress}
+              <div className="md:col-span-12 space-y-1.5">
+                <Label>Parcel / Unit / Lot No.</Label>
+                <HistoryInput
+                  storageKey="property.parcelUnitLotNo"
+                  value={v.property.parcelNo || v.property.lotNo || v.property.petakNo || v.property.unitNo}
+                  onChange={(next) => set({ ...v, property: { ...v.property, parcelNo: next, unitNo: next, lotNo: next, petakNo: next } })}
                   disabled={submitting}
                 />
               </div>
-              <div className="md:col-span-12 space-y-1.5">
-                <Label>Composed Property Address</Label>
-                <Input value={v.property.propertyAddress} readOnly />
-              </div>
             </div>
-          )}
 
-          {v.titleCategory === "individual" && (
             <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
               <div className="md:col-span-4 space-y-1.5">
-                <Label>Lot No</Label>
-                <Input value={v.property.lotNo} onChange={(e) => set({ ...v, property: { ...v.property, lotNo: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-4 space-y-1.5">
-                <Label>Luas Tanah</Label>
-                <Input value={v.property.landArea} onChange={(e) => set({ ...v, property: { ...v.property, landArea: e.target.value } })} disabled={submitting} />
-              </div>
-              <div className="md:col-span-12">
-                <AddressLinesFields
-                  label="Property Address"
-                  value={v.property.propertyAddressLines}
-                  onChange={(next) => set({ ...v, property: { ...v.property, propertyAddressLines: next } })}
-                  onBlurCompose={onComposePropertyAddress}
+                <Label>Property Purchase Price</Label>
+                <HistoryInput
+                  storageKey="purchasePrice"
+                  value={v.purchasePrice}
+                  onChange={(next) => {
+                    setPurchasePriceManuallyChanged(true);
+                    set({ ...v, purchasePrice: next });
+                  }}
                   disabled={submitting}
+                  inputMode="decimal"
                 />
+                {v.purchasePrice.trim() ? (
+                  <div className="text-xs text-slate-500">Formatted: {formatRMAmount(v.purchasePrice)}</div>
+                ) : null}
               </div>
-              <div className="md:col-span-12 space-y-1.5">
-                <Label>Composed Property Address</Label>
-                <Input value={v.property.propertyAddress} readOnly />
-              </div>
-            </div>
-          )}
-
-          <Separator />
-
-          <div className="space-y-3">
-            <div className="text-sm font-medium text-slate-900">Pricing</div>
-            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-              <div className="md:col-span-3 space-y-1.5">
-                <Label>Purchase Price</Label>
-                <Input value={formatRMAmount(purchasePriceAmount)} readOnly />
-              </div>
-              <div className="md:col-span-9 space-y-1.5">
+              <div className="md:col-span-8 space-y-1.5">
                 <Label>Purchase Price In Words</Label>
                 <Input value={purchasePriceWords} readOnly />
               </div>
-              <div className="md:col-span-3 space-y-1.5">
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+              <div className="md:col-span-4 space-y-1.5">
                 <Label>APDL Price</Label>
-                <Input value={v.apdlPrice} onChange={(e) => set({ ...v, apdlPrice: e.target.value })} disabled={submitting} inputMode="decimal" />
+                <HistoryInput storageKey="apdlPrice" value={v.apdlPrice} onChange={(next) => set({ ...v, apdlPrice: next })} disabled={submitting} inputMode="decimal" />
+                {v.apdlPrice.trim() ? (
+                  <div className="text-xs text-slate-500">Formatted: {formatRMAmount(v.apdlPrice)}</div>
+                ) : null}
               </div>
-              <div className="md:col-span-3 space-y-1.5">
+              <div className="md:col-span-4 space-y-1.5">
                 <Label>Developer Discount</Label>
-                <Input value={v.developerDiscount} onChange={(e) => set({ ...v, developerDiscount: e.target.value })} disabled={submitting} inputMode="decimal" />
+                <HistoryInput storageKey="developerDiscount" value={v.developerDiscount} onChange={(next) => set({ ...v, developerDiscount: next })} disabled={submitting} inputMode="decimal" />
+                {v.developerDiscount.trim() ? (
+                  <div className="text-xs text-slate-500">Formatted: {formatRMAmount(v.developerDiscount)}</div>
+                ) : null}
               </div>
-              <div className="md:col-span-3 space-y-1.5">
+              <div className="md:col-span-4 space-y-1.5">
                 <Label>Bumiputra Discount</Label>
-                <Input value={v.bumiputraDiscount} onChange={(e) => set({ ...v, bumiputraDiscount: e.target.value })} disabled={submitting} inputMode="decimal" />
+                <HistoryInput storageKey="bumiputraDiscount" value={v.bumiputraDiscount} onChange={(next) => set({ ...v, bumiputraDiscount: next })} disabled={submitting} inputMode="decimal" />
+                {v.bumiputraDiscount.trim() ? (
+                  <div className="text-xs text-slate-500">Formatted: {formatRMAmount(v.bumiputraDiscount)}</div>
+                ) : null}
               </div>
             </div>
+
             <PricingBreakdown purchasePrice={v.purchasePrice} />
+
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+              <div className="md:col-span-6 space-y-1.5">
+                <Label>Property Type (A / A1 / B / B1)</Label>
+                <HistoryInput storageKey="property.propertyType" value={v.property.propertyType} onChange={(next) => set({ ...v, property: { ...v.property, propertyType: next } })} disabled={submitting} />
+                <div className="text-xs text-slate-500">A 22x70 Intermediate Lot / B 22x70 Corner Lot</div>
+              </div>
+              <div className="md:col-span-6 space-y-1.5">
+                <Label>Parcel Area</Label>
+                <HistoryInput storageKey="property.parcelAreaSqm" value={v.property.areaSqm} onChange={(next) => set({ ...v, property: { ...v.property, areaSqm: next } })} disabled={submitting} />
+                <div className="text-xs text-slate-500">square meter • High Rise Unit Area / Landed Land Area as per Title</div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-slate-700">HighRise / Landed Strata only</div>
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                <div className="md:col-span-3 space-y-1.5">
+                  <Label>Building No.</Label>
+                  <Input value={v.property.buildingNo || v.property.bangunanNo} onChange={(e) => {
+                    const next = e.target.value;
+                    set({ ...v, property: { ...v.property, buildingNo: next, bangunanNo: next } });
+                  }} disabled={submitting} />
+                </div>
+                <div className="md:col-span-2 space-y-1.5">
+                  <Label>Floor No.</Label>
+                  <Input value={v.property.floorNo || v.property.tingkatNo} onChange={(e) => {
+                    const next = e.target.value;
+                    set({ ...v, property: { ...v.property, floorNo: next, tingkatNo: next } });
+                  }} disabled={submitting} />
+                </div>
+                <div className="md:col-span-3 space-y-1.5">
+                  <Label>Accessory Parcel No.</Label>
+                  <Input value={v.property.accessoryPetakNo} onChange={(e) => set({ ...v, property: { ...v.property, accessoryPetakNo: e.target.value } })} disabled={submitting} />
+                </div>
+                <div className="md:col-span-2 space-y-1.5">
+                  <Label>Carpark No.</Label>
+                  <Input value={v.property.carparkNo} onChange={(e) => set({ ...v, property: { ...v.property, carparkNo: e.target.value } })} disabled={submitting} />
+                </div>
+                <div className="md:col-span-2 space-y-1.5">
+                  <Label>Carpark Level</Label>
+                  <Input value={v.property.carparkLevel} onChange={(e) => set({ ...v, property: { ...v.property, carparkLevel: e.target.value } })} disabled={submitting} />
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border p-3 space-y-3">
+            <div className="text-sm font-medium text-slate-900">Property Completed</div>
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+              <div className="md:col-span-8">
+                <AddressLinesFields
+                  label="Property Address"
+                  value={v.property.propertyAddressLines}
+                  onChange={(next) => set({ ...v, property: { ...v.property, propertyAddressLines: next } })}
+                  onBlurCompose={onComposePropertyAddress}
+                  normalize={normalizeAddressText}
+                  historyKeyPrefix="property.address"
+                  disabled={submitting}
+                />
+              </div>
+              <div className="md:col-span-4 space-y-1.5">
+                <Label>Postcode (if property completed)</Label>
+                <Input
+                  value={v.property.postcode}
+                  onChange={(e) => {
+                    const nextPostcode = normalizeMalaysiaPostcodeInput(e.target.value);
+                    const derived = nextPostcode.length === 5 ? getStateFromPostcode(nextPostcode) : null;
+                    setPostcodeWarnings((prev) => {
+                      const next = { ...prev };
+                      if (derived && v.property.negeri.trim() && v.property.negeri.trim() !== derived) next["property"] = `Warning: Postcode ${nextPostcode} belongs to ${derived}`;
+                      else delete next["property"];
+                      return next;
+                    });
+                    const nextNegeri = derived ?? v.property.negeri;
+                    const composed = composeMalaysiaAddress({
+                      lines: v.property.propertyAddressLines,
+                      postcode: nextPostcode,
+                      city: v.property.bandarMukim,
+                      state: nextNegeri,
+                    });
+                    set({
+                      ...v,
+                      property: {
+                        ...v.property,
+                        postcode: nextPostcode,
+                        negeri: derived ?? v.property.negeri,
+                        propertyAddress: composed.address,
+                      },
+                    });
+                  }}
+                  disabled={submitting}
+                  inputMode="numeric"
+                />
+                {postcodeWarnings["property"] ? (
+                  <div className="text-xs text-amber-700 mt-1">{postcodeWarnings["property"]}</div>
+                ) : null}
+              </div>
+              <div className="md:col-span-12 space-y-1.5">
+                <Label>Composed Property Address</Label>
+                <Input value={v.property.propertyAddress} readOnly />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border p-3 space-y-3">
+            <div className="text-sm font-medium text-slate-900">Individual Title / Strata Title Details</div>
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+              <div className="md:col-span-4 space-y-1.5">
+                <Label>Individual Title / Strata Title</Label>
+                <Select
+                  value={v.property.titleTypeLabel}
+                  onValueChange={(next) => set({ ...v, property: { ...v.property, titleTypeLabel: next } })}
+                  disabled={submitting}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(v.titleCategory === "individual"
+                      ? ["HS(D)", "HS(M)"]
+                      : ["Geran", "GM"]
+                    ).map((s) => (
+                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="md:col-span-8 space-y-1.5">
+                <Label>TITLE Number</Label>
+                <Input value={v.property.hakmilikNo} onChange={(e) => set({ ...v, property: { ...v.property, hakmilikNo: e.target.value } })} disabled={submitting} />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+              <div className="md:col-span-4 space-y-1.5">
+                <Label>BANDAR / PEKAN / MUKIM</Label>
+                  <HistoryInput storageKey="property.bandarMukim" value={v.property.bandarMukim} onChange={(next) => set({ ...v, property: { ...v.property, bandarMukim: next } })} disabled={submitting} />
+              </div>
+              <div className="md:col-span-4 space-y-1.5">
+                <Label>DAERAH</Label>
+                  <HistoryInput storageKey="property.daerah" value={v.property.daerah} onChange={(next) => set({ ...v, property: { ...v.property, daerah: next } })} disabled={submitting} />
+              </div>
+              <div className="md:col-span-4 space-y-1.5">
+                <Label>NEGERI</Label>
+                <Select
+                  value={v.property.negeri}
+                  onValueChange={(nextState) => {
+                    const derived = v.property.postcode.length === 5 ? getStateFromPostcode(v.property.postcode) : null;
+                    setPostcodeWarnings((prev) => {
+                      const next = { ...prev };
+                      if (derived && nextState.trim() && nextState.trim() !== derived) next["property"] = `Warning: Postcode ${v.property.postcode} belongs to ${derived}`;
+                      else delete next["property"];
+                      return next;
+                    });
+                    const composed = composeMalaysiaAddress({
+                      lines: v.property.propertyAddressLines,
+                      postcode: v.property.postcode,
+                      city: v.property.bandarMukim,
+                      state: nextState,
+                    });
+                    set({ ...v, property: { ...v.property, negeri: nextState, propertyAddress: composed.address } });
+                  }}
+                  disabled={submitting || Boolean(v.property.postcode.length === 5 && getStateFromPostcode(v.property.postcode))}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {MALAYSIA_STATE_OPTIONS.map((s) => (
+                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+              <div className="md:col-span-6 space-y-1.5">
+                <Label>TITLE LAND / PARCEL AREA</Label>
+                <Input value={v.property.landArea} onChange={(e) => set({ ...v, property: { ...v.property, landArea: e.target.value } })} disabled={submitting} />
+                <div className="text-xs text-slate-500">square meter</div>
+              </div>
+              <div className="md:col-span-6 space-y-1.5">
+                <Label>ACCESSORY AREA</Label>
+                <Input value={v.property.accessoryArea} onChange={(e) => set({ ...v, property: { ...v.property, accessoryArea: e.target.value } })} disabled={submitting} />
+                <div className="text-xs text-slate-500">square meter</div>
+              </div>
+            </div>
           </div>
         </TabsContent>
           </Tabs>

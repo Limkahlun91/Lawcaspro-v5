@@ -2,7 +2,7 @@ import { pgTable, serial, text, integer, numeric, timestamp, index, uniqueIndex,
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
-export type CaseBorrower = { name: string; ic?: string | null; address: string };
+export type CaseBorrower = { name: string; ic?: string | null; tin?: string | null; address: string };
 
 export type CasePropertyDetails = {
   propertyAddress?: string;
@@ -34,7 +34,7 @@ export type CasePropertyDetails = {
   [k: string]: unknown;
 };
 
-export type CaseLoanBorrower = { name: string; ic?: string | null; hp?: string; email?: string; address?: string };
+export type CaseLoanBorrower = { name: string; ic?: string | null; tin?: string | null; hp?: string; email?: string; address?: string };
 export type CaseLoanDetails = {
   loanPartyType?: "1st Party" | "3rd Party" | "1st_party" | "3rd_party";
   borrowers?: CaseLoanBorrower[];
@@ -88,6 +88,7 @@ export const CasePropertyDetailsSchema = z.object({
 export const CaseLoanBorrowerSchema = z.object({
   name: z.string(),
   ic: z.string().nullish(),
+  tin: z.string().nullish(),
   hp: z.string().optional(),
   email: z.string().optional(),
   address: z.string().optional(),
