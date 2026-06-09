@@ -26,6 +26,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import CaseDocumentsTab from "./components/CaseDocumentsTab";
 import CaseBillingTab from "./components/CaseBillingTab";
 import CaseCommunicationsTab from "./components/CaseCommunicationsTab";
+import CaseCommunicationTimelineTab from "./components/CaseCommunicationTimelineTab";
 import CaseComplianceTab from "./components/CaseComplianceTab";
 import { ErrorBoundary } from "@/components/common/error-boundary";
 import { CaseFormModal, mapCaseToFormValues } from "./components/case-form/CaseFormModal";
@@ -660,6 +661,7 @@ export default function CaseDetail() {
       "billing",
       "ledger",
       "communications",
+      "communication-timeline",
       "client-interaction",
       ...(SHOW_COMPLIANCE_TAB ? (["compliance"] as const) : []),
     ]);
@@ -2348,6 +2350,7 @@ export default function CaseDetail() {
           <TabsTrigger value="billing">Billing</TabsTrigger>
           <TabsTrigger value="ledger">Ledger</TabsTrigger>
           <TabsTrigger value="communications">Comms</TabsTrigger>
+          <TabsTrigger value="communication-timeline">Comms Timeline</TabsTrigger>
           {canAccessClientInteraction && (
             <TabsTrigger value="client-interaction" className="gap-2">
               <span>Client Interaction</span>
@@ -3524,6 +3527,10 @@ export default function CaseDetail() {
 
         <TabsContent value="communications">
           <CaseCommunicationsTab caseId={caseId} initialThreadId={initialThreadId} />
+        </TabsContent>
+
+        <TabsContent value="communication-timeline">
+          <CaseCommunicationTimelineTab caseId={caseId} />
         </TabsContent>
 
         {canAccessClientInteraction && (

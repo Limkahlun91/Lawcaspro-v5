@@ -89,6 +89,8 @@ import ProjectStatusReport from "@/pages/app/reports/project-status";
 import Hub from "@/pages/app/hub";
 import Communications from "@/pages/app/communications";
 import CommunicationThreadDetail from "@/pages/app/communications/thread-detail";
+import EmailControlCenterPage from "@/pages/app/communication/email";
+import WhatsAppInboxPlaceholderPage from "@/pages/app/communication/whatsapp";
 import QuotationsList from "@/pages/app/quotations";
 import NewQuotation from "@/pages/app/quotations/new";
 import QuotationDetail from "@/pages/app/quotations/detail";
@@ -250,6 +252,18 @@ function AppRoutes() {
               <Communications />
             </PermissionGuard>
           )} />
+
+          <Route path="/app/communication/email" component={() => (
+            <PermissionGuard module="communications" action="read">
+              <EmailControlCenterPage />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/communication/whatsapp" component={() => (
+            <PermissionGuard module="communications" action="read">
+              <WhatsAppInboxPlaceholderPage />
+            </PermissionGuard>
+          )} />
+
           <Route path="/app/quotations/new" component={() => (
             <PermissionGuard module="accounting" action="write">
               <NewQuotation />

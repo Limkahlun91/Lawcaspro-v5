@@ -19,6 +19,7 @@ export * from "./accounting";
 export * from "./platform-governance";
 export * from "./platform-incident-center";
 export * from "./communications";
+export * from "./communication-hub";
 export * from "./platform";
 export * from "./platform-ops";
 export * from "./quotations";
