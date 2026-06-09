@@ -150,33 +150,83 @@ export function CaseForm(props: {
     return projects.find((p: any) => Number(p.id) === pid) ?? null;
   }, [projects, v.projectId]);
 
+  const selectedProjectDeveloperId = useMemo(() => {
+    if (!selectedProject) return "";
+    const raw = (selectedProject as any)?.developerId;
+    return raw ? String(raw) : "";
+  }, [selectedProject]);
+
+  const selectedProjectTitleCategory = useMemo<TitleCategory | "">(() => {
+    if (!selectedProject) return "";
+    const raw = String((selectedProject as any)?.titleCategory ?? (selectedProject as any)?.titleType ?? "").trim().toLowerCase();
+    if (raw === "strata") return "strata";
+    if (raw === "individual") return "individual";
+    if (raw === "master") return "master";
+    return "";
+  }, [selectedProject]);
+
+  const selectedProjectAutoFillWarning = useMemo(() => {
+    if (!selectedProject || v.caseType !== "developer_sales") return "";
+    const missing: string[] = [];
+    if (!selectedProjectDeveloperId) missing.push("developer");
+    if (!selectedProjectTitleCategory) missing.push("title type");
+    return missing.length > 0
+      ? `Selected project is missing ${missing.join(" and ")} mapping. Please update the project master data.`
+      : "";
+  }, [selectedProject, selectedProjectDeveloperId, selectedProjectTitleCategory, v.caseType]);
+
   useEffect(() => {
     if (!selectedProject) return;
     if (v.caseType !== "developer_sales") return;
-    const projectDeveloperId = (selectedProject as any)?.developerId ? String((selectedProject as any).developerId) : "";
-    if (projectDeveloperId && (!developerManuallyChanged || !canOverrideProjectDerivedFields)) {
-      set({ ...v, developerId: projectDeveloperId });
+    let changed = false;
+    const nextValue: CaseFormValues = {
+      ...v,
+      property: { ...v.property },
+    };
+
+    if (!developerManuallyChanged || !canOverrideProjectDerivedFields) {
+      const nextDeveloperId = selectedProjectDeveloperId || "";
+      if (nextValue.developerId !== nextDeveloperId) {
+        nextValue.developerId = nextDeveloperId;
+        changed = true;
+      }
     }
-    const tt = String((selectedProject as any)?.titleType ?? "").trim().toLowerCase();
-    const titleCategory: TitleCategory = tt === "strata" ? "strata" : tt === "individual" ? "individual" : "master";
+
     if (!v.titleCategory || !titleManuallyChanged || !canOverrideProjectDerivedFields) {
-      set({ ...v, titleCategory });
+      const nextTitleCategory = selectedProjectTitleCategory;
+      if (nextValue.titleCategory !== nextTitleCategory) {
+        nextValue.titleCategory = nextTitleCategory;
+        changed = true;
+      }
     }
+
     const mukim = String((selectedProject as any)?.mukim ?? "").trim();
     const daerah = String((selectedProject as any)?.daerah ?? "").trim();
     const negeri = String((selectedProject as any)?.negeri ?? "").trim();
-    if (mukim || daerah || negeri) {
-      set({
-        ...v,
-        property: {
-          ...v.property,
-          bandarMukim: v.property.bandarMukim || mukim,
-          daerah: v.property.daerah || daerah,
-          negeri: v.property.negeri || negeri,
-        },
-      });
+    if (mukim && !nextValue.property.bandarMukim) {
+      nextValue.property.bandarMukim = mukim;
+      changed = true;
     }
-  }, [selectedProject]);
+    if (daerah && !nextValue.property.daerah) {
+      nextValue.property.daerah = daerah;
+      changed = true;
+    }
+    if (negeri && !nextValue.property.negeri) {
+      nextValue.property.negeri = negeri;
+      changed = true;
+    }
+
+    if (changed) set(nextValue);
+  }, [
+    canOverrideProjectDerivedFields,
+    developerManuallyChanged,
+    selectedProject,
+    selectedProjectDeveloperId,
+    selectedProjectTitleCategory,
+    set,
+    titleManuallyChanged,
+    v,
+  ]);
 
   useEffect(() => {
     if (!v.purchasePrice.trim()) setPurchasePriceManuallyChanged(false);
@@ -282,8 +332,8 @@ export function CaseForm(props: {
   const onComposeBorrowerAddress = (id: string) => {
     const nextBorrowers = v.borrowers.map((b) => {
       if (b.id !== id) return b;
-      const composed = composeMalaysiaAddress({ lines: b.addressLines, postcode: b.postcode, city: b.city, state: b.state });
-      return { ...b, address: composed.address, state: composed.derivedState ?? b.state };
+      const address = joinAddressLines(b.addressLines);
+      return { ...b, address };
     });
     set({ ...v, borrowers: nextBorrowers });
   };
@@ -340,6 +390,9 @@ export function CaseForm(props: {
                   ))}
                 </SelectContent>
               </Select>
+              {selectedProjectAutoFillWarning ? (
+                <div className="text-xs text-amber-700">{selectedProjectAutoFillWarning}</div>
+              ) : null}
             </div>
             <div className="md:col-span-4 space-y-1.5">
               <Label>Developer *</Label>
@@ -609,88 +662,6 @@ export function CaseForm(props: {
                       disabled={submitting}
                       maxLines={5}
                     />
-
-                    <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-                      <div className="md:col-span-4 space-y-1.5">
-                        <Label>City</Label>
-                        <Input
-                          value={b.city}
-                          onChange={(e) => {
-                            const nextCity = e.target.value;
-                            const nextBorrowers = v.borrowers.map((x) => {
-                              if (x.id !== b.id) return x;
-                              const composed = composeMalaysiaAddress({ lines: x.addressLines, postcode: x.postcode, city: nextCity, state: x.state });
-                              return { ...x, city: nextCity, address: composed.address, state: composed.derivedState ?? x.state };
-                            });
-                            set({ ...v, borrowers: nextBorrowers });
-                          }}
-                          disabled={submitting}
-                          placeholder="e.g. Muar"
-                        />
-                      </div>
-                      <div className="md:col-span-4 space-y-1.5">
-                        <Label>Postcode</Label>
-                        <Input
-                          value={b.postcode}
-                          onChange={(e) => {
-                            const nextPostcode = normalizeMalaysiaPostcodeInput(e.target.value);
-                            const derived = nextPostcode.length === 5 ? getStateFromPostcode(nextPostcode) : null;
-                            const key = `borrower:${b.id}`;
-                            setPostcodeWarnings((prev) => {
-                              const next = { ...prev };
-                              if (derived && b.state.trim() && b.state.trim() !== derived) next[key] = `Warning: Postcode ${nextPostcode} belongs to ${derived}`;
-                              else delete next[key];
-                              return next;
-                            });
-                            const nextBorrowers = v.borrowers.map((x) => {
-                              if (x.id !== b.id) return x;
-                              const nextState = derived ?? x.state;
-                              const composed = composeMalaysiaAddress({ lines: x.addressLines, postcode: nextPostcode, city: x.city, state: nextState });
-                              return { ...x, postcode: nextPostcode, state: derived ?? x.state, address: composed.address };
-                            });
-                            set({ ...v, borrowers: nextBorrowers });
-                          }}
-                          disabled={submitting}
-                          inputMode="numeric"
-                          placeholder="e.g. 84000"
-                        />
-                      </div>
-                      <div className="md:col-span-4 space-y-1.5">
-                        <Label>State</Label>
-                        <Select
-                          value={b.state}
-                          onValueChange={(nextState) => {
-                            const key = `borrower:${b.id}`;
-                            const derived = b.postcode.length === 5 ? getStateFromPostcode(b.postcode) : null;
-                            setPostcodeWarnings((prev) => {
-                              const next = { ...prev };
-                              if (derived && nextState.trim() && nextState.trim() !== derived) next[key] = `Warning: Postcode ${b.postcode} belongs to ${derived}`;
-                              else delete next[key];
-                              return next;
-                            });
-                            const nextBorrowers = v.borrowers.map((x) => {
-                              if (x.id !== b.id) return x;
-                              const composed = composeMalaysiaAddress({ lines: x.addressLines, postcode: x.postcode, city: x.city, state: nextState });
-                              return { ...x, state: nextState, address: composed.address };
-                            });
-                            set({ ...v, borrowers: nextBorrowers });
-                          }}
-                          disabled={submitting || Boolean(b.postcode.length === 5 && getStateFromPostcode(b.postcode))}
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select state" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {MALAYSIA_STATE_OPTIONS.map((s) => (
-                              <SelectItem key={s} value={s}>{s}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        {postcodeWarnings[`borrower:${b.id}`] ? (
-                          <div className="text-xs text-amber-700 mt-1">{postcodeWarnings[`borrower:${b.id}`]}</div>
-                        ) : null}
-                      </div>
-                    </div>
                   </div>
                 ))}
               </div>

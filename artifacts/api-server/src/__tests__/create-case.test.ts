@@ -4,6 +4,9 @@ import app from "../app";
 import { db, casesTable, casePurchasersTable, caseAssignmentsTable, clientsTable } from "@workspace/db";
 import { eq, and, desc, or, inArray } from "drizzle-orm";
 
+const skipDb = process.env.VITEST_SKIP_DB === "1" || !process.env.DATABASE_URL;
+const suite = skipDb ? describe.skip : describe;
+
 let partnerToken: string;
 let partnerFirmId: number;
 let projectId: number;
@@ -11,6 +14,7 @@ let developerId: number;
 let wrongDeveloperId: number;
 let lawyerUserId: number;
 
+if (!skipDb) {
 beforeAll(async () => {
   const loginRes = await request(app)
     .post("/api/auth/login")
@@ -84,8 +88,9 @@ afterAll(async () => {
     )
   ));
 });
+}
 
-describe("POST /api/cases — create case regression", () => {
+suite("POST /api/cases — create case regression", () => {
   it("returns structured validation errors when body is empty", async () => {
     const res = await request(app)
       .post("/api/cases")
@@ -169,6 +174,44 @@ describe("POST /api/cases — create case regression", () => {
     expect(res.status).toBe(201);
     expect(res.body.referenceNo).toBeNull();
     expect(res.body.purchasers).toHaveLength(2);
+  });
+
+  it("reuses the same case when the same tracking token is retried", async () => {
+    const trackingToken = "11111111-1111-4111-8111-111111111111";
+    const payload = {
+      caseType: "developer_sales",
+      projectId,
+      developerId,
+      purchaseMode: "loan",
+      titleType: "master",
+      trackingToken,
+      parcelNo: "TEST-REGRESSION-001",
+      purchasers: [
+        { name: "Retry Safe Purchaser", ic: "901010-07-0003" },
+      ],
+    };
+
+    const first = await request(app)
+      .post("/api/cases")
+      .set("Authorization", `Bearer ${partnerToken}`)
+      .send(payload);
+    expect(first.status).toBe(201);
+    expect(first.body.id).toBeDefined();
+    expect(first.body.trackingToken).toBe(trackingToken);
+
+    const second = await request(app)
+      .post("/api/cases")
+      .set("Authorization", `Bearer ${partnerToken}`)
+      .send(payload);
+    expect(second.status).toBe(200);
+    expect(second.body.id).toBe(first.body.id);
+    expect(second.body.duplicate).toBe(true);
+
+    const rows = await db
+      .select({ id: casesTable.id })
+      .from(casesTable)
+      .where(and(eq(casesTable.firmId, partnerFirmId), eq(casesTable.trackingToken, trackingToken)));
+    expect(rows).toHaveLength(1);
   });
 
   it("returns 401 when creating a case without authentication", async () => {

@@ -61,16 +61,9 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
     tin: String(b?.tin ?? ""),
     hp: String(b?.hp ?? ""),
     email: String(b?.email ?? ""),
-    postcode: (() => {
-      const m = String(b?.address ?? "").match(/\b(\d{5})\b/);
-      return m ? m[1] : "";
-    })(),
+    postcode: "",
     city: "",
-    state: (() => {
-      const m = String(b?.address ?? "").match(/\b(\d{5})\b/);
-      const pc = m ? m[1] : "";
-      return pc ? (getStateFromPostcode(pc) ?? "") : "";
-    })(),
+    state: "",
     addressLines: splitAddressToLines(String(b?.address ?? "")),
     address: String(b?.address ?? ""),
   })) : [v.borrowers[0]];
@@ -189,8 +182,8 @@ export function buildCasePayloadFromFormValues(values: CaseFormValues): Record<s
       hp: b.hp.trim() ? b.hp.trim() : null,
       email: b.email.trim() ? b.email.trim() : null,
       address: (() => {
-        const composed = composeMalaysiaAddress({ lines: b.addressLines, postcode: b.postcode, city: b.city, state: b.state });
-        return (b.address.trim() ? b.address.trim() : composed.address).trim() || null;
+        const composed = joinAddressLines(b.addressLines);
+        return (b.address.trim() ? b.address.trim() : composed).trim() || null;
       })(),
     }))
     .filter((b) => b.name.length > 0);

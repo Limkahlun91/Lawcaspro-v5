@@ -30,6 +30,7 @@ export default defineConfig({
         "src/__tests__/documentNaming.unit.test.ts",
         "src/__tests__/dashboard.milestone-drilldown.test.ts",
         "src/__tests__/caseListLogic.milestone.unit.test.ts",
+        "src/__tests__/create-case.test.ts",
         "src/__tests__/communication-hub.test.ts",
       ],
     pool: "forks",

@@ -919,6 +919,66 @@ async function formatCaseSummary(r: DbConn, c: typeof casesTable.$inferSelect) {
   };
 }
 
+function buildCreateCaseResponse(
+  c: typeof casesTable.$inferSelect,
+  options: {
+    purchasersCreated: number;
+    purchasersReused: number;
+    purchasers?: Array<{
+      id: number;
+      clientId: number;
+      clientName: string;
+      icNo: string | null;
+      tin?: string | null;
+      phone?: string | null;
+      email?: string | null;
+      address?: string | null;
+      role: string;
+      orderNo: number;
+    }>;
+    assignments?: Array<{
+      id: number;
+      userId: number;
+      userName: string;
+      roleInCase: string;
+      assignedAt: string | null;
+    }>;
+    duplicate?: boolean;
+  },
+) {
+  return {
+    id: c.id,
+    firmId: c.firmId,
+    referenceNo: c.referenceNo,
+    projectId: c.projectId,
+    developerId: c.developerId,
+    purchaseMode: c.purchaseMode,
+    loanPartyType: c.loanPartyType ?? "1st_party",
+    titleType: c.titleType,
+    status: c.status,
+    caseType: c.caseType,
+    approvalStatus: (c as any).approvalStatus ?? null,
+    submittedBy: (c as any).submittedBy ?? null,
+    submittedAt: toIsoStringSafeOrNull((c as any).submittedAt),
+    approvedBy: (c as any).approvedBy ?? null,
+    approvedAt: toIsoStringSafeOrNull((c as any).approvedAt),
+    approvalNote: (c as any).approvalNote ?? null,
+    encumbrances: (c as any).encumbrances ?? null,
+    actingFor: (c as any).actingFor ?? null,
+    perfectionType: (c as any).perfectionType ?? null,
+    parcelNo: c.parcelNo,
+    trackingToken: c.trackingToken,
+    purchasers: options.purchasers ?? [],
+    assignments: options.assignments ?? [],
+    createdBy: c.createdBy ?? null,
+    createdAt: toIsoStringSafe(c.createdAt),
+    purchasersCreated: options.purchasersCreated,
+    purchasersReused: options.purchasersReused,
+    duplicate: Boolean(options.duplicate),
+    message: "Case submitted for approval.",
+  };
+}
+
 router.get("/cases/stats/by-status", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const rows = await db
     .select({ status: casesTable.status, count: count() })
@@ -3314,6 +3374,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
 
     const createCaseSchema = z.object({
       caseType: z.string().min(1),
+      trackingToken: z.string().uuid().optional(),
       projectId: z.coerce.number().int().positive().optional(),
       developerId: z.coerce.number().int().positive().optional(),
       referenceNo: z.string().trim().max(80).optional(),
@@ -3434,6 +3495,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
 
     const {
       caseType,
+      trackingToken,
       projectId: projectIdRaw,
       developerId: clientDeveloperId,
       purchaseMode,
@@ -3462,6 +3524,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
 
     safeReqBody = {
       caseType,
+      trackingToken: trackingToken ?? null,
       projectId: projectIdRaw ?? null,
       developerId: clientDeveloperId ?? null,
       titleType: titleType ?? null,
@@ -3480,6 +3543,27 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       res.status(400).json({ error: "Invalid caseType" });
       return;
     }
+
+    if (trackingToken) {
+      const [existingByTrackingToken] = await r
+        .select()
+        .from(casesTable)
+        .where(and(
+          eq(casesTable.firmId, req.firmId!),
+          eq(casesTable.trackingToken, trackingToken),
+          sql`${casesTable.deletedAt} IS NULL`,
+        ))
+        .limit(1);
+      if (existingByTrackingToken) {
+        res.status(200).json(buildCreateCaseResponse(existingByTrackingToken, {
+          purchasersCreated: 0,
+          purchasersReused: 0,
+          duplicate: true,
+        }));
+        return;
+      }
+    }
+
     if (!canAssignAny) {
       if (normalizedAssignedLawyerId !== undefined && normalizedAssignedLawyerId !== req.userId) {
         res.status(403).json({ error: "You cannot assign cases to other users" });
@@ -3574,6 +3658,18 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     let resolvedPurchaserIds: number[] = purchaserIds ?? [];
     let purchasersCreated = 0;
     let purchasersReused = 0;
+    const responsePurchasers: Array<{
+      id: number;
+      clientId: number;
+      clientName: string;
+      icNo: string | null;
+      tin?: string | null;
+      phone?: string | null;
+      email?: string | null;
+      address?: string | null;
+      role: string;
+      orderNo: number;
+    }> = [];
 
     if (resolvedPurchaserIds.length === 0 && purchasers && purchasers.length > 0) {
       for (const p of purchasers) {
@@ -3616,6 +3712,18 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         if (existingClientId) {
           resolvedPurchaserIds.push(existingClientId);
           purchasersReused++;
+          responsePurchasers.push({
+            id: 0,
+            clientId: existingClientId,
+            clientName: trimmedName,
+            icNo: trimmedIc,
+            tin: trimmedTin,
+            phone: trimmedPhone,
+            email: trimmedEmail,
+            address: trimmedAddress,
+            role: "joint",
+            orderNo: resolvedPurchaserIds.length,
+          });
           if (trimmedTin || trimmedPhone || trimmedEmail || trimmedAddress) {
             const [existing] = await r
               .select({ id: clientsTable.id, tin: clientsTable.tin, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
@@ -3652,6 +3760,18 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
             .returning();
           resolvedPurchaserIds.push(client.id);
           purchasersCreated++;
+          responsePurchasers.push({
+            id: 0,
+            clientId: client.id,
+            clientName: trimmedName,
+            icNo: trimmedIc,
+            tin: trimmedTin,
+            phone: trimmedPhone,
+            email: trimmedEmail,
+            address: trimmedAddress,
+            role: "joint",
+            orderNo: resolvedPurchaserIds.length,
+          });
         }
       }
     }
@@ -3805,50 +3925,94 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
 
     const [newCase] = await r
       .insert(casesTable)
-      .values({ ...insertCaseBase, referenceNo: null } satisfies typeof casesTable.$inferInsert)
+      .values({ ...insertCaseBase, referenceNo: null, trackingToken: trackingToken ?? undefined } satisfies typeof casesTable.$inferInsert)
       .returning();
     if (!newCase) {
       res.status(500).json({ error: "Internal Server Error" });
       return;
     }
 
+    const responseAssignments: Array<{
+      id: number;
+      userId: number;
+      userName: string;
+      roleInCase: string;
+      assignedAt: string | null;
+    }> = [];
+
     for (let i = 0; i < resolvedPurchaserIds.length; i++) {
-      await r.insert(casePurchasersTable).values({
+      const [casePurchaser] = await r.insert(casePurchasersTable).values({
         caseId: newCase.id,
         clientId: resolvedPurchaserIds[i],
         role: i === 0 ? "main" : "joint",
         orderNo: i + 1,
-      });
+      }).returning({ id: casePurchasersTable.id });
+      if (responsePurchasers[i]) {
+        responsePurchasers[i] = {
+          ...responsePurchasers[i],
+          id: casePurchaser?.id ?? 0,
+          role: i === 0 ? "main" : "joint",
+          orderNo: i + 1,
+        };
+      }
     }
 
     const wantsExplicitAssignments = Boolean(canAssignAny && (normalizedAssignedLawyerId || normalizedAssignedClerkId));
     if (!wantsExplicitAssignments) {
-      await r.insert(caseAssignmentsTable).values({
+      const [assignment] = await r.insert(caseAssignmentsTable).values({
         caseId: newCase.id,
         userId: req.userId!,
         roleInCase: "clerk",
         assignedBy: req.userId,
+      }).returning({ id: caseAssignmentsTable.id, assignedAt: caseAssignmentsTable.assignedAt });
+      responseAssignments.push({
+        id: assignment?.id ?? 0,
+        userId: req.userId!,
+        userName: "",
+        roleInCase: "clerk",
+        assignedAt: assignment?.assignedAt ? toIsoStringSafe(assignment.assignedAt) : null,
       });
     } else {
       if (normalizedAssignedLawyerId) {
-        await r.insert(caseAssignmentsTable).values({
+        const [assignment] = await r.insert(caseAssignmentsTable).values({
           caseId: newCase.id,
           userId: normalizedAssignedLawyerId,
           roleInCase: "lawyer",
           assignedBy: req.userId,
+        }).returning({ id: caseAssignmentsTable.id, assignedAt: caseAssignmentsTable.assignedAt });
+        responseAssignments.push({
+          id: assignment?.id ?? 0,
+          userId: normalizedAssignedLawyerId,
+          userName: "",
+          roleInCase: "lawyer",
+          assignedAt: assignment?.assignedAt ? toIsoStringSafe(assignment.assignedAt) : null,
         });
       }
       if (normalizedAssignedClerkId) {
-        await r.insert(caseAssignmentsTable).values({
+        const [assignment] = await r.insert(caseAssignmentsTable).values({
           caseId: newCase.id,
           userId: normalizedAssignedClerkId,
           roleInCase: "clerk",
           assignedBy: req.userId,
+        }).returning({ id: caseAssignmentsTable.id, assignedAt: caseAssignmentsTable.assignedAt });
+        responseAssignments.push({
+          id: assignment?.id ?? 0,
+          userId: normalizedAssignedClerkId,
+          userName: "",
+          roleInCase: "clerk",
+          assignedAt: assignment?.assignedAt ? toIsoStringSafe(assignment.assignedAt) : null,
         });
       }
     }
 
-    await writeAuditLog({
+    res.status(201).json(buildCreateCaseResponse(newCase, {
+      purchasersCreated,
+      purchasersReused,
+      purchasers: responsePurchasers,
+      assignments: responseAssignments,
+    }));
+
+    void writeAuditLog({
       firmId: req.firmId,
       actorId: req.userId,
       actorType: "firm_user",
@@ -3858,10 +4022,9 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       detail: `referenceNo=null purchasersCreated=${purchasersCreated} purchasersReused=${purchasersReused} approvalStatus=pending_approval`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
+    }).catch((auditErr) => {
+      req.log.error({ err: auditErr, caseId: newCase.id, firmId: req.firmId, userId: req.userId }, "cases.create audit log failed");
     });
-
-    const detail = await formatCaseDetail(r, newCase);
-    res.status(201).json({ ...detail, purchasersCreated, purchasersReused, message: "Case submitted for approval." });
     return;
   } catch (e) {
     const pg = (() => {
@@ -3880,6 +4043,26 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       }
       return {};
     })();
+    if (pg?.code === "23505" && pg?.constraint === "cases_tracking_token_key" && typeof safeReqBody?.trackingToken === "string") {
+      const retryDb = req.rlsDb ?? db;
+      const [existingByTrackingToken] = await retryDb
+        .select()
+        .from(casesTable)
+        .where(and(
+          eq(casesTable.firmId, req.firmId!),
+          eq(casesTable.trackingToken, safeReqBody.trackingToken),
+          sql`${casesTable.deletedAt} IS NULL`,
+        ))
+        .limit(1);
+      if (existingByTrackingToken) {
+        res.status(200).json(buildCreateCaseResponse(existingByTrackingToken, {
+          purchasersCreated: 0,
+          purchasersReused: 0,
+          duplicate: true,
+        }));
+        return;
+      }
+    }
     req.log.error({ err: e, pg, body: safeReqBody }, "cases.create failed");
     if (process.env.API_ERROR_DETAILS === "1") {
       res.status(500).json({

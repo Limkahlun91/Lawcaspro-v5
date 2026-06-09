@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { type ReactNode, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { QueryFallback } from "@/components/query-fallback";
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
@@ -86,6 +87,51 @@ function splitCommaList(v: string): string[] {
 function StatusBadge({ value }: { value: string }) {
   const v = String(value ?? "");
   return <Badge variant="outline">{v}</Badge>;
+}
+
+function QuerySection({
+  isLoading,
+  isError,
+  error,
+  isFetching,
+  onRetry,
+  isEmpty,
+  emptyTitle,
+  emptyDescription,
+  loadingText = "Loading...",
+  children,
+}: {
+  isLoading: boolean;
+  isError: boolean;
+  error: unknown;
+  isFetching: boolean;
+  onRetry: () => void;
+  isEmpty: boolean;
+  emptyTitle: string;
+  emptyDescription: string;
+  loadingText?: string;
+  children: ReactNode;
+}) {
+  if (isError) {
+    return <QueryFallback title={emptyTitle} error={error} onRetry={onRetry} isRetrying={isFetching} />;
+  }
+
+  if (isLoading) {
+    return <div className="py-8 text-center text-sm text-slate-500">{loadingText}</div>;
+  }
+
+  if (isEmpty) {
+    return (
+      <Empty className="border border-dashed border-slate-200 bg-slate-50/50 py-10">
+        <EmptyHeader>
+          <EmptyTitle>{emptyTitle}</EmptyTitle>
+          <EmptyDescription>{emptyDescription}</EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  }
+
+  return <>{children}</>;
 }
 
 export default function EmailControlCenterPage() {
@@ -410,7 +456,16 @@ export default function EmailControlCenterPage() {
           </CardHeader>
           <CardContent className="space-y-2">
             {view === "my_tasks" ? (
-              <QueryFallback query={tasksMineQuery}>
+              <QuerySection
+                isLoading={tasksMineQuery.isLoading}
+                isError={tasksMineQuery.isError}
+                error={tasksMineQuery.error}
+                isFetching={tasksMineQuery.isFetching}
+                onRetry={() => tasksMineQuery.refetch()}
+                isEmpty={tasksMine.length === 0}
+                emptyTitle="No tasks assigned yet"
+                emptyDescription="Assigned communication tasks will appear here."
+              >
                 {tasksMine.map((t) => (
                   <button key={t.id} className="w-full text-left rounded border p-2 hover:bg-slate-50" onClick={() => {
                     setSelectedMessageId(t.parentMessageId);
@@ -424,9 +479,18 @@ export default function EmailControlCenterPage() {
                     <div className="text-xs text-slate-500">{t.partyName || ""}</div>
                   </button>
                 ))}
-              </QueryFallback>
+              </QuerySection>
             ) : view === "drafts_pending_approval" ? (
-              <QueryFallback query={draftsPendingQuery}>
+              <QuerySection
+                isLoading={draftsPendingQuery.isLoading}
+                isError={draftsPendingQuery.isError}
+                error={draftsPendingQuery.error}
+                isFetching={draftsPendingQuery.isFetching}
+                onRetry={() => draftsPendingQuery.refetch()}
+                isEmpty={draftsPending.length === 0}
+                emptyTitle="No drafts pending approval"
+                emptyDescription="Submitted communication drafts will appear here."
+              >
                 {draftsPending.map((d) => (
                   <button key={d.id} className="w-full text-left rounded border p-2 hover:bg-slate-50" onClick={() => {
                     setSelectedDraftId(d.id);
@@ -439,9 +503,18 @@ export default function EmailControlCenterPage() {
                     <div className="text-xs text-slate-500">Type: {d.draftType}</div>
                   </button>
                 ))}
-              </QueryFallback>
+              </QuerySection>
             ) : view === "overdue" ? (
-              <QueryFallback query={overdueQuery}>
+              <QuerySection
+                isLoading={overdueQuery.isLoading}
+                isError={overdueQuery.isError}
+                error={overdueQuery.error}
+                isFetching={overdueQuery.isFetching}
+                onRetry={() => overdueQuery.refetch()}
+                isEmpty={overdue.length === 0}
+                emptyTitle="No overdue items"
+                emptyDescription="Overdue messages, tasks, and drafts will appear here."
+              >
                 {overdue.map((o: any) => (
                   <div key={`${o.kind}-${o.entity_id}`} className="rounded border p-2">
                     <div className="flex items-center justify-between gap-2">
@@ -451,9 +524,18 @@ export default function EmailControlCenterPage() {
                     <div className="text-xs text-slate-500">{String(o.event_at ?? "")}</div>
                   </div>
                 ))}
-              </QueryFallback>
+              </QuerySection>
             ) : (
-              <QueryFallback query={messagesQuery}>
+              <QuerySection
+                isLoading={messagesQuery.isLoading}
+                isError={messagesQuery.isError}
+                error={messagesQuery.error}
+                isFetching={messagesQuery.isFetching}
+                onRetry={() => messagesQuery.refetch()}
+                isEmpty={messages.length === 0}
+                emptyTitle="No messages yet"
+                emptyDescription="Create a manual email to start."
+              >
                 {messages.map((row) => (
                   <button key={row.message.id} className="w-full text-left rounded border p-2 hover:bg-slate-50" onClick={() => {
                     setSelectedMessageId(row.message.id);
@@ -476,7 +558,7 @@ export default function EmailControlCenterPage() {
                     ) : null}
                   </button>
                 ))}
-              </QueryFallback>
+              </QuerySection>
             )}
           </CardContent>
         </Card>
@@ -487,7 +569,16 @@ export default function EmailControlCenterPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             {selectedDraftId ? (
-              <QueryFallback query={selectedDraftQuery}>
+              <QuerySection
+                isLoading={selectedDraftQuery.isLoading}
+                isError={selectedDraftQuery.isError}
+                error={selectedDraftQuery.error}
+                isFetching={selectedDraftQuery.isFetching}
+                onRetry={() => selectedDraftQuery.refetch()}
+                isEmpty={!selectedDraft}
+                emptyTitle="Draft unavailable"
+                emptyDescription="Select another draft or refresh the list."
+              >
                 {selectedDraft ? (
                   <div className="space-y-3">
                     <div className="flex items-center justify-between gap-2">
@@ -529,7 +620,17 @@ export default function EmailControlCenterPage() {
 
                     <div className="space-y-2">
                       <div className="text-sm font-medium">Audit</div>
-                      <QueryFallback query={selectedDraftAuditQuery}>
+                      <QuerySection
+                        isLoading={selectedDraftAuditQuery.isLoading}
+                        isError={selectedDraftAuditQuery.isError}
+                        error={selectedDraftAuditQuery.error}
+                        isFetching={selectedDraftAuditQuery.isFetching}
+                        onRetry={() => selectedDraftAuditQuery.refetch()}
+                        isEmpty={draftAudit.length === 0}
+                        emptyTitle="No draft audit entries yet"
+                        emptyDescription="Approval and send actions will appear here."
+                        loadingText="Loading audit..."
+                      >
                         <div className="space-y-1">
                           {(draftAudit ?? []).map((a: any) => (
                             <div key={a.id} className="text-xs text-slate-600">
@@ -537,13 +638,22 @@ export default function EmailControlCenterPage() {
                             </div>
                           ))}
                         </div>
-                      </QueryFallback>
+                      </QuerySection>
                     </div>
                   </div>
                 ) : null}
-              </QueryFallback>
+              </QuerySection>
             ) : selectedMessageId ? (
-              <QueryFallback query={selectedMessageQuery}>
+              <QuerySection
+                isLoading={selectedMessageQuery.isLoading}
+                isError={selectedMessageQuery.isError}
+                error={selectedMessageQuery.error}
+                isFetching={selectedMessageQuery.isFetching}
+                onRetry={() => selectedMessageQuery.refetch()}
+                isEmpty={!selectedMessage}
+                emptyTitle="Message unavailable"
+                emptyDescription="Select another message or refresh the list."
+              >
                 {selectedMessage ? (
                   <div className="space-y-4">
                     <div className="flex items-center justify-between gap-2">
@@ -603,7 +713,17 @@ export default function EmailControlCenterPage() {
                             <Button onClick={() => setDraftDialogOpen(true)} disabled={!selectedTaskIds.length}>Create Draft</Button>
                           </div>
                         </div>
-                        <QueryFallback query={selectedTasksQuery}>
+                        <QuerySection
+                          isLoading={selectedTasksQuery.isLoading}
+                          isError={selectedTasksQuery.isError}
+                          error={selectedTasksQuery.error}
+                          isFetching={selectedTasksQuery.isFetching}
+                          onRetry={() => selectedTasksQuery.refetch()}
+                          isEmpty={selectedTasks.length === 0}
+                          emptyTitle="No child case tasks yet"
+                          emptyDescription="Add a case task to split this batch email."
+                          loadingText="Loading child tasks..."
+                        >
                           <div className="space-y-2">
                             {selectedTasks.map((t) => (
                               <div key={t.id} className="rounded border p-2 space-y-2">
@@ -688,13 +808,23 @@ export default function EmailControlCenterPage() {
                               </div>
                             ))}
                           </div>
-                        </QueryFallback>
+                        </QuerySection>
                       </div>
                     ) : null}
 
                     <div className="space-y-2">
                       <div className="text-sm font-medium">Audit</div>
-                      <QueryFallback query={selectedMessageAuditQuery}>
+                      <QuerySection
+                        isLoading={selectedMessageAuditQuery.isLoading}
+                        isError={selectedMessageAuditQuery.isError}
+                        error={selectedMessageAuditQuery.error}
+                        isFetching={selectedMessageAuditQuery.isFetching}
+                        onRetry={() => selectedMessageAuditQuery.refetch()}
+                        isEmpty={messageAudit.length === 0}
+                        emptyTitle="No message audit entries yet"
+                        emptyDescription="View, assignment, and workflow changes will appear here."
+                        loadingText="Loading audit..."
+                      >
                         <div className="space-y-1">
                           {(messageAudit ?? []).map((a: any) => (
                             <div key={a.id} className="text-xs text-slate-600">
@@ -702,11 +832,11 @@ export default function EmailControlCenterPage() {
                             </div>
                           ))}
                         </div>
-                      </QueryFallback>
+                      </QuerySection>
                     </div>
                   </div>
                 ) : null}
-              </QueryFallback>
+              </QuerySection>
             ) : (
               <div className="text-sm text-slate-500">Select a message or draft.</div>
             )}

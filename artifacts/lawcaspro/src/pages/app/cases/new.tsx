@@ -10,6 +10,7 @@ import { CaseFormModal } from "./components/case-form/CaseFormModal";
 export default function NewCasePage() {
   const [, navigate] = useLocation();
   const [open, setOpen] = useState(true);
+  const [createRequestToken] = useState(() => crypto.randomUUID());
   const { toast } = useToast();
   const { user } = useAuth();
   const qc = useQueryClient();
@@ -36,7 +37,7 @@ export default function NewCasePage() {
           const created = await apiFetchJson<any>("/cases", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify(payload),
+            body: JSON.stringify({ ...payload, trackingToken: createRequestToken }),
           });
           await Promise.all([
             qc.invalidateQueries({ queryKey: ["dashboard"] }),
