@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { getListRolesQueryKey, getListUsersQueryKey, useDeleteUser, useListDevelopers, useListRoles, useListUsers, useUpdateRole, useUpdateUser } from "@workspace/api-client-react";
+import { getListRolesQueryKey, getListUsersQueryKey, useDeleteUser, useListDevelopers, useListProjects, useListRoles, useListUsers, useUpdateRole, useUpdateUser } from "@workspace/api-client-react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -946,6 +946,24 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
   const projects = Array.isArray((projectsQuery.data as any)?.data) ? ((projectsQuery.data as any).data as any[]) : [];
   const developers = Array.isArray((developersQuery.data as any)?.data) ? ((developersQuery.data as any).data as any[]) : [];
 
+  const toUiCaseType = useMemo(() => {
+    return (caseTypeRaw: string): string => {
+      const ct = String(caseTypeRaw ?? "").trim();
+      const m = /^project_(\d+)$/i.exec(ct);
+      if (m) return `project:${m[1]}`;
+      return ct;
+    };
+  }, []);
+
+  const toApiCaseType = useMemo(() => {
+    return (caseTypeRaw: string): string => {
+      const ct = String(caseTypeRaw ?? "").trim().toLowerCase();
+      const m = /^project:(\d+)$/i.exec(ct);
+      if (m) return `project_${m[1]}`;
+      return ct;
+    };
+  }, []);
+
   const deriveShortCode = useMemo(() => {
     return (nameRaw: unknown, options?: { maxLen?: number; mode?: "initials" | "token" }) => {
       const name = typeof nameRaw === "string" ? nameRaw.trim() : "";
@@ -1006,7 +1024,7 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
     if (!settingsQuery.data) return;
     const next = (settingsQuery.data.items ?? []).map((x) => ({
       id: Number(x.id),
-      caseType: String(x.caseType || ""),
+      caseType: toUiCaseType(String(x.caseType || "")),
       formatPattern: String(x.formatPattern || ""),
       currentSequence: Number(x.currentSequence ?? 0),
     }));
@@ -1147,8 +1165,8 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                       <td className="px-4 py-2 text-slate-700">
                         {(() => {
                           const ct = String(row.caseType ?? "").trim().toLowerCase();
-                          if (ct.startsWith("project:")) {
-                            const pid = Number(ct.split(":")[1]);
+                          if (ct.startsWith("project:") || ct.startsWith("project_")) {
+                            const pid = Number(ct.replace(/^project[:_]/, ""));
                             const proj = projects.find((p: any) => Number(p.id) === pid);
                             const dev = proj?.developerId ? developers.find((d: any) => Number(d.id) === Number(proj.developerId)) : null;
                             const projectName = String(proj?.name ?? "").trim();
@@ -1188,8 +1206,8 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                           const clerk = "GHY";
                           let developerCode = "MS";
                           let projectCode = "LEGASI";
-                          if (ct.startsWith("project:")) {
-                            const pid = Number(ct.split(":")[1]);
+                          if (ct.startsWith("project:") || ct.startsWith("project_")) {
+                            const pid = Number(ct.replace(/^project[:_]/, ""));
                             const proj = projects.find((p: any) => Number(p.id) === pid);
                             const dev = proj?.developerId ? developers.find((d: any) => Number(d.id) === Number(proj.developerId)) : null;
                             const projectName = String(proj?.name ?? "").trim();
@@ -1217,12 +1235,13 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                             variant="outline"
                             size="sm"
                             onClick={() => {
-                              const caseType = row.caseType.trim();
+                              const caseTypeUi = row.caseType.trim();
                               const formatPattern = row.formatPattern.trim();
-                              if (!caseType) {
+                              if (!caseTypeUi) {
                                 toast({ title: "caseType is required", variant: "destructive" });
                                 return;
                               }
+                              const caseType = toApiCaseType(caseTypeUi);
                               if (!formatPattern) {
                                 toast({ title: "formatPattern is required", variant: "destructive" });
                                 return;
@@ -1238,9 +1257,9 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                             size="sm"
                             className="text-red-600 hover:text-red-700"
                             onClick={() => {
-                              const caseType = row.caseType.trim();
-                              if (!caseType) return;
-                              deleteMutation.mutate(caseType);
+                              const caseTypeUi = row.caseType.trim();
+                              if (!caseTypeUi) return;
+                              deleteMutation.mutate(toApiCaseType(caseTypeUi));
                             }}
                             disabled={!canUpdate || deleteMutation.isPending || !row.caseType.trim()}
                           >
@@ -1363,6 +1382,15 @@ export default function Settings() {
   const [editRoleOpen, setEditRoleOpen] = useState(false);
   const [editRole, setEditRole] = useState<any | null>(null);
   const [editRolePermissionSet, setEditRolePermissionSet] = useState<Set<string>>(new Set());
+
+  const bootstrapRolesMutation = useMutation({
+    mutationFn: () => apiFetchJson("/roles/bootstrap", { method: "POST" }),
+    onSuccess: async () => {
+      await rolesQuery.refetch();
+      toast({ title: "Standard roles backfilled" });
+    },
+    onError: (e: any) => toastError(toast, e, "Failed to backfill roles"),
+  });
 
   const deriveInitials = useMemo(() => {
     return (name: string) => {
@@ -1773,7 +1801,16 @@ export default function Settings() {
             ) : (rolesRes ?? []).length === 0 ? (
               <div className="col-span-2 p-8 text-center text-slate-600">
                 <div className="font-medium">No roles found</div>
-                <div className="text-sm text-slate-500">Create roles first, then configure permissions.</div>
+                <div className="text-sm text-slate-500">This usually means the firm roles were never bootstrapped. Backfill the standard roles to restore role management.</div>
+                <div className="mt-4 flex justify-center">
+                  <Button
+                    variant="outline"
+                    onClick={() => bootstrapRolesMutation.mutate()}
+                    disabled={bootstrapRolesMutation.isPending}
+                  >
+                    {bootstrapRolesMutation.isPending ? "Backfilling..." : "Backfill Standard Roles"}
+                  </Button>
+                </div>
               </div>
             ) : (
               (rolesRes ?? []).map((role: any) => (

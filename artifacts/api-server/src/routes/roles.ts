@@ -1,5 +1,5 @@
 import express, { type Router as ExpressRouter } from "express";
-import { and, count, eq, or } from "drizzle-orm";
+import { and, count, eq } from "drizzle-orm";
 import { db, permissionsTable, rolesTable, sql, usersTable } from "@workspace/db";
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { z } from "zod/v4";
@@ -90,22 +90,6 @@ const shouldAutoGrantRoleByName = (name: string): boolean => {
   return n.includes("partner") || n.includes("lawyer") || n.includes("clerk") || n === "staff" || (n.includes("account") && (n.includes("admin") || n.includes("manager")));
 };
 
-async function canBackfillStandardRoles(r: DbConn, req: AuthRequest): Promise<boolean> {
-  if (!req.roleId) return false;
-  const perms = await r
-    .select({ allowed: permissionsTable.allowed })
-    .from(permissionsTable)
-    .where(and(
-      eq(permissionsTable.roleId, req.roleId),
-      eq(permissionsTable.allowed, true),
-      or(
-        and(eq(permissionsTable.module, "roles"), eq(permissionsTable.action, "create")),
-        and(eq(permissionsTable.module, "users"), eq(permissionsTable.action, "create")),
-      ),
-    ));
-  return perms.length > 0;
-}
-
 async function backfillStandardRoles(r: DbConn, firmId: number): Promise<string[]> {
   return asTransactionCapable(r).transaction(async (tx: DbConn) => {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(${firmId})`);
@@ -145,24 +129,22 @@ async function enrichRole(r: DbConn, role: typeof rolesTable.$inferSelect) {
 
 routerInternal.get("/roles", requireAuth, requireFirmUser, requirePermission("roles", "read"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const r = rdb(req);
-  if (req.firmId) {
-    const allowed = await canBackfillStandardRoles(r, req);
-    if (allowed) {
-      const created = await backfillStandardRoles(r, req.firmId);
-      if (created.length > 0) {
-        await writeAuditLog({
-          firmId: req.firmId,
-          actorId: req.userId,
-          actorType: req.userType,
-          action: "roles.standard_roles_backfilled",
-          detail: `created=${created.join(",")}`,
-          ipAddress: req.ip,
-          userAgent: getHeader(req, "user-agent"),
-        }, { db: req.rlsDb });
-      }
+  let roles = await r.select().from(rolesTable).where(eq(rolesTable.firmId, req.firmId!));
+  if (roles.length === 0 && req.firmId) {
+    const created = await backfillStandardRoles(r, req.firmId);
+    if (created.length > 0) {
+      await writeAuditLog({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "roles.standard_roles_backfilled",
+        detail: `created=${created.join(",")}`,
+        ipAddress: req.ip,
+        userAgent: getHeader(req, "user-agent"),
+      }, { db: req.rlsDb });
+      roles = await r.select().from(rolesTable).where(eq(rolesTable.firmId, req.firmId!));
     }
   }
-  const roles = await r.select().from(rolesTable).where(eq(rolesTable.firmId, req.firmId!));
   const enriched = await Promise.all(roles.map((role: typeof rolesTable.$inferSelect) => enrichRole(r, role)));
   res.json(enriched);
 });
