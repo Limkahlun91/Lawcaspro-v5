@@ -48,6 +48,7 @@ export const firmFileRefSettingsTable = pgTable("firm_file_ref_settings", {
   firmId: integer("firm_id").notNull(),
   caseType: text("case_type").notNull(),
   formatPattern: text("format_pattern").notNull(),
+  startingSequence: integer("starting_sequence").notNull().default(1000),
   currentSequence: integer("current_sequence").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),

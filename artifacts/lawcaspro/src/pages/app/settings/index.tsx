@@ -1008,7 +1008,7 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
     };
   }, []);
 
-  const settingsQuery = useQuery<{ items: Array<{ id: number; caseType: string; formatPattern: string; currentSequence: number }> }>({
+  const settingsQuery = useQuery<{ items: Array<{ id: number; caseType: string; formatPattern: string; startingSequence: number; currentSequence: number }> }>({
     queryKey: ["firm-file-ref-settings"],
     queryFn: () => apiFetchJson("/firm-file-ref-settings"),
     retry: false,
@@ -1018,7 +1018,7 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
   const rowKeyCounter = useRef(0);
   const makeRowKey = (): string => `tmp-${Date.now()}-${rowKeyCounter.current++}`;
 
-  const [rows, setRows] = useState<Array<{ id?: number; rowKey: string; caseType: string; formatPattern: string; currentSequence: number }>>([]);
+  const [rows, setRows] = useState<Array<{ id?: number; rowKey: string; caseType: string; formatPattern: string; startingSequence: number; currentSequence: number }>>([]);
 
   useEffect(() => {
     if (!settingsQuery.data) return;
@@ -1026,6 +1026,7 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
       id: Number(x.id),
       caseType: toUiCaseType(String(x.caseType || "")),
       formatPattern: String(x.formatPattern || ""),
+      startingSequence: Number(x.startingSequence ?? 1000),
       currentSequence: Number(x.currentSequence ?? 0),
     }));
     setRows((prev) => {
@@ -1046,26 +1047,35 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
     {
       caseType: "developer_sales",
       formatPattern: "CON/{DEVELOPER_CODE}-{PROJECT_CODE}/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}",
+      startingSequence: 1000,
+      currentSequence: 1000,
     },
     {
       caseType: "subsale",
       formatPattern: "CON/SS/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}",
+      startingSequence: 1000,
+      currentSequence: 1000,
     },
     {
       caseType: "perfection",
       formatPattern: "CON/PFT/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}",
+      startingSequence: 1000,
+      currentSequence: 1000,
     },
   ]), []);
 
   const upsertMutation = useMutation({
-    mutationFn: (row: { caseType: string; formatPattern: string; currentSequence?: number }) =>
+    mutationFn: (row: { caseType: string; formatPattern: string; startingSequence?: number; currentSequence?: number }) =>
       apiFetchJson("/firm-file-ref-settings", {
         method: "PUT",
         body: JSON.stringify(row),
       }),
-    onSuccess: async () => {
+    onSuccess: async (data: any) => {
       await queryClient.invalidateQueries({ queryKey: ["firm-file-ref-settings"] });
       toast({ title: "Saved" });
+      if (typeof data?.sequenceWarning === "string" && data.sequenceWarning.trim()) {
+        toast({ title: data.sequenceWarning, variant: "destructive" });
+      }
     },
     onError: (e: any) => toastError(toast, e, "Failed to save"),
   });
@@ -1100,7 +1110,13 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                   onClick={() => {
                     const existing = rows.some((r) => r.caseType.trim().toLowerCase() === t.caseType);
                     if (existing) return;
-                    setRows((prev) => [...prev, { rowKey: makeRowKey(), caseType: t.caseType, formatPattern: t.formatPattern, currentSequence: 0 }]);
+                    setRows((prev) => [...prev, {
+                      rowKey: makeRowKey(),
+                      caseType: t.caseType,
+                      formatPattern: t.formatPattern,
+                      startingSequence: t.startingSequence,
+                      currentSequence: t.currentSequence,
+                    }]);
                   }}
                 >
                   Add {t.caseType}
@@ -1112,7 +1128,13 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                 onClick={() => {
                   const pid = projects[0]?.id ? Number(projects[0].id) : null;
                   const key = pid ? `project:${pid}` : "project:1";
-                  setRows((prev) => [...prev, { rowKey: makeRowKey(), caseType: key, formatPattern: "CON/{DEVELOPER_CODE}-{PROJECT_CODE}/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}", currentSequence: 0 }]);
+                  setRows((prev) => [...prev, {
+                    rowKey: makeRowKey(),
+                    caseType: key,
+                    formatPattern: "CON/{DEVELOPER_CODE}-{PROJECT_CODE}/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}",
+                    startingSequence: 1000,
+                    currentSequence: 1000,
+                  }]);
                 }}
                 disabled={projects.length === 0}
               >
@@ -1141,8 +1163,11 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                   <tr>
                     <th className="px-4 py-2 font-semibold min-w-[160px]">Rule Name</th>
                     <th className="px-4 py-2 font-semibold min-w-[220px]">Applies To</th>
+                    <th className="px-4 py-2 font-semibold min-w-[120px]">Developer Code</th>
+                    <th className="px-4 py-2 font-semibold min-w-[120px]">Project Code</th>
                     <th className="px-4 py-2 font-semibold min-w-[220px]">Format Pattern</th>
-                    <th className="px-4 py-2 font-semibold text-right">Sequence</th>
+                    <th className="px-4 py-2 font-semibold min-w-[140px]">Starting Number</th>
+                    <th className="px-4 py-2 font-semibold min-w-[140px]">Next Number</th>
                     <th className="px-4 py-2 font-semibold min-w-[260px]">Preview</th>
                     <th className="px-4 py-2 font-semibold text-right">Actions</th>
                   </tr>
@@ -1183,6 +1208,33 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                           return `Case Type · ${ct || "—"}`;
                         })()}
                       </td>
+                      <td className="px-4 py-2 text-slate-700 tabular-nums">
+                        {(() => {
+                          const ct = String(row.caseType ?? "").trim().toLowerCase();
+                          if (ct.startsWith("project:") || ct.startsWith("project_")) {
+                            const pid = Number(ct.replace(/^project[:_]/, ""));
+                            const proj = projects.find((p: any) => Number(p.id) === pid);
+                            const dev = proj?.developerId ? developers.find((d: any) => Number(d.id) === Number(proj.developerId)) : null;
+                            return deriveShortCode(String(dev?.name ?? ""), { maxLen: 5, mode: "initials" });
+                          }
+                          return ct === "developer_sales" ? "AUTO" : "â€”";
+                        })()}
+                      </td>
+                      <td className="px-4 py-2 text-slate-700 tabular-nums">
+                        {(() => {
+                          const ct = String(row.caseType ?? "").trim().toLowerCase();
+                          if (ct.startsWith("project:") || ct.startsWith("project_")) {
+                            const pid = Number(ct.replace(/^project[:_]/, ""));
+                            const proj = projects.find((p: any) => Number(p.id) === pid);
+                            const extra = (proj as any)?.extraFields;
+                            const rawCode = extra && typeof extra === "object" ? (extra as any).projectRefCode : null;
+                            return rawCode
+                              ? deriveShortCode(String(rawCode), { maxLen: 12, mode: "token" })
+                              : deriveShortCode(String(proj?.name ?? ""), { maxLen: 12, mode: "token" });
+                          }
+                          return ct === "developer_sales" ? "AUTO" : "â€”";
+                        })()}
+                      </td>
                       <td className="px-4 py-2">
                         <Input
                           value={row.formatPattern}
@@ -1195,8 +1247,33 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                           placeholder="e.g. CON/SS/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}"
                         />
                       </td>
-                      <td className="px-4 py-2 text-right tabular-nums text-slate-600">
-                        {row.currentSequence}
+                      <td className="px-4 py-2">
+                        <Input
+                          type="number"
+                          min={1}
+                          value={row.startingSequence}
+                          onChange={(e) => {
+                            const next = [...rows];
+                            next[idx] = { ...row, startingSequence: Number(e.target.value || 0) };
+                            setRows(next);
+                          }}
+                          disabled={!canUpdate}
+                          placeholder="1000"
+                        />
+                      </td>
+                      <td className="px-4 py-2">
+                        <Input
+                          type="number"
+                          min={1}
+                          value={row.currentSequence}
+                          onChange={(e) => {
+                            const next = [...rows];
+                            next[idx] = { ...row, currentSequence: Number(e.target.value || 0) };
+                            setRows(next);
+                          }}
+                          disabled={!canUpdate}
+                          placeholder="1000"
+                        />
                       </td>
                       <td className="px-4 py-2 font-mono text-xs text-slate-700">
                         {(() => {
@@ -1224,7 +1301,7 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                             caseTypeCode,
                             lawyerInitials: lawyer,
                             clerkInitials: clerk,
-                            seq: (row.currentSequence ?? 0) + 1,
+                            seq: Math.max(1, Number(row.currentSequence || row.startingSequence || 1000)),
                             now,
                           });
                         })()}
@@ -1246,7 +1323,17 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                                 toast({ title: "formatPattern is required", variant: "destructive" });
                                 return;
                               }
-                              upsertMutation.mutate({ caseType, formatPattern });
+                              const startingSequence = Number(row.startingSequence || 0);
+                              const currentSequence = Number(row.currentSequence || 0);
+                              if (!Number.isFinite(startingSequence) || startingSequence < 1) {
+                                toast({ title: "Starting Number must be 1 or higher", variant: "destructive" });
+                                return;
+                              }
+                              if (!Number.isFinite(currentSequence) || currentSequence < 1) {
+                                toast({ title: "Next Number must be 1 or higher", variant: "destructive" });
+                                return;
+                              }
+                              upsertMutation.mutate({ caseType, formatPattern, startingSequence, currentSequence });
                             }}
                             disabled={!canUpdate || upsertMutation.isPending}
                           >
@@ -1272,7 +1359,7 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                   ))}
                   {rows.length === 0 ? (
                     <tr>
-                      <td colSpan={4} className="px-4 py-8 text-center text-slate-500">
+                      <td colSpan={9} className="px-4 py-8 text-center text-slate-500">
                         No patterns configured yet.
                       </td>
                     </tr>
@@ -1285,7 +1372,13 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
           <div className="flex justify-end">
             <Button
               variant="outline"
-              onClick={() => setRows((prev) => [...prev, { rowKey: makeRowKey(), caseType: "", formatPattern: "", currentSequence: 0 }])}
+              onClick={() => setRows((prev) => [...prev, {
+                rowKey: makeRowKey(),
+                caseType: "",
+                formatPattern: "",
+                startingSequence: 1000,
+                currentSequence: 1000,
+              }])}
               disabled={!canUpdate}
             >
               <Plus className="w-4 h-4 mr-1" />

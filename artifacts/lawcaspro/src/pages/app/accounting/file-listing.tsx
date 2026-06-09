@@ -158,6 +158,10 @@ export default function AccountingFileListing() {
   const debouncedReferenceNo = useDebouncedValue(reviewReferenceNo, 250).trim();
   const referenceSuggestionsQuery = useQuery<{
     suggestedReference: string;
+    startingNumber: number;
+    nextNumber: number;
+    highestExistingNumber: number | null;
+    sequenceWarning: string | null;
     previousReferences: string[];
     duplicateWarning: { isDuplicate: boolean; existingCaseId?: number } | null;
   }>({
@@ -175,6 +179,7 @@ export default function AccountingFileListing() {
 
   const previousReferenceSuggestions = referenceSuggestionsQuery.data?.previousReferences ?? [];
   const suggestedReference = referenceSuggestionsQuery.data?.suggestedReference ?? "";
+  const sequenceWarning = referenceSuggestionsQuery.data?.sequenceWarning ?? null;
   const duplicateWarning = referenceSuggestionsQuery.data?.duplicateWarning;
 
   const approveMutation = useMutation({
@@ -416,6 +421,11 @@ export default function AccountingFileListing() {
               {isPendingTab && duplicateWarning?.isDuplicate ? (
                 <div className="text-xs text-amber-700">
                   Warning: This Reference Number already exists in this firm. Please change it before approving.
+                </div>
+              ) : null}
+              {isPendingTab && sequenceWarning ? (
+                <div className="text-xs text-amber-700">
+                  {sequenceWarning}
                 </div>
               ) : null}
               {!isPendingTab ? <div className="text-xs text-slate-500">Reference Number can only be set while Open File Pending Approval.</div> : null}

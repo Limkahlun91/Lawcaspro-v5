@@ -43,6 +43,7 @@ import { WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY, deriveStatusFromRequirement } fro
 import { computeStampingSummary, deriveStampingItemStatus, type StampingItemInput } from "../lib/stampingProgress.js";
 import { checkFirmQuota } from "../lib/quota.js";
 import { resolveSmartFilename } from "../lib/smartFileNaming.js";
+import { computeEffectiveNextNumber, extractRunningNumber, renderFileReferencePattern } from "../lib/fileReferenceSequence.js";
 import { computeDashboardStats } from "../services/dashboard-stats.js";
 import { computeMilestonesSummary } from "../services/milestones-summary.js";
 
@@ -4275,43 +4276,70 @@ router.get("/cases/reference-suggestions", requireAuthHandler, requireFirmUserHa
   const projectCode = (projectRefCode.trim() ? deriveShortCode(projectRefCode, { maxLen: 12, mode: "token" }) : deriveShortCode(projectName || undefined, { maxLen: 12, mode: "token" }));
 
   let prefix = "CON";
-  let settingsKey = normalizedCaseType;
+  const projectSettingsKey = normalizedCaseType === "developer_sales" && projectId ? `project_${projectId}` : null;
   if (normalizedCaseType === "developer_sales") {
     prefix = `CON/${developerCode}-${projectCode}`;
-    if (projectId) settingsKey = `project:${projectId}`;
   } else if (normalizedCaseType === "subsale") {
     prefix = "CON/SS";
-    settingsKey = "subsale";
   } else if (normalizedCaseType === "perfection") {
     prefix = "CON/PFT";
-    settingsKey = "perfection";
   } else {
     prefix = "CON";
-    settingsKey = normalizedCaseType || "default";
   }
+  const settingsKeyCandidates = [projectSettingsKey, normalizedCaseType, "default"].filter((value): value is string => Boolean(value));
 
-  const settingsRows = await r
-    .select({
-      caseType: firmFileRefSettingsTable.caseType,
-      formatPattern: firmFileRefSettingsTable.formatPattern,
-      currentSequence: firmFileRefSettingsTable.currentSequence,
-    })
-    .from(firmFileRefSettingsTable)
-    .where(and(
-      eq(firmFileRefSettingsTable.firmId, req.firmId!),
-      or(eq(firmFileRefSettingsTable.caseType, settingsKey), eq(firmFileRefSettingsTable.caseType, normalizedCaseType)),
-    ))
-    .limit(5);
+  const settingsRows = settingsKeyCandidates.length > 0
+    ? await r
+      .select({
+        caseType: firmFileRefSettingsTable.caseType,
+        formatPattern: firmFileRefSettingsTable.formatPattern,
+        startingSequence: firmFileRefSettingsTable.startingSequence,
+        currentSequence: firmFileRefSettingsTable.currentSequence,
+      })
+      .from(firmFileRefSettingsTable)
+      .where(and(
+        eq(firmFileRefSettingsTable.firmId, req.firmId!),
+        inArray(firmFileRefSettingsTable.caseType, settingsKeyCandidates),
+      ))
+      .limit(10)
+    : [];
 
-  const settingsByKey = new Map<string, { formatPattern: string; currentSequence: number }>();
+  const projectRuleRows = normalizedCaseType === "developer_sales"
+    ? await r
+      .select({ caseType: firmFileRefSettingsTable.caseType })
+      .from(firmFileRefSettingsTable)
+      .where(and(
+        eq(firmFileRefSettingsTable.firmId, req.firmId!),
+        sql`${firmFileRefSettingsTable.caseType} LIKE 'project_%'`,
+      ))
+      .limit(500)
+    : [];
+
+  const settingsByKey = new Map<string, { formatPattern: string; startingSequence: number; currentSequence: number }>();
   for (const s of settingsRows) {
     const k = String(s.caseType ?? "").trim();
     if (!k) continue;
-    settingsByKey.set(k, { formatPattern: String(s.formatPattern ?? "").trim(), currentSequence: Number(s.currentSequence ?? 0) });
+    settingsByKey.set(k, {
+      formatPattern: String(s.formatPattern ?? "").trim(),
+      startingSequence: Number(s.startingSequence ?? 1000),
+      currentSequence: Number(s.currentSequence ?? 0),
+    });
   }
+  const projectRuleKeySet = new Set(projectRuleRows.map((row) => String(row.caseType ?? "").trim()).filter(Boolean));
+  const activeSettingsKey = projectSettingsKey && settingsByKey.has(projectSettingsKey)
+    ? projectSettingsKey
+    : (settingsByKey.has(normalizedCaseType) ? normalizedCaseType : "default");
+  const chosenSettings = settingsByKey.get(activeSettingsKey);
+  const fallbackPattern = normalizedCaseType === "developer_sales"
+    ? "CON/{DEVELOPER_CODE}-{PROJECT_CODE}/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}"
+    : normalizedCaseType === "subsale"
+      ? "CON/SS/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}"
+      : normalizedCaseType === "perfection"
+        ? "CON/PFT/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}"
+        : `${prefix}/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}`;
+  const chosenPattern = (chosenSettings?.formatPattern || fallbackPattern).trim();
 
-  const likePrefix = `${prefix}/%`;
-  const rows = await r
+  const approvedRows = await r
     .select({
       referenceNo: casesTable.referenceNo,
       caseType: casesTable.caseType,
@@ -4326,10 +4354,14 @@ router.get("/cases/reference-suggestions", requireAuthHandler, requireFirmUserHa
       eq(casesTable.firmId, req.firmId!),
       sql`${casesTable.deletedAt} IS NULL`,
       sql`${casesTable.referenceNo} IS NOT NULL`,
-      sql`${casesTable.referenceNo} LIKE ${likePrefix}`,
+      eq(casesTable.caseType, normalizedCaseType),
+      sql`${casesTable.approvedAt} IS NOT NULL`,
+      activeSettingsKey === projectSettingsKey && projectId
+        ? eq(casesTable.projectId, projectId)
+        : sql`true`,
     ))
     .orderBy(desc(casesTable.updatedAt), desc(casesTable.createdAt))
-    .limit(200);
+    .limit(500);
 
   const refSet = new Set<string>();
   const refRecords: Array<{
@@ -4340,7 +4372,17 @@ router.get("/cases/reference-suggestions", requireAuthHandler, requireFirmUserHa
     updatedAtMs: number;
   }> = [];
 
-  for (const row of rows) {
+  const resolveRuleKey = (rowCaseTypeRaw: unknown, rowProjectId: number | null): string => {
+    const rowCaseType = String(rowCaseTypeRaw ?? "").trim().toLowerCase() || "default";
+    if (rowCaseType === "developer_sales") {
+      const rowProjectKey = rowProjectId ? `project_${rowProjectId}` : null;
+      if (rowProjectKey && projectRuleKeySet.has(rowProjectKey)) return rowProjectKey;
+      return settingsByKey.has("developer_sales") ? "developer_sales" : "default";
+    }
+    return settingsByKey.has(rowCaseType) ? rowCaseType : "default";
+  };
+
+  for (const row of approvedRows) {
     const ref = String(row.referenceNo ?? "").trim();
     if (!ref) continue;
     if (refSet.has(ref)) continue;
@@ -4355,59 +4397,46 @@ router.get("/cases/reference-suggestions", requireAuthHandler, requireFirmUserHa
     });
   }
 
-  const runRegex = new RegExp(`^${escapeRegex(prefix)}/(\\d+)/(\\d{2})\\(`);
-  let maxRun = 0;
-  for (const rr of refRecords) {
-    const m = rr.ref.match(runRegex);
-    if (!m) continue;
-    const run = Number(m[1]);
-    const year = String(m[2]);
-    if (year !== yy) continue;
-    if (Number.isFinite(run) && run > maxRun) maxRun = Math.trunc(run);
-  }
-  const nextRun = maxRun > 0 ? maxRun + 1 : 1000;
   const lawyerCodeSafe = (lawyerInitials || "NA").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) || "NA";
   const clerkCodeSafe = (clerkInitials || "NA").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) || "NA";
 
-  const patternProject = settingsByKey.get(settingsKey)?.formatPattern ?? "";
-  const patternCaseType = settingsByKey.get(normalizedCaseType)?.formatPattern ?? "";
-  const chosenPattern = (patternProject || patternCaseType).trim();
-  const renderPattern = (patternRaw: string): string => {
-    const base0 = String(patternRaw || "").trim();
-    const base = /\{SEQ:\d+\}/i.test(base0) ? base0 : `${base0}/{SEQ:4}`;
-    const withDate = base
-      .replaceAll("{YYYY}", String(now.getFullYear()).padStart(4, "0"))
-      .replaceAll("{YY}", yy)
-      .replaceAll("{MM}", String(now.getMonth() + 1).padStart(2, "0"))
-      .replaceAll("{DEVELOPER_CODE}", developerCode)
-      .replaceAll("{PROJECT_CODE}", projectCode)
-      .replaceAll("{CASE_TYPE_CODE}", normalizedCaseType.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || "CASE")
-      .replaceAll("{LAWYER_INITIALS}", lawyerCodeSafe)
-      .replaceAll("{CLERK_INITIALS}", clerkCodeSafe);
-    return withDate
-      .replace(/\{SEQ:(\d+)\}/g, (_m, w: string) => String(nextRun).padStart(Math.max(1, Math.min(12, Number(w))), "0"))
-      .replace(/[\r\n\t]/g, " ")
-      .replace(/\s+/g, "")
-      .replace(/\/{2,}/g, "/")
-      .replace(/^\/+|\/+$/g, "")
-      .slice(0, 80);
-  };
+  const relevantReferences = refRecords
+    .filter((rr) => resolveRuleKey(rr.caseType, rr.projectId) === activeSettingsKey);
+  let highestExistingNumber: number | null = null;
+  for (const rr of relevantReferences) {
+    const runningNumber = extractRunningNumber(rr.ref, chosenPattern);
+    if (runningNumber === null) continue;
+    highestExistingNumber = highestExistingNumber === null
+      ? runningNumber
+      : Math.max(highestExistingNumber, runningNumber);
+  }
+  const sequenceInfo = computeEffectiveNextNumber({
+    startingSequence: chosenSettings?.startingSequence,
+    currentSequence: chosenSettings?.currentSequence,
+    highestExistingNumber,
+  });
+  const caseTypeCode = normalizedCaseType.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || "CASE";
+  const suggestedReference = renderFileReferencePattern(chosenPattern, {
+    now,
+    seq: sequenceInfo.nextNumber,
+    developerCode,
+    projectCode,
+    caseTypeCode,
+    lawyerInitials: lawyerCodeSafe,
+    clerkInitials: clerkCodeSafe,
+  });
 
-  const suggestedReference = chosenPattern
-    ? renderPattern(chosenPattern)
-    : `${prefix}/${nextRun}/${yy}(${lawyerCodeSafe})${clerkCodeSafe}`;
-
-  const scoreRef = (rr: typeof refRecords[number], idx: number): number => {
+  const scoreRef = (rr: typeof relevantReferences[number], idx: number): number => {
     let score = 0;
     if (rr.caseType === normalizedCaseType) score += 100;
     if (projectId && rr.projectId === projectId) score += 50;
     if (developerId && rr.developerId === developerId) score += 25;
-    if (rr.ref.includes(`/${yy}(`)) score += 20;
+    if (String(rr.ref).includes(`/${yy}(`)) score += 20;
     score += Math.max(0, 200 - idx);
     return score;
   };
 
-  const previousReferences = refRecords
+  const previousReferences = relevantReferences
     .map((rr, idx) => ({ ref: rr.ref, score: scoreRef(rr, idx), updatedAtMs: rr.updatedAtMs }))
     .sort((a, b) => (b.score - a.score) || (b.updatedAtMs - a.updatedAtMs))
     .slice(0, 25)
@@ -4434,13 +4463,17 @@ router.get("/cases/reference-suggestions", requireAuthHandler, requireFirmUserHa
 
   res.json({
     suggestedReference,
+    startingNumber: sequenceInfo.startingNumber,
+    nextNumber: sequenceInfo.nextNumber,
+    highestExistingNumber: sequenceInfo.highestExistingNumber,
+    sequenceWarning: sequenceInfo.sequenceWarning,
     previousReferences,
     duplicateWarning,
     meta: {
       prefix,
-      settingsKey,
+      settingsKey: activeSettingsKey,
       year: yy,
-      nextRun,
+      nextRun: sequenceInfo.nextNumber,
       developerCode,
       projectCode,
       lawyerCode: lawyerCodeSafe,
