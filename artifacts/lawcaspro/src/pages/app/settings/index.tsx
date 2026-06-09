@@ -429,13 +429,16 @@ function FirmInfoTab() {
   const canUpdate = hasPermission(user, "settings", "update");
   const firmId = user?.firmId;
 
-  const { data: settings, isLoading } = useQuery<FirmSettings>({
+  const firmSettingsQuery = useQuery<FirmSettings>({
     queryKey: ["firm-settings"],
     queryFn: async ({ signal }) => {
       const res = await apiFetchJson<any>("/firm-settings", { signal, timeoutMs: 8000 });
       return res && typeof res === "object" && "data" in res ? (res as any).data : res;
     },
+    retry: false,
   });
+  const settings = firmSettingsQuery.data;
+  const isLoading = firmSettingsQuery.isLoading;
 
   const [name, setName] = useState("");
   const [selectedLogoFile, setSelectedLogoFile] = useState<File | null>(null);
@@ -641,6 +644,17 @@ function FirmInfoTab() {
     }
     addBankMutation.mutate({ bankName: newBankName, accountNo: newAccountNo, accountType: newAccountType });
   };
+
+  if (firmSettingsQuery.isError) {
+    return (
+      <QueryFallback
+        title="Unable to load firm settings"
+        error={firmSettingsQuery.error}
+        onRetry={() => firmSettingsQuery.refetch()}
+        isRetrying={firmSettingsQuery.isFetching}
+      />
+    );
+  }
 
   if (isLoading) return <div className="py-12 text-center text-slate-500">Loading...</div>;
 
@@ -1298,12 +1312,13 @@ export default function Settings() {
     limit: 50,
     search: userSearch || undefined,
   };
+  const usersQueryKey = getListUsersQueryKey(userParams);
 
   const { data: usersRes, isLoading: loadingUsers } = useListUsers(
     userParams,
     {
       query: {
-        queryKey: getListUsersQueryKey(userParams),
+        queryKey: usersQueryKey,
         enabled: canManageUsers,
         staleTime: 5 * 60 * 1000,
       },
@@ -1355,8 +1370,9 @@ export default function Settings() {
   useEffect(() => {
     if (!editUserOpen) return;
     if (editInitialsTouched) return;
+    if (editInitials.trim()) return;
     setEditInitials(deriveInitials(editName));
-  }, [editUserOpen, editName, editInitialsTouched, deriveInitials]);
+  }, [editUserOpen, editName, editInitials, editInitialsTouched, deriveInitials]);
 
   return (
     <div className="space-y-6">
@@ -1497,7 +1513,7 @@ export default function Settings() {
                                 onClick={() => {
                                   setEditUser(user);
                                   setEditName(user.name || "");
-                                  setEditInitials(user.initials || deriveInitials(user.name || ""));
+                                  setEditInitials(String(user.initials ?? ""));
                                   setEditInitialsTouched(false);
                                   setEditRoleId(user.roleId ? String(user.roleId) : "");
                                   setEditDeveloperId(user.developerId ? String(user.developerId) : "");
@@ -1515,7 +1531,7 @@ export default function Settings() {
                                     { userId: user.id, data: { status: nextStatus } },
                                     {
                                       onSuccess: () => {
-                                        queryClient.invalidateQueries({ queryKey: getListUsersQueryKey() });
+                                        queryClient.invalidateQueries({ queryKey: usersQueryKey });
                                         toast({ title: `User ${nextStatus === "active" ? "activated" : "deactivated"}` });
                                       },
                                       onError: (e: any) => {
@@ -1671,7 +1687,7 @@ export default function Settings() {
                       { userId: editUser.id, data: payload },
                       {
                         onSuccess: () => {
-                          queryClient.invalidateQueries({ queryKey: getListUsersQueryKey() });
+                          queryClient.invalidateQueries({ queryKey: usersQueryKey });
                           toast({ title: "User updated" });
                           setEditUserOpen(false);
                         },
@@ -1712,7 +1728,7 @@ export default function Settings() {
                       { userId: deleteTarget.id },
                       {
                         onSuccess: () => {
-                          queryClient.invalidateQueries({ queryKey: getListUsersQueryKey() });
+                          queryClient.invalidateQueries({ queryKey: usersQueryKey });
                           toast({ title: "User deleted" });
                           setDeleteUserOpen(false);
                         },
