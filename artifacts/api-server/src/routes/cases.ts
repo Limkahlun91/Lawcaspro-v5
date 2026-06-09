@@ -15,6 +15,7 @@ import {
   caseListSavedViewsTable,
   caseLedgersTable,
   projectsTable, developersTable, clientsTable, usersTable, rolesTable, auditLogsTable,
+  firmFileRefSettingsTable,
   permissionsTable,
   sql,
 } from "@workspace/db";
@@ -4199,6 +4200,7 @@ router.get("/cases/reference-suggestions", requireAuthHandler, requireFirmUserHa
   let developerName = "";
   let lawyerInitials = "";
   let clerkInitials = "";
+  let projectRefCode = "";
 
   if (caseId) {
     const [c] = await r
@@ -4233,11 +4235,14 @@ router.get("/cases/reference-suggestions", requireAuthHandler, requireFirmUserHa
     }
     if (projectId) {
       const [proj] = await r
-        .select({ name: projectsTable.name })
+        .select({ name: projectsTable.name, extraFields: projectsTable.extraFields })
         .from(projectsTable)
         .where(and(eq(projectsTable.id, projectId), eq(projectsTable.firmId, req.firmId!)))
         .limit(1);
       projectName = String(proj?.name ?? "").trim();
+      const extra = (proj as any)?.extraFields;
+      const rawCode = extra && typeof extra === "object" ? (extra as any).projectRefCode : null;
+      projectRefCode = typeof rawCode === "string" ? rawCode.trim() : "";
     }
 
     const assignments = await r
@@ -4267,17 +4272,42 @@ router.get("/cases/reference-suggestions", requireAuthHandler, requireFirmUserHa
 
   const normalizedCaseType = caseType || "developer_sales";
   const developerCode = deriveShortCode(developerName || undefined, { maxLen: 5, mode: "initials" });
-  const projectCode = deriveShortCode(projectName || undefined, { maxLen: 12, mode: "token" });
+  const projectCode = (projectRefCode.trim() ? deriveShortCode(projectRefCode, { maxLen: 12, mode: "token" }) : deriveShortCode(projectName || undefined, { maxLen: 12, mode: "token" }));
 
   let prefix = "CON";
+  let settingsKey = normalizedCaseType;
   if (normalizedCaseType === "developer_sales") {
     prefix = `CON/${developerCode}-${projectCode}`;
+    if (projectId) settingsKey = `project:${projectId}`;
   } else if (normalizedCaseType === "subsale") {
     prefix = "CON/SS";
+    settingsKey = "subsale";
   } else if (normalizedCaseType === "perfection") {
     prefix = "CON/PFT";
+    settingsKey = "perfection";
   } else {
     prefix = "CON";
+    settingsKey = normalizedCaseType || "default";
+  }
+
+  const settingsRows = await r
+    .select({
+      caseType: firmFileRefSettingsTable.caseType,
+      formatPattern: firmFileRefSettingsTable.formatPattern,
+      currentSequence: firmFileRefSettingsTable.currentSequence,
+    })
+    .from(firmFileRefSettingsTable)
+    .where(and(
+      eq(firmFileRefSettingsTable.firmId, req.firmId!),
+      or(eq(firmFileRefSettingsTable.caseType, settingsKey), eq(firmFileRefSettingsTable.caseType, normalizedCaseType)),
+    ))
+    .limit(5);
+
+  const settingsByKey = new Map<string, { formatPattern: string; currentSequence: number }>();
+  for (const s of settingsRows) {
+    const k = String(s.caseType ?? "").trim();
+    if (!k) continue;
+    settingsByKey.set(k, { formatPattern: String(s.formatPattern ?? "").trim(), currentSequence: Number(s.currentSequence ?? 0) });
   }
 
   const likePrefix = `${prefix}/%`;
@@ -4338,7 +4368,34 @@ router.get("/cases/reference-suggestions", requireAuthHandler, requireFirmUserHa
   const nextRun = maxRun > 0 ? maxRun + 1 : 1000;
   const lawyerCodeSafe = (lawyerInitials || "NA").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) || "NA";
   const clerkCodeSafe = (clerkInitials || "NA").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) || "NA";
-  const suggestedReference = `${prefix}/${nextRun}/${yy}(${lawyerCodeSafe})${clerkCodeSafe}`;
+
+  const patternProject = settingsByKey.get(settingsKey)?.formatPattern ?? "";
+  const patternCaseType = settingsByKey.get(normalizedCaseType)?.formatPattern ?? "";
+  const chosenPattern = (patternProject || patternCaseType).trim();
+  const renderPattern = (patternRaw: string): string => {
+    const base0 = String(patternRaw || "").trim();
+    const base = /\{SEQ:\d+\}/i.test(base0) ? base0 : `${base0}/{SEQ:4}`;
+    const withDate = base
+      .replaceAll("{YYYY}", String(now.getFullYear()).padStart(4, "0"))
+      .replaceAll("{YY}", yy)
+      .replaceAll("{MM}", String(now.getMonth() + 1).padStart(2, "0"))
+      .replaceAll("{DEVELOPER_CODE}", developerCode)
+      .replaceAll("{PROJECT_CODE}", projectCode)
+      .replaceAll("{CASE_TYPE_CODE}", normalizedCaseType.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || "CASE")
+      .replaceAll("{LAWYER_INITIALS}", lawyerCodeSafe)
+      .replaceAll("{CLERK_INITIALS}", clerkCodeSafe);
+    return withDate
+      .replace(/\{SEQ:(\d+)\}/g, (_m, w: string) => String(nextRun).padStart(Math.max(1, Math.min(12, Number(w))), "0"))
+      .replace(/[\r\n\t]/g, " ")
+      .replace(/\s+/g, "")
+      .replace(/\/{2,}/g, "/")
+      .replace(/^\/+|\/+$/g, "")
+      .slice(0, 80);
+  };
+
+  const suggestedReference = chosenPattern
+    ? renderPattern(chosenPattern)
+    : `${prefix}/${nextRun}/${yy}(${lawyerCodeSafe})${clerkCodeSafe}`;
 
   const scoreRef = (rr: typeof refRecords[number], idx: number): number => {
     let score = 0;
@@ -4381,6 +4438,7 @@ router.get("/cases/reference-suggestions", requireAuthHandler, requireFirmUserHa
     duplicateWarning,
     meta: {
       prefix,
+      settingsKey,
       year: yy,
       nextRun,
       developerCode,

@@ -927,6 +927,55 @@ function FirmInfoTab() {
 function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; canUpdate: boolean }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const projectsQuery = useListProjects({ page: 1, limit: 200 }, { query: { enabled: canRead, staleTime: 5 * 60 * 1000 } });
+  const developersQuery = useListDevelopers({ page: 1, limit: 200 }, { query: { enabled: canRead, staleTime: 5 * 60 * 1000 } });
+  const projects = projectsQuery.data?.data ?? [];
+  const developers = developersQuery.data?.data ?? [];
+
+  const deriveShortCode = useMemo(() => {
+    return (nameRaw: unknown, options?: { maxLen?: number; mode?: "initials" | "token" }) => {
+      const name = typeof nameRaw === "string" ? nameRaw.trim() : "";
+      if (!name) return "NA";
+      const maxLen = Math.max(2, Math.min(12, options?.maxLen ?? 6));
+      const mode = options?.mode ?? "initials";
+      if (mode === "token") {
+        const token = name.toUpperCase().replace(/[^A-Z0-9]+/g, "").slice(0, maxLen);
+        return token || "NA";
+      }
+      const parts = name.toUpperCase().replace(/[^A-Z0-9\s]+/g, " ").split(/\s+/).filter(Boolean);
+      const letters = parts.map((p) => p.slice(0, 1)).join("").slice(0, maxLen);
+      if (letters.length >= 2) return letters;
+      return parts.join("").slice(0, maxLen) || "NA";
+    };
+  }, []);
+
+  const renderPreview = useMemo(() => {
+    return (patternRaw: string, args: { developerCode: string; projectCode: string; caseTypeCode: string; lawyerInitials: string; clerkInitials: string; seq: number; now?: Date }) => {
+      const now = args.now ?? new Date();
+      const yyyy = String(now.getFullYear()).padStart(4, "0");
+      const yy = yyyy.slice(-2);
+      const mm = String(now.getMonth() + 1).padStart(2, "0");
+      const base0 = String(patternRaw || "").trim() || "{YY}/{SEQ:4}";
+      const base = /\{SEQ:\d+\}/i.test(base0) ? base0 : `${base0}/{SEQ:4}`;
+      const withVars = base
+        .replaceAll("{YYYY}", yyyy)
+        .replaceAll("{YY}", yy)
+        .replaceAll("{MM}", mm)
+        .replaceAll("{DEVELOPER_CODE}", args.developerCode)
+        .replaceAll("{PROJECT_CODE}", args.projectCode)
+        .replaceAll("{CASE_TYPE_CODE}", args.caseTypeCode)
+        .replaceAll("{LAWYER_INITIALS}", args.lawyerInitials)
+        .replaceAll("{CLERK_INITIALS}", args.clerkInitials);
+      return withVars
+        .replace(/\{SEQ:(\d+)\}/g, (_m, w: string) => String(Math.max(0, Math.trunc(args.seq))).padStart(Math.max(1, Math.min(12, Number(w))), "0"))
+        .replace(/[\r\n\t]/g, " ")
+        .replace(/\s+/g, "")
+        .replace(/\/{2,}/g, "/")
+        .replace(/^\/+|\/+$/g, "")
+        .slice(0, 80);
+    };
+  }, []);
+
   const settingsQuery = useQuery<{ items: Array<{ id: number; caseType: string; formatPattern: string; currentSequence: number }> }>({
     queryKey: ["firm-file-ref-settings"],
     queryFn: () => apiFetchJson("/firm-file-ref-settings"),
@@ -961,6 +1010,21 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
     });
   }, [settingsQuery.data]);
 
+  const baseTemplates = useMemo(() => ([
+    {
+      caseType: "developer_sales",
+      formatPattern: "CON/{DEVELOPER_CODE}-{PROJECT_CODE}/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}",
+    },
+    {
+      caseType: "subsale",
+      formatPattern: "CON/SS/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}",
+    },
+    {
+      caseType: "perfection",
+      formatPattern: "CON/PFT/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}",
+    },
+  ]), []);
+
   const upsertMutation = useMutation({
     mutationFn: (row: { caseType: string; formatPattern: string; currentSequence?: number }) =>
       apiFetchJson("/firm-file-ref-settings", {
@@ -987,12 +1051,43 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
     <div className="space-y-4">
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Case File Reference Generator</CardTitle>
+          <CardTitle className="text-base">File Reference Templates</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3">
           <div className="text-sm text-slate-600">
-            Supported variables: {"{YYYY}"} {"{YY}"} {"{MM}"} {"{SEQ:3}"} / {"{SEQ:4}"} {"{INITIALS}"}
+            Supported variables: {"{YYYY}"} {"{YY}"} {"{MM}"} {"{SEQ:3}"} {"{SEQ:4}"} {"{DEVELOPER_CODE}"} {"{PROJECT_CODE}"} {"{CASE_TYPE_CODE}"} {"{LAWYER_INITIALS}"} {"{CLERK_INITIALS}"}
           </div>
+
+          {canUpdate ? (
+            <div className="flex flex-wrap gap-2">
+              {baseTemplates.map((t) => (
+                <Button
+                  key={t.caseType}
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const existing = rows.some((r) => r.caseType.trim().toLowerCase() === t.caseType);
+                    if (existing) return;
+                    setRows((prev) => [...prev, { rowKey: makeRowKey(), caseType: t.caseType, formatPattern: t.formatPattern, currentSequence: 0 }]);
+                  }}
+                >
+                  Add {t.caseType}
+                </Button>
+              ))}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const pid = projects[0]?.id ? Number(projects[0].id) : null;
+                  const key = pid ? `project:${pid}` : "project:1";
+                  setRows((prev) => [...prev, { rowKey: makeRowKey(), caseType: key, formatPattern: "CON/{DEVELOPER_CODE}-{PROJECT_CODE}/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}", currentSequence: 0 }]);
+                }}
+                disabled={projects.length === 0}
+              >
+                Add Project Rule
+              </Button>
+          </div>
+          ) : null}
 
           {settingsQuery.isError ? (
             <QueryFallback title="Unable to load settings" error={settingsQuery.error} onRetry={() => settingsQuery.refetch()} isRetrying={settingsQuery.isFetching} />
@@ -1003,9 +1098,11 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
               <table className="w-full text-sm">
                 <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
                   <tr>
-                    <th className="px-4 py-2 font-semibold">Case Type</th>
-                    <th className="px-4 py-2 font-semibold">Format Pattern</th>
+                    <th className="px-4 py-2 font-semibold min-w-[160px]">Rule Name</th>
+                    <th className="px-4 py-2 font-semibold min-w-[220px]">Applies To</th>
+                    <th className="px-4 py-2 font-semibold min-w-[220px]">Format Pattern</th>
                     <th className="px-4 py-2 font-semibold text-right">Sequence</th>
+                    <th className="px-4 py-2 font-semibold min-w-[260px]">Preview</th>
                     <th className="px-4 py-2 font-semibold text-right">Actions</th>
                   </tr>
                 </thead>
@@ -1021,8 +1118,29 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                             setRows(next);
                           }}
                           disabled={!canUpdate}
-                          placeholder="e.g. subsale"
+                          placeholder="e.g. subsale or project:123"
                         />
+                      </td>
+                      <td className="px-4 py-2 text-slate-700">
+                        {(() => {
+                          const ct = row.caseType.trim().toLowerCase();
+                          if (ct.startsWith("project:")) {
+                            const pid = Number(ct.split(":")[1]);
+                            const proj = projects.find((p: any) => Number(p.id) === pid);
+                            const dev = proj?.developerId ? developers.find((d: any) => Number(d.id) === Number(proj.developerId)) : null;
+                            const projectName = String(proj?.name ?? "").trim();
+                            const developerName = String(dev?.name ?? "").trim();
+                            const developerCode = deriveShortCode(developerName, { maxLen: 5, mode: "initials" });
+                            const extra = (proj as any)?.extraFields;
+                            const rawCode = extra && typeof extra === "object" ? (extra as any).projectRefCode : null;
+                            const projectCode = rawCode ? deriveShortCode(String(rawCode), { maxLen: 12, mode: "token" }) : deriveShortCode(projectName, { maxLen: 12, mode: "token" });
+                            return `Specific Project · ${developerCode}-${projectCode}`;
+                          }
+                          if (ct === "developer_sales") return "Developer Sales (Default)";
+                          if (ct === "subsale") return "Subsale (Default)";
+                          if (ct === "perfection") return "Perfection (Default)";
+                          return `Case Type · ${ct || "—"}`;
+                        })()}
                       </td>
                       <td className="px-4 py-2">
                         <Input
@@ -1033,11 +1151,42 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
                             setRows(next);
                           }}
                           disabled={!canUpdate}
-                          placeholder="e.g. {INITIALS}/SS/{YY}/{SEQ:4}"
+                          placeholder="e.g. CON/SS/{SEQ:4}/{YY}({LAWYER_INITIALS}){CLERK_INITIALS}"
                         />
                       </td>
                       <td className="px-4 py-2 text-right tabular-nums text-slate-600">
                         {row.currentSequence}
+                      </td>
+                      <td className="px-4 py-2 font-mono text-xs text-slate-700">
+                        {(() => {
+                          const ct = row.caseType.trim().toLowerCase();
+                          const now = new Date();
+                          const lawyer = "FYS";
+                          const clerk = "GHY";
+                          let developerCode = "MS";
+                          let projectCode = "LEGASI";
+                          if (ct.startsWith("project:")) {
+                            const pid = Number(ct.split(":")[1]);
+                            const proj = projects.find((p: any) => Number(p.id) === pid);
+                            const dev = proj?.developerId ? developers.find((d: any) => Number(d.id) === Number(proj.developerId)) : null;
+                            const projectName = String(proj?.name ?? "").trim();
+                            const developerName = String(dev?.name ?? "").trim();
+                            developerCode = deriveShortCode(developerName, { maxLen: 5, mode: "initials" });
+                            const extra = (proj as any)?.extraFields;
+                            const rawCode = extra && typeof extra === "object" ? (extra as any).projectRefCode : null;
+                            projectCode = rawCode ? deriveShortCode(String(rawCode), { maxLen: 12, mode: "token" }) : deriveShortCode(projectName, { maxLen: 12, mode: "token" });
+                          }
+                          const caseTypeCode = ct.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8) || "CASE";
+                          return renderPreview(row.formatPattern, {
+                            developerCode,
+                            projectCode,
+                            caseTypeCode,
+                            lawyerInitials: lawyer,
+                            clerkInitials: clerk,
+                            seq: (row.currentSequence ?? 0) + 1,
+                            now,
+                          });
+                        })()}
                       </td>
                       <td className="px-4 py-2 text-right">
                         <div className="inline-flex gap-2">
@@ -1098,7 +1247,7 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
               disabled={!canUpdate}
             >
               <Plus className="w-4 h-4 mr-1" />
-              Add Case Type
+              Add Rule
             </Button>
           </div>
         </CardContent>
@@ -1316,7 +1465,10 @@ export default function Settings() {
                         <tr key={user.id} className="hover:bg-slate-50/50">
                           <td className="px-6 py-4">
                             <div className="font-medium text-slate-900">{user.name}</div>
-                            <div className="text-slate-500 text-xs mt-0.5">{user.email}</div>
+                            <div className="text-slate-500 text-xs mt-0.5">
+                              {user.email}
+                              {user.initials ? <span className="ml-2 text-slate-600">({String(user.initials).toUpperCase()})</span> : null}
+                            </div>
                           </td>
                           <td className="px-6 py-4">
                             <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-800">
@@ -1492,6 +1644,10 @@ export default function Settings() {
                     const name = editName.trim();
                     if (!name) {
                       toast({ title: "Name is required", variant: "destructive" });
+                      return;
+                    }
+                    if (editInitials.trim() && editInitials.trim().length < 2) {
+                      toast({ title: "Initials must be 2–5 characters", variant: "destructive" });
                       return;
                     }
                     const payload: any = { name };

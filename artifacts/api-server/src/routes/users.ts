@@ -211,7 +211,12 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
 
   const { email, name, password, roleId, developerId, department, barCouncilNo, nricNo } = parsed.data;
   const initialsRaw = typeof (req.body as any)?.initials === "string" ? String((req.body as any).initials) : "";
-  const initials = initialsRaw.trim() ? initialsRaw.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) : null;
+  const initialsClean = initialsRaw.trim() ? initialsRaw.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) : "";
+  if (initialsClean && initialsClean.length < 2) {
+    res.status(400).json({ error: "Initials must be 2–5 characters" });
+    return;
+  }
+  const initials = initialsClean ? initialsClean : null;
   const normalizedEmail = email.toLowerCase();
 
   try {
@@ -389,8 +394,12 @@ routerInternal.patch("/users/:userId", requireAuth, requireFirmUser, requirePerm
   if (parsed.data.name !== undefined) updates.name = parsed.data.name;
   if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "initials") && await usersInitialsExists(r)) {
     const initialsRaw = typeof (req.body as any)?.initials === "string" ? String((req.body as any).initials) : "";
-    const initials = initialsRaw.trim() ? initialsRaw.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) : null;
-    updates.initials = initials;
+    const initialsClean = initialsRaw.trim() ? initialsRaw.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) : "";
+    if (initialsClean && initialsClean.length < 2) {
+      res.status(400).json({ error: "Initials must be 2–5 characters" });
+      return;
+    }
+    updates.initials = initialsClean ? initialsClean : null;
   }
   if (parsed.data.roleId !== undefined) updates.roleId = parsed.data.roleId;
   if (Object.prototype.hasOwnProperty.call(parsed.data, "developerId")) {

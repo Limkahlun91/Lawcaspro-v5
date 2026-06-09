@@ -153,6 +153,8 @@ export default function AccountingFileListing() {
   const [reviewReferenceNo, setReviewReferenceNo] = useState("");
   const [reviewNote, setReviewNote] = useState("");
 
+  const isPendingTab = status === "pending_approval";
+
   const debouncedReferenceNo = useDebouncedValue(reviewReferenceNo, 250).trim();
   const referenceSuggestionsQuery = useQuery<{
     suggestedReference: string;
@@ -246,8 +248,6 @@ export default function AccountingFileListing() {
   const error = status === "approved" ? approvedFilesQuery.error : listQuery.error;
   const refetch = status === "approved" ? approvedFilesQuery.refetch : listQuery.refetch;
   const isFetching = status === "approved" ? approvedFilesQuery.isFetching : listQuery.isFetching;
-
-  const isPendingTab = status === "pending_approval";
 
   return (
     <div className="space-y-4">
