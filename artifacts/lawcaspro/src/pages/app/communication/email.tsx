@@ -15,7 +15,19 @@ import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 
-type InboxView = "shared_inbox" | "unassigned" | "my_tasks" | "batch_emails" | "drafts_pending_approval" | "overdue" | "closed";
+type InboxView =
+  | "shared_inbox"
+  | "unread"
+  | "assigned_to_me"
+  | "unassigned"
+  | "linked_to_case"
+  | "no_case"
+  | "archived"
+  | "my_tasks"
+  | "batch_emails"
+  | "drafts_pending_approval"
+  | "overdue"
+  | "closed";
 
 type Mailbox = {
   id: number;
@@ -169,13 +181,35 @@ function toggleString(list: string[], value: string): string[] {
 }
 
 function StatusBadge({ value }: { value: string }) {
-  const v = String(value ?? "");
-  return <Badge variant="outline">{v}</Badge>;
+  const raw = String(value ?? "").trim().toLowerCase();
+  const v = raw === "fully_replied" || raw === "partially_replied" ? "archived" : raw;
+  return <Badge variant="outline">{v || "-"}</Badge>;
 }
 
 function isLawyerLikeRole(roleName: unknown): boolean {
   const n = String(roleName ?? "").trim().toLowerCase();
   return n.includes("lawyer") || n.includes("partner") || n.includes("admin");
+}
+
+function uniqueNumberList(values: Array<number | null | undefined>): number[] {
+  const out: number[] = [];
+  for (const v of values) {
+    if (typeof v !== "number") continue;
+    if (!Number.isFinite(v)) continue;
+    if (!out.includes(v)) out.push(v);
+  }
+  return out;
+}
+
+function getAssignedUserIdsFromMessage(message: { assignedToUserId: number | null; team?: MessageDetail["team"] }): number[] {
+  const team = message.team;
+  return uniqueNumberList([
+    message.assignedToUserId ?? null,
+    team?.lawyerInChargeUserId ?? null,
+    ...(team?.handlerUserIds ?? []),
+    team?.reviewerUserId ?? null,
+    ...(team?.watcherUserIds ?? []),
+  ]);
 }
 
 function QuerySection({
@@ -230,6 +264,9 @@ export default function EmailControlCenterPage() {
   const [view, setView] = useState<InboxView>("shared_inbox");
   const [selectedMessageId, setSelectedMessageId] = useState<number | null>(null);
   const [selectedDraftId, setSelectedDraftId] = useState<number | null>(null);
+  const [search, setSearch] = useState("");
+  const [linkCaseRef, setLinkCaseRef] = useState("");
+  const showWorkflowUi = false;
 
   const usersQuery = useQuery<User[]>({
     queryKey: ["communication", "users"],
@@ -253,8 +290,10 @@ export default function EmailControlCenterPage() {
       if (view === "overdue") return [];
       const params = new URLSearchParams();
       if (view === "unassigned") params.set("assignedTo", "unassigned");
+      if (view === "assigned_to_me") params.set("assignedTo", "me");
       if (view === "batch_emails") params.set("isBatch", "true");
       if (view === "closed") params.set("status", "closed,fully_replied");
+      if (view === "archived") params.set("status", "closed");
       return apiFetchJson(`/communication/messages?${params.toString()}`).then((r) => asArray<MessageRow>(r));
     },
     enabled: view !== "drafts_pending_approval" && view !== "my_tasks" && view !== "overdue",
@@ -543,6 +582,21 @@ export default function EmailControlCenterPage() {
   const selectedDraft = selectedDraftQuery.data ?? null;
   const draftAudit = asArray<any>(selectedDraftAuditQuery.data);
 
+  const filteredMessages = useMemo(() => {
+    const q = String(search ?? "").trim().toLowerCase();
+    const base = messages.filter((row) => {
+      if (view === "linked_to_case") return row.message.linkedCaseId != null;
+      if (view === "no_case") return row.message.linkedCaseId == null;
+      return true;
+    });
+    if (!q) return base;
+    return base.filter((row) => {
+      const from = String(row.message.fromAddress ?? "").toLowerCase();
+      const subject = String(row.message.subject ?? "").toLowerCase();
+      return from.includes(q) || subject.includes(q);
+    });
+  }, [messages, search, view]);
+
   const [draftEditForm, setDraftEditForm] = useState({ to: "", cc: "", subject: "", bodyText: "" });
 
   useEffect(() => {
@@ -600,11 +654,19 @@ export default function EmailControlCenterPage() {
   const [draftDialogOpen, setDraftDialogOpen] = useState(false);
   const [draftForm, setDraftForm] = useState({ to: "", cc: "", subject: "" });
 
+  useEffect(() => {
+    if (!selectedMessage) {
+      setLinkCaseRef("");
+      return;
+    }
+    setLinkCaseRef("");
+  }, [selectedMessage]);
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <div className="text-lg font-semibold">Email Control Center</div>
-        <Button onClick={() => setShowManualEmail(true)}>Manual Email</Button>
+        <div className="text-lg font-semibold">Email Inbox</div>
+        <Button onClick={() => setShowManualEmail(true)}>Manual Add Email</Button>
       </div>
 
       {usersQuery.isError || mailboxesQuery.isError ? (
@@ -631,112 +693,80 @@ export default function EmailControlCenterPage() {
       ) : null}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        <Card className="lg:col-span-2">
+        <Card className="lg:col-span-3">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Inbox</CardTitle>
+            <CardTitle className="text-sm">Mailboxes & Filters</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-2">
-            {([
-              ["shared_inbox", "Shared Inbox"],
-              ["unassigned", "Unassigned"],
-              ["my_tasks", "My Tasks"],
-              ["batch_emails", "Batch Emails"],
-              ["drafts_pending_approval", "Drafts Pending Approval"],
-              ["overdue", "Overdue"],
-              ["closed", "Closed"],
-            ] as Array<[InboxView, string]>).map(([k, label]) => (
-              <Button
-                key={k}
-                variant={view === k ? "default" : "outline"}
-                className="w-full justify-start"
-                onClick={() => {
-                  setView(k);
-                  setSelectedMessageId(null);
-                  setSelectedDraftId(null);
-                  setSelectedTaskIds([]);
-                }}
-              >
-                {label}
+          <CardContent className="space-y-3">
+            <div className="space-y-1">
+              <div className="text-xs font-medium text-slate-600">Connected mailboxes</div>
+              {mailboxes.length === 0 ? (
+                <div className="text-xs text-slate-500">No mailboxes found.</div>
+              ) : (
+                <div className="space-y-1">
+                  {mailboxes.map((m) => (
+                    <div key={m.id} className="rounded border px-2 py-1 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="truncate">{m.displayName || m.address || `Mailbox ${m.id}`}</div>
+                        {m.isActive ? <Badge variant="secondary">Active</Badge> : null}
+                      </div>
+                      <div className="text-[11px] text-slate-500 truncate">{m.provider}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <Button variant="outline" className="w-full justify-start" disabled>
+                Connect Microsoft 365
               </Button>
-            ))}
+              <div className="text-[11px] text-slate-500">Coming soon / setup required</div>
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-xs font-medium text-slate-600">Filters</div>
+              {([
+                ["shared_inbox", "All Emails"],
+                ["unread", "Unread (coming soon)"],
+                ["assigned_to_me", "Assigned to Me"],
+                ["unassigned", "Unassigned"],
+                ["linked_to_case", "Linked to Case"],
+                ["no_case", "No Case"],
+                ["archived", "Archived"],
+              ] as Array<[InboxView, string]>).map(([k, label]) => (
+                <Button
+                  key={k}
+                  variant={view === k ? "default" : "outline"}
+                  className="w-full justify-start"
+                  disabled={k === "unread"}
+                  onClick={() => {
+                    if (k === "unread") return;
+                    setView(k);
+                    setSelectedMessageId(null);
+                    setSelectedDraftId(null);
+                    setSelectedTaskIds([]);
+                  }}
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
           </CardContent>
         </Card>
 
         <Card className="lg:col-span-4">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">List</CardTitle>
+            <CardTitle className="text-sm">Emails</CardTitle>
           </CardHeader>
           <CardContent className="space-y-2">
-            {view === "my_tasks" ? (
-              <QuerySection
-                isLoading={tasksMineQuery.isLoading}
-                isError={tasksMineQuery.isError}
-                error={tasksMineQuery.error}
-                isFetching={tasksMineQuery.isFetching}
-                onRetry={() => tasksMineQuery.refetch()}
-                isEmpty={tasksMine.length === 0}
-                emptyTitle="No tasks assigned yet"
-                emptyDescription="Assigned communication tasks will appear here."
-              >
-                {tasksMine.map((t) => (
-                  <button key={t.id} className="w-full text-left rounded border p-2 hover:bg-slate-50" onClick={() => {
-                    setSelectedMessageId(t.parentMessageId);
-                    setSelectedDraftId(null);
-                    viewMessageMutation.mutate(t.parentMessageId);
-                  }}>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-medium">{t.caseRef || `Task #${t.id}`}</div>
-                      <StatusBadge value={t.taskStatus} />
-                    </div>
-                    <div className="text-xs text-slate-500">{t.partyName || ""}</div>
-                  </button>
-                ))}
-              </QuerySection>
-            ) : view === "drafts_pending_approval" ? (
-              <QuerySection
-                isLoading={draftsPendingQuery.isLoading}
-                isError={draftsPendingQuery.isError}
-                error={draftsPendingQuery.error}
-                isFetching={draftsPendingQuery.isFetching}
-                onRetry={() => draftsPendingQuery.refetch()}
-                isEmpty={draftsPending.length === 0}
-                emptyTitle="No drafts pending approval"
-                emptyDescription="Submitted communication drafts will appear here."
-              >
-                {draftsPending.map((d) => (
-                  <button key={d.id} className="w-full text-left rounded border p-2 hover:bg-slate-50" onClick={() => {
-                    setSelectedDraftId(d.id);
-                    setSelectedMessageId(null);
-                  }}>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-medium">{d.subject || `Draft #${d.id}`}</div>
-                      <StatusBadge value={d.status} />
-                    </div>
-                    <div className="text-xs text-slate-500">Type: {d.draftType}</div>
-                  </button>
-                ))}
-              </QuerySection>
-            ) : view === "overdue" ? (
-              <QuerySection
-                isLoading={overdueQuery.isLoading}
-                isError={overdueQuery.isError}
-                error={overdueQuery.error}
-                isFetching={overdueQuery.isFetching}
-                onRetry={() => overdueQuery.refetch()}
-                isEmpty={overdue.length === 0}
-                emptyTitle="No overdue items"
-                emptyDescription="Overdue messages, tasks, and drafts will appear here."
-              >
-                {overdue.map((o: any) => (
-                  <div key={`${o.kind}-${o.entity_id}`} className="rounded border p-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-medium">{String(o.subject ?? "")}</div>
-                      <Badge variant="destructive">{String(o.kind)}</Badge>
-                    </div>
-                    <div className="text-xs text-slate-500">{String(o.event_at ?? "")}</div>
-                  </div>
-                ))}
-              </QuerySection>
+            <Input placeholder="Search sender or subject..." value={search} onChange={(e) => setSearch(e.target.value)} />
+
+            {view === "unread" ? (
+              <Empty className="border border-dashed border-slate-200 bg-slate-50/50 py-10">
+                <EmptyHeader>
+                  <EmptyTitle>Unread filter coming soon</EmptyTitle>
+                  <EmptyDescription>Unread tracking will be available after inbox schema upgrade.</EmptyDescription>
+                </EmptyHeader>
+              </Empty>
             ) : (
               <QuerySection
                 isLoading={messagesQuery.isLoading}
@@ -744,30 +774,30 @@ export default function EmailControlCenterPage() {
                 error={messagesQuery.error}
                 isFetching={messagesQuery.isFetching}
                 onRetry={() => messagesQuery.refetch()}
-                isEmpty={messages.length === 0}
-                emptyTitle="No messages yet"
-                emptyDescription="Create a manual email to start."
+                isEmpty={filteredMessages.length === 0}
+                emptyTitle="No emails yet"
+                emptyDescription="Use Manual Add Email to start."
               >
-                {messages.map((row) => (
-                  <button key={row.message.id} className="w-full text-left rounded border p-2 hover:bg-slate-50" onClick={() => {
-                    setSelectedMessageId(row.message.id);
-                    setSelectedDraftId(null);
-                    setSelectedTaskIds([]);
-                    viewMessageMutation.mutate(row.message.id);
-                  }}>
+                {filteredMessages.map((row) => (
+                  <button
+                    key={row.message.id}
+                    className="w-full text-left rounded border p-2 hover:bg-slate-50"
+                    onClick={() => {
+                      setSelectedMessageId(row.message.id);
+                      setSelectedDraftId(null);
+                      setSelectedTaskIds([]);
+                      viewMessageMutation.mutate(row.message.id);
+                    }}
+                  >
                     <div className="flex items-center justify-between gap-2">
                       <div className="text-sm font-medium truncate">{row.message.subject || "(no subject)"}</div>
-                      <div className="flex items-center gap-2">
-                        {row.message.isBatch ? <Badge variant="secondary">Batch</Badge> : null}
-                        <StatusBadge value={row.message.internalStatus} />
-                      </div>
+                      <StatusBadge value={row.message.internalStatus} />
                     </div>
                     <div className="text-xs text-slate-500 truncate">{row.message.fromAddress || ""}</div>
-                    {row.message.isBatch ? (
-                      <div className="text-xs text-slate-500 mt-1">
-                        {row.tasksReady}/{row.tasksTotal} ready • {row.tasksReplied}/{row.tasksTotal} replied • {row.tasksUnassigned} pending
-                      </div>
-                    ) : null}
+                    <div className="text-xs text-slate-500 mt-1 flex items-center justify-between gap-2">
+                      <div className="truncate">{row.message.receivedAt || ""}</div>
+                      {row.message.linkedCaseId ? <Badge variant="secondary">Case</Badge> : null}
+                    </div>
                   </button>
                 ))}
               </QuerySection>
@@ -775,95 +805,21 @@ export default function EmailControlCenterPage() {
           </CardContent>
         </Card>
 
-        <Card className="lg:col-span-6">
+        <Card className="lg:col-span-5">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Detail</CardTitle>
+            <CardTitle className="text-sm">Email Detail</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             {selectedDraftId ? (
-              <QuerySection
-                isLoading={selectedDraftQuery.isLoading}
-                isError={selectedDraftQuery.isError}
-                error={selectedDraftQuery.error}
-                isFetching={selectedDraftQuery.isFetching}
-                onRetry={() => selectedDraftQuery.refetch()}
-                isEmpty={!selectedDraft}
-                emptyTitle="Draft unavailable"
-                emptyDescription="Select another draft or refresh the list."
-              >
-                {selectedDraft ? (
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-semibold">{selectedDraft.draft.subject || `Draft #${selectedDraft.draft.id}`}</div>
-                      <StatusBadge value={selectedDraft.draft.status} />
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-                      <div className="md:col-span-12 space-y-1.5">
-                        <Label>To</Label>
-                        <Input value={draftEditForm.to} onChange={(e) => setDraftEditForm((prev) => ({ ...prev, to: e.target.value }))} />
-                      </div>
-                      <div className="md:col-span-12 space-y-1.5">
-                        <Label>CC</Label>
-                        <Input value={draftEditForm.cc} onChange={(e) => setDraftEditForm((prev) => ({ ...prev, cc: e.target.value }))} />
-                      </div>
-                      <div className="md:col-span-12 space-y-1.5">
-                        <Label>Subject</Label>
-                        <Input value={draftEditForm.subject} onChange={(e) => setDraftEditForm((prev) => ({ ...prev, subject: e.target.value }))} />
-                      </div>
-                      <div className="md:col-span-12 space-y-1.5">
-                        <Label>Body</Label>
-                        <Textarea value={draftEditForm.bodyText} onChange={(e) => setDraftEditForm((prev) => ({ ...prev, bodyText: e.target.value }))} rows={8} />
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap gap-2">
-                      <Button variant="outline" onClick={() => patchDraftMutation.mutate()} disabled={patchDraftMutation.isPending}>Save Draft</Button>
-                      <Button variant="outline" onClick={() => submitDraftMutation.mutate(selectedDraft.draft.id)} disabled={submitDraftMutation.isPending}>Submit Approval</Button>
-                      <Button variant="outline" onClick={() => approveDraftMutation.mutate(selectedDraft.draft.id)} disabled={approveDraftMutation.isPending}>Approve</Button>
-                      <Button onClick={() => markSentMutation.mutate(selectedDraft.draft.id)} disabled={markSentMutation.isPending}>Mark Sent</Button>
-                      <Button variant="destructive" onClick={() => cancelDraftMutation.mutate(selectedDraft.draft.id)} disabled={cancelDraftMutation.isPending}>Cancel</Button>
-                    </div>
-
-                    <div className="space-y-2">
-                      <div className="text-sm font-medium">Included Tasks</div>
-                      <div className="space-y-2">
-                        {selectedDraft.tasks.map((t) => (
-                          <div key={t.id} className="rounded border p-2">
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="text-sm font-medium">{t.caseRef || `Task #${t.id}`}</div>
-                              <StatusBadge value={t.taskStatus} />
-                            </div>
-                            <div className="text-xs text-slate-500 whitespace-pre-wrap">{t.replyNote || ""}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <div className="text-sm font-medium">Audit</div>
-                      <QuerySection
-                        isLoading={selectedDraftAuditQuery.isLoading}
-                        isError={selectedDraftAuditQuery.isError}
-                        error={selectedDraftAuditQuery.error}
-                        isFetching={selectedDraftAuditQuery.isFetching}
-                        onRetry={() => selectedDraftAuditQuery.refetch()}
-                        isEmpty={draftAudit.length === 0}
-                        emptyTitle="No draft audit entries yet"
-                        emptyDescription="Approval and send actions will appear here."
-                        loadingText="Loading audit..."
-                      >
-                        <div className="space-y-1">
-                          {(draftAudit ?? []).map((a: any) => (
-                            <div key={a.id} className="text-xs text-slate-600">
-                              {String(a.createdAt ?? "")} • {String(a.action ?? "")} • actor {String(a.actorUserId ?? "")}
-                            </div>
-                          ))}
-                        </div>
-                      </QuerySection>
-                    </div>
-                  </div>
-                ) : null}
-              </QuerySection>
+              <Empty className="border border-dashed border-slate-200 bg-slate-50/50 py-10">
+                <EmptyHeader>
+                  <EmptyTitle>Advanced workflow hidden</EmptyTitle>
+                  <EmptyDescription>Draft/approval workflow is not shown in Email Inbox MVP.</EmptyDescription>
+                </EmptyHeader>
+                <div className="mt-4 flex justify-center">
+                  <Button variant="outline" onClick={() => setSelectedDraftId(null)}>Back to Inbox</Button>
+                </div>
+              </Empty>
             ) : selectedMessageId ? (
               <QuerySection
                 isLoading={selectedMessageQuery.isLoading}
@@ -880,8 +836,23 @@ export default function EmailControlCenterPage() {
                     <div className="flex items-center justify-between gap-2">
                       <div className="text-sm font-semibold">{selectedMessage.subject || `(Message #${selectedMessage.id})`}</div>
                       <div className="flex items-center gap-2">
-                        {selectedMessage.isBatch ? <Badge variant="secondary">Batch</Badge> : null}
-                        <StatusBadge value={selectedMessage.internalStatus} />
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => toast({ title: "Opened by tracking will be available after inbox schema upgrade" })}
+                        >
+                          Mark Read
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => toast({ title: "Opened by tracking will be available after inbox schema upgrade" })}
+                        >
+                          Mark Unread
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={() => closeMessageMutation.mutate(selectedMessage.id)} disabled={closeMessageMutation.isPending}>
+                          Archive
+                        </Button>
                       </div>
                     </div>
 
@@ -903,173 +874,168 @@ export default function EmailControlCenterPage() {
                         <Input value={(selectedMessage.ccAddresses ?? []).join(", ")} readOnly />
                       </div>
                       <div className="md:col-span-6 space-y-1.5">
-                        <Label>Responsible Team</Label>
-                        <div className="rounded border p-2 text-sm space-y-1">
-                          <div>
-                            <span className="text-slate-500">Lawyer in Charge:</span>{" "}
-                            {(() => {
-                              const id = selectedMessage.team?.lawyerInChargeUserId ?? null;
-                              if (!id) return "Unassigned";
-                              return selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`;
-                            })()}
-                          </div>
-                          <div>
-                            <span className="text-slate-500">Handlers:</span>{" "}
-                            {(() => {
-                              const ids = selectedMessage.team?.handlerUserIds ?? [];
-                              if (!ids.length) return "-";
-                              return ids.map((id) => selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`).join(", ");
-                            })()}
-                          </div>
-                          <div>
-                            <span className="text-slate-500">Reviewer:</span>{" "}
-                            {(() => {
-                              const id = selectedMessage.team?.reviewerUserId ?? null;
-                              if (!id) return "-";
-                              return selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`;
-                            })()}
-                          </div>
-                          <div>
-                            <span className="text-slate-500">Watchers:</span>{" "}
-                            {(() => {
-                              const ids = selectedMessage.team?.watcherUserIds ?? [];
-                              if (!ids.length) return "-";
-                              return ids.map((id) => selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`).join(", ");
-                            })()}
-                          </div>
+                        <Label>Assigned Users</Label>
+                        <div className="rounded border p-2 text-sm">
+                          {(() => {
+                            const ids = getAssignedUserIdsFromMessage(selectedMessage);
+                            if (ids.length === 0) return <div className="text-slate-500">Unassigned</div>;
+                            return (
+                              <div className="flex flex-wrap gap-2">
+                                {ids.map((id) => (
+                                  <Badge key={id} variant="secondary">
+                                    {selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`}
+                                  </Badge>
+                                ))}
+                              </div>
+                            );
+                          })()}
                         </div>
                       </div>
                       <div className="md:col-span-6 space-y-1.5">
-                        <Label>Linked Case (Ref or Parcel No)</Label>
-                        <div className="flex gap-2">
-                          <Input
-                            placeholder="e.g. REF123 / TEST-REGRESSION-001"
-                            defaultValue={selectedMessage.linkedCaseId ? `Case #${selectedMessage.linkedCaseId}` : ""}
-                            onKeyDown={(e) => {
-                            if (e.key === "Enter") {
-                              const v = (e.target as any).value;
-                              if (v) linkMessageCaseMutation.mutate({ messageId: selectedMessage.id, caseRef: String(v) });
-                            }
+                        <Label>Linked Case</Label>
+                        <div className="space-y-2">
+                          <div className="text-xs text-slate-500">{selectedMessage.linkedCaseId ? `Currently linked: Case #${selectedMessage.linkedCaseId}` : "Currently not linked to any case."}</div>
+                          <div className="flex gap-2">
+                          <Input placeholder="e.g. REF123 / TEST-REGRESSION-001" value={linkCaseRef} onChange={(e) => setLinkCaseRef(e.target.value)} />
+                          <Button
+                            variant="outline"
+                            onClick={() => {
+                              const v = String(linkCaseRef ?? "").trim();
+                              if (!v) return;
+                              linkMessageCaseMutation.mutate({ messageId: selectedMessage.id, caseRef: v });
                             }}
-                          />
-                          <Button variant="outline" onClick={() => closeMessageMutation.mutate(selectedMessage.id)} disabled={closeMessageMutation.isPending}>Close</Button>
+                            disabled={linkMessageCaseMutation.isPending}
+                          >
+                            Link
+                          </Button>
+                          </div>
                         </div>
                       </div>
                       <div className="md:col-span-12 space-y-1.5">
                         <Label>Body</Label>
                         <Textarea value={selectedMessage.bodyText || ""} readOnly rows={6} />
                       </div>
+                      <div className="md:col-span-12 space-y-1.5">
+                        <Label>Remarks</Label>
+                        <div className="rounded border p-2 text-sm text-slate-500">Remarks will be available after inbox schema upgrade</div>
+                      </div>
+                      <div className="md:col-span-12 space-y-1.5">
+                        <Label>Opened By</Label>
+                        <div className="rounded border p-2 text-sm text-slate-500">Opened by tracking will be available after inbox schema upgrade</div>
+                      </div>
                     </div>
 
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <div className="text-sm font-medium">{selectedMessage.isBatch ? "Child Case Tasks" : "Email Tasks"}</div>
-                        <div className="flex items-center gap-2">
-                          <Button variant="outline" onClick={() => setTaskDialogOpen(true)} disabled={createTaskMutation.isPending}>Add Task</Button>
-                          <Button onClick={() => setDraftDialogOpen(true)} disabled={false}>Create Draft</Button>
+                    {showWorkflowUi ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-medium">{selectedMessage.isBatch ? "Child Case Tasks" : "Email Tasks"}</div>
+                          <div className="flex items-center gap-2">
+                            <Button variant="outline" onClick={() => setTaskDialogOpen(true)} disabled={createTaskMutation.isPending}>Add Task</Button>
+                            <Button onClick={() => setDraftDialogOpen(true)} disabled={false}>Create Draft</Button>
+                          </div>
                         </div>
-                      </div>
-                      <QuerySection
-                        isLoading={selectedTasksQuery.isLoading}
-                        isError={selectedTasksQuery.isError}
-                        error={selectedTasksQuery.error}
-                        isFetching={selectedTasksQuery.isFetching}
-                        onRetry={() => selectedTasksQuery.refetch()}
-                        isEmpty={selectedTasks.length === 0}
-                        emptyTitle="No child case tasks yet"
-                        emptyDescription={selectedMessage.isBatch ? "Add a case task to split this batch email." : "Add a task to process this email and prepare a reply draft."}
-                        loadingText="Loading child tasks..."
-                      >
-                        <div className="space-y-2">
-                          {selectedTasks.map((t) => (
-                            <div key={t.id} className="rounded border p-2 space-y-2">
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="flex items-center gap-2">
-                                  <Checkbox
-                                    checked={selectedTaskIds.includes(t.id)}
-                                    onCheckedChange={(c) => {
-                                      setSelectedTaskIds((prev) => c ? Array.from(new Set([...prev, t.id])) : prev.filter((x) => x !== t.id));
-                                    }}
-                                  />
-                                  <div className="text-sm font-medium">{t.caseRef || `Task #${t.id}`}</div>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <StatusBadge value={t.taskStatus} />
-                                  <Button variant="outline" size="sm" onClick={() => taskAcknowledgeMutation.mutate(t.id)} disabled={taskAcknowledgeMutation.isPending}>Acknowledge</Button>
-                                </div>
-                              </div>
-
-                              <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
-                                <div className="md:col-span-4 space-y-1.5">
-                                  <Label className="text-xs">Responsible Team</Label>
-                                  <div className="rounded border p-2 text-xs space-y-1">
-                                    <div>
-                                      <span className="text-slate-500">Lawyer:</span>{" "}
-                                      {(() => {
-                                        const id = t.team?.lawyerInChargeUserId ?? null;
-                                        if (!id) return "-";
-                                        return selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`;
-                                      })()}
-                                    </div>
-                                    <div>
-                                      <span className="text-slate-500">Handlers:</span>{" "}
-                                      {(() => {
-                                        const ids = t.team?.handlerUserIds ?? [];
-                                        if (!ids.length) return "-";
-                                        return ids.map((id) => selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`).join(", ");
-                                      })()}
-                                    </div>
+                        <QuerySection
+                          isLoading={selectedTasksQuery.isLoading}
+                          isError={selectedTasksQuery.isError}
+                          error={selectedTasksQuery.error}
+                          isFetching={selectedTasksQuery.isFetching}
+                          onRetry={() => selectedTasksQuery.refetch()}
+                          isEmpty={selectedTasks.length === 0}
+                          emptyTitle="No child case tasks yet"
+                          emptyDescription={selectedMessage.isBatch ? "Add a case task to split this batch email." : "Add a task to process this email and prepare a reply draft."}
+                          loadingText="Loading child tasks..."
+                        >
+                          <div className="space-y-2">
+                            {selectedTasks.map((t) => (
+                              <div key={t.id} className="rounded border p-2 space-y-2">
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                    <Checkbox
+                                      checked={selectedTaskIds.includes(t.id)}
+                                      onCheckedChange={(c) => {
+                                        setSelectedTaskIds((prev) => c ? Array.from(new Set([...prev, t.id])) : prev.filter((x) => x !== t.id));
+                                      }}
+                                    />
+                                    <div className="text-sm font-medium">{t.caseRef || `Task #${t.id}`}</div>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <StatusBadge value={t.taskStatus} />
+                                    <Button variant="outline" size="sm" onClick={() => taskAcknowledgeMutation.mutate(t.id)} disabled={taskAcknowledgeMutation.isPending}>Acknowledge</Button>
                                   </div>
                                 </div>
-                                <div className="md:col-span-4 space-y-1.5">
-                                  <Label className="text-xs">Status</Label>
-                                  <Select value={t.taskStatus} onValueChange={(v) => taskStatusMutation.mutate({ taskId: t.id, taskStatus: v })}>
-                                    <SelectTrigger>
-                                      <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      {[
-                                        "pending_owner_review",
-                                        "seen_by_owner",
-                                        "in_progress",
-                                        "waiting_client",
-                                        "waiting_developer",
-                                        "waiting_bank",
-                                        "waiting_lawyer_review",
-                                        "ready_to_reply",
-                                        "included_in_draft",
-                                        "replied",
-                                        "closed",
-                                      ].map((s) => (
-                                        <SelectItem key={s} value={s}>{s}</SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                </div>
-                                <div className="md:col-span-4 space-y-1.5">
-                                  <Label className="text-xs">Link Case</Label>
-                                  <Input placeholder="case ref" onKeyDown={(e) => {
-                                    if (e.key === "Enter") {
-                                      const v = (e.target as any).value;
-                                      if (v) taskLinkCaseMutation.mutate({ taskId: t.id, caseRef: String(v) });
-                                    }
-                                  }} />
-                                </div>
-                              </div>
 
-                              <div className="space-y-1.5">
-                                <Label className="text-xs">Reply Note</Label>
-                                <Textarea
-                                  defaultValue={t.replyNote || ""}
-                                  rows={3}
-                                  onBlur={(e) => taskReplyNoteMutation.mutate({ taskId: t.id, replyNote: e.target.value })}
-                                />
+                                <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
+                                  <div className="md:col-span-4 space-y-1.5">
+                                    <Label className="text-xs">Responsible Team</Label>
+                                    <div className="rounded border p-2 text-xs space-y-1">
+                                      <div>
+                                        <span className="text-slate-500">Lawyer:</span>{" "}
+                                        {(() => {
+                                          const id = t.team?.lawyerInChargeUserId ?? null;
+                                          if (!id) return "-";
+                                          return selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`;
+                                        })()}
+                                      </div>
+                                      <div>
+                                        <span className="text-slate-500">Handlers:</span>{" "}
+                                        {(() => {
+                                          const ids = t.team?.handlerUserIds ?? [];
+                                          if (!ids.length) return "-";
+                                          return ids.map((id) => selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`).join(", ");
+                                        })()}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <div className="md:col-span-4 space-y-1.5">
+                                    <Label className="text-xs">Status</Label>
+                                    <Select value={t.taskStatus} onValueChange={(v) => taskStatusMutation.mutate({ taskId: t.id, taskStatus: v })}>
+                                      <SelectTrigger>
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        {[
+                                          "pending_owner_review",
+                                          "seen_by_owner",
+                                          "in_progress",
+                                          "waiting_client",
+                                          "waiting_developer",
+                                          "waiting_bank",
+                                          "waiting_lawyer_review",
+                                          "ready_to_reply",
+                                          "included_in_draft",
+                                          "replied",
+                                          "closed",
+                                        ].map((s) => (
+                                          <SelectItem key={s} value={s}>{s}</SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <div className="md:col-span-4 space-y-1.5">
+                                    <Label className="text-xs">Link Case</Label>
+                                    <Input placeholder="case ref" onKeyDown={(e) => {
+                                      if (e.key === "Enter") {
+                                        const v = (e.target as any).value;
+                                        if (v) taskLinkCaseMutation.mutate({ taskId: t.id, caseRef: String(v) });
+                                      }
+                                    }} />
+                                  </div>
+                                </div>
+
+                                <div className="space-y-1.5">
+                                  <Label className="text-xs">Reply Note</Label>
+                                  <Textarea
+                                    defaultValue={t.replyNote || ""}
+                                    rows={3}
+                                    onBlur={(e) => taskReplyNoteMutation.mutate({ taskId: t.id, replyNote: e.target.value })}
+                                  />
+                                </div>
                               </div>
-                            </div>
-                          ))}
-                        </div>
-                      </QuerySection>
-                    </div>
+                            ))}
+                          </div>
+                        </QuerySection>
+                      </div>
+                    ) : null}
 
                     <div className="space-y-2">
                       <div className="text-sm font-medium">Audit</div>
@@ -1106,7 +1072,7 @@ export default function EmailControlCenterPage() {
       <Dialog open={showManualEmail} onOpenChange={setShowManualEmail}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader className="shrink-0">
-            <DialogTitle>Manual Incoming Email</DialogTitle>
+            <DialogTitle>Manual Add Email</DialogTitle>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto pr-2">
             <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
@@ -1147,25 +1113,8 @@ export default function EmailControlCenterPage() {
               <Label>Received Date / Time</Label>
               <Input type="datetime-local" value={manualForm.receivedAt} onChange={(e) => setManualForm((p) => ({ ...p, receivedAt: e.target.value }))} />
             </div>
-            <div className="md:col-span-6 space-y-1.5">
-              <Label>Lawyer in Charge *</Label>
-              <Select
-                value={manualForm.lawyerInChargeUserId}
-                onValueChange={(v) => setManualForm((p) => ({ ...p, lawyerInChargeUserId: v === "unassigned" ? "" : v }))}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Optional (can be unassigned for draft intake)" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="unassigned">Unassigned</SelectItem>
-                  {lawyerUserOptions.map((u) => (
-                    <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
             <div className="md:col-span-12 space-y-1.5">
-              <Label>Handlers / Clerks</Label>
+              <Label>Assigned Users</Label>
               <div className="rounded border p-2 max-h-32 overflow-y-auto space-y-2">
                 {selectedUserOptions.map((u) => (
                   <div key={u.id} className="flex items-center gap-2">
@@ -1178,36 +1127,8 @@ export default function EmailControlCenterPage() {
                 ))}
               </div>
             </div>
-            <div className="md:col-span-6 space-y-1.5">
-              <Label>Reviewer / Approver</Label>
-              <Select value={manualForm.reviewerUserId} onValueChange={(v) => setManualForm((p) => ({ ...p, reviewerUserId: v === "none" ? "" : v }))}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Optional" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">None</SelectItem>
-                  {lawyerUserOptions.map((u) => (
-                    <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="md:col-span-6 space-y-1.5">
-              <Label>Watchers</Label>
-              <div className="rounded border p-2 max-h-32 overflow-y-auto space-y-2">
-                {selectedUserOptions.map((u) => (
-                  <div key={u.id} className="flex items-center gap-2">
-                    <Checkbox
-                      checked={manualForm.watcherUserIds.includes(String(u.id))}
-                      onCheckedChange={() => setManualForm((p) => ({ ...p, watcherUserIds: toggleString(p.watcherUserIds, String(u.id)) }))}
-                    />
-                    <div className="text-sm">{u.label}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
             <div className="md:col-span-12 space-y-1.5">
-              <Label>Related Case (Ref or Parcel No)</Label>
+              <Label>Link Case</Label>
               <Input value={manualForm.caseRef} onChange={(e) => setManualForm((p) => ({ ...p, caseRef: e.target.value }))} placeholder="Optional" />
             </div>
             <div className="md:col-span-12 space-y-1.5">
@@ -1222,7 +1143,7 @@ export default function EmailControlCenterPage() {
           </div>
           <DialogFooter className="shrink-0 border-t pt-3 bg-background sticky bottom-0">
             <Button variant="outline" onClick={() => setShowManualEmail(false)}>Cancel</Button>
-            <Button onClick={() => manualEmailMutation.mutate()} disabled={manualEmailMutation.isPending}>Create</Button>
+            <Button onClick={() => manualEmailMutation.mutate()} disabled={manualEmailMutation.isPending}>Add Email</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
