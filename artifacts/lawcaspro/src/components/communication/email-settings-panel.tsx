@@ -207,6 +207,7 @@ export function EmailSettingsPanel() {
   const [importMaxEmails, setImportMaxEmails] = useState<100 | 500 | 1000>(500);
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
+  const [expandedGuide, setExpandedGuide] = useState<Partial<Record<ConnectProvider, boolean>>>({});
   const [imapForm, setImapForm] = useState({
     emailAddress: "",
     displayName: "",
@@ -535,6 +536,9 @@ export function EmailSettingsPanel() {
   ];
   const activeImapPreset = getProviderPreset(connectProvider);
   const isPresetImapProvider = connectProvider === "imap" || connectProvider === "yahoo_imap";
+  const toggleGuide = (provider: ConnectProvider) => {
+    setExpandedGuide((prev) => ({ ...prev, [provider]: !prev[provider] }));
+  };
 
   return (
     <div className="space-y-6">
@@ -542,7 +546,7 @@ export function EmailSettingsPanel() {
         <div>
           <div className="text-lg font-semibold">Email Settings</div>
           <div className="text-sm text-slate-500">
-            Manage Outlook, Gmail, Yahoo Mail, and other IMAP mailbox connections, folder sync, and historical email import.
+            Choose your email provider below. Outlook and Gmail use secure login. Yahoo and custom mailboxes may require an app password.
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -569,6 +573,119 @@ export function EmailSettingsPanel() {
                   {encryptionDisabledReason}
                 </div>
               ) : null}
+              <div className="grid gap-3 lg:grid-cols-2">
+                {providerCards.map((card) => {
+                  const latestConnected = card.connectedAccounts[0] ?? null;
+                  const isExpanded = Boolean(expandedGuide[card.key]);
+                  return (
+                    <div key={card.key} className="rounded-lg border p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="font-medium text-slate-900">{card.title}</div>
+                          <div className="mt-1 text-xs text-slate-500">{card.description}</div>
+                        </div>
+                        <Badge variant={latestConnected ? "secondary" : "outline"}>
+                          {latestConnected ? humanizeMailboxStatus(latestConnected) : card.status}
+                        </Badge>
+                      </div>
+                      <div className="mt-3 space-y-2 text-sm text-slate-600">
+                        <div>Connection: {card.method}</div>
+                        <div>Password: {card.passwordRequired}</div>
+                        <div>Setup: {card.missing.length ? "Admin configuration required" : "Ready"}</div>
+                        <div>Next: {card.nextStep}</div>
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center gap-3">
+                        <Button variant="outline" onClick={card.action}>
+                          {card.actionLabel}
+                        </Button>
+                        <button
+                          type="button"
+                          className="text-sm text-slate-600 underline underline-offset-4"
+                          onClick={() => toggleGuide(card.key)}
+                        >
+                          {isExpanded ? "Hide connection guide" : "View connection guide"}
+                        </button>
+                      </div>
+                      {card.missing.length ? (
+                        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-sm text-amber-900">
+                          <div>Setup incomplete. Ask admin to configure {card.key === "microsoft_graph" ? "Microsoft OAuth." : card.key === "gmail" ? "Google OAuth." : "credential storage."}</div>
+                          <details className="mt-2">
+                            <summary className="cursor-pointer text-xs underline underline-offset-4">Show technical details</summary>
+                            <ul className="mt-2 list-disc pl-5 text-xs">
+                              {card.missing.map((item) => <li key={item}>{item}</li>)}
+                            </ul>
+                          </details>
+                        </div>
+                      ) : null}
+                      {card.disabledReason ? (
+                        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900">
+                          {card.disabledReason}
+                        </div>
+                      ) : null}
+                      {isExpanded ? (
+                        <div className="mt-3 rounded-lg border bg-slate-50 p-3 text-xs text-slate-600">
+                          {card.key === "microsoft_graph" ? (
+                            <>
+                              <div className="font-medium text-slate-900">Use Microsoft secure login</div>
+                              <div className="mt-1">Supported: Outlook.com, Hotmail.com, Live.com, Microsoft 365 work or school mailbox.</div>
+                              <ol className="mt-2 list-decimal pl-5">
+                                <li>Click Connect Microsoft / Outlook</li>
+                                <li>Sign in with your Microsoft account</li>
+                                <li>Allow read-only mailbox access</li>
+                                <li>Return to Lawcaspro</li>
+                                <li>Click Sync Folders</li>
+                                <li>Select folders</li>
+                                <li>Import Emails</li>
+                              </ol>
+                            </>
+                          ) : null}
+                          {card.key === "gmail" ? (
+                            <>
+                              <div className="font-medium text-slate-900">Use Google secure login</div>
+                              <div className="mt-1">Do not enter your normal Gmail password. Use Google OAuth login.</div>
+                              <ol className="mt-2 list-decimal pl-5">
+                                <li>Click Connect Gmail</li>
+                                <li>Sign in with Google</li>
+                                <li>Allow Gmail read-only access</li>
+                                <li>Return to Lawcaspro</li>
+                                <li>Click Sync Folders or Labels</li>
+                                <li>Select labels</li>
+                                <li>Import Emails</li>
+                              </ol>
+                            </>
+                          ) : null}
+                          {card.key === "yahoo_imap" ? (
+                            <>
+                              <div className="font-medium text-slate-900">Use Yahoo App Password</div>
+                              <div className="mt-1">Do not use your normal Yahoo password.</div>
+                              <ol className="mt-2 list-decimal pl-5">
+                                <li>Login to Yahoo Mail in browser</li>
+                                <li>Go to Account Security</li>
+                                <li>Generate App Password</li>
+                                <li>Paste it into Lawcaspro</li>
+                                <li>Test Connection</li>
+                                <li>Save Yahoo Mailbox</li>
+                              </ol>
+                            </>
+                          ) : null}
+                          {card.key === "imap" ? (
+                            <>
+                              <div className="font-medium text-slate-900">Use this for custom domain / hosting / cPanel mailboxes</div>
+                              <div className="mt-1">Some providers require an App Password instead of the normal password.</div>
+                              <ol className="mt-2 list-decimal pl-5">
+                                <li>Get IMAP settings from your email provider</li>
+                                <li>Enter host, port, username, and password</li>
+                                <li>Test Connection</li>
+                                <li>Save Mailbox</li>
+                              </ol>
+                            </>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
               <div className="rounded-lg border bg-slate-50 p-4 text-sm">
                 <div className="font-medium text-slate-900">What happens after connection?</div>
                 <div className="mt-2 text-slate-600">
@@ -582,62 +699,6 @@ export function EmailSettingsPanel() {
                   <br />
                   5. Imported emails will appear in Email Inbox
                 </div>
-              </div>
-              <div className="grid gap-3 lg:grid-cols-2">
-                {providerCards.map((card) => {
-                  const latestConnected = card.connectedAccounts[0] ?? null;
-                  return (
-                    <div key={card.key} className="rounded-lg border p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="font-medium text-slate-900">{card.title}</div>
-                          <div className="mt-1 text-xs text-slate-500">{card.description}</div>
-                        </div>
-                        <Badge variant={latestConnected ? "secondary" : "outline"}>
-                          {latestConnected ? humanizeMailboxStatus(latestConnected) : card.status}
-                        </Badge>
-                      </div>
-                      <div className="mt-3 space-y-2 text-xs text-slate-600">
-                        <div>Connection method: {card.method}</div>
-                        <div>Password required: {card.passwordRequired}</div>
-                        <div>Admin setup required: {card.adminSetup}</div>
-                        <div>Next step: {card.nextStep}</div>
-                        <div>{card.shortHelp}</div>
-                        <div>Status: {latestConnected ? humanizeMailboxStatus(latestConnected) : card.status}</div>
-                        <div>Required setup: {card.missing.length ? card.missing.join(", ") : "Ready"}</div>
-                        <div>Last sync: {latestConnected ? (formatDateTime(latestConnected.lastSyncAt) || "Never") : "Not connected"}</div>
-                        {card.key === "microsoft_graph" && card.missing.length ? (
-                          <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">
-                            <div className="font-medium">Microsoft connection is not configured yet.</div>
-                            <div className="mt-1">Please ask system admin to configure:</div>
-                            <ul className="list-disc pl-5">
-                              {card.missing.map((item) => <li key={item}>{item}</li>)}
-                            </ul>
-                          </div>
-                        ) : null}
-                        {card.key === "gmail" && card.missing.length ? (
-                          <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">
-                            <div className="font-medium">Gmail connection is not configured yet.</div>
-                            <div className="mt-1">Please ask system admin to configure:</div>
-                            <ul className="list-disc pl-5">
-                              {card.missing.map((item) => <li key={item}>{item}</li>)}
-                            </ul>
-                          </div>
-                        ) : null}
-                        {card.disabledReason ? (
-                          <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">
-                            {card.disabledReason}
-                          </div>
-                        ) : null}
-                      </div>
-                      <div className="mt-3">
-                        <Button variant="outline" onClick={card.action}>
-                          {card.actionLabel}
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                })}
               </div>
             </>
           ) : null}
@@ -884,18 +945,12 @@ export function EmailSettingsPanel() {
             {connectProvider === "microsoft_graph" ? (
               <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
                 <div className="text-sm font-medium">Microsoft 365 / Outlook / Hotmail</div>
-                <div className="text-xs text-slate-500">
-                  Use Microsoft secure login. For Outlook.com, Hotmail.com, Live.com, and Microsoft 365 mailboxes, connect using Microsoft login. You do not need to enter your email password in Lawcaspro.
+                <div className="rounded-lg border bg-white p-3 text-sm">
+                  <div className="font-medium text-slate-900">How this login works</div>
+                  <div className="mt-1 text-slate-600">Use Microsoft secure login. You do not need to enter your email password in Lawcaspro.</div>
                 </div>
-                <div className="rounded-lg border bg-white p-3 text-xs text-slate-600">
-                  <div className="font-medium text-slate-900">Supported</div>
-                  <ul className="mt-1 list-disc pl-5">
-                    <li>Outlook.com</li>
-                    <li>Hotmail.com</li>
-                    <li>Live.com</li>
-                    <li>Microsoft 365 work or school mailbox</li>
-                  </ul>
-                  <div className="mt-3 font-medium text-slate-900">Steps</div>
+                <div className="rounded-lg border bg-white p-3 text-sm">
+                  <div className="font-medium text-slate-900">Steps</div>
                   <ol className="mt-1 list-decimal pl-5">
                     <li>Click Connect Microsoft / Outlook</li>
                     <li>Sign in with your Microsoft account</li>
@@ -906,43 +961,65 @@ export function EmailSettingsPanel() {
                     <li>Import Emails</li>
                   </ol>
                 </div>
-                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
                   Do not enter your normal Microsoft password here. Microsoft mailboxes should use secure OAuth login.
                 </div>
-                {microsoftMissing.length ? (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-                    <div className="font-medium">Microsoft connection is not configured yet.</div>
-                    <div className="mt-2">Please ask system admin to configure:</div>
-                    <ul className="mt-1 list-disc pl-5">
-                      {microsoftMissing.map((item) => <li key={item}>{item}</li>)}
-                    </ul>
-                  </div>
-                ) : (
-                  <div className="rounded-lg border bg-white p-3 text-xs text-slate-600">
-                    OAuth is configured. Tokens are encrypted before storage and never returned by the API.
-                  </div>
-                )}
-                <Button onClick={() => startMicrosoftConnectMutation.mutate()} disabled={startMicrosoftConnectMutation.isPending || microsoftMissing.length > 0}>
-                  Connect Microsoft / Outlook
-                </Button>
-                {microsoftMissing.length ? (
-                  <div className="text-xs text-amber-900">{buildDisabledReason("microsoft_graph", microsoftMissing)}</div>
-                ) : null}
+                <div className="rounded-lg border bg-white p-3 text-sm">
+                  <div className="font-medium text-slate-900">Setup status</div>
+                  {microsoftMissing.length ? (
+                    <div className="mt-1 text-amber-900">
+                      Setup incomplete. Ask admin to configure Microsoft OAuth.
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-xs underline underline-offset-4">Show technical details</summary>
+                        <ul className="mt-2 list-disc pl-5 text-xs">
+                          {microsoftMissing.map((item) => <li key={item}>{item}</li>)}
+                        </ul>
+                      </details>
+                    </div>
+                  ) : (
+                    <div className="mt-1 text-slate-600">
+                      Microsoft OAuth is configured. Tokens are encrypted before storage and never returned by the API.
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-lg border bg-white p-3 text-sm">
+                  <div className="font-medium text-slate-900">Action</div>
+                  <Button className="mt-2" onClick={() => startMicrosoftConnectMutation.mutate()} disabled={startMicrosoftConnectMutation.isPending || microsoftMissing.length > 0}>
+                    Connect Microsoft / Outlook
+                  </Button>
+                  {microsoftMissing.length ? (
+                    <div className="mt-2 text-xs text-amber-900">{buildDisabledReason("microsoft_graph", microsoftMissing)}</div>
+                  ) : null}
+                </div>
               </div>
             ) : null}
 
             {isPresetImapProvider ? (
               <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
                 <div className="text-sm font-medium">{connectProvider === "yahoo_imap" ? "Yahoo Mail" : "Other IMAP"}</div>
-                <div className="text-xs text-slate-500">
-                  {connectProvider === "yahoo_imap"
-                    ? "Yahoo Mail uses IMAP with Yahoo App Password. Do not use your normal Yahoo password."
-                    : "Use this for custom domain mailboxes such as firm.com email, web hosting email, cPanel email, or private mail server."}
+                <div className="rounded-lg border bg-white p-3 text-sm">
+                  <div className="font-medium text-slate-900">How this login works</div>
+                  <div className="mt-1 text-slate-600">
+                    {connectProvider === "yahoo_imap"
+                      ? "Use Yahoo App Password, not your normal Yahoo password."
+                      : "Use this only if your mailbox is custom domain, hosting, or cPanel."}
+                  </div>
                 </div>
-                <div className="rounded-lg border bg-white p-3 text-xs text-slate-600">
+                <div className="rounded-lg border bg-white p-3 text-sm text-slate-600">
+                  {connectProvider === "yahoo_imap" ? (
+                    <div className="grid gap-2 sm:grid-cols-3">
+                      <div><span className="font-medium text-slate-900">Host:</span> imap.mail.yahoo.com</div>
+                      <div><span className="font-medium text-slate-900">Port:</span> 993</div>
+                      <div><span className="font-medium text-slate-900">SSL/TLS:</span> enabled</div>
+                    </div>
+                  ) : (
+                    <div>Most secure IMAP servers use Port 993 with SSL/TLS enabled.</div>
+                  )}
+                </div>
+                <div className="rounded-lg border bg-white p-3 text-sm text-slate-600">
+                  <div className="font-medium text-slate-900">Steps</div>
                   {connectProvider === "yahoo_imap" ? (
                     <>
-                      <div className="font-medium text-slate-900">Steps</div>
                       <ol className="mt-1 list-decimal pl-5">
                         <li>Login to Yahoo Mail in browser</li>
                         <li>Go to Account Info or Account Security</li>
@@ -957,7 +1034,6 @@ export function EmailSettingsPanel() {
                     </>
                   ) : (
                     <>
-                      <div className="font-medium text-slate-900">Steps</div>
                       <ol className="mt-1 list-decimal pl-5">
                         <li>Get IMAP settings from your email provider</li>
                         <li>Enter IMAP host</li>
@@ -970,8 +1046,37 @@ export function EmailSettingsPanel() {
                         <li>Sync Folders</li>
                         <li>Import Emails</li>
                       </ol>
-                      <div className="mt-3">Most secure IMAP servers use Port 993 with SSL/TLS enabled.</div>
                     </>
+                  )}
+                </div>
+                <div className="rounded-lg border bg-white p-3 text-sm text-slate-600">
+                  <div className="font-medium text-slate-900">Setup status</div>
+                  {connectProvider === "yahoo_imap" ? (
+                    !setupStatus?.yahoo.available ? (
+                      <div className="mt-1 text-amber-900">
+                        Setup incomplete. Ask admin to configure credential storage.
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-xs underline underline-offset-4">Show technical details</summary>
+                          <ul className="mt-2 list-disc pl-5 text-xs">
+                            {(setupStatus?.yahoo.missing ?? []).map((item) => <li key={item}>{item}</li>)}
+                          </ul>
+                        </details>
+                      </div>
+                    ) : (
+                      <div className="mt-1">Credential storage is ready for Yahoo App Password.</div>
+                    )
+                  ) : !setupStatus?.otherImap.available ? (
+                    <div className="mt-1 text-amber-900">
+                      Setup incomplete. Ask admin to configure credential storage.
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-xs underline underline-offset-4">Show technical details</summary>
+                        <ul className="mt-2 list-disc pl-5 text-xs">
+                          {(setupStatus?.otherImap.missing ?? []).map((item) => <li key={item}>{item}</li>)}
+                        </ul>
+                      </details>
+                    </div>
+                  ) : (
+                    <div className="mt-1">Credential storage is ready for IMAP passwords or app passwords.</div>
                   )}
                 </div>
                 <div className="grid grid-cols-1 gap-3">
@@ -1035,7 +1140,9 @@ export function EmailSettingsPanel() {
                     <span>Use SSL/TLS</span>
                   </label>
                 </div>
-                <div className="flex flex-wrap gap-2">
+                <div className="rounded-lg border bg-white p-3 text-sm">
+                  <div className="font-medium text-slate-900">Action</div>
+                  <div className="mt-3 flex flex-wrap gap-2">
                   <Button
                     variant="outline"
                     onClick={() => testImapMutation.mutate()}
@@ -1049,28 +1156,30 @@ export function EmailSettingsPanel() {
                   >
                     {connectProvider === "yahoo_imap" ? "Save Yahoo Mailbox" : "Save IMAP Mailbox"}
                   </Button>
+                  </div>
+                  <div className="mt-2 text-xs text-slate-500">
+                    {connectProvider === "yahoo_imap"
+                      ? "Yahoo Mail uses imap.mail.yahoo.com, port 993, and SSL/TLS enabled."
+                      : "IMAP credentials are encrypted before storage. If EMAIL_TOKEN_ENCRYPTION_KEY is missing, save and test stay disabled."}
+                  </div>
+                  {connectProvider === "yahoo_imap" && !setupStatus?.yahoo.available ? (
+                    <div className="mt-2 text-xs text-amber-900">{buildDisabledReason("yahoo_imap", setupStatus?.yahoo.missing ?? [])}</div>
+                  ) : null}
+                  {connectProvider === "imap" && !setupStatus?.otherImap.available ? (
+                    <div className="mt-2 text-xs text-amber-900">{buildDisabledReason("imap", setupStatus?.otherImap.missing ?? [])}</div>
+                  ) : null}
                 </div>
-                <div className="text-xs text-slate-500">
-                  {connectProvider === "yahoo_imap"
-                    ? "Yahoo Mail uses imap.mail.yahoo.com on port 993 with SSL/TLS and a Yahoo App Password. Credentials are stored encrypted only."
-                    : "IMAP credentials are encrypted before storage. If EMAIL_TOKEN_ENCRYPTION_KEY is missing, save/test will return a setup error."}
-                </div>
-                {connectProvider === "yahoo_imap" && !setupStatus?.yahoo.available ? (
-                  <div className="text-xs text-amber-900">{buildDisabledReason("yahoo_imap", setupStatus?.yahoo.missing ?? [])}</div>
-                ) : null}
-                {connectProvider === "imap" && !setupStatus?.otherImap.available ? (
-                  <div className="text-xs text-amber-900">{buildDisabledReason("imap", setupStatus?.otherImap.missing ?? [])}</div>
-                ) : null}
               </div>
             ) : null}
 
             {connectProvider === "gmail" ? (
               <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
                 <div className="text-sm font-medium">Gmail</div>
-                <div className="text-xs text-slate-500">
-                  Use Google secure login. For Gmail, connect using Google login. Lawcaspro should not ask for your normal Gmail password.
+                <div className="rounded-lg border bg-white p-3 text-sm">
+                  <div className="font-medium text-slate-900">How this login works</div>
+                  <div className="mt-1 text-slate-600">Use Google secure login. Lawcaspro should not ask for your normal Gmail password.</div>
                 </div>
-                <div className="rounded-lg border bg-white p-3 text-xs text-slate-600">
+                <div className="rounded-lg border bg-white p-3 text-sm text-slate-600">
                   <div className="font-medium text-slate-900">Steps</div>
                   <ol className="mt-1 list-decimal pl-5">
                     <li>Click Connect Gmail</li>
@@ -1082,29 +1191,37 @@ export function EmailSettingsPanel() {
                     <li>Import Emails</li>
                   </ol>
                 </div>
-                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
                   Do not enter your normal Gmail password. Use Google OAuth login.
                 </div>
-                {gmailMissing.length ? (
-                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-                    <div className="font-medium">Gmail connection is not configured yet.</div>
-                    <div className="mt-2">Please ask system admin to configure:</div>
-                    <ul className="mt-1 list-disc pl-5">
-                      {gmailMissing.map((item) => <li key={item}>{item}</li>)}
-                    </ul>
-                  </div>
-                ) : (
-                  <div className="rounded-lg border bg-white p-3 text-xs text-slate-600">
-                    Google OAuth is configured. Tokens are encrypted before storage and never returned by the API.
-                  </div>
-                )}
-                <Button onClick={() => startGoogleConnectMutation.mutate()} disabled={startGoogleConnectMutation.isPending || gmailMissing.length > 0}>
-                  Connect Gmail
-                </Button>
-                {gmailMissing.length ? (
-                  <div className="text-xs text-amber-900">{buildDisabledReason("gmail", gmailMissing)}</div>
-                ) : null}
-                <div className="rounded-lg border bg-white p-3 text-xs text-slate-600">
+                <div className="rounded-lg border bg-white p-3 text-sm">
+                  <div className="font-medium text-slate-900">Setup status</div>
+                  {gmailMissing.length ? (
+                    <div className="mt-1 text-amber-900">
+                      Setup incomplete. Ask admin to configure Google OAuth.
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-xs underline underline-offset-4">Show technical details</summary>
+                        <ul className="mt-2 list-disc pl-5 text-xs">
+                          {gmailMissing.map((item) => <li key={item}>{item}</li>)}
+                        </ul>
+                      </details>
+                    </div>
+                  ) : (
+                    <div className="mt-1 text-slate-600">
+                      Google OAuth is configured. Tokens are encrypted before storage and never returned by the API.
+                    </div>
+                  )}
+                </div>
+                <div className="rounded-lg border bg-white p-3 text-sm">
+                  <div className="font-medium text-slate-900">Action</div>
+                  <Button className="mt-2" onClick={() => startGoogleConnectMutation.mutate()} disabled={startGoogleConnectMutation.isPending || gmailMissing.length > 0}>
+                    Connect Gmail
+                  </Button>
+                  {gmailMissing.length ? (
+                    <div className="mt-2 text-xs text-amber-900">{buildDisabledReason("gmail", gmailMissing)}</div>
+                  ) : null}
+                </div>
+                <div className="rounded-lg border bg-white p-3 text-sm text-slate-600">
                   <div className="font-medium text-slate-900">Fallback option: Gmail App Password</div>
                   <div className="mt-1">
                     Only use this if Google OAuth is not available. Your Google account may require 2-Step Verification before you can generate an App Password.
