@@ -101,6 +101,33 @@ type User = {
   roleName?: string;
 };
 
+function asArray<T>(value: unknown): T[] {
+  if (Array.isArray(value)) return value as T[];
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (Array.isArray(record.data)) return record.data as T[];
+    if (Array.isArray(record.items)) return record.items as T[];
+    if (Array.isArray(record.rows)) return record.rows as T[];
+    if (Array.isArray(record.tasks)) return record.tasks as T[];
+  }
+  return [];
+}
+
+function asStringArray(value: unknown): string[] {
+  return asArray<string>(value).map((entry) => String(entry ?? "")).filter(Boolean);
+}
+
+function normalizeMessageDetail(value: unknown): MessageDetail | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  return {
+    ...(record as unknown as MessageDetail),
+    toAddresses: asStringArray(record.toAddresses),
+    ccAddresses: asStringArray(record.ccAddresses),
+    bccAddresses: asStringArray(record.bccAddresses),
+  };
+}
+
 function splitCommaList(v: string): string[] {
   return v.split(",").map((x) => x.trim()).filter(Boolean);
 }
@@ -165,17 +192,17 @@ export default function EmailControlCenterPage() {
 
   const usersQuery = useQuery<User[]>({
     queryKey: ["communication", "users"],
-    queryFn: () => apiFetchJson("/users?limit=200").then((r) => r.data ?? r),
+    queryFn: () => apiFetchJson("/users?limit=200").then((r) => asArray<User>((r as any)?.data ?? r)),
     retry: false,
   });
-  const users = usersQuery.data ?? [];
+  const users = asArray<User>(usersQuery.data);
 
   const mailboxesQuery = useQuery<Mailbox[]>({
     queryKey: ["communication", "mailboxes"],
-    queryFn: () => apiFetchJson("/communication/mailboxes?channel=email"),
+    queryFn: () => apiFetchJson("/communication/mailboxes?channel=email").then((r) => asArray<Mailbox>(r)),
     retry: false,
   });
-  const mailboxes = mailboxesQuery.data ?? [];
+  const mailboxes = asArray<Mailbox>(mailboxesQuery.data);
 
   const messagesQuery = useQuery<MessageRow[]>({
     queryKey: ["communication", "messages", view],
@@ -187,7 +214,7 @@ export default function EmailControlCenterPage() {
       if (view === "unassigned") params.set("assignedTo", "unassigned");
       if (view === "batch_emails") params.set("isBatch", "true");
       if (view === "closed") params.set("status", "closed,fully_replied");
-      return apiFetchJson(`/communication/messages?${params.toString()}`);
+      return apiFetchJson(`/communication/messages?${params.toString()}`).then((r) => asArray<MessageRow>(r));
     },
     enabled: view !== "drafts_pending_approval" && view !== "my_tasks" && view !== "overdue",
     retry: false,
@@ -195,7 +222,7 @@ export default function EmailControlCenterPage() {
 
   const tasksMineQuery = useQuery<Task[]>({
     queryKey: ["communication", "tasks", "mine"],
-    queryFn: () => apiFetchJson("/communication/tasks/mine?limit=200"),
+    queryFn: () => apiFetchJson("/communication/tasks/mine?limit=200").then((r) => asArray<Task>(r)),
     enabled: view === "my_tasks",
     retry: false,
   });
@@ -205,7 +232,7 @@ export default function EmailControlCenterPage() {
     queryFn: async () => {
       const a = await apiFetchJson("/communication/drafts?status=pending_partner_approval&limit=200");
       const b = await apiFetchJson("/communication/drafts?status=pending_lawyer_approval&limit=200");
-      return [...(a ?? []), ...(b ?? [])];
+      return [...asArray<Draft>(a), ...asArray<Draft>(b)];
     },
     enabled: view === "drafts_pending_approval",
     retry: false,
@@ -213,42 +240,58 @@ export default function EmailControlCenterPage() {
 
   const overdueQuery = useQuery<any[]>({
     queryKey: ["communication", "sla", "overdue"],
-    queryFn: () => apiFetchJson("/communication/sla/overdue?limit=200"),
+    queryFn: () => apiFetchJson("/communication/sla/overdue?limit=200").then((r) => asArray<any>(r)),
     enabled: view === "overdue",
     retry: false,
   });
 
   const selectedMessageQuery = useQuery({
     queryKey: ["communication", "message", selectedMessageId],
-    queryFn: () => apiFetchJson(`/communication/messages/${selectedMessageId}`),
+    queryFn: () => apiFetchJson(`/communication/messages/${selectedMessageId}`).then((r) => normalizeMessageDetail(r)),
     enabled: typeof selectedMessageId === "number",
     retry: false,
   }) as ReturnType<typeof useQuery<MessageDetail | null>>;
 
   const selectedTasksQuery = useQuery<Task[]>({
     queryKey: ["communication", "message", selectedMessageId, "tasks"],
-    queryFn: () => apiFetchJson(`/communication/messages/${selectedMessageId}/tasks`),
+    queryFn: () => apiFetchJson(`/communication/messages/${selectedMessageId}/tasks`).then((r) => asArray<Task>(r)),
     enabled: typeof selectedMessageId === "number",
     retry: false,
   });
 
   const selectedMessageAuditQuery = useQuery<any[]>({
     queryKey: ["communication", "audit", "message", selectedMessageId],
-    queryFn: () => apiFetchJson(`/communication/audit/message/${selectedMessageId}`),
+    queryFn: () => apiFetchJson(`/communication/audit/message/${selectedMessageId}`).then((r) => asArray<any>(r)),
     enabled: typeof selectedMessageId === "number",
     retry: false,
   });
 
   const selectedDraftQuery = useQuery<{ draft: Draft; tasks: Task[] } | null>({
     queryKey: ["communication", "draft", selectedDraftId],
-    queryFn: () => apiFetchJson(`/communication/drafts/${selectedDraftId}`),
+    queryFn: async () => {
+      const result = await apiFetchJson(`/communication/drafts/${selectedDraftId}`);
+      if (!result || typeof result !== "object") return null;
+      const record = result as Record<string, unknown>;
+      const draftRaw = record.draft;
+      if (!draftRaw || typeof draftRaw !== "object") return null;
+      const draftRecord = draftRaw as Record<string, unknown>;
+      return {
+        draft: {
+          ...(draftRecord as unknown as Draft),
+          toAddresses: asStringArray(draftRecord.toAddresses),
+          ccAddresses: asStringArray(draftRecord.ccAddresses),
+          bccAddresses: asStringArray(draftRecord.bccAddresses),
+        },
+        tasks: asArray<Task>(record.tasks),
+      };
+    },
     enabled: typeof selectedDraftId === "number",
     retry: false,
   });
 
   const selectedDraftAuditQuery = useQuery<any[]>({
     queryKey: ["communication", "audit", "draft", selectedDraftId],
-    queryFn: () => apiFetchJson(`/communication/audit/draft/${selectedDraftId}`),
+    queryFn: () => apiFetchJson(`/communication/audit/draft/${selectedDraftId}`).then((r) => asArray<any>(r)),
     enabled: typeof selectedDraftId === "number",
     retry: false,
   });
@@ -433,8 +476,8 @@ export default function EmailControlCenterPage() {
   useEffect(() => {
     if (!selectedDraft) return;
     setDraftEditForm({
-      to: selectedDraft.draft.toAddresses.join(", "),
-      cc: selectedDraft.draft.ccAddresses.join(", "),
+      to: asStringArray(selectedDraft.draft.toAddresses).join(", "),
+      cc: asStringArray(selectedDraft.draft.ccAddresses).join(", "),
       subject: selectedDraft.draft.subject || "",
       bodyText: selectedDraft.draft.bodyText || "",
     });
@@ -461,17 +504,17 @@ export default function EmailControlCenterPage() {
     onError: (e) => toastError(toast, e),
   });
 
-  const messages = messagesQuery.data ?? [];
-  const tasksMine = tasksMineQuery.data ?? [];
-  const draftsPending = draftsPendingQuery.data ?? [];
-  const overdue = overdueQuery.data ?? [];
+  const messages = asArray<MessageRow>(messagesQuery.data);
+  const tasksMine = asArray<Task>(tasksMineQuery.data);
+  const draftsPending = asArray<Draft>(draftsPendingQuery.data);
+  const overdue = asArray<any>(overdueQuery.data);
 
   const selectedMessage = selectedMessageQuery.data ?? null;
-  const selectedTasks = selectedTasksQuery.data ?? [];
-  const messageAudit = selectedMessageAuditQuery.data ?? [];
+  const selectedTasks = asArray<Task>(selectedTasksQuery.data);
+  const messageAudit = asArray<any>(selectedMessageAuditQuery.data);
 
   const selectedDraft = selectedDraftQuery.data ?? null;
-  const draftAudit = selectedDraftAuditQuery.data ?? [];
+  const draftAudit = asArray<any>(selectedDraftAuditQuery.data);
 
   const selectedUserOptions = useMemo(() => {
     return users.map((u) => ({ id: u.id, label: u.name || `User ${u.id}` }));
@@ -489,6 +532,29 @@ export default function EmailControlCenterPage() {
         <div className="text-lg font-semibold">Email Control Center</div>
         <Button onClick={() => setShowManualEmail(true)}>Manual Email</Button>
       </div>
+
+      {usersQuery.isError || mailboxesQuery.isError ? (
+        <Card>
+          <CardContent className="pt-6 space-y-3">
+            {usersQuery.isError ? (
+              <QueryFallback
+                title="Unable to load user list"
+                error={usersQuery.error}
+                onRetry={() => usersQuery.refetch()}
+                isRetrying={usersQuery.isFetching}
+              />
+            ) : null}
+            {mailboxesQuery.isError ? (
+              <QueryFallback
+                title="Unable to load mailboxes"
+                error={mailboxesQuery.error}
+                onRetry={() => mailboxesQuery.refetch()}
+                isRetrying={mailboxesQuery.isFetching}
+              />
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : null}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
         <Card className="lg:col-span-2">
