@@ -53,7 +53,7 @@ export type CommunicationDraftStatus = z.infer<typeof CommunicationDraftStatusSc
 
 export const ManualEmailCreateSchema = z.object({
   mailboxId: z.number().int().positive().optional().nullable(),
-  fromName: z.string().trim().min(1),
+  fromName: z.string().trim().optional().nullable().default(""),
   fromEmail: z.string().trim().email(),
   to: z.array(z.string().trim().min(1)).optional().nullable().default([]),
   cc: z.array(z.string().trim().min(1)).optional().nullable().default([]),

@@ -122,6 +122,14 @@ router.post("/communication/messages/manual-email", requireAuth, requireFirmUser
       res.status(404).json({ error: "Case not found" });
       return;
     }
+    if (message === "missing_to_addresses") {
+      res.status(400).json({ error: "At least one recipient is required" });
+      return;
+    }
+    if (message === "invalid_received_at") {
+      res.status(400).json({ error: "Invalid received date/time" });
+      return;
+    }
     if (message === "mailbox_not_found" || message === "invalid_mailbox_channel") {
       res.status(400).json({ error: "Invalid mailbox" });
       return;

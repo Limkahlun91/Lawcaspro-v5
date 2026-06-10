@@ -81,7 +81,7 @@ export async function createManualIncomingEmail(args: {
   req: AuthRequest;
   input: {
     mailboxId?: number | null;
-    fromName: string;
+    fromName?: string | null;
     fromEmail: string;
     to: unknown;
     cc: unknown;
@@ -97,14 +97,17 @@ export async function createManualIncomingEmail(args: {
   const firmId = args.req.firmId!;
   const actorId = args.req.userId!;
   const isBatch = Boolean(args.input.isBatchEmail);
+  const availableMailboxes = args.input.mailboxId ? [] : await listMailboxes(args.r, firmId, "email");
   const mailbox = args.input.mailboxId
     ? await getMailboxById(args.r, firmId, args.input.mailboxId)
-    : await getOrCreateDefaultManualEmailMailbox(args.r, firmId, actorId);
+    : (availableMailboxes.find((item) => item.isActive) ?? await getOrCreateDefaultManualEmailMailbox(args.r, firmId, actorId));
   if (!mailbox) throw new Error("mailbox_not_found");
   if (mailbox.channel !== "email") throw new Error("invalid_mailbox_channel");
 
   const receivedAt = args.input.receivedAt ? new Date(args.input.receivedAt) : now();
+  if (Number.isNaN(receivedAt.getTime())) throw new Error("invalid_received_at");
   const toAddresses = normalizeEmailAddressList(args.input.to);
+  if (!toAddresses.length) throw new Error("missing_to_addresses");
   const ccAddresses = normalizeEmailAddressList(args.input.cc);
   let linkedCaseId: number | null = null;
   if (args.input.caseId || args.input.caseRef) {
@@ -116,6 +119,7 @@ export async function createManualIncomingEmail(args: {
     linkedCaseId = foundCase.id;
   }
   const assignedToUserId = args.input.assignedToUserId ?? null;
+  const fromName = (args.input.fromName ?? "").trim();
 
   const created = await insertMessage(args.r, {
     firmId,
@@ -124,7 +128,7 @@ export async function createManualIncomingEmail(args: {
     provider: "manual",
     direction: "incoming",
     fromAddress: args.input.fromEmail.trim(),
-    fromName: args.input.fromName.trim(),
+    fromName: fromName || null,
     toAddresses,
     ccAddresses,
     bccAddresses: [],

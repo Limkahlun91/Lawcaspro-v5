@@ -311,6 +311,13 @@ export default function EmailControlCenterPage() {
     isBatchEmail: true,
   });
 
+  useEffect(() => {
+    if (manualForm.mailboxId) return;
+    const firstActiveMailbox = mailboxes.find((mailbox) => mailbox.isActive);
+    if (!firstActiveMailbox) return;
+    setManualForm((prev) => (prev.mailboxId ? prev : { ...prev, mailboxId: String(firstActiveMailbox.id) }));
+  }, [mailboxes, manualForm.mailboxId]);
+
   const manualEmailMutation = useMutation({
     mutationFn: () => apiFetchJson("/communication/messages/manual-email", {
       method: "POST",
