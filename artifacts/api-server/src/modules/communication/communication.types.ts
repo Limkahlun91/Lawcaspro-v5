@@ -75,6 +75,33 @@ export const EmailFolderPatchSchema = z.object({
   syncEnabled: z.boolean(),
 });
 
+export const EmailImportRangeSchema = z.enum(["7d", "30d", "90d", "all", "custom"]);
+
+export const EmailImportRequestSchema = z.object({
+  range: EmailImportRangeSchema.default("30d"),
+  maxEmails: z.union([z.literal(100), z.literal(500), z.literal(1000)]).default(500),
+  from: z.string().datetime().optional().nullable(),
+  to: z.string().datetime().optional().nullable(),
+}).superRefine((value, ctx) => {
+  if (value.range === "custom") {
+    if (!value.from || !value.to) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Custom import range requires both from and to.",
+        path: ["from"],
+      });
+      return;
+    }
+    if (new Date(value.from).getTime() > new Date(value.to).getTime()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Custom import range start must be before end.",
+        path: ["from"],
+      });
+    }
+  }
+});
+
 export const MicrosoftConnectQuerySchema = z.object({
   returnTo: z.string().url().optional().nullable(),
 });

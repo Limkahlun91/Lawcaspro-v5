@@ -25,6 +25,12 @@ type ImapFolder = {
   folderType: string;
 };
 
+type ImapFetchWindow = {
+  limit: number;
+  since?: Date | null;
+  until?: Date | null;
+};
+
 class SimpleImapClient {
   private readonly socket: net.Socket | tls.TLSSocket;
   private buffer = Buffer.alloc(0);
@@ -83,7 +89,7 @@ class SimpleImapClient {
     return folders;
   }
 
-  async fetchFolderMessages(folderName: string, limit = 50): Promise<ImportedMessage[]> {
+  async fetchFolderMessages(folderName: string, window: ImapFetchWindow): Promise<ImportedMessage[]> {
     await this.runCommand(`SELECT ${quoteImapAtom(folderName)}`);
     const searchRaw = await this.runCommand("UID SEARCH ALL");
     const searchMatch = searchRaw.match(/^\* SEARCH\s*(.*)$/im);
@@ -92,11 +98,15 @@ class SimpleImapClient {
       .split(/\s+/)
       .map((value) => value.trim())
       .filter(Boolean);
-    const selectedUids = uids.slice(-limit).reverse();
+    const selectedUids = uids.slice(-window.limit).reverse();
     const messages: ImportedMessage[] = [];
     for (const uid of selectedUids) {
       const raw = await this.runCommand(`UID FETCH ${uid} (UID FLAGS INTERNALDATE RFC822.SIZE BODYSTRUCTURE BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.4096>)`);
-      messages.push(parseFetchedMessage(raw, folderName, uid));
+      const parsed = parseFetchedMessage(raw, folderName, uid);
+      const compareAt = parsed.receivedAt ?? parsed.sentAt;
+      if (window.until && compareAt && compareAt.getTime() > window.until.getTime()) continue;
+      if (window.since && compareAt && compareAt.getTime() < window.since.getTime()) continue;
+      messages.push(parsed);
     }
     return messages;
   }
@@ -343,10 +353,10 @@ export async function fetchImapFolders(config: ImapConnectionConfig): Promise<Im
   }
 }
 
-export async function fetchImapFolderMessages(config: ImapConnectionConfig, folderName: string, limit = 50) {
+export async function fetchImapFolderMessages(config: ImapConnectionConfig, folderName: string, window: ImapFetchWindow) {
   const client = await SimpleImapClient.connect(config);
   try {
-    return await client.fetchFolderMessages(folderName, limit);
+    return await client.fetchFolderMessages(folderName, window);
   } finally {
     await client.disconnect();
   }

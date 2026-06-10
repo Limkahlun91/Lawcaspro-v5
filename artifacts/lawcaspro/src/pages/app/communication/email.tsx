@@ -83,7 +83,22 @@ type CaseLookupRow = {
   id: number;
   caseRef: string | null;
   status: string;
+  purchaserNames?: string[];
+  projectName?: string | null;
   developerName: string | null;
+  propertyAddress?: string | null;
+  parcelNo?: string | null;
+};
+
+type LinkedCaseSummary = {
+  id: number;
+  referenceNo: string | null;
+  caseType: string | null;
+  purchaserNames: string[];
+  projectName: string | null;
+  developerName: string | null;
+  propertyAddress: string | null;
+  parcelNo: string | null;
 };
 
 type MessageRow = {
@@ -115,6 +130,7 @@ type MessageRow = {
   hasAttachments: boolean;
   isRead: boolean;
   assigneeCount: number;
+  linkedCase: LinkedCaseSummary | null;
 };
 
 type Task = {
@@ -168,6 +184,7 @@ type MessageDetail = {
   receivedAt: string | null;
   sentAt: string | null;
   createdAt: string;
+  linkedCase?: LinkedCaseSummary | null;
   team?: {
     lawyerInChargeUserId: number | null;
     handlerUserIds: number[];
@@ -232,6 +249,7 @@ function normalizeMessageDetail(value: unknown): MessageDetail | null {
     toAddresses: asStringArray(record.toAddresses),
     ccAddresses: asStringArray(record.ccAddresses),
     bccAddresses: asStringArray(record.bccAddresses),
+    linkedCase: record.linkedCase && typeof record.linkedCase === "object" ? (record.linkedCase as LinkedCaseSummary) : null,
     team: normalizeTeam(record.team),
   };
 }
@@ -266,6 +284,16 @@ function getFolderScopeForMessage(message: MessageRow["message"]): FolderScope {
   if (providerFolder.includes("deleted") || providerFolder.includes("trash")) return "deleted";
   if (message.direction === "outgoing" || providerFolder.includes("sent")) return "sent";
   return "inbox";
+}
+
+function getCaseReference(caseSummary: LinkedCaseSummary | null | undefined): string | null {
+  if (!caseSummary) return null;
+  return caseSummary.referenceNo || caseSummary.parcelNo || null;
+}
+
+function getCaseProperty(caseSummary: LinkedCaseSummary | null | undefined): string | null {
+  if (!caseSummary) return null;
+  return caseSummary.propertyAddress || caseSummary.parcelNo || null;
 }
 
 function formatRelativeAction(action: unknown): string {
@@ -1214,6 +1242,7 @@ export default function EmailControlCenterPage() {
                     const assignedLabel = row.assigneeCount > 1
                       ? `${primaryAssigneeLabel || "Assigned"} +${row.assigneeCount - 1}`
                       : (primaryAssigneeLabel || "");
+                    const linkedCaseRef = getCaseReference(row.linkedCase);
 
                     return (
                       <div className="space-y-2">
@@ -1228,7 +1257,7 @@ export default function EmailControlCenterPage() {
                         <div className="flex flex-wrap items-center gap-2">
                           {unread ? <span className="inline-block h-2 w-2 rounded-full bg-blue-500" /> : null}
                           {assignedLabel ? <Badge variant="secondary">{assignedLabel}</Badge> : <Badge variant="outline">Unassigned</Badge>}
-                          {row.message.linkedCaseId ? <Badge variant="secondary">Linked Case</Badge> : null}
+                          {linkedCaseRef ? <Badge variant="secondary" title={linkedCaseRef}>{linkedCaseRef}</Badge> : null}
                           {row.hasAttachments ? <Badge variant="outline">{row.attachmentCount} attachment{row.attachmentCount === 1 ? "" : "s"}</Badge> : null}
                         </div>
                       </div>
@@ -1279,7 +1308,7 @@ export default function EmailControlCenterPage() {
                         <div className="flex flex-wrap gap-2">
                           <Badge variant={selectedMessageIsRead ? "outline" : "secondary"}>{selectedMessageIsRead ? "Read" : "Unread"}</Badge>
                           <Badge variant="outline">{selectedMessageAssignedCount > 0 ? "Assigned" : "Unassigned"}</Badge>
-                          <Badge variant="outline">{selectedMessage.linkedCaseId ? "Linked Case" : "No Case"}</Badge>
+                          <Badge variant="outline">{selectedMessage.linkedCase ? (getCaseReference(selectedMessage.linkedCase) || "Linked Case") : "No Case"}</Badge>
                           <Badge variant="outline">{selectedMessageHasAttachments ? `${selectedMessageAttachmentCount} attachment${selectedMessageAttachmentCount === 1 ? "" : "s"}` : "No attachments"}</Badge>
                         </div>
                       </div>
@@ -1376,7 +1405,13 @@ export default function EmailControlCenterPage() {
                           ) : null}
                         </div>
                         {selectedMessage.linkedCaseId ? (
-                          <div className="rounded-lg bg-slate-50 p-3 text-sm">Linked Case: Case #{selectedMessage.linkedCaseId}</div>
+                          <div className="rounded-lg bg-slate-50 p-3 text-sm space-y-1">
+                            <div><span className="font-medium">Case Reference:</span> {getCaseReference(selectedMessage.linkedCase) || `Case #${selectedMessage.linkedCaseId}`}</div>
+                            <div><span className="font-medium">Purchaser:</span> {selectedMessage.linkedCase?.purchaserNames?.length ? selectedMessage.linkedCase.purchaserNames.join(", ") : "-"}</div>
+                            <div><span className="font-medium">Case Type:</span> {selectedMessage.linkedCase?.caseType || "-"}</div>
+                            <div><span className="font-medium">Project:</span> {selectedMessage.linkedCase?.projectName || selectedMessage.linkedCase?.developerName || "-"}</div>
+                            <div><span className="font-medium">Property:</span> {getCaseProperty(selectedMessage.linkedCase) || "-"}</div>
+                          </div>
                         ) : (
                           <div className="space-y-2">
                             <div className="flex gap-2">
@@ -1418,10 +1453,9 @@ export default function EmailControlCenterPage() {
                                     onClick={() => linkMessageCaseMutation.mutate({ messageId: selectedMessage.id, caseId: c.id })}
                                     disabled={linkMessageCaseMutation.isPending}
                                   >
-                                    <div className="flex items-center justify-between gap-2">
-                                      <div className="truncate">{c.caseRef || `Case #${c.id}`}</div>
-                                      <div className="truncate text-xs text-slate-500">{c.developerName || ""}</div>
-                                    </div>
+                                    <div className="truncate font-medium">{c.caseRef || `Case #${c.id}`}</div>
+                                    <div className="truncate text-xs text-slate-600">{c.purchaserNames?.length ? c.purchaserNames.join(", ") : "-"}</div>
+                                    <div className="truncate text-xs text-slate-500">{[c.projectName || c.developerName || "", c.propertyAddress || c.parcelNo || ""].filter(Boolean).join(" - ")}</div>
                                     <div className="truncate text-xs text-slate-500">{c.status}</div>
                                   </button>
                                 ))}

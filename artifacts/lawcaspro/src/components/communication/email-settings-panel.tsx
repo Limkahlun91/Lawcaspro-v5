@@ -54,6 +54,21 @@ type EmailSyncLog = {
   createdAt: string;
 };
 
+type EmailSetupStatus = {
+  encryptionConfigured: boolean;
+  encryptionMissing: string[];
+  microsoft: {
+    configured: boolean;
+    missing: string[];
+  };
+  gmail: {
+    available: boolean;
+    message: string;
+  };
+};
+
+type EmailImportRange = "7d" | "30d" | "90d" | "all" | "custom";
+
 function asArray<T>(value: unknown): T[] {
   if (Array.isArray(value)) return value as T[];
   if (value && typeof value === "object") {
@@ -77,6 +92,22 @@ function formatDateTime(value: unknown): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(d);
+}
+
+function providerLabel(provider: string): string {
+  if (provider === "microsoft_graph") return "Microsoft 365 / Outlook";
+  if (provider === "imap") return "IMAP";
+  if (provider === "gmail") return "Gmail";
+  return provider;
+}
+
+function humanizeMailboxStatus(account: Pick<EmailAccount, "status" | "lastError">, isBusy = false): string {
+  if (isBusy) return "Syncing";
+  if (account.status === "active") return "Connected";
+  if (account.status === "setup_required") return "Setup required";
+  if (account.status === "disconnected") return "Disconnected";
+  if (account.status === "error") return account.lastError ? "Last sync failed" : "Connection error";
+  return account.status;
 }
 
 function QuerySection(props: {
@@ -114,6 +145,10 @@ export function EmailSettingsPanel() {
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
   const [connectDialogOpen, setConnectDialogOpen] = useState(false);
   const [connectProvider, setConnectProvider] = useState("microsoft_graph");
+  const [importRange, setImportRange] = useState<EmailImportRange>("30d");
+  const [importMaxEmails, setImportMaxEmails] = useState<100 | 500 | 1000>(500);
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
   const [gmailPlaceholderForm, setGmailPlaceholderForm] = useState({ emailAddress: "", displayName: "" });
   const [imapForm, setImapForm] = useState({
     emailAddress: "",
@@ -131,6 +166,13 @@ export function EmailSettingsPanel() {
     retry: false,
   });
   const emailAccounts = asArray<EmailAccount>(emailAccountsQuery.data);
+
+  const setupStatusQuery = useQuery<EmailSetupStatus>({
+    queryKey: ["communication", "email", "setup-status"],
+    queryFn: () => apiFetchJson("/communication/email/setup-status") as Promise<EmailSetupStatus>,
+    retry: false,
+  });
+  const setupStatus = setupStatusQuery.data;
 
   useEffect(() => {
     if (!emailAccounts.length) {
@@ -240,9 +282,14 @@ export function EmailSettingsPanel() {
 
   const importEmailMutation = useMutation({
     mutationFn: (accountId: number) =>
-      apiFetchJson<{ ok: boolean; importedCount: number; skippedDuplicateCount: number }>(`/communication/email/accounts/${accountId}/import-now`, {
+      apiFetchJson<{ ok: boolean; importedCount: number; skippedDuplicateCount: number; failedCount: number; status: string }>(`/communication/email/accounts/${accountId}/import-now`, {
         method: "POST",
-        body: {},
+        body: {
+          range: importRange,
+          maxEmails: importMaxEmails,
+          from: importRange === "custom" && customFrom ? new Date(customFrom).toISOString() : null,
+          to: importRange === "custom" && customTo ? new Date(customTo).toISOString() : null,
+        },
       }),
     onSuccess: (result, accountId) => {
       qc.invalidateQueries({ queryKey: ["communication", "messages"] });
@@ -251,7 +298,7 @@ export function EmailSettingsPanel() {
       qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", accountId, "folders"] });
       toast({
         title: "Import completed",
-        description: `Imported ${result.importedCount} emails, skipped ${result.skippedDuplicateCount} duplicates.`,
+        description: `Imported ${result.importedCount}, skipped ${result.skippedDuplicateCount} duplicates, failed ${result.failedCount}.`,
       });
     },
     onError: (e) => toastError(toast, e),
@@ -297,6 +344,7 @@ export function EmailSettingsPanel() {
   }, [qc, toast]);
 
   const refreshAll = () => {
+    qc.invalidateQueries({ queryKey: ["communication", "email", "setup-status"] });
     qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
     qc.invalidateQueries({ queryKey: ["communication", "messages"] });
     if (selectedAccountId != null) {
@@ -306,6 +354,17 @@ export function EmailSettingsPanel() {
   };
 
   const selectedAccountSyncEnabledFolders = selectedAccountFolders.filter((folder) => folder.syncEnabled);
+  const microsoftMissing = [
+    ...(setupStatus?.microsoft.missing ?? []),
+    ...(setupStatus?.encryptionConfigured === false ? ["EMAIL_TOKEN_ENCRYPTION_KEY"] : []),
+  ];
+  const selectedAccountLastLog = selectedAccountLogs[0] ?? null;
+  const canImportSelectedAccount = Boolean(
+    selectedAccount &&
+    selectedAccount.provider !== "gmail" &&
+    selectedAccount.status !== "setup_required" &&
+    selectedAccount.status !== "disconnected"
+  );
 
   return (
     <div className="space-y-6">
@@ -320,212 +379,259 @@ export function EmailSettingsPanel() {
           <Button variant="outline" onClick={refreshAll}>
             Refresh
           </Button>
-          <Button variant="outline" onClick={() => selectedAccount && syncFoldersMutation.mutate(selectedAccount.id)} disabled={!selectedAccount || syncFoldersMutation.isPending}>
-            Sync Folders
-          </Button>
-          <Button variant="outline" onClick={() => selectedAccount && importEmailMutation.mutate(selectedAccount.id)} disabled={!selectedAccount || importEmailMutation.isPending}>
-            Import Now
-          </Button>
           <Button onClick={() => setConnectDialogOpen(true)}>Connect Mailbox</Button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-6 xl:grid-cols-[320px_minmax(0,1fr)]">
-        <div className="space-y-4">
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">Section 1 — Setup Warnings</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm text-slate-600">
+          {setupStatusQuery.isLoading ? <div>Loading setup status...</div> : null}
+          {setupStatusQuery.isError ? (
+            <QueryFallback title="Unable to load setup status" error={setupStatusQuery.error} onRetry={() => setupStatusQuery.refetch()} isRetrying={setupStatusQuery.isFetching} />
+          ) : null}
+          {!setupStatusQuery.isLoading && !setupStatusQuery.isError ? (
+            <>
+              {microsoftMissing.length ? (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                  <div className="font-medium text-amber-900">Microsoft 365 setup is incomplete.</div>
+                  <div className="mt-2 text-amber-800">Missing:</div>
+                  <ul className="mt-1 list-disc pl-5 text-amber-800">
+                    {microsoftMissing.map((item) => <li key={item}>{item}</li>)}
+                  </ul>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-emerald-800">
+                  Microsoft 365 OAuth configuration is available.
+                </div>
+              )}
+              {!setupStatus?.encryptionConfigured ? (
+                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
+                  Credential storage is blocked until <span className="font-medium">EMAIL_TOKEN_ENCRYPTION_KEY</span> is configured.
+                </div>
+              ) : null}
+            </>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">Section 2 — Connected Mailboxes</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <QuerySection
+            isLoading={emailAccountsQuery.isLoading}
+            isError={emailAccountsQuery.isError}
+            error={emailAccountsQuery.error}
+            isFetching={emailAccountsQuery.isFetching}
+            onRetry={() => emailAccountsQuery.refetch()}
+            isEmpty={emailAccounts.length === 0}
+            emptyTitle="No mailbox accounts"
+            emptyDescription="Connect Microsoft 365 or IMAP to start importing email."
+          >
+            {emailAccounts.map((account) => {
+              const selected = selectedAccountId === account.id;
+              const busy = syncFoldersMutation.isPending || importEmailMutation.isPending;
+              return (
+                <button
+                  key={account.id}
+                  className={[
+                    "w-full rounded-lg border p-4 text-left transition-colors",
+                    selected ? "border-slate-400 bg-slate-50" : "hover:bg-slate-50",
+                  ].join(" ")}
+                  onClick={() => setSelectedAccountId(account.id)}
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="font-medium">{account.displayName || account.emailAddress}</div>
+                      <div className="text-sm text-slate-600">{providerLabel(account.provider)}</div>
+                      <div className="text-sm text-slate-600">{account.emailAddress}</div>
+                      <div className="text-xs text-slate-500">Last sync: {formatDateTime(account.lastSyncAt) || "Never"}</div>
+                    </div>
+                    <Badge variant={account.status === "active" ? "secondary" : "outline"}>
+                      {humanizeMailboxStatus(account, selected && busy)}
+                    </Badge>
+                  </div>
+                </button>
+              );
+            })}
+          </QuerySection>
+        </CardContent>
+      </Card>
+
+      {selectedAccount ? (
+        <>
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-sm">Setup Warnings</CardTitle>
+              <CardTitle className="text-sm">Selected Mailbox</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-3 text-sm text-slate-600">
-              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-                Microsoft 365 requires <span className="font-medium">MICROSOFT_CLIENT_ID</span>, <span className="font-medium">MICROSOFT_CLIENT_SECRET</span>, and <span className="font-medium">MICROSOFT_REDIRECT_URI</span>.
+            <CardContent className="space-y-3">
+              <div className="flex flex-wrap items-start justify-between gap-3 rounded-lg border bg-slate-50 p-4">
+                <div className="space-y-1">
+                  <div className="text-base font-semibold">{selectedAccount.displayName || selectedAccount.emailAddress}</div>
+                  <div className="text-sm text-slate-600">{providerLabel(selectedAccount.provider)} · {selectedAccount.emailAddress}</div>
+                  <div className="text-sm text-slate-600">Status: {humanizeMailboxStatus(selectedAccount, syncFoldersMutation.isPending || importEmailMutation.isPending)}</div>
+                  <div className="text-sm text-slate-600">Last sync: {formatDateTime(selectedAccount.lastSyncAt) || "Never"}</div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" size="sm" onClick={() => syncFoldersMutation.mutate(selectedAccount.id)} disabled={syncFoldersMutation.isPending || selectedAccount.provider === "gmail"}>
+                    Sync Folders
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => importEmailMutation.mutate(selectedAccount.id)} disabled={!canImportSelectedAccount || importEmailMutation.isPending}>
+                    Import Emails
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => disconnectEmailAccountMutation.mutate(selectedAccount.id)} disabled={disconnectEmailAccountMutation.isPending}>
+                    Disconnect
+                  </Button>
+                </div>
               </div>
-              <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-                Credential storage requires <span className="font-medium">EMAIL_TOKEN_ENCRYPTION_KEY</span>. If missing, connect/test/save will fail and no credential will be stored.
-              </div>
+              {selectedAccount.lastError ? (
+                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  Connection error: {selectedAccount.lastError}
+                </div>
+              ) : null}
             </CardContent>
           </Card>
 
           <Card>
             <CardHeader className="pb-3">
-              <CardTitle className="text-sm">Connected Accounts</CardTitle>
+              <CardTitle className="text-sm">Section 3 — Folder Sync</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-2">
+            <CardContent>
               <QuerySection
-                isLoading={emailAccountsQuery.isLoading}
-                isError={emailAccountsQuery.isError}
-                error={emailAccountsQuery.error}
-                isFetching={emailAccountsQuery.isFetching}
-                onRetry={() => emailAccountsQuery.refetch()}
-                isEmpty={emailAccounts.length === 0}
-                emptyTitle="No mailbox accounts"
-                emptyDescription="Connect Microsoft 365 or IMAP to start importing email."
+                isLoading={selectedAccountFoldersQuery.isLoading}
+                isError={selectedAccountFoldersQuery.isError}
+                error={selectedAccountFoldersQuery.error}
+                isFetching={selectedAccountFoldersQuery.isFetching}
+                onRetry={() => selectedAccountFoldersQuery.refetch()}
+                isEmpty={selectedAccountFolders.length === 0}
+                emptyTitle="No folders loaded"
+                emptyDescription="Run Sync Folders to fetch Inbox, Sent, Archive, Junk, Deleted, and custom folders."
               >
-                {emailAccounts.map((account) => (
-                  <button
-                    key={account.id}
-                    className={[
-                      "w-full rounded-lg border px-3 py-2 text-left text-sm transition-colors",
-                      selectedAccountId === account.id ? "border-slate-400 bg-slate-50" : "hover:bg-slate-50",
-                    ].join(" ")}
-                    onClick={() => setSelectedAccountId(account.id)}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="truncate font-medium">{account.displayName || account.emailAddress}</div>
-                      <Badge variant={account.status === "active" ? "secondary" : "outline"}>{account.status}</Badge>
-                    </div>
-                    <div className="truncate text-xs text-slate-500">{account.provider} · {account.emailAddress}</div>
-                    <div className="mt-1 text-xs text-slate-500">Last sync: {formatDateTime(account.lastSyncAt) || "Never"}</div>
-                  </button>
-                ))}
+                <div className="space-y-2">
+                  {selectedAccountFolders.map((folder) => (
+                    <label key={folder.id} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium">{folder.displayName}</div>
+                        <div className="truncate text-xs text-slate-500">
+                          {folder.syncEnabled ? "Enabled" : "Disabled"} · Last synced {formatDateTime(folder.lastSyncAt) || "Never"}
+                        </div>
+                      </div>
+                      <Checkbox checked={folder.syncEnabled} onCheckedChange={(checked) => toggleFolderSyncMutation.mutate({ folderId: folder.id, syncEnabled: Boolean(checked) })} />
+                    </label>
+                  ))}
+                </div>
               </QuerySection>
             </CardContent>
           </Card>
-        </div>
 
-        <Card className="min-h-[420px]">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm">Mailbox Management</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {selectedAccount ? (
-              <>
-                <div className="rounded-lg border bg-slate-50 p-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="space-y-1">
-                      <div className="text-base font-semibold">{selectedAccount.displayName || selectedAccount.emailAddress}</div>
-                      <div className="text-sm text-slate-600">{selectedAccount.provider} · {selectedAccount.emailAddress}</div>
-                      <div className="text-sm text-slate-600">Status: {selectedAccount.status}</div>
-                      <div className="text-sm text-slate-600">Last sync: {formatDateTime(selectedAccount.lastSyncAt) || "Never"}</div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <Button variant="outline" size="sm" onClick={() => syncFoldersMutation.mutate(selectedAccount.id)} disabled={syncFoldersMutation.isPending || selectedAccount.provider === "gmail"}>
-                        Sync Folders
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => importEmailMutation.mutate(selectedAccount.id)}
-                        disabled={importEmailMutation.isPending || selectedAccount.provider === "gmail" || selectedAccount.status === "setup_required" || selectedAccount.status === "disconnected"}
-                      >
-                        Import Now
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={() => disconnectEmailAccountMutation.mutate(selectedAccount.id)} disabled={disconnectEmailAccountMutation.isPending}>
-                        Disconnect
-                      </Button>
-                    </div>
-                  </div>
-                  {selectedAccount.lastError ? (
-                    <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                      Provider setup error: {selectedAccount.lastError}
-                    </div>
-                  ) : null}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm">Section 4 — Import Emails</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label>Import range</Label>
+                  <Select value={importRange} onValueChange={(value) => setImportRange(value as EmailImportRange)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="7d">Last 7 days</SelectItem>
+                      <SelectItem value="30d">Last 30 days</SelectItem>
+                      <SelectItem value="90d">Last 90 days</SelectItem>
+                      <SelectItem value="all">All available emails</SelectItem>
+                      <SelectItem value="custom">Custom date range</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
-
-                <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-                  <div className="space-y-4">
-                    <div className="rounded-lg border p-4">
-                      <div className="mb-3 text-sm font-medium">Sync Folders</div>
-                      <QuerySection
-                        isLoading={selectedAccountFoldersQuery.isLoading}
-                        isError={selectedAccountFoldersQuery.isError}
-                        error={selectedAccountFoldersQuery.error}
-                        isFetching={selectedAccountFoldersQuery.isFetching}
-                        onRetry={() => selectedAccountFoldersQuery.refetch()}
-                        isEmpty={selectedAccountFolders.length === 0}
-                        emptyTitle="No folders loaded"
-                        emptyDescription="Run Sync Folders to fetch provider folders."
-                      >
-                        <div className="space-y-2">
-                          {selectedAccountFolders.map((folder) => (
-                            <label key={folder.id} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-3">
-                              <div className="min-w-0">
-                                <div className="truncate text-sm font-medium">{folder.displayName}</div>
-                                <div className="truncate text-xs text-slate-500">{folder.folderType} · Last sync {formatDateTime(folder.lastSyncAt) || "Never"}</div>
-                              </div>
-                              <Checkbox
-                                checked={folder.syncEnabled}
-                                onCheckedChange={(checked) => toggleFolderSyncMutation.mutate({ folderId: folder.id, syncEnabled: Boolean(checked) })}
-                              />
-                            </label>
-                          ))}
-                        </div>
-                      </QuerySection>
-                    </div>
-
-                    <div className="rounded-lg border p-4">
-                      <div className="mb-3 text-sm font-medium">Sync Logs</div>
-                      <QuerySection
-                        isLoading={selectedAccountLogsQuery.isLoading}
-                        isError={selectedAccountLogsQuery.isError}
-                        error={selectedAccountLogsQuery.error}
-                        isFetching={selectedAccountLogsQuery.isFetching}
-                        onRetry={() => selectedAccountLogsQuery.refetch()}
-                        isEmpty={selectedAccountLogs.length === 0}
-                        emptyTitle="No sync logs yet"
-                        emptyDescription="Import Now and Sync Folders results will appear here."
-                      >
-                        <div className="space-y-2">
-                          {selectedAccountLogs.map((log) => (
-                            <div key={log.id} className="rounded-lg border px-3 py-3 text-sm">
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="font-medium">Status: {log.status}</div>
-                                <div className="text-xs text-slate-500">{formatDateTime(log.startedAt)}</div>
-                              </div>
-                              <div className="mt-2 text-xs text-slate-600">Imported: {log.importedCount}</div>
-                              <div className="text-xs text-slate-600">Skipped duplicates: {log.skippedDuplicateCount}</div>
-                              {log.finishedAt ? <div className="text-xs text-slate-600">Finished: {formatDateTime(log.finishedAt)}</div> : null}
-                              {log.errorMessage ? <div className="mt-2 text-xs text-red-600">{log.errorMessage}</div> : null}
-                            </div>
-                          ))}
-                        </div>
-                      </QuerySection>
-                    </div>
-                  </div>
-
-                  <div className="space-y-4">
-                    <Card>
-                      <CardHeader className="pb-3">
-                        <CardTitle className="text-sm">Active Sync Scope</CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-2 text-sm text-slate-600">
-                        <div>
-                          Sync-enabled folders:{" "}
-                          {selectedAccountSyncEnabledFolders.length
-                            ? selectedAccountSyncEnabledFolders.map((folder) => folder.displayName).join(", ")
-                            : "None"}
-                        </div>
-                        <div>Mailbox type: {selectedAccount.mailboxType || "provider"}</div>
-                        <div>Token expiry: {formatDateTime(selectedAccount.tokenExpiresAt) || "N/A"}</div>
-                      </CardContent>
-                    </Card>
-
-                    <Card>
-                      <CardHeader className="pb-3">
-                        <CardTitle className="text-sm">Security</CardTitle>
-                      </CardHeader>
-                      <CardContent className="space-y-2 text-sm text-slate-600">
-                        <div>Tokens and IMAP passwords are never shown again in the UI.</div>
-                        <div>Microsoft / Gmail use OAuth tokens only.</div>
-                        <div>Gmail password login is not supported.</div>
-                        <div>Only partner/admin users should manage mailbox credentials.</div>
-                      </CardContent>
-                    </Card>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="rounded-lg border border-dashed bg-slate-50 px-4 py-12 text-center">
-                <div className="text-sm font-medium text-slate-900">No mailbox selected</div>
-                <div className="mt-1 text-sm text-slate-500">Choose an existing mailbox account or connect a new mailbox.</div>
-                <div className="mt-4">
-                  <Button onClick={() => setConnectDialogOpen(true)}>Connect Mailbox</Button>
+                <div className="space-y-1.5">
+                  <Label>Max emails per import</Label>
+                  <Select value={String(importMaxEmails)} onValueChange={(value) => setImportMaxEmails(Number(value) as 100 | 500 | 1000)}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="100">100</SelectItem>
+                      <SelectItem value="500">500</SelectItem>
+                      <SelectItem value="1000">1000</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+              {importRange === "custom" ? (
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-1.5">
+                    <Label>From</Label>
+                    <Input type="datetime-local" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>To</Label>
+                    <Input type="datetime-local" value={customTo} onChange={(e) => setCustomTo(e.target.value)} />
+                  </div>
+                </div>
+              ) : null}
+              <div className="flex flex-wrap items-center gap-2">
+                <Button onClick={() => importEmailMutation.mutate(selectedAccount.id)} disabled={!canImportSelectedAccount || importEmailMutation.isPending}>
+                  Import Now
+                </Button>
+                <div className="text-xs text-slate-500">Default recommendation: Last 30 days + max 500 emails.</div>
+              </div>
+              <div className="rounded-lg border bg-slate-50 p-3 text-sm text-slate-600">
+                <div>Sync-enabled folders: {selectedAccountSyncEnabledFolders.length ? selectedAccountSyncEnabledFolders.map((folder) => folder.displayName).join(", ") : "None"}</div>
+                <div className="mt-1">Last import result: {selectedAccountLastLog ? `${selectedAccountLastLog.status} at ${formatDateTime(selectedAccountLastLog.startedAt)}` : "No import yet"}</div>
+                {selectedAccountLastLog ? (
+                  <div className="mt-1">
+                    Imported: {selectedAccountLastLog.importedCount} · Skipped duplicates: {selectedAccountLastLog.skippedDuplicateCount} · Failed: {selectedAccountLastLog.errorMessage ? 1 : 0}
+                  </div>
+                ) : null}
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm">Section 5 — Sync Logs</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <QuerySection
+                isLoading={selectedAccountLogsQuery.isLoading}
+                isError={selectedAccountLogsQuery.isError}
+                error={selectedAccountLogsQuery.error}
+                isFetching={selectedAccountLogsQuery.isFetching}
+                onRetry={() => selectedAccountLogsQuery.refetch()}
+                isEmpty={selectedAccountLogs.length === 0}
+                emptyTitle="No sync logs yet"
+                emptyDescription="Sync Folders and Import Emails results will appear here."
+              >
+                <div className="space-y-2">
+                  {selectedAccountLogs.map((log) => (
+                    <div key={log.id} className="rounded-lg border px-3 py-3 text-sm">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="font-medium">{providerLabel(selectedAccount.provider)} · {log.status}</div>
+                        <div className="text-xs text-slate-500">{formatDateTime(log.startedAt)}</div>
+                      </div>
+                      <div className="mt-2 text-xs text-slate-600">Imported: {log.importedCount}</div>
+                      <div className="text-xs text-slate-600">Skipped duplicates: {log.skippedDuplicateCount}</div>
+                      <div className="text-xs text-slate-600">Failed: {log.errorMessage ? 1 : 0}</div>
+                      {log.finishedAt ? <div className="text-xs text-slate-600">Finished: {formatDateTime(log.finishedAt)}</div> : null}
+                      {log.errorMessage ? <div className="mt-2 text-xs text-red-600">{log.errorMessage}</div> : null}
+                    </div>
+                  ))}
+                </div>
+              </QuerySection>
+            </CardContent>
+          </Card>
+        </>
+      ) : (
+        <div className="rounded-lg border border-dashed bg-slate-50 px-4 py-12 text-center">
+          <div className="text-sm font-medium text-slate-900">No mailbox selected</div>
+          <div className="mt-1 text-sm text-slate-500">Choose an existing mailbox account or connect a new mailbox.</div>
+          <div className="mt-4">
+            <Button onClick={() => setConnectDialogOpen(true)}>Connect Mailbox</Button>
+          </div>
+        </div>
+      )}
 
       <Dialog open={connectDialogOpen} onOpenChange={setConnectDialogOpen}>
         <DialogContent className="flex max-h-[85vh] max-w-lg flex-col overflow-hidden">
@@ -551,15 +657,22 @@ export function EmailSettingsPanel() {
               <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
                 <div className="text-sm font-medium">Microsoft 365 / Outlook</div>
                 <div className="text-xs text-slate-500">
-                  Connect with Microsoft to authorize read-only mailbox import. Tokens are encrypted before storage and the UI never returns token values.
+                  User clicks Connect with Microsoft, signs in on Microsoft login, approves read-only access, returns to Lawcaspro, then the mailbox becomes connected for folder sync and import.
                 </div>
-                <div className="rounded-lg border bg-white p-3 text-xs text-slate-600 space-y-1">
-                  <div>Required env: MICROSOFT_CLIENT_ID</div>
-                  <div>MICROSOFT_CLIENT_SECRET</div>
-                  <div>MICROSOFT_REDIRECT_URI</div>
-                  <div>EMAIL_TOKEN_ENCRYPTION_KEY</div>
-                </div>
-                <Button onClick={() => startMicrosoftConnectMutation.mutate()} disabled={startMicrosoftConnectMutation.isPending}>
+                {microsoftMissing.length ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                    <div className="font-medium">Microsoft 365 setup is incomplete.</div>
+                    <div className="mt-2">Missing:</div>
+                    <ul className="mt-1 list-disc pl-5">
+                      {microsoftMissing.map((item) => <li key={item}>{item}</li>)}
+                    </ul>
+                  </div>
+                ) : (
+                  <div className="rounded-lg border bg-white p-3 text-xs text-slate-600">
+                    OAuth is configured. Tokens are encrypted before storage and never returned by the API.
+                  </div>
+                )}
+                <Button onClick={() => startMicrosoftConnectMutation.mutate()} disabled={startMicrosoftConnectMutation.isPending || microsoftMissing.length > 0}>
                   Connect with Microsoft
                 </Button>
               </div>

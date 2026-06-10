@@ -41,6 +41,7 @@ import {
   listEmailAccounts,
   listEmailFoldersForAccount,
   listEmailSyncLogsForAccount,
+  listLinkedCaseSummariesByIds,
   listDraftTaskIds,
   listDrafts,
   listMailboxes,
@@ -66,12 +67,14 @@ import {
   updateRemark,
   updateTask,
   buildCaseCommunicationTimeline,
+  type LinkedCaseSummary,
   type DbConn,
 } from "./communication.repository.js";
-import { decryptEmailSecret, encryptEmailSecret, ensureEmailEncryptionConfigured, signEmailState, verifyEmailState } from "./email-crypto.js";
+import { decryptEmailSecret, encryptEmailSecret, ensureEmailEncryptionConfigured, isEmailEncryptionConfigured, signEmailState, verifyEmailState } from "./email-crypto.js";
 import { ensureAbsoluteReturnTo, type ImportedMessage } from "./email-provider-utils.js";
 import {
   buildMicrosoftConnectUrl,
+  getMicrosoftOauthSetupStatus,
   ensureMicrosoftOauthConfigured,
   exchangeMicrosoftCodeForTokens,
   fetchMicrosoftFolderMessages,
@@ -95,6 +98,66 @@ function isLawyerRoleName(roleName: string): boolean {
   return n.includes("lawyer") || n.includes("partner");
 }
 
+type EmailImportOptions = {
+  range: "7d" | "30d" | "90d" | "all" | "custom";
+  maxEmails: 100 | 500 | 1000;
+  from?: string | null;
+  to?: string | null;
+};
+
+function normalizeImportOptions(input?: Partial<EmailImportOptions> | null): EmailImportOptions {
+  const range = input?.range ?? "30d";
+  const maxEmails = input?.maxEmails ?? 500;
+  return {
+    range,
+    maxEmails: maxEmails === 100 || maxEmails === 500 || maxEmails === 1000 ? maxEmails : 500,
+    from: input?.from ?? null,
+    to: input?.to ?? null,
+  };
+}
+
+function resolveImportWindow(options: EmailImportOptions) {
+  const until = options.to ? new Date(options.to) : null;
+  if (until && Number.isNaN(until.getTime())) {
+    throw new ApiError({ status: 400, code: "EMAIL_IMPORT_INVALID_TO", message: "Import end date is invalid." });
+  }
+  if (options.range === "all") {
+    return { limit: options.maxEmails, since: null as Date | null, until };
+  }
+  if (options.range === "custom") {
+    const since = options.from ? new Date(options.from) : null;
+    if (!since || Number.isNaN(since.getTime())) {
+      throw new ApiError({ status: 400, code: "EMAIL_IMPORT_INVALID_FROM", message: "Import start date is invalid." });
+    }
+    if (!until) {
+      throw new ApiError({ status: 400, code: "EMAIL_IMPORT_INVALID_TO", message: "Import end date is invalid." });
+    }
+    if (since.getTime() > until.getTime()) {
+      throw new ApiError({ status: 400, code: "EMAIL_IMPORT_INVALID_RANGE", message: "Import start date must be before end date." });
+    }
+    return { limit: options.maxEmails, since, until };
+  }
+  const days = options.range === "7d" ? 7 : options.range === "90d" ? 90 : 30;
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  return { limit: options.maxEmails, since, until };
+}
+
+function buildFriendlyImapError(error: unknown): ApiError {
+  if (error instanceof ApiError && error.code === "EMAIL_ENCRYPTION_NOT_CONFIGURED") return error;
+  return new ApiError({
+    status: 400,
+    code: "IMAP_CONNECTION_FAILED",
+    message: "Unable to connect to IMAP server. Please check host, port, username, password, and SSL setting.",
+  });
+}
+
+async function attachLinkedCaseSummary<T extends { linkedCaseId?: number | null }>(r: DbConn, firmId: number, row: T): Promise<T & { linkedCase: LinkedCaseSummary | null }> {
+  const caseId = typeof row.linkedCaseId === "number" ? row.linkedCaseId : null;
+  if (!caseId) return { ...row, linkedCase: null };
+  const [summary] = await listLinkedCaseSummariesByIds(r, firmId, [caseId]);
+  return { ...row, linkedCase: summary ?? null };
+}
+
 export async function listCommunicationMailboxes(args: { r: DbConn; firmId: number; channel?: string }) {
   return listMailboxes(args.r, args.firmId, args.channel);
 }
@@ -114,7 +177,7 @@ export async function listCommunicationMessages(args: {
   limit: number;
   offset: number;
 }) {
-  return listMessages(args.r, args.firmId, {
+  const rows = await listMessages(args.r, args.firmId, {
     status: args.filter.status,
     isBatch: args.filter.isBatch,
     assignedTo: args.filter.assignedTo ?? "any",
@@ -125,13 +188,23 @@ export async function listCommunicationMessages(args: {
     limit: args.limit,
     offset: args.offset,
   });
+  const linkedCaseIds = rows
+    .map((row) => (typeof row.message.linkedCaseId === "number" ? row.message.linkedCaseId : null))
+    .filter((value): value is number => typeof value === "number");
+  const summaries = await listLinkedCaseSummariesByIds(args.r, args.firmId, linkedCaseIds);
+  const summaryById = new Map(summaries.map((summary) => [summary.id, summary]));
+  return rows.map((row) => ({
+    ...row,
+    linkedCase: row.message.linkedCaseId ? (summaryById.get(row.message.linkedCaseId) ?? null) : null,
+  }));
 }
 
 export async function getCommunicationMessage(args: { r: DbConn; firmId: number; messageId: number }) {
   const message = await getMessageById(args.r, args.firmId, args.messageId);
   if (!message) return null;
   const assignees = await listActiveAssigneesForMessage(args.r, args.firmId, message.id);
-  return { ...message, team: buildTeamFromAssignees(assignees) };
+  const base = { ...message, team: buildTeamFromAssignees(assignees) };
+  return await attachLinkedCaseSummary(args.r, args.firmId, base);
 }
 
 function buildTeamFromAssignees(rows: Array<{ assignmentRole: string; userId: number }>) {
@@ -843,7 +916,7 @@ async function storeImportedMessage(args: {
   return { status: "imported" as const, messageId: created.id };
 }
 
-async function importMessagesForAccount(args: { r: DbConn; req: AuthRequest; accountId: number }) {
+async function importMessagesForAccount(args: { r: DbConn; req: AuthRequest; accountId: number; options: EmailImportOptions }) {
   const firmId = args.req.firmId!;
   const account = await getAccountOrThrow(args.r, firmId, args.accountId);
   const enabledFolders = (await listEmailFoldersForAccount(args.r, firmId, args.accountId)).filter((folder) => folder.syncEnabled);
@@ -865,18 +938,34 @@ async function importMessagesForAccount(args: { r: DbConn; req: AuthRequest; acc
     skippedDuplicateCount: 0,
   });
 
+  const importWindow = resolveImportWindow(args.options);
   let importedCount = 0;
   let skippedDuplicateCount = 0;
+  let failedCount = 0;
+  let firstFailureMessage: string | null = null;
+  let remaining = importWindow.limit;
 
   try {
     if (account.provider === "microsoft_graph") {
       const { accessToken, account: currentAccount } = await ensureMicrosoftAccessToken({ r: args.r, firmId, accountId: args.accountId });
       for (const folder of enabledFolders) {
-        const messages = await fetchMicrosoftFolderMessages(accessToken, folder.providerFolderId, 100);
+        if (remaining <= 0) break;
+        const messages = await fetchMicrosoftFolderMessages(accessToken, folder.providerFolderId, {
+          limit: remaining,
+          since: importWindow.since,
+          until: importWindow.until,
+        });
         for (const item of messages) {
-          const result = await storeImportedMessage({ r: args.r, req: args.req, account: currentAccount, folder, message: item });
-          if (result.status === "imported") importedCount += 1;
-          else skippedDuplicateCount += 1;
+          try {
+            const result = await storeImportedMessage({ r: args.r, req: args.req, account: currentAccount, folder, message: item });
+            if (result.status === "imported") importedCount += 1;
+            else skippedDuplicateCount += 1;
+          } catch (error) {
+            failedCount += 1;
+            firstFailureMessage = firstFailureMessage ?? (error instanceof Error ? error.message : "Email import failed");
+          }
+          remaining -= 1;
+          if (remaining <= 0) break;
         }
         await updateEmailFolder(args.r, firmId, folder.id, { lastSyncAt: now() });
       }
@@ -890,17 +979,34 @@ async function importMessagesForAccount(args: { r: DbConn; req: AuthRequest; acc
         });
       }
       for (const folder of enabledFolders) {
-        const messages = await fetchImapFolderMessages({
-          host: account.imapHost,
-          port: account.imapPort,
-          username: account.imapUsername,
-          password,
-          useTls: account.useTls ?? true,
-        }, folder.providerFolderId, 50);
+        if (remaining <= 0) break;
+        let messages;
+        try {
+          messages = await fetchImapFolderMessages({
+            host: account.imapHost,
+            port: account.imapPort,
+            username: account.imapUsername,
+            password,
+            useTls: account.useTls ?? true,
+          }, folder.providerFolderId, {
+            limit: remaining,
+            since: importWindow.since,
+            until: importWindow.until,
+          });
+        } catch (error) {
+          throw buildFriendlyImapError(error);
+        }
         for (const item of messages) {
-          const result = await storeImportedMessage({ r: args.r, req: args.req, account, folder, message: item });
-          if (result.status === "imported") importedCount += 1;
-          else skippedDuplicateCount += 1;
+          try {
+            const result = await storeImportedMessage({ r: args.r, req: args.req, account, folder, message: item });
+            if (result.status === "imported") importedCount += 1;
+            else skippedDuplicateCount += 1;
+          } catch (error) {
+            failedCount += 1;
+            firstFailureMessage = firstFailureMessage ?? (error instanceof Error ? error.message : "Email import failed");
+          }
+          remaining -= 1;
+          if (remaining <= 0) break;
         }
         await updateEmailFolder(args.r, firmId, folder.id, { lastSyncAt: now() });
       }
@@ -912,25 +1018,26 @@ async function importMessagesForAccount(args: { r: DbConn; req: AuthRequest; acc
       });
     }
 
+    const completedStatus = failedCount > 0 ? "partial" : "success";
     await updateEmailSyncLog(args.r, firmId, syncLog.id, {
       finishedAt: now(),
-      status: "success",
+      status: completedStatus,
       importedCount,
       skippedDuplicateCount,
-      errorMessage: null,
+      errorMessage: firstFailureMessage,
     });
     await updateEmailAccount(args.r, firmId, args.accountId, {
-      status: "active",
+      status: failedCount > 0 ? "error" : "active",
       lastSyncAt: now(),
-      lastError: null,
+      lastError: firstFailureMessage,
     });
     await writeCommunicationAuditLog({
       r: args.r,
       req: args.req,
-      action: "communication.email_sync.success",
-      newValue: { accountId: args.accountId, syncLogId: syncLog.id, importedCount, skippedDuplicateCount },
+      action: failedCount > 0 ? "communication.email_sync.failed" : "communication.email_sync.success",
+      newValue: { accountId: args.accountId, syncLogId: syncLog.id, importedCount, skippedDuplicateCount, failedCount, options: args.options, errorMessage: firstFailureMessage },
     });
-    return { ok: true as const, importedCount, skippedDuplicateCount, syncLogId: syncLog.id };
+    return { ok: failedCount === 0 as const, importedCount, skippedDuplicateCount, failedCount, syncLogId: syncLog.id, status: completedStatus };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Email import failed";
     await updateEmailSyncLog(args.r, firmId, syncLog.id, {
@@ -948,7 +1055,7 @@ async function importMessagesForAccount(args: { r: DbConn; req: AuthRequest; acc
       r: args.r,
       req: args.req,
       action: "communication.email_sync.failed",
-      newValue: { accountId: args.accountId, syncLogId: syncLog.id, importedCount, skippedDuplicateCount, errorMessage: message },
+      newValue: { accountId: args.accountId, syncLogId: syncLog.id, importedCount, skippedDuplicateCount, failedCount, options: args.options, errorMessage: message },
     });
     throw error;
   }
@@ -967,6 +1074,20 @@ export async function listEmailFolders(args: { r: DbConn; req: AuthRequest; acco
 export async function listEmailSyncLogs(args: { r: DbConn; req: AuthRequest; accountId: number; limit: number }) {
   await getAccountOrThrow(args.r, args.req.firmId!, args.accountId);
   return listEmailSyncLogsForAccount(args.r, args.req.firmId!, args.accountId, args.limit);
+}
+
+export async function getEmailProviderSetupStatus(_args: { req: AuthRequest }) {
+  const microsoft = getMicrosoftOauthSetupStatus();
+  const encryptionConfigured = isEmailEncryptionConfigured();
+  return {
+    encryptionConfigured,
+    encryptionMissing: encryptionConfigured ? [] : ["EMAIL_TOKEN_ENCRYPTION_KEY"],
+    microsoft,
+    gmail: {
+      available: false,
+      message: "Gmail coming soon",
+    },
+  };
 }
 
 export async function lookupCasesForCommunication(args: { r: DbConn; req: AuthRequest; q: string; limit: number }) {
@@ -1081,13 +1202,18 @@ export async function syncEmailAccountFolders(args: { r: DbConn; req: AuthReques
         message: "IMAP mailbox configuration is incomplete.",
       });
     }
-    const folders = await fetchImapFolders({
-      host: account.imapHost,
-      port: account.imapPort,
-      username: account.imapUsername,
-      password,
-      useTls: account.useTls ?? true,
-    });
+    let folders;
+    try {
+      folders = await fetchImapFolders({
+        host: account.imapHost,
+        port: account.imapPort,
+        username: account.imapUsername,
+        password,
+        useTls: account.useTls ?? true,
+      });
+    } catch (error) {
+      throw buildFriendlyImapError(error);
+    }
     const saved = await upsertProviderFolders({ r: args.r, firmId, accountId: args.accountId, folders });
     await updateEmailAccount(args.r, firmId, args.accountId, { status: "active", lastError: null });
     return saved;
@@ -1105,13 +1231,17 @@ export async function testImapMailbox(args: {
 }) {
   requireMailboxManagementRole(args.req);
   ensureEmailEncryptionConfigured();
-  return await testImapConnection({
-    host: args.input.host,
-    port: args.input.port,
-    username: args.input.username,
-    password: args.input.password,
-    useTls: args.input.useTls,
-  });
+  try {
+    return await testImapConnection({
+      host: args.input.host,
+      port: args.input.port,
+      username: args.input.username,
+      password: args.input.password,
+      useTls: args.input.useTls,
+    });
+  } catch (error) {
+    throw buildFriendlyImapError(error);
+  }
 }
 
 export async function connectImapMailbox(args: {
@@ -1121,13 +1251,18 @@ export async function connectImapMailbox(args: {
 }) {
   requireMailboxManagementRole(args.req);
   ensureEmailEncryptionConfigured();
-  const folders = await fetchImapFolders({
-    host: args.input.host,
-    port: args.input.port,
-    username: args.input.username,
-    password: args.input.password,
-    useTls: args.input.useTls,
-  });
+  let folders;
+  try {
+    folders = await fetchImapFolders({
+      host: args.input.host,
+      port: args.input.port,
+      username: args.input.username,
+      password: args.input.password,
+      useTls: args.input.useTls,
+    });
+  } catch (error) {
+    throw buildFriendlyImapError(error);
+  }
   const existing = await getEmailAccountByProviderEmail(args.r, args.req.firmId!, "imap", args.input.emailAddress.trim());
   const saved = existing
     ? await updateEmailAccount(args.r, args.req.firmId!, existing.id, {
@@ -1209,7 +1344,7 @@ export async function patchEmailFolderDetails(args: { r: DbConn; req: AuthReques
   return updated ?? folder;
 }
 
-export async function importEmailNow(args: { r: DbConn; req: AuthRequest; accountId: number }) {
+export async function importEmailNow(args: { r: DbConn; req: AuthRequest; accountId: number; options?: Partial<EmailImportOptions> | null }) {
   requireMailboxManagementRole(args.req);
   const account = await getAccountOrThrow(args.r, args.req.firmId!, args.accountId);
   if (account.status === "setup_required") {
@@ -1219,7 +1354,7 @@ export async function importEmailNow(args: { r: DbConn; req: AuthRequest; accoun
       message: "Mailbox setup is incomplete. Please complete provider connection first.",
     });
   }
-  return await importMessagesForAccount(args);
+  return await importMessagesForAccount({ ...args, options: normalizeImportOptions(args.options) });
 }
 
 export async function listMessageTasks(args: { r: DbConn; firmId: number; messageId: number }) {

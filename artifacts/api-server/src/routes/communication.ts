@@ -4,6 +4,7 @@ import {
   DraftCreateSchema,
   DraftPatchSchema,
   EmailAccountPatchSchema,
+  EmailImportRequestSchema,
   ManualEmailCreateSchema,
   MessageArchivePatchSchema,
   MessageAssigneesPatchSchema,
@@ -41,6 +42,7 @@ import {
   createMessageRemark,
   createMessageTask,
   disconnectEmailAccount,
+  getEmailProviderSetupStatus,
   deleteMessageRemark,
   setMessageResponsibleTeam,
   setTaskResponsibleTeam,
@@ -398,6 +400,15 @@ router.get("/communication/email/microsoft/connect", requireAuth, requireFirmUse
   }
 });
 
+router.get("/communication/email/setup-status", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
+  try {
+    const result = await getEmailProviderSetupStatus({ req });
+    res.json(result);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
+});
+
 router.get("/communication/email/microsoft/callback", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -611,8 +622,10 @@ router.post("/communication/email/accounts/:accountId/import-now", requireAuth, 
   const idStr = one((req.params as any).accountId);
   const id = idStr ? parseInt(idStr, 10) : NaN;
   if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid account id" }); return; }
+  const parsed = EmailImportRequestSchema.safeParse(req.body ?? {});
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
   try {
-    const result = await importEmailNow({ r, req, accountId: id });
+    const result = await importEmailNow({ r, req, accountId: id, options: parsed.data });
     res.json(result);
   } catch (error) {
     sendProviderError(res, error);

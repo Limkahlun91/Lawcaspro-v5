@@ -1,7 +1,10 @@
 import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   casesTable,
+  casePurchasersTable,
+  clientsTable,
   caseAssignmentsTable,
+  projectsTable,
   developersTable,
   rolesTable,
   usersTable,
@@ -21,6 +24,17 @@ import {
 } from "@workspace/db";
 
 export type DbConn = typeof import("@workspace/db").db;
+
+export type LinkedCaseSummary = {
+  id: number;
+  referenceNo: string | null;
+  caseType: string | null;
+  purchaserNames: string[];
+  projectName: string | null;
+  developerName: string | null;
+  propertyAddress: string | null;
+  parcelNo: string | null;
+};
 
 export function normalizeCaseRefInput(v: string): string {
   return String(v ?? "").trim();
@@ -243,6 +257,70 @@ export async function listMessages(
     .offset(args.offset);
 
   return rows;
+}
+
+export async function listLinkedCaseSummariesByIds(r: DbConn, firmId: number, caseIds: number[]): Promise<LinkedCaseSummary[]> {
+  const uniqueCaseIds = Array.from(new Set(caseIds.filter((id) => Number.isFinite(id))));
+  if (!uniqueCaseIds.length) return [];
+
+  const rows = await r
+    .select({
+      id: casesTable.id,
+      referenceNo: casesTable.referenceNo,
+      caseType: casesTable.caseType,
+      projectName: projectsTable.name,
+      developerName: developersTable.name,
+      parcelNo: casesTable.parcelNo,
+      propertyDetails: casesTable.propertyDetails,
+    })
+    .from(casesTable)
+    .leftJoin(projectsTable, and(eq(projectsTable.firmId, firmId), eq(projectsTable.id, casesTable.projectId)))
+    .leftJoin(developersTable, and(eq(developersTable.firmId, firmId), eq(developersTable.id, casesTable.developerId)))
+    .where(and(eq(casesTable.firmId, firmId), inArray(casesTable.id, uniqueCaseIds)));
+
+  const purchasers = await r
+    .select({
+      caseId: casePurchasersTable.caseId,
+      orderNo: casePurchasersTable.orderNo,
+      name: clientsTable.name,
+    })
+    .from(casePurchasersTable)
+    .innerJoin(clientsTable, and(eq(clientsTable.firmId, firmId), eq(clientsTable.id, casePurchasersTable.clientId)))
+    .where(inArray(casePurchasersTable.caseId, uniqueCaseIds))
+    .orderBy(asc(casePurchasersTable.caseId), asc(casePurchasersTable.orderNo));
+
+  const purchaserNamesByCaseId = new Map<number, string[]>();
+  for (const purchaser of purchasers) {
+    const list = purchaserNamesByCaseId.get(purchaser.caseId) ?? [];
+    if (purchaser.name) list.push(String(purchaser.name));
+    purchaserNamesByCaseId.set(purchaser.caseId, list);
+  }
+
+  return rows.map((row) => {
+    const propertyDetails = (row.propertyDetails && typeof row.propertyDetails === "object")
+      ? row.propertyDetails as Record<string, unknown>
+      : null;
+    const propertyAddress =
+      (typeof propertyDetails?.propertyAddress === "string" && propertyDetails.propertyAddress.trim()) ||
+      (typeof propertyDetails?.parcelNo === "string" && propertyDetails.parcelNo.trim()) ||
+      null;
+
+    return {
+      id: row.id,
+      referenceNo: row.referenceNo ?? null,
+      caseType: row.caseType ?? null,
+      purchaserNames: purchaserNamesByCaseId.get(row.id) ?? [],
+      projectName: row.projectName ?? null,
+      developerName: row.developerName ?? null,
+      propertyAddress,
+      parcelNo: row.parcelNo ?? null,
+    };
+  });
+}
+
+export async function getLinkedCaseSummaryById(r: DbConn, firmId: number, caseId: number): Promise<LinkedCaseSummary | null> {
+  const [summary] = await listLinkedCaseSummariesByIds(r, firmId, [caseId]);
+  return summary ?? null;
 }
 
 export async function listUsersByIds(r: DbConn, firmId: number, userIds: number[]) {
@@ -819,13 +897,11 @@ export async function lookupCases(r: DbConn, firmId: number, q: string, limit: n
   const rows = await r
     .select({
       id: casesTable.id,
-      referenceNo: casesTable.referenceNo,
-      parcelNo: casesTable.parcelNo,
       status: casesTable.status,
-      developerName: developersTable.name,
       createdAt: casesTable.createdAt,
     })
     .from(casesTable)
+    .leftJoin(projectsTable, and(eq(projectsTable.firmId, firmId), eq(projectsTable.id, casesTable.projectId)))
     .leftJoin(developersTable, and(eq(developersTable.firmId, firmId), eq(developersTable.id, casesTable.developerId)))
     .where(and(
       eq(casesTable.firmId, firmId),
@@ -834,13 +910,39 @@ export async function lookupCases(r: DbConn, firmId: number, q: string, limit: n
         sql`${casesTable.parcelNo} ILIKE ${like}`,
         sql`${casesTable.borrowers}::text ILIKE ${like}`,
         sql`${casesTable.propertyDetails}::text ILIKE ${like}`,
+        sql`${projectsTable.name} ILIKE ${like}`,
         sql`${developersTable.name} ILIKE ${like}`,
+        sql`EXISTS (
+          SELECT 1
+          FROM case_purchasers cp
+          INNER JOIN clients cl
+            ON cl.firm_id = ${firmId}
+           AND cl.id = cp.client_id
+          WHERE cp.case_id = ${casesTable.id}
+            AND cl.name ILIKE ${like}
+        )`,
       )
     ))
     .orderBy(desc(casesTable.createdAt), desc(casesTable.id))
     .limit(Math.min(limit, 50));
 
-  return rows.map((r) => ({ id: r.id, caseRef: r.referenceNo ?? r.parcelNo ?? null, status: r.status, developerName: r.developerName ?? null, createdAt: r.createdAt }));
+  const summaries = await listLinkedCaseSummariesByIds(r, firmId, rows.map((row) => row.id));
+  const summaryById = new Map(summaries.map((summary) => [summary.id, summary]));
+
+  return rows.map((row) => {
+    const summary = summaryById.get(row.id) ?? null;
+    return {
+      id: row.id,
+      caseRef: summary?.referenceNo ?? summary?.parcelNo ?? null,
+      status: row.status,
+      purchaserNames: summary?.purchaserNames ?? [],
+      projectName: summary?.projectName ?? null,
+      developerName: summary?.developerName ?? null,
+      propertyAddress: summary?.propertyAddress ?? null,
+      parcelNo: summary?.parcelNo ?? null,
+      createdAt: row.createdAt,
+    };
+  });
 }
 
 export async function getCaseRefDisplay(r: DbConn, firmId: number, caseId: number): Promise<{ caseRef: string | null; parcelNo: string | null; referenceNo: string | null } | null> {

@@ -33,11 +33,30 @@ type GraphFolder = {
   folderType: string;
 };
 
+type GraphFetchWindow = {
+  limit: number;
+  since?: Date | null;
+  until?: Date | null;
+};
+
 function readMicrosoftConfig() {
   const clientId = String(process.env.MICROSOFT_CLIENT_ID ?? "").trim();
   const clientSecret = String(process.env.MICROSOFT_CLIENT_SECRET ?? "").trim();
   const redirectUri = String(process.env.MICROSOFT_REDIRECT_URI ?? "").trim();
   return { clientId, clientSecret, redirectUri };
+}
+
+export function getMicrosoftOauthSetupStatus() {
+  const { clientId, clientSecret, redirectUri } = readMicrosoftConfig();
+  const missing = [
+    !clientId ? "MICROSOFT_CLIENT_ID" : null,
+    !clientSecret ? "MICROSOFT_CLIENT_SECRET" : null,
+    !redirectUri ? "MICROSOFT_REDIRECT_URI" : null,
+  ].filter((value): value is string => Boolean(value));
+  return {
+    configured: missing.length === 0,
+    missing,
+  };
 }
 
 export function ensureMicrosoftOauthConfigured() {
@@ -232,10 +251,10 @@ async function fetchMicrosoftAttachments(accessToken: string, providerMessageId:
     .filter((row): row is NonNullable<typeof row> => Boolean(row));
 }
 
-export async function fetchMicrosoftFolderMessages(accessToken: string, providerFolderId: string, limit = 100): Promise<ImportedMessage[]> {
+export async function fetchMicrosoftFolderMessages(accessToken: string, providerFolderId: string, window: GraphFetchWindow): Promise<ImportedMessage[]> {
   const out: ImportedMessage[] = [];
   let url = `${MICROSOFT_GRAPH_BASE}/me/mailFolders/${providerFolderId}/messages?$top=50&$orderby=receivedDateTime DESC&$select=id,conversationId,internetMessageId,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,sentDateTime,bodyPreview,body,hasAttachments,isRead,parentFolderId`;
-  while (url && out.length < limit) {
+  while (url && out.length < window.limit) {
     const page = await fetchGraphJson<{
       value?: Array<Record<string, unknown>>;
       "@odata.nextLink"?: string;
@@ -244,6 +263,16 @@ export async function fetchMicrosoftFolderMessages(accessToken: string, provider
     for (const item of page.value ?? []) {
       const providerMessageId = String(item.id ?? "").trim();
       if (!providerMessageId) continue;
+      const receivedAt = toDateOrNull(String(item.receivedDateTime ?? ""));
+      const sentAt = toDateOrNull(String(item.sentDateTime ?? ""));
+      const compareAt = receivedAt ?? sentAt;
+      if (window.until && compareAt && compareAt.getTime() > window.until.getTime()) {
+        continue;
+      }
+      if (window.since && compareAt && compareAt.getTime() < window.since.getTime()) {
+        url = "";
+        break;
+      }
       const sender = parseGraphSender(item.from);
       const bodyHtml = typeof item.body === "object" && item.body && String((item.body as any).contentType ?? "").toLowerCase() === "html"
         ? String((item.body as any).content ?? "")
@@ -269,14 +298,14 @@ export async function fetchMicrosoftFolderMessages(accessToken: string, provider
         bodyPreview: clampPreview(String(item.bodyPreview ?? "").trim() || bodyText),
         bodyText,
         bodyHtml,
-        receivedAt: toDateOrNull(String(item.receivedDateTime ?? "")),
-        sentAt: toDateOrNull(String(item.sentDateTime ?? "")),
+        receivedAt,
+        sentAt,
         attachments,
       });
-      if (out.length >= limit) break;
+      if (out.length >= window.limit) break;
     }
 
-    url = out.length >= limit ? "" : String(page["@odata.nextLink"] ?? "").trim();
+    url = out.length >= window.limit ? "" : String(page["@odata.nextLink"] ?? "").trim();
   }
   return out;
 }
