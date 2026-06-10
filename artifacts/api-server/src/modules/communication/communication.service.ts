@@ -12,6 +12,7 @@ import {
   getMailboxById,
   getMessageById,
   getOrCreateDefaultManualEmailMailbox,
+  getReadByMessageUser,
   getRemarkById,
   getTaskById,
   insertEmailAccount,
@@ -556,14 +557,23 @@ export async function recordMessageOpened(args: { r: DbConn; req: AuthRequest; m
   const firmId = args.req.firmId!;
   const message = await getMessageById(args.r, firmId, args.messageId);
   if (!message) return null;
+  const existing = await getReadByMessageUser(args.r, firmId, args.messageId, args.req.userId!);
+  const shouldWriteAudit = (() => {
+    if (!existing?.lastOpenedAt) return true;
+    const lastOpenedAtMs = new Date(existing.lastOpenedAt).getTime();
+    if (Number.isNaN(lastOpenedAtMs)) return true;
+    return Date.now() - lastOpenedAtMs > 5 * 60 * 1000;
+  })();
   const updated = await upsertMessageOpened(args.r, firmId, args.messageId, args.req.userId!);
-  await writeCommunicationAuditLog({
-    r: args.r,
-    req: args.req,
-    action: "communication.message.opened",
-    messageId: args.messageId,
-    newValue: { userId: args.req.userId!, openedCount: updated?.openedCount ?? null, lastOpenedAt: updated?.lastOpenedAt ?? null },
-  });
+  if (shouldWriteAudit) {
+    await writeCommunicationAuditLog({
+      r: args.r,
+      req: args.req,
+      action: "communication.message.opened",
+      messageId: args.messageId,
+      newValue: { userId: args.req.userId!, openedCount: updated?.openedCount ?? null, lastOpenedAt: updated?.lastOpenedAt ?? null },
+    });
+  }
   return updated;
 }
 

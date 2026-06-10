@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -178,6 +178,13 @@ type User = {
   roleName?: string;
 };
 
+type AuditEntry = {
+  id?: number;
+  actorUserId?: number | null;
+  action?: string | null;
+  createdAt?: string | null;
+};
+
 function asArray<T>(value: unknown): T[] {
   if (Array.isArray(value)) return value as T[];
   if (value && typeof value === "object") {
@@ -246,6 +253,67 @@ function previewText(value: unknown): string {
   if (!s) return "";
   if (s.length <= 140) return s;
   return `${s.slice(0, 137)}...`;
+}
+
+function formatRelativeAction(action: unknown): string {
+  const value = String(action ?? "").trim();
+  if (!value) return "Updated";
+  const map: Record<string, string> = {
+    "communication.message.manual_email.created": "Manual email created",
+    "communication.message.assignees.updated": "Assigned users updated",
+    "communication.message.case_linked": "Linked to case",
+    "communication.message.case_unlinked": "Unlinked case",
+    "communication.message.archived": "Archived",
+    "communication.message.unarchived": "Unarchived",
+    "communication.message.marked_read": "Marked read",
+    "communication.message.marked_unread": "Marked unread",
+    "communication.remark.created": "Remark added",
+    "communication.remark.updated": "Remark edited",
+    "communication.remark.deleted": "Remark deleted",
+    "communication.message.opened": "Opened",
+    "communication.message.viewed": "Viewed",
+  };
+  return map[value] ?? value.replace(/^communication\./, "").replace(/\./g, " ");
+}
+
+function compactAuditEntries(entries: AuditEntry[], users: User[]) {
+  const userNameById = new Map(users.map((user) => [user.id, user.name || `User ${user.id}`]));
+  const items: Array<{ key: string; label: string; createdAt: string | null; count: number }> = [];
+
+  for (const entry of entries) {
+    const action = String(entry.action ?? "");
+    const actorUserId = typeof entry.actorUserId === "number" ? entry.actorUserId : null;
+    const actorName = actorUserId ? (userNameById.get(actorUserId) ?? `User ${actorUserId}`) : "System";
+    const isOpenLike = action === "communication.message.opened" || action === "communication.message.viewed";
+
+    if (isOpenLike) {
+      const last = items[items.length - 1];
+      if (last?.key === `open:${actorUserId ?? "system"}`) {
+        last.count += 1;
+        last.createdAt = entry.createdAt ?? last.createdAt;
+        continue;
+      }
+      items.push({
+        key: `open:${actorUserId ?? "system"}`,
+        label: `Opened by ${actorName}`,
+        createdAt: entry.createdAt ?? null,
+        count: 1,
+      });
+      continue;
+    }
+
+    items.push({
+      key: `${action}:${entry.id ?? items.length}`,
+      label: actorUserId ? `${formatRelativeAction(action)} by ${actorName}` : formatRelativeAction(action),
+      createdAt: entry.createdAt ?? null,
+      count: 1,
+    });
+  }
+
+  return items.map((item) => ({
+    ...item,
+    label: item.key.startsWith("open:") && item.count > 1 ? `${item.label} multiple times` : item.label,
+  }));
 }
 
 function StatusBadge({ value }: { value: string }) {
@@ -328,16 +396,21 @@ function QuerySection({
 export default function EmailControlCenterPage() {
   const { toast } = useToast();
   const qc = useQueryClient();
+  const openedMessageIdsRef = useRef<Map<number, number>>(new Map());
 
   const [view, setView] = useState<InboxView>("shared_inbox");
   const [selectedMessageId, setSelectedMessageId] = useState<number | null>(null);
   const [selectedDraftId, setSelectedDraftId] = useState<number | null>(null);
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [linkCaseRef, setLinkCaseRef] = useState("");
+  const [linkCaseError, setLinkCaseError] = useState("");
   const [assignedUserIds, setAssignedUserIds] = useState<number[]>([]);
   const [newRemarkBody, setNewRemarkBody] = useState("");
   const [editingRemarkId, setEditingRemarkId] = useState<number | null>(null);
   const [editingRemarkBody, setEditingRemarkBody] = useState("");
+  const [assigneesDialogOpen, setAssigneesDialogOpen] = useState(false);
+  const [auditExpanded, setAuditExpanded] = useState(false);
   const showWorkflowUi = false;
 
   const usersQuery = useQuery<User[]>({
@@ -368,6 +441,8 @@ export default function EmailControlCenterPage() {
       if (view === "my_tasks") return [];
       if (view === "overdue") return [];
       const params = new URLSearchParams();
+      const activeStatuses = "new,assigned,unassigned";
+      if (view !== "archived" && view !== "closed") params.set("status", activeStatuses);
       if (view === "unassigned") params.set("assignedTo", "unassigned");
       if (view === "assigned_to_me") params.set("assignedTo", "me");
       if (view === "unread") params.set("unread", "true");
@@ -493,6 +568,11 @@ export default function EmailControlCenterPage() {
   });
 
   useEffect(() => {
+    const handle = window.setTimeout(() => setSearch(searchInput.trim()), 250);
+    return () => window.clearTimeout(handle);
+  }, [searchInput]);
+
+  useEffect(() => {
     const next = asArray<number>((selectedAssigneesQuery.data as any)?.userIds);
     setAssignedUserIds(next.filter((n) => typeof n === "number"));
   }, [selectedAssigneesQuery.data, selectedMessageId]);
@@ -582,13 +662,29 @@ export default function EmailControlCenterPage() {
   const linkMessageCaseMutation = useMutation({
     mutationFn: (args: { messageId: number; caseId?: number | null; caseRef?: string | null }) =>
       apiFetchJson(`/communication/messages/${args.messageId}/link-case`, { method: "PATCH", body: { caseId: args.caseId ?? null, caseRef: args.caseRef ?? null } }),
-    onSuccess: (_r, args) => qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId] }),
-    onError: (e) => toastError(toast, e),
+    onSuccess: (_r, args) => {
+      setLinkCaseError("");
+      setLinkCaseRef("");
+      qc.invalidateQueries({ queryKey: ["communication", "messages"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId] });
+      qc.invalidateQueries({ queryKey: ["communication", "audit", "message", args.messageId] });
+      toast({ title: "Case linked" });
+    },
+    onError: (e) => {
+      setLinkCaseError("Case not found. Try a case reference, purchaser, developer, or parcel search.");
+      toastError(toast, e);
+    },
   });
 
   const unlinkMessageCaseMutation = useMutation({
     mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/link-case`, { method: "DELETE" }),
-    onSuccess: (_r, messageId) => qc.invalidateQueries({ queryKey: ["communication", "message", messageId] }),
+    onSuccess: (_r, messageId) => {
+      setLinkCaseError("");
+      qc.invalidateQueries({ queryKey: ["communication", "messages"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", messageId] });
+      qc.invalidateQueries({ queryKey: ["communication", "audit", "message", messageId] });
+      toast({ title: "Case unlinked" });
+    },
     onError: (e) => toastError(toast, e),
   });
 
@@ -598,6 +694,8 @@ export default function EmailControlCenterPage() {
     onSuccess: (_r, args) => {
       qc.invalidateQueries({ queryKey: ["communication", "messages"] });
       qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId] });
+      qc.invalidateQueries({ queryKey: ["communication", "audit", "message", args.messageId] });
+      toast({ title: args.archived ? "Email archived" : "Email unarchived" });
     },
     onError: (e) => toastError(toast, e),
   });
@@ -608,6 +706,7 @@ export default function EmailControlCenterPage() {
     onSuccess: (_r, args) => {
       qc.invalidateQueries({ queryKey: ["communication", "messages"] });
       qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId, "reads"] });
+      qc.invalidateQueries({ queryKey: ["communication", "audit", "message", args.messageId] });
     },
     onError: (e) => toastError(toast, e),
   });
@@ -616,9 +715,12 @@ export default function EmailControlCenterPage() {
     mutationFn: (args: { messageId: number; userIds: number[] }) =>
       apiFetchJson(`/communication/messages/${args.messageId}/assignees`, { method: "PATCH", body: { userIds: args.userIds } }),
     onSuccess: (_r, args) => {
+      setAssigneesDialogOpen(false);
       qc.invalidateQueries({ queryKey: ["communication", "messages"] });
       qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId] });
       qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId, "assignees"] });
+      qc.invalidateQueries({ queryKey: ["communication", "audit", "message", args.messageId] });
+      toast({ title: "Assigned users updated" });
     },
     onError: (e) => toastError(toast, e),
   });
@@ -641,13 +743,17 @@ export default function EmailControlCenterPage() {
       setEditingRemarkId(null);
       setEditingRemarkBody("");
       qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "remarks"] });
+      qc.invalidateQueries({ queryKey: ["communication", "audit", "message", selectedMessageId] });
     },
     onError: (e) => toastError(toast, e),
   });
 
   const deleteRemarkMutation = useMutation({
     mutationFn: (remarkId: number) => apiFetchJson(`/communication/remarks/${remarkId}`, { method: "DELETE" }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "remarks"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "remarks"] });
+      qc.invalidateQueries({ queryKey: ["communication", "audit", "message", selectedMessageId] });
+    },
     onError: (e) => toastError(toast, e),
   });
 
@@ -776,6 +882,13 @@ export default function EmailControlCenterPage() {
 
   const selectedDraft = selectedDraftQuery.data ?? null;
   const draftAudit = asArray<any>(selectedDraftAuditQuery.data);
+  const selectedMessageRow = messages.find((row) => row.message.id === selectedMessageId) ?? null;
+  const selectedMessageIsRead = selectedMessageRow?.isRead ?? false;
+  const selectedMessageHasAttachments = selectedMessageRow?.hasAttachments ?? false;
+  const selectedMessageAttachmentCount = selectedMessageRow?.attachmentCount ?? asArray<Attachment>(selectedAttachmentsQuery.data).length;
+  const selectedMessageAssignedCount = selectedMessageRow?.assigneeCount ?? assignedUserIds.length;
+  const compactAudit = useMemo(() => compactAuditEntries(asArray<AuditEntry>(messageAudit), users), [messageAudit, users]);
+  const visibleAudit = auditExpanded ? compactAudit : compactAudit.slice(0, 5);
 
   const filteredMessages = useMemo(() => {
     const base = messages.filter((row) => {
@@ -846,123 +959,117 @@ export default function EmailControlCenterPage() {
   useEffect(() => {
     if (!selectedMessage) {
       setLinkCaseRef("");
+      setLinkCaseError("");
       return;
     }
     setLinkCaseRef("");
+    setLinkCaseError("");
   }, [selectedMessage]);
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="text-lg font-semibold">Email Inbox</div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            onClick={() => {
-              qc.invalidateQueries({ queryKey: ["communication", "messages"] });
-              qc.invalidateQueries({ queryKey: ["communication", "mailboxes"] });
-              qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
-            }}
-          >
-            Refresh
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => toast({ title: "Import is not available yet. Please connect and configure a mailbox sync first." })}
-          >
-            Import Now
-          </Button>
-          <Button variant="outline" onClick={() => setConnectDialogOpen(true)}>
-            Connect Mailbox
-          </Button>
-          <Button onClick={() => setShowManualEmail(true)}>Manual Add Email</Button>
+    <div className="flex h-[calc(100vh-7rem)] min-h-0 flex-col gap-3 overflow-hidden">
+      <div className="shrink-0 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-lg font-semibold">Email Inbox</div>
+            <div className="text-sm text-slate-500">Simple internal inbox for assignment, remarks, case linking, and read tracking.</div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                qc.invalidateQueries({ queryKey: ["communication", "messages"] });
+                qc.invalidateQueries({ queryKey: ["communication", "mailboxes"] });
+                qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
+              }}
+            >
+              Refresh
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => toast({ title: "Import is not available yet. Please connect and configure a mailbox sync first." })}
+            >
+              Import Now
+            </Button>
+            <Button variant="outline" onClick={() => setConnectDialogOpen(true)}>
+              Connect Mailbox
+            </Button>
+            <Button onClick={() => setShowManualEmail(true)}>Manual Add Email</Button>
+          </div>
         </div>
+
+        {usersQuery.isError || mailboxesQuery.isError ? (
+          <Card>
+            <CardContent className="pt-6 space-y-3">
+              {usersQuery.isError ? (
+                <QueryFallback
+                  title="Unable to load user list"
+                  error={usersQuery.error}
+                  onRetry={() => usersQuery.refetch()}
+                  isRetrying={usersQuery.isFetching}
+                />
+              ) : null}
+              {mailboxesQuery.isError ? (
+                <QueryFallback
+                  title="Unable to load mailboxes"
+                  error={mailboxesQuery.error}
+                  onRetry={() => mailboxesQuery.refetch()}
+                  isRetrying={mailboxesQuery.isFetching}
+                />
+              ) : null}
+            </CardContent>
+          </Card>
+        ) : null}
       </div>
 
-      {usersQuery.isError || mailboxesQuery.isError ? (
-        <Card>
-          <CardContent className="pt-6 space-y-3">
-            {usersQuery.isError ? (
-              <QueryFallback
-                title="Unable to load user list"
-                error={usersQuery.error}
-                onRetry={() => usersQuery.refetch()}
-                isRetrying={usersQuery.isFetching}
-              />
-            ) : null}
-            {mailboxesQuery.isError ? (
-              <QueryFallback
-                title="Unable to load mailboxes"
-                error={mailboxesQuery.error}
-                onRetry={() => mailboxesQuery.refetch()}
-                isRetrying={mailboxesQuery.isFetching}
-              />
-            ) : null}
-          </CardContent>
-        </Card>
-      ) : null}
-
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 lg:min-h-[calc(100vh-180px)]">
-        <Card className="lg:col-span-3 flex flex-col">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-hidden xl:grid-cols-[280px_420px_minmax(0,1fr)]">
+        <Card className="flex min-h-0 flex-col overflow-hidden">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">Mailboxes & Filters</CardTitle>
           </CardHeader>
-          <CardContent className="flex-1 overflow-y-auto space-y-3">
-            <div className="space-y-1">
+          <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto">
+            <div className="space-y-2">
               <div className="text-xs font-medium text-slate-600">Connected mailboxes</div>
               {mailboxes.length === 0 ? (
                 <div className="text-xs text-slate-500">No mailboxes found.</div>
               ) : (
                 <div className="space-y-1">
                   {mailboxes.map((m) => (
-                    <div key={m.id} className="rounded border px-2 py-1 text-xs">
+                    <div key={m.id} className="rounded-lg border px-3 py-2 text-xs">
                       <div className="flex items-center justify-between gap-2">
                         <div className="truncate">{m.displayName || m.address || `Mailbox ${m.id}`}</div>
                         {m.isActive ? <Badge variant="secondary">Active</Badge> : null}
                       </div>
-                      <div className="text-[11px] text-slate-500 truncate">{m.provider}</div>
+                      <div className="truncate text-[11px] text-slate-500">{m.provider}</div>
                     </div>
                   ))}
                 </div>
               )}
+            </div>
 
-              <div className="pt-2 space-y-1">
-                <div className="text-xs font-medium text-slate-600">Connected email accounts</div>
-                {emailAccounts.length === 0 ? (
-                  <div className="text-xs text-slate-500">No connected accounts.</div>
-                ) : (
-                  <div className="space-y-1">
-                    {emailAccounts.map((a) => (
-                      <div key={a.id} className="rounded border px-2 py-1 text-xs">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="truncate">{a.displayName || a.emailAddress}</div>
-                          <Badge variant="outline">{a.status}</Badge>
-                        </div>
-                        <div className="text-[11px] text-slate-500 truncate">{a.provider}</div>
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-slate-600">Connected account placeholders</div>
+              {emailAccounts.length === 0 ? (
+                <div className="text-xs text-slate-500">No connected accounts.</div>
+              ) : (
+                <div className="space-y-1">
+                  {emailAccounts.map((a) => (
+                    <div key={a.id} className="rounded-lg border px-3 py-2 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="truncate">{a.displayName || a.emailAddress}</div>
+                        <Badge variant="outline">{a.status}</Badge>
                       </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              <div className="pt-2 space-y-2">
-                <div>
-                  <Button variant="outline" className="w-full justify-start opacity-60" disabled>
-                    Connect Microsoft 365
-                  </Button>
-                  <div className="text-[11px] text-slate-500">Coming soon / setup required</div>
+                      <div className="truncate text-[11px] text-slate-500">{a.provider} · {a.emailAddress}</div>
+                    </div>
+                  ))}
                 </div>
-                <div>
-                  <Button variant="outline" className="w-full justify-start opacity-60" disabled>
-                    Connect IMAP
-                  </Button>
-                  <div className="text-[11px] text-slate-500">Coming soon / setup required</div>
-                </div>
-                <div>
-                  <Button variant="outline" className="w-full justify-start opacity-60" disabled>
-                    Connect Gmail
-                  </Button>
-                  <div className="text-[11px] text-slate-500">Coming soon / setup required</div>
+              )}
+              <div className="rounded-lg border border-dashed bg-slate-50 p-3 text-xs text-slate-600">
+                <div className="font-medium">Provider setup status</div>
+                <div className="mt-2 space-y-1">
+                  <div>Microsoft 365 / Outlook — setup required</div>
+                  <div>IMAP — setup required</div>
+                  <div>Gmail — coming soon</div>
                 </div>
               </div>
             </div>
@@ -996,12 +1103,12 @@ export default function EmailControlCenterPage() {
           </CardContent>
         </Card>
 
-        <Card className="lg:col-span-4 flex flex-col">
-          <CardHeader className="pb-2 space-y-2">
+        <Card className="flex min-h-0 flex-col overflow-hidden">
+          <CardHeader className="space-y-2 pb-2">
             <CardTitle className="text-sm">Email List</CardTitle>
-            <Input placeholder="Search sender or subject..." value={search} onChange={(e) => setSearch(e.target.value)} />
+            <Input placeholder="Search sender, subject, or body..." value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
           </CardHeader>
-          <CardContent className="flex-1 overflow-y-auto space-y-2">
+          <CardContent className="min-h-0 flex-1 space-y-2 overflow-y-auto">
             <QuerySection
               isLoading={messagesQuery.isLoading}
               isError={messagesQuery.isError}
@@ -1009,71 +1116,75 @@ export default function EmailControlCenterPage() {
               isFetching={messagesQuery.isFetching}
               onRetry={() => messagesQuery.refetch()}
               isEmpty={filteredMessages.length === 0}
-              emptyTitle="No emails yet"
-              emptyDescription="Use Manual Add Email to start."
+              emptyTitle="No emails found"
+              emptyDescription="Try another filter, or use Manual Add Email."
             >
               {filteredMessages.map((row) => (
                 <button
                   key={row.message.id}
                   className={[
-                    "w-full text-left rounded border p-2 transition-colors",
+                    "w-full rounded-xl border p-3 text-left transition-colors",
                     selectedMessageId === row.message.id ? "border-slate-400 bg-slate-50" : "hover:bg-slate-50",
                   ].join(" ")}
                   onClick={() => {
                     setSelectedMessageId(row.message.id);
                     setSelectedDraftId(null);
                     setSelectedTaskIds([]);
-                    recordMessageOpenedMutation.mutate(row.message.id);
+                    const lastOpenedAt = openedMessageIdsRef.current.get(row.message.id) ?? 0;
+                    const nowTs = Date.now();
+                    if (nowTs - lastOpenedAt > 5 * 60 * 1000) {
+                      openedMessageIdsRef.current.set(row.message.id, nowTs);
+                      recordMessageOpenedMutation.mutate(row.message.id);
+                    }
                   }}
                 >
                   {(() => {
-                      const unread = row.isRead === false;
-                      const from = `${row.message.fromName || ""}${row.message.fromName ? " " : ""}<${row.message.fromAddress || ""}>`.trim();
-                      const preview = previewText(row.message.bodyText);
-                      const ts = formatDateTime(row.message.receivedAt || row.message.lastActivityAt || row.message.createdAt);
-                      const primaryAssigneeLabel = row.message.assignedToUserId
-                        ? (selectedUserOptions.find((u) => u.id === row.message.assignedToUserId)?.label ?? `User ${row.message.assignedToUserId}`)
-                        : "";
-                      const assignedLabel = row.assigneeCount > 1
-                        ? `${primaryAssigneeLabel || "Assigned"} +${row.assigneeCount - 1}`
-                        : (primaryAssigneeLabel || "");
+                    const unread = row.isRead === false;
+                    const from = `${row.message.fromName || ""}${row.message.fromName ? " " : ""}<${row.message.fromAddress || ""}>`.trim();
+                    const preview = previewText(row.message.bodyText);
+                    const ts = formatDateTime(row.message.receivedAt || row.message.lastActivityAt || row.message.createdAt);
+                    const primaryAssigneeLabel = row.message.assignedToUserId
+                      ? (selectedUserOptions.find((u) => u.id === row.message.assignedToUserId)?.label ?? `User ${row.message.assignedToUserId}`)
+                      : "";
+                    const assignedLabel = row.assigneeCount > 1
+                      ? `${primaryAssigneeLabel || "Assigned"} +${row.assigneeCount - 1}`
+                      : (primaryAssigneeLabel || "");
 
-                      return (
-                        <div className="space-y-1">
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0">
-                              <div className={unread ? "text-sm font-semibold truncate" : "text-sm font-medium truncate"}>{row.message.subject || "(no subject)"}</div>
-                              <div className="text-xs text-slate-500 truncate">{from}</div>
-                            </div>
-                            <div className="shrink-0 text-[11px] text-slate-500">{ts}</div>
+                    return (
+                      <div className="space-y-2">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 space-y-1">
+                            <div className={unread ? "truncate text-sm font-semibold" : "truncate text-sm font-medium"}>{row.message.subject || "(no subject)"}</div>
+                            <div className="truncate text-xs text-slate-500">{from}</div>
                           </div>
-                          {preview ? <div className="text-xs text-slate-600">{preview}</div> : null}
-                          <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                            {unread ? <span className="inline-block h-2 w-2 rounded-full bg-blue-500" /> : null}
-                            {assignedLabel ? <Badge variant="secondary">{assignedLabel}</Badge> : <Badge variant="outline">Unassigned</Badge>}
-                            {row.message.linkedCaseId ? <Badge variant="secondary">Case</Badge> : null}
-                            {row.hasAttachments ? <Badge variant="outline">Attachment{row.attachmentCount > 1 ? `s ${row.attachmentCount}` : ""}</Badge> : null}
-                            <StatusBadge value={row.message.internalStatus} />
-                          </div>
+                          <div className="shrink-0 text-[11px] text-slate-500">{ts}</div>
                         </div>
-                      );
-                    })()}
+                        {preview ? <div className="text-xs text-slate-600">{preview}</div> : null}
+                        <div className="flex flex-wrap items-center gap-2">
+                          {unread ? <span className="inline-block h-2 w-2 rounded-full bg-blue-500" /> : null}
+                          {assignedLabel ? <Badge variant="secondary">{assignedLabel}</Badge> : <Badge variant="outline">Unassigned</Badge>}
+                          {row.message.linkedCaseId ? <Badge variant="secondary">Linked Case</Badge> : null}
+                          {row.hasAttachments ? <Badge variant="outline">{row.attachmentCount} attachment{row.attachmentCount === 1 ? "" : "s"}</Badge> : null}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </button>
               ))}
             </QuerySection>
           </CardContent>
         </Card>
 
-        <Card className="lg:col-span-5 flex flex-col">
+        <Card className="flex min-h-0 flex-col overflow-hidden">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">Email Detail</CardTitle>
           </CardHeader>
-          <CardContent className="flex-1 overflow-y-auto space-y-4">
+          <CardContent className="min-h-0 flex-1 overflow-y-auto">
             {selectedDraftId ? (
               <Empty className="border border-dashed border-slate-200 bg-slate-50/50 py-10">
                 <EmptyHeader>
                   <EmptyTitle>Advanced workflow hidden</EmptyTitle>
-                  <EmptyDescription>Draft/approval workflow is not shown in Email Inbox MVP.</EmptyDescription>
+                  <EmptyDescription>Draft and approval workflow stay out of the inbox UI.</EmptyDescription>
                 </EmptyHeader>
                 <div className="mt-4 flex justify-center">
                   <Button variant="outline" onClick={() => setSelectedDraftId(null)}>Back to Inbox</Button>
@@ -1092,416 +1203,333 @@ export default function EmailControlCenterPage() {
               >
                 {selectedMessage ? (
                   <div className="space-y-4">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-semibold">{selectedMessage.subject || `(Message #${selectedMessage.id})`}</div>
-                      <div className="flex items-center gap-2">
+                    <div className="rounded-xl border p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="text-lg font-semibold">{selectedMessage.subject || `(Message #${selectedMessage.id})`}</div>
+                          <div className="mt-1 text-sm text-slate-500">
+                            {selectedMessage.fromName || selectedMessage.fromAddress || "-"} · {formatDateTime(selectedMessage.receivedAt || selectedMessage.sentAt || selectedMessage.createdAt)}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <Badge variant={selectedMessageIsRead ? "outline" : "secondary"}>{selectedMessageIsRead ? "Read" : "Unread"}</Badge>
+                          <Badge variant="outline">{selectedMessageAssignedCount > 0 ? "Assigned" : "Unassigned"}</Badge>
+                          <Badge variant="outline">{selectedMessage.linkedCaseId ? "Linked Case" : "No Case"}</Badge>
+                          <Badge variant="outline">{selectedMessageHasAttachments ? `${selectedMessageAttachmentCount} attachment${selectedMessageAttachmentCount === 1 ? "" : "s"}` : "No attachments"}</Badge>
+                        </div>
+                      </div>
+                      <div className="mt-4 flex flex-wrap gap-2">
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => readStatusMutation.mutate({ messageId: selectedMessage.id, isRead: true })}
+                          onClick={() => readStatusMutation.mutate({ messageId: selectedMessage.id, isRead: !selectedMessageIsRead })}
                           disabled={readStatusMutation.isPending}
                         >
-                          Mark Read
+                          {selectedMessageIsRead ? "Mark Unread" : "Mark Read"}
                         </Button>
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => readStatusMutation.mutate({ messageId: selectedMessage.id, isRead: false })}
-                          disabled={readStatusMutation.isPending}
+                          onClick={() => archiveMessageMutation.mutate({ messageId: selectedMessage.id, archived: selectedMessage.internalStatus !== "archived" })}
+                          disabled={archiveMessageMutation.isPending}
                         >
-                          Mark Unread
+                          {selectedMessage.internalStatus === "archived" ? "Unarchive" : "Archive"}
                         </Button>
-                        {selectedMessage.internalStatus === "archived" ? (
-                          <Button variant="outline" size="sm" onClick={() => archiveMessageMutation.mutate({ messageId: selectedMessage.id, archived: false })} disabled={archiveMessageMutation.isPending}>
-                            Unarchive
+                        <Button variant="outline" size="sm" onClick={() => setAssigneesDialogOpen(true)}>
+                          Edit Assigned Users
+                        </Button>
+                        {selectedMessage.linkedCaseId ? (
+                          <Button variant="outline" size="sm" onClick={() => unlinkMessageCaseMutation.mutate(selectedMessage.id)} disabled={unlinkMessageCaseMutation.isPending}>
+                            Unlink Case
                           </Button>
-                        ) : (
-                          <Button variant="outline" size="sm" onClick={() => archiveMessageMutation.mutate({ messageId: selectedMessage.id, archived: true })} disabled={archiveMessageMutation.isPending}>
-                            Archive
-                          </Button>
-                        )}
+                        ) : null}
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-                      <div className="md:col-span-6 space-y-1.5">
-                        <Label>From</Label>
-                        <Input value={`${selectedMessage.fromName || ""} <${selectedMessage.fromAddress || ""}>`.trim()} readOnly />
-                      </div>
-                      <div className="md:col-span-6 space-y-1.5">
-                        <Label>Received / Sent</Label>
-                        <Input value={formatDateTime(selectedMessage.receivedAt || selectedMessage.sentAt || selectedMessage.createdAt || "")} readOnly />
-                      </div>
-                      <div className="md:col-span-12 space-y-1.5">
-                        <Label>To</Label>
-                        <Input value={(selectedMessage.toAddresses ?? []).join(", ")} readOnly />
-                      </div>
-                      <div className="md:col-span-12 space-y-1.5">
-                        <Label>CC</Label>
-                        <Input value={(selectedMessage.ccAddresses ?? []).join(", ")} readOnly />
-                      </div>
-                      <div className="md:col-span-6 space-y-1.5">
-                        <Label>Assigned Users</Label>
-                        <div className="rounded border p-2 space-y-2">
-                          <div className="flex flex-wrap gap-2">
-                            {assignedUserIds.length ? (
-                              assignedUserIds.map((id) => (
-                                <Badge key={id} variant="secondary">
-                                  {selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`}
-                                </Badge>
-                              ))
-                            ) : (
-                              <div className="text-sm text-slate-500">Unassigned</div>
-                            )}
-                          </div>
-                          <div className="max-h-32 overflow-y-auto border rounded p-2 space-y-2">
-                            {selectedUserOptions.map((u) => (
-                              <label key={u.id} className="flex items-center gap-2 text-sm">
-                                <Checkbox
-                                  checked={assignedUserIds.includes(u.id)}
-                                  onCheckedChange={(c) => {
-                                    setAssignedUserIds((prev) => (c ? Array.from(new Set([...prev, u.id])) : prev.filter((x) => x !== u.id)));
-                                  }}
-                                />
-                                <span>{u.label}</span>
-                              </label>
-                            ))}
-                          </div>
-                          <div className="flex justify-end">
-                            <Button
-                              size="sm"
-                              onClick={() => assigneesMutation.mutate({ messageId: selectedMessage.id, userIds: assignedUserIds })}
-                              disabled={assigneesMutation.isPending}
-                            >
-                              Save Assigned Users
-                            </Button>
-                          </div>
+                    <div className="rounded-xl border p-4 space-y-3">
+                      <div className="text-sm font-medium">Body</div>
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <Label>From</Label>
+                          <Input value={`${selectedMessage.fromName || ""} <${selectedMessage.fromAddress || ""}>`.trim()} readOnly />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label>Received / Sent</Label>
+                          <Input value={formatDateTime(selectedMessage.receivedAt || selectedMessage.sentAt || selectedMessage.createdAt || "")} readOnly />
+                        </div>
+                        <div className="space-y-1.5 md:col-span-2">
+                          <Label>To</Label>
+                          <Input value={(selectedMessage.toAddresses ?? []).join(", ")} readOnly />
+                        </div>
+                        <div className="space-y-1.5 md:col-span-2">
+                          <Label>CC</Label>
+                          <Input value={(selectedMessage.ccAddresses ?? []).join(", ")} readOnly />
                         </div>
                       </div>
-                      <div className="md:col-span-6 space-y-1.5">
-                        <Label>Linked Case</Label>
-                        <div className="space-y-2">
-                          <div className="text-xs text-slate-500">{selectedMessage.linkedCaseId ? `Currently linked: Case #${selectedMessage.linkedCaseId}` : "Currently not linked to any case."}</div>
-                          <div className="flex gap-2">
-                            <Input placeholder="Search case reference / purchaser / developer / property..." value={linkCaseRef} onChange={(e) => setLinkCaseRef(e.target.value)} />
-                            <Button
-                              variant="outline"
-                              onClick={() => {
-                                const v = String(linkCaseRef ?? "").trim();
-                                if (!v) return;
-                                linkMessageCaseMutation.mutate({ messageId: selectedMessage.id, caseRef: v });
-                              }}
-                              disabled={linkMessageCaseMutation.isPending}
-                            >
-                              Link by Ref
-                            </Button>
-                          </div>
-                          {selectedMessage.linkedCaseId ? (
-                            <Button variant="outline" size="sm" onClick={() => unlinkMessageCaseMutation.mutate(selectedMessage.id)} disabled={unlinkMessageCaseMutation.isPending}>
-                              Unlink
-                            </Button>
-                          ) : null}
-                          {caseLookupQuery.isFetching ? <div className="text-xs text-slate-500">Searching...</div> : null}
-                          {linkCaseRef.trim().length >= 2 && caseLookupQuery.data?.length ? (
-                            <div className="rounded border p-2 space-y-1">
-                              {asArray<CaseLookupRow>(caseLookupQuery.data).map((c) => (
-                                <button
-                                  key={c.id}
-                                  className="w-full text-left text-sm rounded px-2 py-1 hover:bg-slate-50"
-                                  onClick={() => linkMessageCaseMutation.mutate({ messageId: selectedMessage.id, caseId: c.id })}
-                                  disabled={linkMessageCaseMutation.isPending}
-                                >
-                                  <div className="flex items-center justify-between gap-2">
-                                    <div className="truncate">{c.caseRef || `Case #${c.id}`}</div>
-                                    <div className="text-xs text-slate-500 truncate">{c.developerName || ""}</div>
-                                  </div>
-                                  <div className="text-xs text-slate-500 truncate">{c.status}</div>
-                                </button>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-                      </div>
-                      <div className="md:col-span-12 space-y-1.5">
-                        <Label>Body</Label>
-                        <div className="rounded border p-2 text-sm whitespace-pre-wrap">{selectedMessage.bodyText || ""}</div>
-                      </div>
-                      <div className="md:col-span-12 space-y-1.5">
+                      <div className="rounded-lg bg-slate-50 p-3 text-sm whitespace-pre-wrap">{selectedMessage.bodyText || ""}</div>
+                      <div className="space-y-2">
                         <Label>Attachments</Label>
-                        <div className="rounded border p-2 space-y-2">
+                        <div className="rounded-lg border p-3 space-y-2">
                           {selectedAttachmentsQuery.isFetching ? (
                             <div className="text-sm text-slate-500">Loading attachments...</div>
                           ) : asArray<Attachment>(selectedAttachmentsQuery.data).length ? (
-                            <div className="space-y-1">
-                              {asArray<Attachment>(selectedAttachmentsQuery.data).map((a) => (
-                                <div key={a.id} className="flex items-center justify-between gap-2 text-sm">
-                                  <div className="truncate">{a.filename}</div>
-                                  <div className="text-xs text-slate-500">{a.sizeBytes ? `${a.sizeBytes} bytes` : ""}</div>
-                                </div>
-                              ))}
-                            </div>
+                            asArray<Attachment>(selectedAttachmentsQuery.data).map((a) => (
+                              <div key={a.id} className="flex items-center justify-between gap-2 text-sm">
+                                <div className="truncate">{a.filename}</div>
+                                <div className="text-xs text-slate-500">{a.sizeBytes ? `${a.sizeBytes} bytes` : ""}</div>
+                              </div>
+                            ))
                           ) : (
                             <div className="text-sm text-slate-500">No attachments.</div>
                           )}
                         </div>
                       </div>
-                      <div className="md:col-span-12 space-y-1.5">
-                        <Label>Remarks</Label>
-                        <div className="rounded border p-2 space-y-3">
+                    </div>
+
+                    <div className="grid gap-4 xl:grid-cols-2">
+                      <div className="rounded-xl border p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-medium">Assigned Users</div>
+                          <Button variant="outline" size="sm" onClick={() => setAssigneesDialogOpen(true)}>Edit</Button>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {assignedUserIds.length ? assignedUserIds.map((id) => (
+                            <Badge key={id} variant="secondary">
+                              {selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`}
+                            </Badge>
+                          )) : <div className="text-sm text-slate-500">No assigned users.</div>}
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-medium">Linked Case</div>
+                          {selectedMessage.linkedCaseId ? (
+                            <Button variant="outline" size="sm" onClick={() => unlinkMessageCaseMutation.mutate(selectedMessage.id)} disabled={unlinkMessageCaseMutation.isPending}>
+                              Unlink
+                            </Button>
+                          ) : null}
+                        </div>
+                        {selectedMessage.linkedCaseId ? (
+                          <div className="rounded-lg bg-slate-50 p-3 text-sm">Linked Case: Case #{selectedMessage.linkedCaseId}</div>
+                        ) : (
+                          <div className="space-y-2">
+                            <div className="flex gap-2">
+                              <Input
+                                placeholder="Search case reference / purchaser / parcel"
+                                value={linkCaseRef}
+                                onChange={(e) => {
+                                  setLinkCaseRef(e.target.value);
+                                  setLinkCaseError("");
+                                }}
+                              />
+                              <Button
+                                variant="outline"
+                                onClick={() => {
+                                  const value = linkCaseRef.trim();
+                                  if (!value) {
+                                    setLinkCaseError("Enter a case reference, purchaser, or parcel keyword.");
+                                    return;
+                                  }
+                                  if (!caseLookupQuery.isFetching && value.length >= 2 && asArray<CaseLookupRow>(caseLookupQuery.data).length === 0) {
+                                    setLinkCaseError("No matching case found.");
+                                    return;
+                                  }
+                                  linkMessageCaseMutation.mutate({ messageId: selectedMessage.id, caseRef: value });
+                                }}
+                                disabled={linkMessageCaseMutation.isPending}
+                              >
+                                Link
+                              </Button>
+                            </div>
+                            {linkCaseError ? <div className="text-xs text-red-600">{linkCaseError}</div> : null}
+                            {caseLookupQuery.isFetching ? <div className="text-xs text-slate-500">Searching cases...</div> : null}
+                            {linkCaseRef.trim().length >= 2 && caseLookupQuery.data?.length ? (
+                              <div className="rounded-lg border p-2 space-y-1">
+                                {asArray<CaseLookupRow>(caseLookupQuery.data).map((c) => (
+                                  <button
+                                    key={c.id}
+                                    className="w-full rounded-md px-2 py-2 text-left text-sm hover:bg-slate-50"
+                                    onClick={() => linkMessageCaseMutation.mutate({ messageId: selectedMessage.id, caseId: c.id })}
+                                    disabled={linkMessageCaseMutation.isPending}
+                                  >
+                                    <div className="flex items-center justify-between gap-2">
+                                      <div className="truncate">{c.caseRef || `Case #${c.id}`}</div>
+                                      <div className="truncate text-xs text-slate-500">{c.developerName || ""}</div>
+                                    </div>
+                                    <div className="truncate text-xs text-slate-500">{c.status}</div>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="rounded-xl border p-4 space-y-3 xl:col-span-2">
+                        <div className="text-sm font-medium">Remarks</div>
+                        <div className="space-y-2">
                           {selectedRemarksQuery.isFetching ? (
                             <div className="text-sm text-slate-500">Loading remarks...</div>
                           ) : asArray<Remark>(selectedRemarksQuery.data).length ? (
-                            <div className="space-y-2">
-                              {asArray<Remark>(selectedRemarksQuery.data).map((r) => (
-                                <div key={r.id} className="rounded border p-2 space-y-1">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <div className="text-xs text-slate-500">
-                                      {(r.userName || `User ${r.userId}`)} · {formatDateTime(r.createdAt)}
-                                      {r.updatedAt && r.updatedAt !== r.createdAt ? " (edited)" : ""}
-                                    </div>
-                                    <div className="flex items-center gap-2">
+                            asArray<Remark>(selectedRemarksQuery.data).map((r) => (
+                              <div key={r.id} className="rounded-lg border p-3 space-y-2">
+                                <div className="flex items-center justify-between gap-2">
+                                  <div className="text-xs text-slate-500">
+                                    {r.userName || `User ${r.userId}`} · {formatDateTime(r.createdAt)}
+                                    {r.updatedAt && r.updatedAt !== r.createdAt ? " (edited)" : ""}
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => {
+                                        setEditingRemarkId(r.id);
+                                        setEditingRemarkBody(r.body);
+                                      }}
+                                    >
+                                      Edit
+                                    </Button>
+                                    <Button variant="outline" size="sm" onClick={() => deleteRemarkMutation.mutate(r.id)} disabled={deleteRemarkMutation.isPending}>
+                                      Delete
+                                    </Button>
+                                  </div>
+                                </div>
+                                {editingRemarkId === r.id ? (
+                                  <div className="space-y-2">
+                                    <Textarea value={editingRemarkBody} onChange={(e) => setEditingRemarkBody(e.target.value)} rows={3} />
+                                    <div className="flex justify-end gap-2">
                                       <Button
                                         variant="outline"
                                         size="sm"
                                         onClick={() => {
-                                          setEditingRemarkId(r.id);
-                                          setEditingRemarkBody(r.body);
+                                          setEditingRemarkId(null);
+                                          setEditingRemarkBody("");
                                         }}
                                       >
-                                        Edit
+                                        Cancel
                                       </Button>
-                                      <Button variant="outline" size="sm" onClick={() => deleteRemarkMutation.mutate(r.id)} disabled={deleteRemarkMutation.isPending}>
-                                        Delete
+                                      <Button size="sm" onClick={() => updateRemarkMutation.mutate({ remarkId: r.id, body: editingRemarkBody.trim() })} disabled={updateRemarkMutation.isPending}>
+                                        Save
                                       </Button>
                                     </div>
                                   </div>
-                                  {editingRemarkId === r.id ? (
-                                    <div className="space-y-2">
-                                      <Textarea value={editingRemarkBody} onChange={(e) => setEditingRemarkBody(e.target.value)} rows={3} />
-                                      <div className="flex justify-end gap-2">
-                                        <Button
-                                          variant="outline"
-                                          size="sm"
-                                          onClick={() => {
-                                            setEditingRemarkId(null);
-                                            setEditingRemarkBody("");
-                                          }}
-                                        >
-                                          Cancel
-                                        </Button>
-                                        <Button size="sm" onClick={() => updateRemarkMutation.mutate({ remarkId: r.id, body: editingRemarkBody })} disabled={updateRemarkMutation.isPending}>
-                                          Save
-                                        </Button>
-                                      </div>
-                                    </div>
-                                  ) : (
-                                    <div className="text-sm whitespace-pre-wrap">{r.body}</div>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="text-sm text-slate-500">No remarks yet.</div>
-                          )}
-
-                          <div className="space-y-2">
-                            <Textarea placeholder="Add a remark..." value={newRemarkBody} onChange={(e) => setNewRemarkBody(e.target.value)} rows={3} />
-                            <div className="flex justify-end">
-                              <Button
-                                size="sm"
-                                onClick={() => {
-                                  const v = newRemarkBody.trim();
-                                  if (!v) return;
-                                  createRemarkMutation.mutate({ messageId: selectedMessage.id, body: v });
-                                }}
-                                disabled={createRemarkMutation.isPending}
-                              >
-                                Add Remark
-                              </Button>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="md:col-span-12 space-y-1.5">
-                        <Label>Opened By</Label>
-                        <div className="rounded border p-2 space-y-2">
-                          {selectedReadsQuery.isFetching ? (
-                            <div className="text-sm text-slate-500">Loading opened by...</div>
-                          ) : asArray<MessageRead>(selectedReadsQuery.data).length ? (
-                            <div className="space-y-1">
-                              {asArray<MessageRead>(selectedReadsQuery.data).map((r) => (
-                                <div key={r.id} className="text-sm flex items-center justify-between gap-2">
-                                  <div className="truncate">{r.userName || `User ${r.userId}`}</div>
-                                  <div className="text-xs text-slate-500">
-                                    opened {r.openedCount} time{r.openedCount === 1 ? "" : "s"} · last {formatDateTime(r.lastOpenedAt)}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="text-sm text-slate-500">No opens yet.</div>
-                          )}
-                        </div>
-                      </div>
-                      <div className="md:col-span-12 space-y-1.5">
-                        <Label>Audit</Label>
-                        <div className="rounded border p-2 space-y-1">
-                          {messageAudit.length ? (
-                            messageAudit.slice(0, 20).map((a, idx) => (
-                              <div key={idx} className="text-xs text-slate-600">
-                                {formatDateTime(a.createdAt)} · {String(a.action ?? "")}
+                                ) : (
+                                  <div className="text-sm whitespace-pre-wrap">{r.body}</div>
+                                )}
                               </div>
                             ))
                           ) : (
-                            <div className="text-sm text-slate-500">No audit entries.</div>
+                            <div className="text-sm text-slate-500">No remarks yet. Add the first remark.</div>
                           )}
                         </div>
-                      </div>
-                    </div>
-
-                    {showWorkflowUi ? (
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between">
-                          <div className="text-sm font-medium">{selectedMessage.isBatch ? "Child Case Tasks" : "Email Tasks"}</div>
-                          <div className="flex items-center gap-2">
-                            <Button variant="outline" onClick={() => setTaskDialogOpen(true)} disabled={createTaskMutation.isPending}>Add Task</Button>
-                            <Button onClick={() => setDraftDialogOpen(true)} disabled={false}>Create Draft</Button>
+                        <div className="rounded-lg bg-slate-50 p-3 space-y-2">
+                          <Textarea placeholder="Add a remark..." value={newRemarkBody} onChange={(e) => setNewRemarkBody(e.target.value)} rows={3} />
+                          <div className="flex justify-end">
+                            <Button
+                              size="sm"
+                              onClick={() => {
+                                const value = newRemarkBody.trim();
+                                if (!value) return;
+                                createRemarkMutation.mutate({ messageId: selectedMessage.id, body: value });
+                              }}
+                              disabled={createRemarkMutation.isPending}
+                            >
+                              Add Remark
+                            </Button>
                           </div>
                         </div>
-                        <QuerySection
-                          isLoading={selectedTasksQuery.isLoading}
-                          isError={selectedTasksQuery.isError}
-                          error={selectedTasksQuery.error}
-                          isFetching={selectedTasksQuery.isFetching}
-                          onRetry={() => selectedTasksQuery.refetch()}
-                          isEmpty={selectedTasks.length === 0}
-                          emptyTitle="No child case tasks yet"
-                          emptyDescription={selectedMessage.isBatch ? "Add a case task to split this batch email." : "Add a task to process this email and prepare a reply draft."}
-                          loadingText="Loading child tasks..."
-                        >
+                      </div>
+
+                      <div className="rounded-xl border p-4 space-y-3">
+                        <div className="text-sm font-medium">Opened By</div>
+                        {selectedReadsQuery.isFetching ? (
+                          <div className="text-sm text-slate-500">Loading opened by...</div>
+                        ) : asArray<MessageRead>(selectedReadsQuery.data).length ? (
                           <div className="space-y-2">
-                            {selectedTasks.map((t) => (
-                              <div key={t.id} className="rounded border p-2 space-y-2">
-                                <div className="flex items-center justify-between gap-2">
-                                  <div className="flex items-center gap-2">
-                                    <Checkbox
-                                      checked={selectedTaskIds.includes(t.id)}
-                                      onCheckedChange={(c) => {
-                                        setSelectedTaskIds((prev) => c ? Array.from(new Set([...prev, t.id])) : prev.filter((x) => x !== t.id));
-                                      }}
-                                    />
-                                    <div className="text-sm font-medium">{t.caseRef || `Task #${t.id}`}</div>
-                                  </div>
-                                  <div className="flex items-center gap-2">
-                                    <StatusBadge value={t.taskStatus} />
-                                    <Button variant="outline" size="sm" onClick={() => taskAcknowledgeMutation.mutate(t.id)} disabled={taskAcknowledgeMutation.isPending}>Acknowledge</Button>
-                                  </div>
-                                </div>
-
-                                <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
-                                  <div className="md:col-span-4 space-y-1.5">
-                                    <Label className="text-xs">Responsible Team</Label>
-                                    <div className="rounded border p-2 text-xs space-y-1">
-                                      <div>
-                                        <span className="text-slate-500">Lawyer:</span>{" "}
-                                        {(() => {
-                                          const id = t.team?.lawyerInChargeUserId ?? null;
-                                          if (!id) return "-";
-                                          return selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`;
-                                        })()}
-                                      </div>
-                                      <div>
-                                        <span className="text-slate-500">Handlers:</span>{" "}
-                                        {(() => {
-                                          const ids = t.team?.handlerUserIds ?? [];
-                                          if (!ids.length) return "-";
-                                          return ids.map((id) => selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`).join(", ");
-                                        })()}
-                                      </div>
-                                    </div>
-                                  </div>
-                                  <div className="md:col-span-4 space-y-1.5">
-                                    <Label className="text-xs">Status</Label>
-                                    <Select value={t.taskStatus} onValueChange={(v) => taskStatusMutation.mutate({ taskId: t.id, taskStatus: v })}>
-                                      <SelectTrigger>
-                                        <SelectValue />
-                                      </SelectTrigger>
-                                      <SelectContent>
-                                        {[
-                                          "pending_owner_review",
-                                          "seen_by_owner",
-                                          "in_progress",
-                                          "waiting_client",
-                                          "waiting_developer",
-                                          "waiting_bank",
-                                          "waiting_lawyer_review",
-                                          "ready_to_reply",
-                                          "included_in_draft",
-                                          "replied",
-                                          "closed",
-                                        ].map((s) => (
-                                          <SelectItem key={s} value={s}>{s}</SelectItem>
-                                        ))}
-                                      </SelectContent>
-                                    </Select>
-                                  </div>
-                                  <div className="md:col-span-4 space-y-1.5">
-                                    <Label className="text-xs">Link Case</Label>
-                                    <Input placeholder="case ref" onKeyDown={(e) => {
-                                      if (e.key === "Enter") {
-                                        const v = (e.target as any).value;
-                                        if (v) taskLinkCaseMutation.mutate({ taskId: t.id, caseRef: String(v) });
-                                      }
-                                    }} />
-                                  </div>
-                                </div>
-
-                                <div className="space-y-1.5">
-                                  <Label className="text-xs">Reply Note</Label>
-                                  <Textarea
-                                    defaultValue={t.replyNote || ""}
-                                    rows={3}
-                                    onBlur={(e) => taskReplyNoteMutation.mutate({ taskId: t.id, replyNote: e.target.value })}
-                                  />
-                                </div>
+                            {asArray<MessageRead>(selectedReadsQuery.data).map((r) => (
+                              <div key={r.id} className="text-sm text-slate-700">
+                                <span className="font-medium">{r.userName || `User ${r.userId}`}</span>
+                                {" — "}
+                                opened {r.openedCount} time{r.openedCount === 1 ? "" : "s"}, last {formatDateTime(r.lastOpenedAt)}
                               </div>
                             ))}
                           </div>
-                        </QuerySection>
+                        ) : (
+                          <div className="text-sm text-slate-500">No opens yet.</div>
+                        )}
                       </div>
-                    ) : null}
 
-                    <div className="space-y-2">
-                      <div className="text-sm font-medium">Audit</div>
-                      <QuerySection
-                        isLoading={selectedMessageAuditQuery.isLoading}
-                        isError={selectedMessageAuditQuery.isError}
-                        error={selectedMessageAuditQuery.error}
-                        isFetching={selectedMessageAuditQuery.isFetching}
-                        onRetry={() => selectedMessageAuditQuery.refetch()}
-                        isEmpty={messageAudit.length === 0}
-                        emptyTitle="No message audit entries yet"
-                        emptyDescription="View, assignment, and workflow changes will appear here."
-                        loadingText="Loading audit..."
-                      >
-                        <div className="space-y-1">
-                          {(messageAudit ?? []).map((a: any) => (
-                            <div key={a.id} className="text-xs text-slate-600">
-                              {String(a.createdAt ?? "")} • {String(a.action ?? "")} • actor {String(a.actorUserId ?? "")}
-                            </div>
-                          ))}
+                      <div className="rounded-xl border p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-medium">Audit</div>
+                          {compactAudit.length > 5 ? (
+                            <Button variant="outline" size="sm" onClick={() => setAuditExpanded((value) => !value)}>
+                              {auditExpanded ? "Show less" : "Show all"}
+                            </Button>
+                          ) : null}
                         </div>
-                      </QuerySection>
+                        {selectedMessageAuditQuery.isFetching ? (
+                          <div className="text-sm text-slate-500">Loading audit...</div>
+                        ) : visibleAudit.length ? (
+                          <div className="space-y-2">
+                            {visibleAudit.map((entry) => (
+                              <div key={entry.key} className="text-sm text-slate-700">
+                                <div>{entry.label}</div>
+                                <div className="text-xs text-slate-500">{formatDateTime(entry.createdAt)}</div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-sm text-slate-500">No audit entries yet.</div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ) : null}
               </QuerySection>
             ) : (
-              <div className="text-sm text-slate-500">Select a message.</div>
+              <div className="flex h-full items-center justify-center rounded-xl border border-dashed text-sm text-slate-500">Select a message.</div>
             )}
           </CardContent>
         </Card>
       </div>
+
+      <Dialog open={assigneesDialogOpen} onOpenChange={setAssigneesDialogOpen}>
+        <DialogContent className="max-w-lg max-h-[80vh] overflow-hidden flex flex-col">
+          <DialogHeader className="shrink-0">
+            <DialogTitle>Edit Assigned Users</DialogTitle>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto space-y-3">
+            <div className="text-sm text-slate-500">Select one or more users for this email.</div>
+            <div className="rounded-lg border p-3 space-y-2">
+              {selectedUserOptions.map((u) => (
+                <label key={u.id} className="flex items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={assignedUserIds.includes(u.id)}
+                    onCheckedChange={(checked) => {
+                      setAssignedUserIds((prev) => checked ? Array.from(new Set([...prev, u.id])) : prev.filter((x) => x !== u.id));
+                    }}
+                  />
+                  <span>{u.label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          <DialogFooter className="shrink-0">
+            <Button variant="outline" onClick={() => setAssigneesDialogOpen(false)}>Cancel</Button>
+            <Button
+              onClick={() => {
+                if (!selectedMessageId) return;
+                assigneesMutation.mutate({ messageId: selectedMessageId, userIds: assignedUserIds });
+              }}
+              disabled={assigneesMutation.isPending || !selectedMessageId}
+            >
+              Save Assigned Users
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={connectDialogOpen} onOpenChange={setConnectDialogOpen}>
         <DialogContent className="max-w-lg">
