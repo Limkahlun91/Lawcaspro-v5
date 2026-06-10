@@ -3,6 +3,7 @@ import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } fro
 import {
   DraftCreateSchema,
   DraftPatchSchema,
+  EmailAccountPatchSchema,
   ManualEmailCreateSchema,
   MessageArchivePatchSchema,
   MessageAssigneesPatchSchema,
@@ -11,6 +12,9 @@ import {
   MessageLinkCaseSchema,
   MessageReadStatusPatchSchema,
   EmailAccountCreateSchema,
+  EmailFolderPatchSchema,
+  ImapConnectionInputSchema,
+  MicrosoftConnectQuerySchema,
   RemarkCreateSchema,
   RemarkPatchSchema,
   TaskAssignSchema,
@@ -29,11 +33,14 @@ import {
   cancelDraft,
   closeMessage,
   closeTask,
+  completeMicrosoftOauth,
+  connectImapMailbox,
   createDraft,
   createEmailAccount,
   createManualIncomingEmail,
   createMessageRemark,
   createMessageTask,
+  disconnectEmailAccount,
   deleteMessageRemark,
   setMessageResponsibleTeam,
   setTaskResponsibleTeam,
@@ -62,8 +69,13 @@ import {
   listMessageTasks,
   listMyTasks,
   importEmailNow,
+  patchEmailAccountDetails,
+  patchEmailFolderDetails,
   recordMessageOpened,
   setMessageAssignees,
+  startMicrosoftOauth,
+  syncEmailAccountFolders,
+  testImapMailbox,
   updateTaskReplyNote,
   updateMessageReadStatus,
   updateMessageRemark,
@@ -364,11 +376,117 @@ router.patch("/communication/messages/:id/read-status", requireAuth, requireFirm
   res.json(updated);
 });
 
+const sendProviderError = (res: Response, error: unknown) => {
+  const status = typeof (error as any)?.status === "number" ? Number((error as any).status) : 500;
+  const message = error instanceof Error ? error.message : "Internal Server Error";
+  const code = typeof (error as any)?.code === "string" ? String((error as any).code) : "EMAIL_PROVIDER_ERROR";
+  res.status(status).json({
+    error: message,
+    code,
+    requestId: typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : null,
+  });
+};
+
+router.get("/communication/email/microsoft/connect", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  try {
+    const parsed = MicrosoftConnectQuerySchema.safeParse({ returnTo: one((req.query as any).returnTo) ?? null });
+    if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+    const result = await startMicrosoftOauth({ req, returnTo: parsed.data.returnTo ?? null });
+    res.json(result);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
+});
+
+router.get("/communication/email/microsoft/callback", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const code = one((req.query as any).code) ?? "";
+  const state = one((req.query as any).state) ?? "";
+  const providerError = one((req.query as any).error) ?? "";
+  if (providerError) {
+    const description = one((req.query as any).error_description) ?? providerError;
+    res.status(400).json({ error: description, code: providerError });
+    return;
+  }
+  if (!code || !state) {
+    res.status(400).json({ error: "Missing Microsoft OAuth callback parameters." });
+    return;
+  }
+  try {
+    const result = await completeMicrosoftOauth({ r, req, code, state });
+    const target = new URL(result.returnTo);
+    target.searchParams.set("provider", "microsoft_graph");
+    target.searchParams.set("providerStatus", "connected");
+    target.searchParams.set("accountId", String(result.account.id));
+    res.redirect(target.toString());
+  } catch (error) {
+    const fallback = one((req.query as any).returnTo);
+    if (fallback) {
+      try {
+        const target = new URL(fallback);
+        target.searchParams.set("provider", "microsoft_graph");
+        target.searchParams.set("providerStatus", "error");
+        target.searchParams.set("providerError", error instanceof Error ? error.message : "Microsoft connection failed");
+        res.redirect(target.toString());
+        return;
+      } catch {
+        // Fall through to JSON error.
+      }
+    }
+    sendProviderError(res, error);
+  }
+});
+
+router.post("/communication/email/imap/test", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  try {
+    const parsed = ImapConnectionInputSchema.safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+    const result = await testImapMailbox({ req, input: {
+      emailAddress: parsed.data.emailAddress,
+      displayName: parsed.data.displayName ?? null,
+      host: parsed.data.host,
+      port: parsed.data.port,
+      username: parsed.data.username,
+      password: parsed.data.password,
+      useTls: parsed.data.useTls,
+    } });
+    res.json(result);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
+});
+
+router.post("/communication/email/imap/connect", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  try {
+    const parsed = ImapConnectionInputSchema.safeParse(req.body);
+    if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+    const result = await connectImapMailbox({ r, req, input: {
+      emailAddress: parsed.data.emailAddress,
+      displayName: parsed.data.displayName ?? null,
+      host: parsed.data.host,
+      port: parsed.data.port,
+      username: parsed.data.username,
+      password: parsed.data.password,
+      useTls: parsed.data.useTls,
+    } });
+    res.status(201).json(result);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
+});
+
 router.get("/communication/email/accounts", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
   const r = getRlsDb(req, res);
   if (!r) return;
-  const rows = await listConnectedEmailAccounts({ r, req });
-  res.json(rows);
+  try {
+    const rows = await listConnectedEmailAccounts({ r, req });
+    res.json(rows);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
 });
 
 router.post("/communication/email/accounts", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
@@ -376,8 +494,42 @@ router.post("/communication/email/accounts", requireAuth, requireFirmUser, requi
   if (!r) return;
   const parsed = EmailAccountCreateSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
-  const created = await createEmailAccount({ r, req, input: { provider: parsed.data.provider, emailAddress: parsed.data.emailAddress, displayName: parsed.data.displayName ?? null } });
-  res.status(201).json(created);
+  try {
+    const created = await createEmailAccount({ r, req, input: { provider: parsed.data.provider, emailAddress: parsed.data.emailAddress, displayName: parsed.data.displayName ?? null } });
+    res.status(201).json(created);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
+});
+
+router.patch("/communication/email/accounts/:accountId", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).accountId);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid account id" }); return; }
+  const parsed = EmailAccountPatchSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  try {
+    const updated = await patchEmailAccountDetails({ r, req, accountId: id, patch: parsed.data });
+    res.json(updated);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
+});
+
+router.delete("/communication/email/accounts/:accountId", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).accountId);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid account id" }); return; }
+  try {
+    const updated = await disconnectEmailAccount({ r, req, accountId: id });
+    res.json(updated);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
 });
 
 router.get("/communication/email/accounts/:accountId/folders", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
@@ -386,8 +538,56 @@ router.get("/communication/email/accounts/:accountId/folders", requireAuth, requ
   const idStr = one((req.params as any).accountId);
   const id = idStr ? parseInt(idStr, 10) : NaN;
   if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid account id" }); return; }
-  const rows = await listEmailFolders({ r, req, accountId: id });
-  res.json(rows);
+  try {
+    const rows = await listEmailFolders({ r, req, accountId: id });
+    res.json(rows);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
+});
+
+router.post("/communication/email/microsoft/:accountId/sync-folders", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).accountId);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid account id" }); return; }
+  try {
+    const rows = await syncEmailAccountFolders({ r, req, accountId: id });
+    res.json(rows);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
+});
+
+router.post("/communication/email/accounts/:accountId/sync-folders", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).accountId);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid account id" }); return; }
+  try {
+    const rows = await syncEmailAccountFolders({ r, req, accountId: id });
+    res.json(rows);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
+});
+
+router.patch("/communication/email/folders/:folderId", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).folderId);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid folder id" }); return; }
+  const parsed = EmailFolderPatchSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  try {
+    const updated = await patchEmailFolderDetails({ r, req, folderId: id, syncEnabled: parsed.data.syncEnabled });
+    res.json(updated);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
 });
 
 router.get("/communication/email/accounts/:accountId/sync-logs", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
@@ -397,8 +597,12 @@ router.get("/communication/email/accounts/:accountId/sync-logs", requireAuth, re
   const id = idStr ? parseInt(idStr, 10) : NaN;
   if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid account id" }); return; }
   const limit = Math.min(parseInt(one((req.query as any).limit) ?? "50", 10) || 50, 200);
-  const rows = await listEmailSyncLogs({ r, req, accountId: id, limit });
-  res.json(rows);
+  try {
+    const rows = await listEmailSyncLogs({ r, req, accountId: id, limit });
+    res.json(rows);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
 });
 
 router.post("/communication/email/accounts/:accountId/import-now", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
@@ -407,8 +611,12 @@ router.post("/communication/email/accounts/:accountId/import-now", requireAuth, 
   const idStr = one((req.params as any).accountId);
   const id = idStr ? parseInt(idStr, 10) : NaN;
   if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid account id" }); return; }
-  const result = await importEmailNow({ r, req, accountId: id });
-  res.status(400).json(result);
+  try {
+    const result = await importEmailNow({ r, req, accountId: id });
+    res.json(result);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
 });
 
 router.get("/communication/case-lookup", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {

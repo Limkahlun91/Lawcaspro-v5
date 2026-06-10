@@ -107,6 +107,46 @@ export async function getMessageById(r: DbConn, firmId: number, id: number) {
   return row ?? null;
 }
 
+export async function getMessageByProviderMessageId(r: DbConn, firmId: number, accountId: number, providerMessageId: string) {
+  const [row] = await r
+    .select()
+    .from(communicationMessagesTable)
+    .where(and(
+      eq(communicationMessagesTable.firmId, firmId),
+      eq(communicationMessagesTable.emailAccountId, accountId),
+      eq(communicationMessagesTable.providerMessageId, providerMessageId),
+    ))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function getMessageByInternetMessageId(r: DbConn, firmId: number, accountId: number, internetMessageId: string) {
+  const [row] = await r
+    .select()
+    .from(communicationMessagesTable)
+    .where(and(
+      eq(communicationMessagesTable.firmId, firmId),
+      eq(communicationMessagesTable.emailAccountId, accountId),
+      eq(communicationMessagesTable.internetMessageId, internetMessageId),
+    ))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function getMessageByFolderUid(r: DbConn, firmId: number, accountId: number, folderId: number, providerUid: string) {
+  const [row] = await r
+    .select()
+    .from(communicationMessagesTable)
+    .where(and(
+      eq(communicationMessagesTable.firmId, firmId),
+      eq(communicationMessagesTable.emailAccountId, accountId),
+      eq(communicationMessagesTable.emailFolderId, folderId),
+      eq(communicationMessagesTable.providerUid, providerUid),
+    ))
+    .limit(1);
+  return row ?? null;
+}
+
 export async function listMessages(
   r: DbConn,
   firmId: number,
@@ -421,11 +461,92 @@ export async function insertEmailAccount(r: DbConn, values: typeof communication
   return row;
 }
 
+export async function getEmailAccountById(r: DbConn, firmId: number, accountId: number) {
+  const [row] = await r
+    .select()
+    .from(communicationEmailAccountsTable)
+    .where(and(
+      eq(communicationEmailAccountsTable.firmId, firmId),
+      eq(communicationEmailAccountsTable.id, accountId),
+    ))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function getEmailAccountByProviderEmail(r: DbConn, firmId: number, provider: string, emailAddress: string) {
+  const [row] = await r
+    .select()
+    .from(communicationEmailAccountsTable)
+    .where(and(
+      eq(communicationEmailAccountsTable.firmId, firmId),
+      eq(communicationEmailAccountsTable.provider, provider),
+      eq(communicationEmailAccountsTable.emailAddress, emailAddress),
+    ))
+    .limit(1);
+  return row ?? null;
+}
+
 export async function updateEmailAccount(r: DbConn, firmId: number, accountId: number, patch: Partial<typeof communicationEmailAccountsTable.$inferInsert>) {
   const [row] = await r
     .update(communicationEmailAccountsTable)
     .set({ ...patch, updatedAt: new Date() })
     .where(and(eq(communicationEmailAccountsTable.firmId, firmId), eq(communicationEmailAccountsTable.id, accountId)))
+    .returning();
+  return row ?? null;
+}
+
+export async function upsertEmailFolder(r: DbConn, values: typeof communicationEmailFoldersTable.$inferInsert & { syncEnabled?: boolean | null }) {
+  const [existing] = await r
+    .select()
+    .from(communicationEmailFoldersTable)
+    .where(and(
+      eq(communicationEmailFoldersTable.accountId, values.accountId),
+      eq(communicationEmailFoldersTable.providerFolderId, values.providerFolderId),
+    ))
+    .limit(1);
+
+  if (!existing) {
+    const [created] = await r.insert(communicationEmailFoldersTable).values({
+      ...values,
+      syncEnabled: values.syncEnabled ?? false,
+    }).returning();
+    return created;
+  }
+
+  const [updated] = await r
+    .update(communicationEmailFoldersTable)
+    .set({
+      parentProviderFolderId: values.parentProviderFolderId ?? null,
+      displayName: values.displayName,
+      folderType: values.folderType,
+      syncEnabled: values.syncEnabled ?? existing.syncEnabled,
+      updatedAt: new Date(),
+    })
+    .where(eq(communicationEmailFoldersTable.id, existing.id))
+    .returning();
+  return updated ?? existing;
+}
+
+export async function getEmailFolderById(r: DbConn, firmId: number, folderId: number) {
+  const [row] = await r
+    .select()
+    .from(communicationEmailFoldersTable)
+    .where(and(
+      eq(communicationEmailFoldersTable.firmId, firmId),
+      eq(communicationEmailFoldersTable.id, folderId),
+    ))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function updateEmailFolder(r: DbConn, firmId: number, folderId: number, patch: Partial<typeof communicationEmailFoldersTable.$inferInsert>) {
+  const [row] = await r
+    .update(communicationEmailFoldersTable)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(and(
+      eq(communicationEmailFoldersTable.firmId, firmId),
+      eq(communicationEmailFoldersTable.id, folderId),
+    ))
     .returning();
   return row ?? null;
 }
@@ -450,6 +571,36 @@ export async function listEmailSyncLogsForAccount(r: DbConn, firmId: number, acc
 export async function insertEmailSyncLog(r: DbConn, values: typeof communicationEmailSyncLogsTable.$inferInsert) {
   const [row] = await r.insert(communicationEmailSyncLogsTable).values(values).returning();
   return row;
+}
+
+export async function updateEmailSyncLog(r: DbConn, firmId: number, syncLogId: number, patch: Partial<typeof communicationEmailSyncLogsTable.$inferInsert>) {
+  const [row] = await r
+    .update(communicationEmailSyncLogsTable)
+    .set(patch)
+    .where(and(
+      eq(communicationEmailSyncLogsTable.firmId, firmId),
+      eq(communicationEmailSyncLogsTable.id, syncLogId),
+    ))
+    .returning();
+  return row ?? null;
+}
+
+export async function insertAttachment(r: DbConn, values: typeof communicationAttachmentsTable.$inferInsert) {
+  const [row] = await r.insert(communicationAttachmentsTable).values(values).returning();
+  return row;
+}
+
+export async function getAttachmentByProviderId(r: DbConn, firmId: number, messageId: number, providerAttachmentId: string) {
+  const [row] = await r
+    .select()
+    .from(communicationAttachmentsTable)
+    .where(and(
+      eq(communicationAttachmentsTable.firmId, firmId),
+      eq(communicationAttachmentsTable.messageId, messageId),
+      eq(communicationAttachmentsTable.providerAttachmentId, providerAttachmentId),
+    ))
+    .limit(1);
+  return row ?? null;
 }
 
 export async function listAttachmentsForMessage(r: DbConn, firmId: number, messageId: number) {

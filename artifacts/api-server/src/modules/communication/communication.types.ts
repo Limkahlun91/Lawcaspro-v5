@@ -66,6 +66,29 @@ export const EmailAccountCreateSchema = z.object({
   displayName: z.string().trim().max(200).optional().nullable(),
 });
 
+export const EmailAccountPatchSchema = z.object({
+  displayName: z.string().trim().max(200).optional().nullable(),
+  status: z.enum(["active", "disconnected", "error", "setup_required"]).optional(),
+});
+
+export const EmailFolderPatchSchema = z.object({
+  syncEnabled: z.boolean(),
+});
+
+export const MicrosoftConnectQuerySchema = z.object({
+  returnTo: z.string().url().optional().nullable(),
+});
+
+export const ImapConnectionInputSchema = z.object({
+  emailAddress: z.string().email(),
+  displayName: z.string().trim().max(200).optional().nullable(),
+  host: z.string().trim().min(1).max(255),
+  port: z.number().int().positive().max(65535),
+  username: z.string().trim().min(1).max(255),
+  password: z.string().min(1).max(1000),
+  useTls: z.boolean().default(true),
+});
+
 export const CommunicationDraftTypeSchema = z.enum(["consolidated", "partial", "split_case", "normal_reply"]);
 export type CommunicationDraftType = z.infer<typeof CommunicationDraftTypeSchema>;
 

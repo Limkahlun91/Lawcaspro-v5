@@ -1,4 +1,5 @@
 import { sql } from "@workspace/db";
+import { ApiError } from "../../lib/api-response.js";
 import type { AuthRequest } from "../../lib/auth.js";
 import { buildConsolidatedDraftBody } from "./communication.draft-builder.js";
 import { writeCommunicationAuditLog } from "./communication.audit.js";
@@ -9,13 +10,21 @@ import {
   getCaseRefDisplay,
   getCaseResponsibleUsers,
   getDraftById,
+  getEmailAccountById,
+  getEmailAccountByProviderEmail,
+  getEmailFolderById,
+  getMessageByFolderUid,
+  getMessageByInternetMessageId,
   getMailboxById,
   getMessageById,
+  getMessageByProviderMessageId,
   getOrCreateDefaultManualEmailMailbox,
   getReadByMessageUser,
   getRemarkById,
   getTaskById,
+  getAttachmentByProviderId,
   insertEmailAccount,
+  insertAttachment,
   insertEmailSyncLog,
   insertRemark,
   insertDraft,
@@ -46,16 +55,35 @@ import {
   replaceAssigneesForTask,
   setMessageReadStatus,
   softDeleteRemark,
+  upsertEmailFolder,
   upsertMessageAssignees,
   upsertMessageOpened,
   updateDraft,
   updateEmailAccount,
+  updateEmailFolder,
+  updateEmailSyncLog,
   updateMessage,
   updateRemark,
   updateTask,
   buildCaseCommunicationTimeline,
   type DbConn,
 } from "./communication.repository.js";
+import { decryptEmailSecret, encryptEmailSecret, ensureEmailEncryptionConfigured, signEmailState, verifyEmailState } from "./email-crypto.js";
+import { ensureAbsoluteReturnTo, type ImportedMessage } from "./email-provider-utils.js";
+import {
+  buildMicrosoftConnectUrl,
+  ensureMicrosoftOauthConfigured,
+  exchangeMicrosoftCodeForTokens,
+  fetchMicrosoftFolderMessages,
+  fetchMicrosoftFolders,
+  fetchMicrosoftMailboxProfile,
+  refreshMicrosoftAccessToken,
+} from "./providers/microsoft-graph.provider.js";
+import {
+  fetchImapFolderMessages,
+  fetchImapFolders,
+  testImapConnection,
+} from "./providers/imap.provider.js";
 import { normalizeEmailAddressList } from "./providers/manual-email.provider.js";
 
 function now(): Date {
@@ -635,15 +663,309 @@ export async function setMessageAssignees(args: { r: DbConn; req: AuthRequest; m
   return { ok: true as const, assignedToUserId: updatedMessage?.assignedToUserId ?? null, userIds: updatedRows.map((r) => r.userId) };
 }
 
+function requireMailboxManagementRole(req: AuthRequest) {
+  const roleName = getRoleNameFromReq(req);
+  if (!isPartnerOrAdminRole(roleName)) {
+    throw new ApiError({
+      status: 403,
+      code: "EMAIL_PROVIDER_FORBIDDEN",
+      message: "Only partner or admin users can manage mailbox connections.",
+    });
+  }
+}
+
+function sanitizeEmailAccount(account: any) {
+  return {
+    id: account.id,
+    provider: account.provider,
+    emailAddress: account.emailAddress,
+    displayName: account.displayName,
+    status: account.status,
+    mailboxType: account.mailboxType,
+    imapHost: account.imapHost ?? null,
+    imapPort: account.imapPort ?? null,
+    imapUsername: account.imapUsername ?? null,
+    useTls: account.useTls,
+    lastSyncAt: account.lastSyncAt ?? null,
+    lastError: account.lastError ?? null,
+    tokenExpiresAt: account.tokenExpiresAt ?? null,
+    createdAt: account.createdAt,
+    updatedAt: account.updatedAt,
+  };
+}
+
+function defaultFolderSyncEnabled(folderType: string): boolean {
+  return folderType === "inbox" || folderType === "sent" || folderType === "archive";
+}
+
+async function getAccountOrThrow(r: DbConn, firmId: number, accountId: number) {
+  const account = await getEmailAccountById(r, firmId, accountId);
+  if (!account) {
+    throw new ApiError({
+      status: 404,
+      code: "EMAIL_ACCOUNT_NOT_FOUND",
+      message: "Mailbox account not found.",
+    });
+  }
+  return account;
+}
+
+async function ensureMicrosoftAccessToken(args: { r: DbConn; firmId: number; accountId: number }) {
+  const account = await getAccountOrThrow(args.r, args.firmId, args.accountId);
+  if (account.provider !== "microsoft_graph") {
+    throw new ApiError({
+      status: 400,
+      code: "EMAIL_PROVIDER_INVALID",
+      message: "Mailbox account is not a Microsoft 365 account.",
+    });
+  }
+  const tokenExpiresAt = account.tokenExpiresAt ? new Date(account.tokenExpiresAt).getTime() : 0;
+  if (account.encryptedAccessToken && tokenExpiresAt > Date.now() + 30_000) {
+    return { account, accessToken: decryptEmailSecret(account.encryptedAccessToken) ?? "" };
+  }
+  const refreshToken = decryptEmailSecret(account.encryptedRefreshToken) ?? "";
+  if (!refreshToken) {
+    throw new ApiError({
+      status: 400,
+      code: "MICROSOFT_REFRESH_TOKEN_MISSING",
+      message: "Microsoft mailbox refresh token is missing. Please reconnect the mailbox.",
+    });
+  }
+  const refreshed = await refreshMicrosoftAccessToken(refreshToken);
+  const updated = await updateEmailAccount(args.r, args.firmId, args.accountId, {
+    encryptedAccessToken: encryptEmailSecret(refreshed.accessToken),
+    encryptedRefreshToken: refreshed.refreshToken ? encryptEmailSecret(refreshed.refreshToken) : account.encryptedRefreshToken,
+    tokenExpiresAt: refreshed.expiresAt,
+    status: "active",
+    lastError: null,
+  });
+  return { account: updated ?? account, accessToken: refreshed.accessToken };
+}
+
+async function upsertProviderFolders(args: {
+  r: DbConn;
+  firmId: number;
+  accountId: number;
+  folders: Array<{ providerFolderId: string; parentProviderFolderId: string | null; displayName: string; folderType: string }>;
+}) {
+  const existing = await listEmailFoldersForAccount(args.r, args.firmId, args.accountId);
+  const existingByProviderId = new Map(existing.map((folder) => [folder.providerFolderId, folder]));
+  const out = [];
+  for (const folder of args.folders) {
+    const current = existingByProviderId.get(folder.providerFolderId);
+    const saved = await upsertEmailFolder(args.r, {
+      firmId: args.firmId,
+      accountId: args.accountId,
+      providerFolderId: folder.providerFolderId,
+      parentProviderFolderId: folder.parentProviderFolderId,
+      displayName: folder.displayName,
+      folderType: folder.folderType,
+      syncEnabled: current?.syncEnabled ?? defaultFolderSyncEnabled(folder.folderType),
+    });
+    out.push(saved);
+  }
+  return out;
+}
+
+async function storeImportedMessage(args: {
+  r: DbConn;
+  req: AuthRequest;
+  account: any;
+  folder: any;
+  message: ImportedMessage;
+}) {
+  const firmId = args.req.firmId!;
+  const duplicate =
+    (args.message.providerMessageId ? await getMessageByProviderMessageId(args.r, firmId, args.account.id, args.message.providerMessageId) : null) ??
+    (args.message.providerUid ? await getMessageByFolderUid(args.r, firmId, args.account.id, args.folder.id, args.message.providerUid) : null) ??
+    (args.message.internetMessageId ? await getMessageByInternetMessageId(args.r, firmId, args.account.id, args.message.internetMessageId) : null);
+
+  if (duplicate) {
+    return { status: "duplicate" as const, messageId: duplicate.id };
+  }
+
+  const created = await insertMessage(args.r, {
+    firmId,
+    mailboxId: null,
+    emailAccountId: args.account.id,
+    emailFolderId: args.folder.id,
+    channel: "email",
+    provider: args.message.provider,
+    providerMessageId: args.message.providerMessageId,
+    providerThreadId: args.message.providerThreadId,
+    providerConversationId: args.message.providerConversationId,
+    providerFolder: args.message.providerFolder ?? args.folder.displayName,
+    internetMessageId: args.message.internetMessageId,
+    providerUid: args.message.providerUid,
+    providerIsRead: args.message.providerIsRead,
+    direction: args.message.direction,
+    fromAddress: args.message.fromAddress,
+    fromName: args.message.fromName,
+    toAddresses: args.message.toAddresses,
+    ccAddresses: args.message.ccAddresses,
+    bccAddresses: args.message.bccAddresses,
+    subject: args.message.subject,
+    bodyPreview: args.message.bodyPreview,
+    bodyText: args.message.bodyText,
+    bodyHtml: args.message.bodyHtml,
+    attachmentCount: args.message.attachments.length,
+    receivedAt: args.message.receivedAt,
+    sentAt: args.message.sentAt,
+    internalStatus: "unassigned",
+    isBatch: false,
+    linkedCaseId: null,
+    assignedToUserId: null,
+    lastActivityAt: args.message.receivedAt ?? args.message.sentAt ?? now(),
+    lastSyncedAt: now(),
+    createdBy: args.req.userId ?? null,
+  });
+
+  for (const attachment of args.message.attachments) {
+    if (attachment.providerAttachmentId) {
+      const existingAttachment = await getAttachmentByProviderId(args.r, firmId, created.id, attachment.providerAttachmentId);
+      if (existingAttachment) continue;
+    }
+    await insertAttachment(args.r, {
+      firmId,
+      messageId: created.id,
+      channel: "email",
+      filename: attachment.filename,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+      storagePath: null,
+      providerAttachmentId: attachment.providerAttachmentId,
+      linkedCaseId: null,
+      savedToCaseDocumentId: null,
+      createdBy: args.req.userId ?? null,
+    });
+  }
+
+  return { status: "imported" as const, messageId: created.id };
+}
+
+async function importMessagesForAccount(args: { r: DbConn; req: AuthRequest; accountId: number }) {
+  const firmId = args.req.firmId!;
+  const account = await getAccountOrThrow(args.r, firmId, args.accountId);
+  const enabledFolders = (await listEmailFoldersForAccount(args.r, firmId, args.accountId)).filter((folder) => folder.syncEnabled);
+  if (!enabledFolders.length) {
+    throw new ApiError({
+      status: 400,
+      code: "EMAIL_SYNC_NO_FOLDERS_ENABLED",
+      message: "No sync-enabled folders found for this mailbox.",
+    });
+  }
+
+  const syncLog = await insertEmailSyncLog(args.r, {
+    firmId,
+    accountId: args.accountId,
+    folderId: null,
+    startedAt: now(),
+    status: "running",
+    importedCount: 0,
+    skippedDuplicateCount: 0,
+  });
+
+  let importedCount = 0;
+  let skippedDuplicateCount = 0;
+
+  try {
+    if (account.provider === "microsoft_graph") {
+      const { accessToken, account: currentAccount } = await ensureMicrosoftAccessToken({ r: args.r, firmId, accountId: args.accountId });
+      for (const folder of enabledFolders) {
+        const messages = await fetchMicrosoftFolderMessages(accessToken, folder.providerFolderId, 100);
+        for (const item of messages) {
+          const result = await storeImportedMessage({ r: args.r, req: args.req, account: currentAccount, folder, message: item });
+          if (result.status === "imported") importedCount += 1;
+          else skippedDuplicateCount += 1;
+        }
+        await updateEmailFolder(args.r, firmId, folder.id, { lastSyncAt: now() });
+      }
+    } else if (account.provider === "imap") {
+      const password = decryptEmailSecret(account.encryptedImapPassword);
+      if (!password || !account.imapHost || !account.imapPort || !account.imapUsername) {
+        throw new ApiError({
+          status: 400,
+          code: "IMAP_CONFIGURATION_INCOMPLETE",
+          message: "IMAP mailbox configuration is incomplete.",
+        });
+      }
+      for (const folder of enabledFolders) {
+        const messages = await fetchImapFolderMessages({
+          host: account.imapHost,
+          port: account.imapPort,
+          username: account.imapUsername,
+          password,
+          useTls: account.useTls ?? true,
+        }, folder.providerFolderId, 50);
+        for (const item of messages) {
+          const result = await storeImportedMessage({ r: args.r, req: args.req, account, folder, message: item });
+          if (result.status === "imported") importedCount += 1;
+          else skippedDuplicateCount += 1;
+        }
+        await updateEmailFolder(args.r, firmId, folder.id, { lastSyncAt: now() });
+      }
+    } else {
+      throw new ApiError({
+        status: 400,
+        code: "EMAIL_PROVIDER_NOT_SUPPORTED",
+        message: "This mailbox provider is not supported for import yet.",
+      });
+    }
+
+    await updateEmailSyncLog(args.r, firmId, syncLog.id, {
+      finishedAt: now(),
+      status: "success",
+      importedCount,
+      skippedDuplicateCount,
+      errorMessage: null,
+    });
+    await updateEmailAccount(args.r, firmId, args.accountId, {
+      status: "active",
+      lastSyncAt: now(),
+      lastError: null,
+    });
+    await writeCommunicationAuditLog({
+      r: args.r,
+      req: args.req,
+      action: "communication.email_sync.success",
+      newValue: { accountId: args.accountId, syncLogId: syncLog.id, importedCount, skippedDuplicateCount },
+    });
+    return { ok: true as const, importedCount, skippedDuplicateCount, syncLogId: syncLog.id };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Email import failed";
+    await updateEmailSyncLog(args.r, firmId, syncLog.id, {
+      finishedAt: now(),
+      status: importedCount > 0 ? "partial" : "failed",
+      importedCount,
+      skippedDuplicateCount,
+      errorMessage: message,
+    });
+    await updateEmailAccount(args.r, firmId, args.accountId, {
+      status: "error",
+      lastError: message,
+    });
+    await writeCommunicationAuditLog({
+      r: args.r,
+      req: args.req,
+      action: "communication.email_sync.failed",
+      newValue: { accountId: args.accountId, syncLogId: syncLog.id, importedCount, skippedDuplicateCount, errorMessage: message },
+    });
+    throw error;
+  }
+}
+
 export async function listConnectedEmailAccounts(args: { r: DbConn; req: AuthRequest }) {
-  return listEmailAccounts(args.r, args.req.firmId!);
+  const rows = await listEmailAccounts(args.r, args.req.firmId!);
+  return rows.map(sanitizeEmailAccount);
 }
 
 export async function listEmailFolders(args: { r: DbConn; req: AuthRequest; accountId: number }) {
+  await getAccountOrThrow(args.r, args.req.firmId!, args.accountId);
   return listEmailFoldersForAccount(args.r, args.req.firmId!, args.accountId);
 }
 
 export async function listEmailSyncLogs(args: { r: DbConn; req: AuthRequest; accountId: number; limit: number }) {
+  await getAccountOrThrow(args.r, args.req.firmId!, args.accountId);
   return listEmailSyncLogsForAccount(args.r, args.req.firmId!, args.accountId, args.limit);
 }
 
@@ -652,6 +974,14 @@ export async function lookupCasesForCommunication(args: { r: DbConn; req: AuthRe
 }
 
 export async function createEmailAccount(args: { r: DbConn; req: AuthRequest; input: { provider: string; emailAddress: string; displayName?: string | null } }) {
+  requireMailboxManagementRole(args.req);
+  if (args.input.provider !== "gmail") {
+    throw new ApiError({
+      status: 400,
+      code: "EMAIL_PROVIDER_CREATE_NOT_SUPPORTED",
+      message: "Use the provider-specific connection flow for Microsoft 365 or IMAP.",
+    });
+  }
   const firmId = args.req.firmId!;
   const created = await insertEmailAccount(args.r, {
     firmId,
@@ -667,31 +997,229 @@ export async function createEmailAccount(args: { r: DbConn; req: AuthRequest; in
     action: "communication.email_account.created",
     newValue: { accountId: created.id, provider: created.provider, emailAddress: created.emailAddress, status: created.status },
   });
-  return created;
+  return sanitizeEmailAccount(created);
 }
 
-export async function importEmailNow(args: { r: DbConn; req: AuthRequest; accountId: number }) {
-  const firmId = args.req.firmId!;
-  const startedAt = now();
-  const log = await insertEmailSyncLog(args.r, {
-    firmId,
-    accountId: args.accountId,
-    folderId: null,
-    startedAt,
-    finishedAt: startedAt,
-    status: "failed",
-    importedCount: 0,
-    skippedDuplicateCount: 0,
-    errorMessage: "Email import requires provider sync configuration",
+export async function startMicrosoftOauth(args: { req: AuthRequest; returnTo?: string | null }) {
+  requireMailboxManagementRole(args.req);
+  ensureEmailEncryptionConfigured();
+  ensureMicrosoftOauthConfigured();
+  const state = signEmailState({
+    firmId: args.req.firmId!,
+    userId: args.req.userId!,
+    provider: "microsoft_graph",
+    returnTo: ensureAbsoluteReturnTo(args.returnTo) ?? "/app/communication/email",
+    issuedAt: Date.now(),
   });
-  await updateEmailAccount(args.r, firmId, args.accountId, { status: "setup_required", lastError: log.errorMessage });
+  return { url: buildMicrosoftConnectUrl(state) };
+}
+
+export async function completeMicrosoftOauth(args: { r: DbConn; req: AuthRequest; code: string; state: string }) {
+  requireMailboxManagementRole(args.req);
+  ensureEmailEncryptionConfigured();
+  const statePayload = verifyEmailState<{ firmId: number; userId: number; provider: string; returnTo: string }>(args.state);
+  if (statePayload.firmId !== args.req.firmId || statePayload.userId !== args.req.userId || statePayload.provider !== "microsoft_graph") {
+    throw new ApiError({
+      status: 400,
+      code: "EMAIL_OAUTH_STATE_MISMATCH",
+      message: "Mailbox connection state does not match the current session.",
+    });
+  }
+  const tokenResult = await exchangeMicrosoftCodeForTokens(args.code);
+  const profile = await fetchMicrosoftMailboxProfile(tokenResult.accessToken);
+  const existing = await getEmailAccountByProviderEmail(args.r, args.req.firmId!, "microsoft_graph", profile.emailAddress);
+  const saved = existing
+    ? await updateEmailAccount(args.r, args.req.firmId!, existing.id, {
+        displayName: profile.displayName,
+        status: "active",
+        encryptedAccessToken: encryptEmailSecret(tokenResult.accessToken),
+        encryptedRefreshToken: tokenResult.refreshToken ? encryptEmailSecret(tokenResult.refreshToken) : existing.encryptedRefreshToken,
+        tokenExpiresAt: tokenResult.expiresAt,
+        lastError: null,
+      })
+    : await insertEmailAccount(args.r, {
+        firmId: args.req.firmId!,
+        provider: "microsoft_graph",
+        emailAddress: profile.emailAddress,
+        displayName: profile.displayName,
+        status: "active",
+        encryptedAccessToken: encryptEmailSecret(tokenResult.accessToken),
+        encryptedRefreshToken: tokenResult.refreshToken ? encryptEmailSecret(tokenResult.refreshToken) : null,
+        tokenExpiresAt: tokenResult.expiresAt,
+        createdBy: args.req.userId ?? null,
+      });
+  const account = saved ?? existing;
+  if (!account) throw new ApiError({ status: 500, code: "EMAIL_ACCOUNT_SAVE_FAILED", message: "Unable to save Microsoft mailbox account." });
+  const folders = await fetchMicrosoftFolders(tokenResult.accessToken);
+  await upsertProviderFolders({ r: args.r, firmId: args.req.firmId!, accountId: account.id, folders });
   await writeCommunicationAuditLog({
     r: args.r,
     req: args.req,
-    action: "communication.email_sync.failed",
-    newValue: { accountId: args.accountId, syncLogId: log.id, errorMessage: log.errorMessage },
+    action: existing ? "communication.email_account.updated" : "communication.email_account.connected",
+    newValue: { accountId: account.id, provider: "microsoft_graph", emailAddress: account.emailAddress },
   });
-  return { ok: false as const, error: "setup_required" as const, message: log.errorMessage };
+  return { account: sanitizeEmailAccount(account), returnTo: statePayload.returnTo };
+}
+
+export async function syncEmailAccountFolders(args: { r: DbConn; req: AuthRequest; accountId: number }) {
+  requireMailboxManagementRole(args.req);
+  const firmId = args.req.firmId!;
+  const account = await getAccountOrThrow(args.r, firmId, args.accountId);
+  if (account.provider === "microsoft_graph") {
+    const { accessToken } = await ensureMicrosoftAccessToken({ r: args.r, firmId, accountId: args.accountId });
+    const folders = await fetchMicrosoftFolders(accessToken);
+    const saved = await upsertProviderFolders({ r: args.r, firmId, accountId: args.accountId, folders });
+    await updateEmailAccount(args.r, firmId, args.accountId, { status: "active", lastError: null });
+    return saved;
+  }
+  if (account.provider === "imap") {
+    const password = decryptEmailSecret(account.encryptedImapPassword);
+    if (!password || !account.imapHost || !account.imapPort || !account.imapUsername) {
+      throw new ApiError({
+        status: 400,
+        code: "IMAP_CONFIGURATION_INCOMPLETE",
+        message: "IMAP mailbox configuration is incomplete.",
+      });
+    }
+    const folders = await fetchImapFolders({
+      host: account.imapHost,
+      port: account.imapPort,
+      username: account.imapUsername,
+      password,
+      useTls: account.useTls ?? true,
+    });
+    const saved = await upsertProviderFolders({ r: args.r, firmId, accountId: args.accountId, folders });
+    await updateEmailAccount(args.r, firmId, args.accountId, { status: "active", lastError: null });
+    return saved;
+  }
+  throw new ApiError({
+    status: 400,
+    code: "EMAIL_PROVIDER_NOT_SUPPORTED",
+    message: "Folder sync is not supported for this provider.",
+  });
+}
+
+export async function testImapMailbox(args: {
+  req: AuthRequest;
+  input: { emailAddress: string; displayName?: string | null; host: string; port: number; username: string; password: string; useTls: boolean };
+}) {
+  requireMailboxManagementRole(args.req);
+  ensureEmailEncryptionConfigured();
+  return await testImapConnection({
+    host: args.input.host,
+    port: args.input.port,
+    username: args.input.username,
+    password: args.input.password,
+    useTls: args.input.useTls,
+  });
+}
+
+export async function connectImapMailbox(args: {
+  r: DbConn;
+  req: AuthRequest;
+  input: { emailAddress: string; displayName?: string | null; host: string; port: number; username: string; password: string; useTls: boolean };
+}) {
+  requireMailboxManagementRole(args.req);
+  ensureEmailEncryptionConfigured();
+  const folders = await fetchImapFolders({
+    host: args.input.host,
+    port: args.input.port,
+    username: args.input.username,
+    password: args.input.password,
+    useTls: args.input.useTls,
+  });
+  const existing = await getEmailAccountByProviderEmail(args.r, args.req.firmId!, "imap", args.input.emailAddress.trim());
+  const saved = existing
+    ? await updateEmailAccount(args.r, args.req.firmId!, existing.id, {
+        displayName: args.input.displayName?.trim() || null,
+        status: "active",
+        imapHost: args.input.host.trim(),
+        imapPort: args.input.port,
+        imapUsername: args.input.username.trim(),
+        encryptedImapPassword: encryptEmailSecret(args.input.password),
+        useTls: args.input.useTls,
+        lastError: null,
+      })
+    : await insertEmailAccount(args.r, {
+        firmId: args.req.firmId!,
+        provider: "imap",
+        emailAddress: args.input.emailAddress.trim(),
+        displayName: args.input.displayName?.trim() || null,
+        status: "active",
+        imapHost: args.input.host.trim(),
+        imapPort: args.input.port,
+        imapUsername: args.input.username.trim(),
+        encryptedImapPassword: encryptEmailSecret(args.input.password),
+        useTls: args.input.useTls,
+        createdBy: args.req.userId ?? null,
+      });
+  const account = saved ?? existing;
+  if (!account) throw new ApiError({ status: 500, code: "EMAIL_ACCOUNT_SAVE_FAILED", message: "Unable to save IMAP mailbox account." });
+  const folderRows = await upsertProviderFolders({ r: args.r, firmId: args.req.firmId!, accountId: account.id, folders });
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: existing ? "communication.email_account.updated" : "communication.email_account.connected",
+    newValue: { accountId: account.id, provider: "imap", emailAddress: account.emailAddress },
+  });
+  return { account: sanitizeEmailAccount(account), folders: folderRows };
+}
+
+export async function patchEmailAccountDetails(args: { r: DbConn; req: AuthRequest; accountId: number; patch: { displayName?: string | null; status?: "active" | "disconnected" | "error" | "setup_required" } }) {
+  requireMailboxManagementRole(args.req);
+  const account = await getAccountOrThrow(args.r, args.req.firmId!, args.accountId);
+  const updated = await updateEmailAccount(args.r, args.req.firmId!, args.accountId, {
+    displayName: args.patch.displayName !== undefined ? (args.patch.displayName?.trim() || null) : account.displayName,
+    status: args.patch.status ?? account.status,
+  });
+  return sanitizeEmailAccount(updated ?? account);
+}
+
+export async function disconnectEmailAccount(args: { r: DbConn; req: AuthRequest; accountId: number }) {
+  requireMailboxManagementRole(args.req);
+  const account = await getAccountOrThrow(args.r, args.req.firmId!, args.accountId);
+  const updated = await updateEmailAccount(args.r, args.req.firmId!, args.accountId, {
+    status: "disconnected",
+    encryptedAccessToken: null,
+    encryptedRefreshToken: null,
+    encryptedImapPassword: null,
+    tokenExpiresAt: null,
+    lastError: null,
+  });
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: "communication.email_account.disconnected",
+    newValue: { accountId: account.id, provider: account.provider, emailAddress: account.emailAddress },
+  });
+  return sanitizeEmailAccount(updated ?? account);
+}
+
+export async function patchEmailFolderDetails(args: { r: DbConn; req: AuthRequest; folderId: number; syncEnabled: boolean }) {
+  requireMailboxManagementRole(args.req);
+  const folder = await getEmailFolderById(args.r, args.req.firmId!, args.folderId);
+  if (!folder) {
+    throw new ApiError({
+      status: 404,
+      code: "EMAIL_FOLDER_NOT_FOUND",
+      message: "Mailbox folder not found.",
+    });
+  }
+  const updated = await updateEmailFolder(args.r, args.req.firmId!, args.folderId, { syncEnabled: args.syncEnabled });
+  return updated ?? folder;
+}
+
+export async function importEmailNow(args: { r: DbConn; req: AuthRequest; accountId: number }) {
+  requireMailboxManagementRole(args.req);
+  const account = await getAccountOrThrow(args.r, args.req.firmId!, args.accountId);
+  if (account.status === "setup_required") {
+    throw new ApiError({
+      status: 400,
+      code: "EMAIL_SETUP_INCOMPLETE",
+      message: "Mailbox setup is incomplete. Please complete provider connection first.",
+    });
+  }
+  return await importMessagesForAccount(args);
 }
 
 export async function listMessageTasks(args: { r: DbConn; firmId: number; messageId: number }) {
