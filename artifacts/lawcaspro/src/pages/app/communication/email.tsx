@@ -39,6 +39,52 @@ type Mailbox = {
   isActive: boolean;
 };
 
+type EmailAccount = {
+  id: number;
+  provider: string;
+  emailAddress: string;
+  displayName: string | null;
+  status: string;
+  lastSyncAt: string | null;
+  lastError: string | null;
+};
+
+type Attachment = {
+  id: number;
+  filename: string;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  storagePath: string | null;
+  createdAt: string;
+};
+
+type Remark = {
+  id: number;
+  messageId: number;
+  userId: number;
+  userName: string | null;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type MessageRead = {
+  id: number;
+  messageId: number;
+  userId: number;
+  userName: string | null;
+  firstOpenedAt: string | null;
+  lastOpenedAt: string | null;
+  openedCount: number;
+};
+
+type CaseLookupRow = {
+  id: number;
+  caseRef: string | null;
+  status: string;
+  developerName: string | null;
+};
+
 type MessageRow = {
   message: {
     id: number;
@@ -61,6 +107,10 @@ type MessageRow = {
   tasksReady: number;
   tasksReplied: number;
   tasksUnassigned: number;
+  attachmentCount: number;
+  hasAttachments: boolean;
+  isRead: boolean;
+  assigneeCount: number;
 };
 
 type Task = {
@@ -284,6 +334,10 @@ export default function EmailControlCenterPage() {
   const [selectedDraftId, setSelectedDraftId] = useState<number | null>(null);
   const [search, setSearch] = useState("");
   const [linkCaseRef, setLinkCaseRef] = useState("");
+  const [assignedUserIds, setAssignedUserIds] = useState<number[]>([]);
+  const [newRemarkBody, setNewRemarkBody] = useState("");
+  const [editingRemarkId, setEditingRemarkId] = useState<number | null>(null);
+  const [editingRemarkBody, setEditingRemarkBody] = useState("");
   const showWorkflowUi = false;
 
   const usersQuery = useQuery<User[]>({
@@ -300,8 +354,15 @@ export default function EmailControlCenterPage() {
   });
   const mailboxes = asArray<Mailbox>(mailboxesQuery.data);
 
+  const emailAccountsQuery = useQuery<EmailAccount[]>({
+    queryKey: ["communication", "email", "accounts"],
+    queryFn: () => apiFetchJson("/communication/email/accounts").then((r) => asArray<EmailAccount>(r)),
+    retry: false,
+  });
+  const emailAccounts = asArray<EmailAccount>(emailAccountsQuery.data);
+
   const messagesQuery = useQuery<MessageRow[]>({
-    queryKey: ["communication", "messages", view],
+    queryKey: ["communication", "messages", view, search],
     queryFn: () => {
       if (view === "drafts_pending_approval") return [];
       if (view === "my_tasks") return [];
@@ -309,9 +370,11 @@ export default function EmailControlCenterPage() {
       const params = new URLSearchParams();
       if (view === "unassigned") params.set("assignedTo", "unassigned");
       if (view === "assigned_to_me") params.set("assignedTo", "me");
+      if (view === "unread") params.set("unread", "true");
       if (view === "batch_emails") params.set("isBatch", "true");
       if (view === "closed") params.set("status", "closed,fully_replied");
-      if (view === "archived") params.set("status", "closed");
+      if (view === "archived") params.set("status", "archived");
+      if (search.trim()) params.set("q", search.trim());
       return apiFetchJson(`/communication/messages?${params.toString()}`).then((r) => asArray<MessageRow>(r));
     },
     enabled: view !== "drafts_pending_approval" && view !== "my_tasks" && view !== "overdue",
@@ -364,6 +427,41 @@ export default function EmailControlCenterPage() {
     retry: false,
   });
 
+  const selectedAssigneesQuery = useQuery<{ userIds: number[] }>({
+    queryKey: ["communication", "message", selectedMessageId, "assignees"],
+    queryFn: () => apiFetchJson(`/communication/messages/${selectedMessageId}/assignees`).then((r) => (r as any) ?? { userIds: [] }),
+    enabled: typeof selectedMessageId === "number",
+    retry: false,
+  });
+
+  const selectedRemarksQuery = useQuery<Remark[]>({
+    queryKey: ["communication", "message", selectedMessageId, "remarks"],
+    queryFn: () => apiFetchJson(`/communication/messages/${selectedMessageId}/remarks`).then((r) => asArray<Remark>(r)),
+    enabled: typeof selectedMessageId === "number",
+    retry: false,
+  });
+
+  const selectedReadsQuery = useQuery<MessageRead[]>({
+    queryKey: ["communication", "message", selectedMessageId, "reads"],
+    queryFn: () => apiFetchJson(`/communication/messages/${selectedMessageId}/reads`).then((r) => asArray<MessageRead>(r)),
+    enabled: typeof selectedMessageId === "number",
+    retry: false,
+  });
+
+  const selectedAttachmentsQuery = useQuery<Attachment[]>({
+    queryKey: ["communication", "message", selectedMessageId, "attachments"],
+    queryFn: () => apiFetchJson(`/communication/messages/${selectedMessageId}/attachments`).then((r) => asArray<Attachment>(r)),
+    enabled: typeof selectedMessageId === "number",
+    retry: false,
+  });
+
+  const caseLookupQuery = useQuery<CaseLookupRow[]>({
+    queryKey: ["communication", "case-lookup", linkCaseRef],
+    queryFn: () => apiFetchJson(`/communication/case-lookup?q=${encodeURIComponent(linkCaseRef)}`).then((r) => asArray<CaseLookupRow>(r)),
+    enabled: linkCaseRef.trim().length >= 2 && typeof selectedMessageId === "number",
+    retry: false,
+  });
+
   const selectedDraftQuery = useQuery<{ draft: Draft; tasks: Task[] } | null>({
     queryKey: ["communication", "draft", selectedDraftId],
     queryFn: async () => {
@@ -393,6 +491,11 @@ export default function EmailControlCenterPage() {
     enabled: typeof selectedDraftId === "number",
     retry: false,
   });
+
+  useEffect(() => {
+    const next = asArray<number>((selectedAssigneesQuery.data as any)?.userIds);
+    setAssignedUserIds(next.filter((n) => typeof n === "number"));
+  }, [selectedAssigneesQuery.data, selectedMessageId]);
 
   const [showManualEmail, setShowManualEmail] = useState(false);
   const [manualForm, setManualForm] = useState({
@@ -466,24 +569,98 @@ export default function EmailControlCenterPage() {
     onError: (e) => toastError(toast, e),
   });
 
-  const viewMessageMutation = useMutation({
-    mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/view`, { method: "POST", body: {} }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "audit", "message"] }),
+  const recordMessageOpenedMutation = useMutation({
+    mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/read`, { method: "POST", body: {} }),
+    onSuccess: (_r, messageId) => {
+      qc.invalidateQueries({ queryKey: ["communication", "messages"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", messageId, "reads"] });
+      qc.invalidateQueries({ queryKey: ["communication", "audit", "message", messageId] });
+    },
     onError: (e) => toastError(toast, e),
   });
 
   const linkMessageCaseMutation = useMutation({
-    mutationFn: (args: { messageId: number; caseRef: string }) =>
-      apiFetchJson(`/communication/messages/${args.messageId}/link-case`, { method: "PATCH", body: { caseRef: args.caseRef } }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "message"] }),
+    mutationFn: (args: { messageId: number; caseId?: number | null; caseRef?: string | null }) =>
+      apiFetchJson(`/communication/messages/${args.messageId}/link-case`, { method: "PATCH", body: { caseId: args.caseId ?? null, caseRef: args.caseRef ?? null } }),
+    onSuccess: (_r, args) => qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId] }),
     onError: (e) => toastError(toast, e),
   });
 
-  const closeMessageMutation = useMutation({
-    mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/close`, { method: "PATCH", body: {} }),
-    onSuccess: () => {
+  const unlinkMessageCaseMutation = useMutation({
+    mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/link-case`, { method: "DELETE" }),
+    onSuccess: (_r, messageId) => qc.invalidateQueries({ queryKey: ["communication", "message", messageId] }),
+    onError: (e) => toastError(toast, e),
+  });
+
+  const archiveMessageMutation = useMutation({
+    mutationFn: (args: { messageId: number; archived: boolean }) =>
+      apiFetchJson(`/communication/messages/${args.messageId}/archive`, { method: "PATCH", body: { archived: args.archived } }),
+    onSuccess: (_r, args) => {
       qc.invalidateQueries({ queryKey: ["communication", "messages"] });
-      qc.invalidateQueries({ queryKey: ["communication", "message"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId] });
+    },
+    onError: (e) => toastError(toast, e),
+  });
+
+  const readStatusMutation = useMutation({
+    mutationFn: (args: { messageId: number; isRead: boolean }) =>
+      apiFetchJson(`/communication/messages/${args.messageId}/read-status`, { method: "PATCH", body: { isRead: args.isRead } }),
+    onSuccess: (_r, args) => {
+      qc.invalidateQueries({ queryKey: ["communication", "messages"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId, "reads"] });
+    },
+    onError: (e) => toastError(toast, e),
+  });
+
+  const assigneesMutation = useMutation({
+    mutationFn: (args: { messageId: number; userIds: number[] }) =>
+      apiFetchJson(`/communication/messages/${args.messageId}/assignees`, { method: "PATCH", body: { userIds: args.userIds } }),
+    onSuccess: (_r, args) => {
+      qc.invalidateQueries({ queryKey: ["communication", "messages"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId, "assignees"] });
+    },
+    onError: (e) => toastError(toast, e),
+  });
+
+  const createRemarkMutation = useMutation({
+    mutationFn: (args: { messageId: number; body: string }) =>
+      apiFetchJson(`/communication/messages/${args.messageId}/remarks`, { method: "POST", body: { body: args.body } }),
+    onSuccess: (_r, args) => {
+      setNewRemarkBody("");
+      qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId, "remarks"] });
+      qc.invalidateQueries({ queryKey: ["communication", "audit", "message", args.messageId] });
+    },
+    onError: (e) => toastError(toast, e),
+  });
+
+  const updateRemarkMutation = useMutation({
+    mutationFn: (args: { remarkId: number; body: string }) =>
+      apiFetchJson(`/communication/remarks/${args.remarkId}`, { method: "PATCH", body: { body: args.body } }),
+    onSuccess: () => {
+      setEditingRemarkId(null);
+      setEditingRemarkBody("");
+      qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "remarks"] });
+    },
+    onError: (e) => toastError(toast, e),
+  });
+
+  const deleteRemarkMutation = useMutation({
+    mutationFn: (remarkId: number) => apiFetchJson(`/communication/remarks/${remarkId}`, { method: "DELETE" }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "remarks"] }),
+    onError: (e) => toastError(toast, e),
+  });
+
+  const [connectDialogOpen, setConnectDialogOpen] = useState(false);
+  const [connectForm, setConnectForm] = useState({ provider: "microsoft_graph", emailAddress: "", displayName: "" });
+
+  const createEmailAccountMutation = useMutation({
+    mutationFn: () => apiFetchJson("/communication/email/accounts", { method: "POST", body: connectForm }),
+    onSuccess: () => {
+      setConnectDialogOpen(false);
+      setConnectForm({ provider: "microsoft_graph", emailAddress: "", displayName: "" });
+      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
+      toast({ title: "Mailbox connection saved (setup required)" });
     },
     onError: (e) => toastError(toast, e),
   });
@@ -601,19 +778,13 @@ export default function EmailControlCenterPage() {
   const draftAudit = asArray<any>(selectedDraftAuditQuery.data);
 
   const filteredMessages = useMemo(() => {
-    const q = String(search ?? "").trim().toLowerCase();
     const base = messages.filter((row) => {
       if (view === "linked_to_case") return row.message.linkedCaseId != null;
       if (view === "no_case") return row.message.linkedCaseId == null;
       return true;
     });
-    if (!q) return base;
-    return base.filter((row) => {
-      const from = String(row.message.fromAddress ?? "").toLowerCase();
-      const subject = String(row.message.subject ?? "").toLowerCase();
-      return from.includes(q) || subject.includes(q);
-    });
-  }, [messages, search, view]);
+    return base;
+  }, [messages, view]);
 
   const [draftEditForm, setDraftEditForm] = useState({ to: "", cc: "", subject: "", bodyText: "" });
 
@@ -684,7 +855,25 @@ export default function EmailControlCenterPage() {
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div className="text-lg font-semibold">Email Inbox</div>
-        <Button onClick={() => setShowManualEmail(true)}>Manual Add Email</Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            onClick={() => {
+              qc.invalidateQueries({ queryKey: ["communication", "messages"] });
+              qc.invalidateQueries({ queryKey: ["communication", "mailboxes"] });
+              qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
+            }}
+          >
+            Refresh
+          </Button>
+          <Button variant="outline" onClick={() => toast({ title: "Import requires mailbox connection and sync setup" })}>
+            Import Now
+          </Button>
+          <Button variant="outline" onClick={() => setConnectDialogOpen(true)}>
+            Connect Mailbox
+          </Button>
+          <Button onClick={() => setShowManualEmail(true)}>Manual Add Email</Button>
+        </div>
       </div>
 
       {usersQuery.isError || mailboxesQuery.isError ? (
@@ -734,17 +923,52 @@ export default function EmailControlCenterPage() {
                 </div>
               )}
 
-              <Button variant="outline" className="w-full justify-start opacity-60" disabled>
-                Connect Microsoft 365
-              </Button>
-              <div className="text-[11px] text-slate-500">Coming soon / setup required</div>
+              <div className="pt-2 space-y-1">
+                <div className="text-xs font-medium text-slate-600">Connected email accounts</div>
+                {emailAccounts.length === 0 ? (
+                  <div className="text-xs text-slate-500">No connected accounts.</div>
+                ) : (
+                  <div className="space-y-1">
+                    {emailAccounts.map((a) => (
+                      <div key={a.id} className="rounded border px-2 py-1 text-xs">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="truncate">{a.displayName || a.emailAddress}</div>
+                          <Badge variant="outline">{a.status}</Badge>
+                        </div>
+                        <div className="text-[11px] text-slate-500 truncate">{a.provider}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="pt-2 space-y-2">
+                <div>
+                  <Button variant="outline" className="w-full justify-start opacity-60" disabled>
+                    Connect Microsoft 365
+                  </Button>
+                  <div className="text-[11px] text-slate-500">Coming soon / setup required</div>
+                </div>
+                <div>
+                  <Button variant="outline" className="w-full justify-start opacity-60" disabled>
+                    Connect IMAP
+                  </Button>
+                  <div className="text-[11px] text-slate-500">Coming soon / setup required</div>
+                </div>
+                <div>
+                  <Button variant="outline" className="w-full justify-start opacity-60" disabled>
+                    Connect Gmail
+                  </Button>
+                  <div className="text-[11px] text-slate-500">Coming soon / setup required</div>
+                </div>
+              </div>
             </div>
 
             <div className="space-y-1">
               <div className="text-xs font-medium text-slate-600">Filters</div>
               {([
                 ["shared_inbox", "All Emails"],
-                ["unread", "Unread (coming soon)"],
+                ["unread", "Unread"],
                 ["assigned_to_me", "Assigned to Me"],
                 ["unassigned", "Unassigned"],
                 ["linked_to_case", "Linked to Case"],
@@ -755,9 +979,7 @@ export default function EmailControlCenterPage() {
                   key={k}
                   variant={view === k ? "default" : "outline"}
                   className="w-full justify-start"
-                  disabled={k === "unread"}
                   onClick={() => {
-                    if (k === "unread") return;
                     setView(k);
                     setSelectedMessageId(null);
                     setSelectedDraftId(null);
@@ -777,46 +999,41 @@ export default function EmailControlCenterPage() {
             <Input placeholder="Search sender or subject..." value={search} onChange={(e) => setSearch(e.target.value)} />
           </CardHeader>
           <CardContent className="flex-1 overflow-y-auto space-y-2">
-            {view === "unread" ? (
-              <Empty className="border border-dashed border-slate-200 bg-slate-50/50 py-10">
-                <EmptyHeader>
-                  <EmptyTitle>Unread filter coming soon</EmptyTitle>
-                  <EmptyDescription>Unread tracking will be available after inbox schema upgrade.</EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            ) : (
-              <QuerySection
-                isLoading={messagesQuery.isLoading}
-                isError={messagesQuery.isError}
-                error={messagesQuery.error}
-                isFetching={messagesQuery.isFetching}
-                onRetry={() => messagesQuery.refetch()}
-                isEmpty={filteredMessages.length === 0}
-                emptyTitle="No emails yet"
-                emptyDescription="Use Manual Add Email to start."
-              >
-                {filteredMessages.map((row) => (
-                  <button
-                    key={row.message.id}
-                    className={[
-                      "w-full text-left rounded border p-2 transition-colors",
-                      selectedMessageId === row.message.id ? "border-slate-400 bg-slate-50" : "hover:bg-slate-50",
-                    ].join(" ")}
-                    onClick={() => {
-                      setSelectedMessageId(row.message.id);
-                      setSelectedDraftId(null);
-                      setSelectedTaskIds([]);
-                      viewMessageMutation.mutate(row.message.id);
-                    }}
-                  >
-                    {(() => {
-                      const unread = row.message.providerIsRead === false || String(row.message.internalStatus ?? "").trim().toLowerCase() === "new";
+            <QuerySection
+              isLoading={messagesQuery.isLoading}
+              isError={messagesQuery.isError}
+              error={messagesQuery.error}
+              isFetching={messagesQuery.isFetching}
+              onRetry={() => messagesQuery.refetch()}
+              isEmpty={filteredMessages.length === 0}
+              emptyTitle="No emails yet"
+              emptyDescription="Use Manual Add Email to start."
+            >
+              {filteredMessages.map((row) => (
+                <button
+                  key={row.message.id}
+                  className={[
+                    "w-full text-left rounded border p-2 transition-colors",
+                    selectedMessageId === row.message.id ? "border-slate-400 bg-slate-50" : "hover:bg-slate-50",
+                  ].join(" ")}
+                  onClick={() => {
+                    setSelectedMessageId(row.message.id);
+                    setSelectedDraftId(null);
+                    setSelectedTaskIds([]);
+                    recordMessageOpenedMutation.mutate(row.message.id);
+                  }}
+                >
+                  {(() => {
+                      const unread = row.isRead === false;
                       const from = `${row.message.fromName || ""}${row.message.fromName ? " " : ""}<${row.message.fromAddress || ""}>`.trim();
                       const preview = previewText(row.message.bodyText);
                       const ts = formatDateTime(row.message.receivedAt || row.message.lastActivityAt || row.message.createdAt);
-                      const assignedLabel = row.message.assignedToUserId
+                      const primaryAssigneeLabel = row.message.assignedToUserId
                         ? (selectedUserOptions.find((u) => u.id === row.message.assignedToUserId)?.label ?? `User ${row.message.assignedToUserId}`)
                         : "";
+                      const assignedLabel = row.assigneeCount > 1
+                        ? `${primaryAssigneeLabel || "Assigned"} +${row.assigneeCount - 1}`
+                        : (primaryAssigneeLabel || "");
 
                       return (
                         <div className="space-y-1">
@@ -832,15 +1049,15 @@ export default function EmailControlCenterPage() {
                             {unread ? <span className="inline-block h-2 w-2 rounded-full bg-blue-500" /> : null}
                             {assignedLabel ? <Badge variant="secondary">{assignedLabel}</Badge> : <Badge variant="outline">Unassigned</Badge>}
                             {row.message.linkedCaseId ? <Badge variant="secondary">Case</Badge> : null}
+                            {row.hasAttachments ? <Badge variant="outline">Attachment{row.attachmentCount > 1 ? `s ${row.attachmentCount}` : ""}</Badge> : null}
                             <StatusBadge value={row.message.internalStatus} />
                           </div>
                         </div>
                       );
                     })()}
-                  </button>
-                ))}
-              </QuerySection>
-            )}
+                </button>
+              ))}
+            </QuerySection>
           </CardContent>
         </Card>
 
@@ -878,20 +1095,28 @@ export default function EmailControlCenterPage() {
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => toast({ title: "Opened by tracking will be available after inbox schema upgrade" })}
+                          onClick={() => readStatusMutation.mutate({ messageId: selectedMessage.id, isRead: true })}
+                          disabled={readStatusMutation.isPending}
                         >
                           Mark Read
                         </Button>
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => toast({ title: "Opened by tracking will be available after inbox schema upgrade" })}
+                          onClick={() => readStatusMutation.mutate({ messageId: selectedMessage.id, isRead: false })}
+                          disabled={readStatusMutation.isPending}
                         >
                           Mark Unread
                         </Button>
-                        <Button variant="outline" size="sm" onClick={() => closeMessageMutation.mutate(selectedMessage.id)} disabled={closeMessageMutation.isPending}>
-                          Archive
-                        </Button>
+                        {selectedMessage.internalStatus === "archived" ? (
+                          <Button variant="outline" size="sm" onClick={() => archiveMessageMutation.mutate({ messageId: selectedMessage.id, archived: false })} disabled={archiveMessageMutation.isPending}>
+                            Unarchive
+                          </Button>
+                        ) : (
+                          <Button variant="outline" size="sm" onClick={() => archiveMessageMutation.mutate({ messageId: selectedMessage.id, archived: true })} disabled={archiveMessageMutation.isPending}>
+                            Archive
+                          </Button>
+                        )}
                       </div>
                     </div>
 
@@ -914,20 +1139,40 @@ export default function EmailControlCenterPage() {
                       </div>
                       <div className="md:col-span-6 space-y-1.5">
                         <Label>Assigned Users</Label>
-                        <div className="rounded border p-2 text-sm">
-                          {(() => {
-                            const ids = getAssignedUserIdsFromMessage(selectedMessage);
-                            if (ids.length === 0) return <div className="text-slate-500">Unassigned</div>;
-                            return (
-                              <div className="flex flex-wrap gap-2">
-                                {ids.map((id) => (
-                                  <Badge key={id} variant="secondary">
-                                    {selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`}
-                                  </Badge>
-                                ))}
-                              </div>
-                            );
-                          })()}
+                        <div className="rounded border p-2 space-y-2">
+                          <div className="flex flex-wrap gap-2">
+                            {assignedUserIds.length ? (
+                              assignedUserIds.map((id) => (
+                                <Badge key={id} variant="secondary">
+                                  {selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`}
+                                </Badge>
+                              ))
+                            ) : (
+                              <div className="text-sm text-slate-500">Unassigned</div>
+                            )}
+                          </div>
+                          <div className="max-h-32 overflow-y-auto border rounded p-2 space-y-2">
+                            {selectedUserOptions.map((u) => (
+                              <label key={u.id} className="flex items-center gap-2 text-sm">
+                                <Checkbox
+                                  checked={assignedUserIds.includes(u.id)}
+                                  onCheckedChange={(c) => {
+                                    setAssignedUserIds((prev) => (c ? Array.from(new Set([...prev, u.id])) : prev.filter((x) => x !== u.id)));
+                                  }}
+                                />
+                                <span>{u.label}</span>
+                              </label>
+                            ))}
+                          </div>
+                          <div className="flex justify-end">
+                            <Button
+                              size="sm"
+                              onClick={() => assigneesMutation.mutate({ messageId: selectedMessage.id, userIds: assignedUserIds })}
+                              disabled={assigneesMutation.isPending}
+                            >
+                              Save Assigned Users
+                            </Button>
+                          </div>
                         </div>
                       </div>
                       <div className="md:col-span-6 space-y-1.5">
@@ -935,19 +1180,43 @@ export default function EmailControlCenterPage() {
                         <div className="space-y-2">
                           <div className="text-xs text-slate-500">{selectedMessage.linkedCaseId ? `Currently linked: Case #${selectedMessage.linkedCaseId}` : "Currently not linked to any case."}</div>
                           <div className="flex gap-2">
-                          <Input placeholder="e.g. REF123 / TEST-REGRESSION-001" value={linkCaseRef} onChange={(e) => setLinkCaseRef(e.target.value)} />
-                          <Button
-                            variant="outline"
-                            onClick={() => {
-                              const v = String(linkCaseRef ?? "").trim();
-                              if (!v) return;
-                              linkMessageCaseMutation.mutate({ messageId: selectedMessage.id, caseRef: v });
-                            }}
-                            disabled={linkMessageCaseMutation.isPending}
-                          >
-                            Link
-                          </Button>
+                            <Input placeholder="Search case reference / purchaser / developer / property..." value={linkCaseRef} onChange={(e) => setLinkCaseRef(e.target.value)} />
+                            <Button
+                              variant="outline"
+                              onClick={() => {
+                                const v = String(linkCaseRef ?? "").trim();
+                                if (!v) return;
+                                linkMessageCaseMutation.mutate({ messageId: selectedMessage.id, caseRef: v });
+                              }}
+                              disabled={linkMessageCaseMutation.isPending}
+                            >
+                              Link by Ref
+                            </Button>
                           </div>
+                          {selectedMessage.linkedCaseId ? (
+                            <Button variant="outline" size="sm" onClick={() => unlinkMessageCaseMutation.mutate(selectedMessage.id)} disabled={unlinkMessageCaseMutation.isPending}>
+                              Unlink
+                            </Button>
+                          ) : null}
+                          {caseLookupQuery.isFetching ? <div className="text-xs text-slate-500">Searching...</div> : null}
+                          {linkCaseRef.trim().length >= 2 && caseLookupQuery.data?.length ? (
+                            <div className="rounded border p-2 space-y-1">
+                              {asArray<CaseLookupRow>(caseLookupQuery.data).map((c) => (
+                                <button
+                                  key={c.id}
+                                  className="w-full text-left text-sm rounded px-2 py-1 hover:bg-slate-50"
+                                  onClick={() => linkMessageCaseMutation.mutate({ messageId: selectedMessage.id, caseId: c.id })}
+                                  disabled={linkMessageCaseMutation.isPending}
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="truncate">{c.caseRef || `Case #${c.id}`}</div>
+                                    <div className="text-xs text-slate-500 truncate">{c.developerName || ""}</div>
+                                  </div>
+                                  <div className="text-xs text-slate-500 truncate">{c.status}</div>
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                       <div className="md:col-span-12 space-y-1.5">
@@ -955,12 +1224,135 @@ export default function EmailControlCenterPage() {
                         <div className="rounded border p-2 text-sm whitespace-pre-wrap">{selectedMessage.bodyText || ""}</div>
                       </div>
                       <div className="md:col-span-12 space-y-1.5">
+                        <Label>Attachments</Label>
+                        <div className="rounded border p-2 space-y-2">
+                          {selectedAttachmentsQuery.isFetching ? (
+                            <div className="text-sm text-slate-500">Loading attachments...</div>
+                          ) : asArray<Attachment>(selectedAttachmentsQuery.data).length ? (
+                            <div className="space-y-1">
+                              {asArray<Attachment>(selectedAttachmentsQuery.data).map((a) => (
+                                <div key={a.id} className="flex items-center justify-between gap-2 text-sm">
+                                  <div className="truncate">{a.filename}</div>
+                                  <div className="text-xs text-slate-500">{a.sizeBytes ? `${a.sizeBytes} bytes` : ""}</div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-sm text-slate-500">No attachments.</div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="md:col-span-12 space-y-1.5">
                         <Label>Remarks</Label>
-                        <div className="rounded border p-2 text-sm text-slate-500">Remarks will be available after inbox schema upgrade</div>
+                        <div className="rounded border p-2 space-y-3">
+                          {selectedRemarksQuery.isFetching ? (
+                            <div className="text-sm text-slate-500">Loading remarks...</div>
+                          ) : asArray<Remark>(selectedRemarksQuery.data).length ? (
+                            <div className="space-y-2">
+                              {asArray<Remark>(selectedRemarksQuery.data).map((r) => (
+                                <div key={r.id} className="rounded border p-2 space-y-1">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="text-xs text-slate-500">
+                                      {(r.userName || `User ${r.userId}`)} · {formatDateTime(r.createdAt)}
+                                      {r.updatedAt && r.updatedAt !== r.createdAt ? " (edited)" : ""}
+                                    </div>
+                                    <div className="flex items-center gap-2">
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() => {
+                                          setEditingRemarkId(r.id);
+                                          setEditingRemarkBody(r.body);
+                                        }}
+                                      >
+                                        Edit
+                                      </Button>
+                                      <Button variant="outline" size="sm" onClick={() => deleteRemarkMutation.mutate(r.id)} disabled={deleteRemarkMutation.isPending}>
+                                        Delete
+                                      </Button>
+                                    </div>
+                                  </div>
+                                  {editingRemarkId === r.id ? (
+                                    <div className="space-y-2">
+                                      <Textarea value={editingRemarkBody} onChange={(e) => setEditingRemarkBody(e.target.value)} rows={3} />
+                                      <div className="flex justify-end gap-2">
+                                        <Button
+                                          variant="outline"
+                                          size="sm"
+                                          onClick={() => {
+                                            setEditingRemarkId(null);
+                                            setEditingRemarkBody("");
+                                          }}
+                                        >
+                                          Cancel
+                                        </Button>
+                                        <Button size="sm" onClick={() => updateRemarkMutation.mutate({ remarkId: r.id, body: editingRemarkBody })} disabled={updateRemarkMutation.isPending}>
+                                          Save
+                                        </Button>
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div className="text-sm whitespace-pre-wrap">{r.body}</div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-sm text-slate-500">No remarks yet.</div>
+                          )}
+
+                          <div className="space-y-2">
+                            <Textarea placeholder="Add a remark..." value={newRemarkBody} onChange={(e) => setNewRemarkBody(e.target.value)} rows={3} />
+                            <div className="flex justify-end">
+                              <Button
+                                size="sm"
+                                onClick={() => {
+                                  const v = newRemarkBody.trim();
+                                  if (!v) return;
+                                  createRemarkMutation.mutate({ messageId: selectedMessage.id, body: v });
+                                }}
+                                disabled={createRemarkMutation.isPending}
+                              >
+                                Add Remark
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                       <div className="md:col-span-12 space-y-1.5">
                         <Label>Opened By</Label>
-                        <div className="rounded border p-2 text-sm text-slate-500">Opened by tracking will be available after inbox schema upgrade</div>
+                        <div className="rounded border p-2 space-y-2">
+                          {selectedReadsQuery.isFetching ? (
+                            <div className="text-sm text-slate-500">Loading opened by...</div>
+                          ) : asArray<MessageRead>(selectedReadsQuery.data).length ? (
+                            <div className="space-y-1">
+                              {asArray<MessageRead>(selectedReadsQuery.data).map((r) => (
+                                <div key={r.id} className="text-sm flex items-center justify-between gap-2">
+                                  <div className="truncate">{r.userName || `User ${r.userId}`}</div>
+                                  <div className="text-xs text-slate-500">
+                                    opened {r.openedCount} time{r.openedCount === 1 ? "" : "s"} · last {formatDateTime(r.lastOpenedAt)}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-sm text-slate-500">No opens yet.</div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="md:col-span-12 space-y-1.5">
+                        <Label>Audit</Label>
+                        <div className="rounded border p-2 space-y-1">
+                          {messageAudit.length ? (
+                            messageAudit.slice(0, 20).map((a, idx) => (
+                              <div key={idx} className="text-xs text-slate-600">
+                                {formatDateTime(a.createdAt)} · {String(a.action ?? "")}
+                              </div>
+                            ))
+                          ) : (
+                            <div className="text-sm text-slate-500">No audit entries.</div>
+                          )}
+                        </div>
                       </div>
                     </div>
 
@@ -1107,6 +1499,44 @@ export default function EmailControlCenterPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Dialog open={connectDialogOpen} onOpenChange={setConnectDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Connect Mailbox</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1.5">
+              <Label>Provider</Label>
+              <Select value={connectForm.provider} onValueChange={(v) => setConnectForm((p) => ({ ...p, provider: v }))}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select provider" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="microsoft_graph">Microsoft 365 (setup required)</SelectItem>
+                  <SelectItem value="imap">IMAP (setup required)</SelectItem>
+                  <SelectItem value="gmail">Gmail (coming soon)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Email Address</Label>
+              <Input value={connectForm.emailAddress} onChange={(e) => setConnectForm((p) => ({ ...p, emailAddress: e.target.value }))} placeholder="name@firm.com" />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Display Name</Label>
+              <Input value={connectForm.displayName} onChange={(e) => setConnectForm((p) => ({ ...p, displayName: e.target.value }))} placeholder="e.g. Conveyancing Shared Inbox" />
+            </div>
+            <div className="text-xs text-slate-500">Connection requires OAuth/IMAP credentials setup. This creates a placeholder account record only.</div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConnectDialogOpen(false)}>Cancel</Button>
+            <Button onClick={() => createEmailAccountMutation.mutate()} disabled={createEmailAccountMutation.isPending}>
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={showManualEmail} onOpenChange={setShowManualEmail}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">

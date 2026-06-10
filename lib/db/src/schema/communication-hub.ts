@@ -200,3 +200,94 @@ export const communicationTaskAssigneesTable = pgTable("communication_task_assig
   firmUserRoleIdx: index("idx_communication_task_assignees_user_role").on(t.firmId, t.userId, t.assignmentRole),
   firmUserStatusIdx: index("idx_communication_task_assignees_user_status").on(t.firmId, t.userId, t.status),
 }));
+
+export const communicationEmailAccountsTable = pgTable("communication_email_accounts", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  provider: text("provider").notNull(),
+  emailAddress: text("email_address").notNull(),
+  displayName: text("display_name"),
+  status: text("status").notNull().default("setup_required"),
+  mailboxType: text("mailbox_type"),
+  encryptedAccessToken: text("encrypted_access_token"),
+  encryptedRefreshToken: text("encrypted_refresh_token"),
+  tokenExpiresAt: timestamp("token_expires_at", { withTimezone: true }),
+  imapHost: text("imap_host"),
+  imapPort: integer("imap_port"),
+  imapUsername: text("imap_username"),
+  encryptedImapPassword: text("encrypted_imap_password"),
+  useTls: boolean("use_tls").notNull().default(true),
+  lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+  lastError: text("last_error"),
+  createdBy: integer("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  firmIdIdx: index("idx_communication_email_accounts_firm").on(t.firmId),
+  uniqProviderEmail: uniqueIndex("uq_communication_email_accounts_provider_email").on(t.firmId, t.provider, t.emailAddress),
+}));
+
+export const communicationEmailFoldersTable = pgTable("communication_email_folders", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  accountId: integer("account_id").notNull(),
+  providerFolderId: text("provider_folder_id").notNull(),
+  parentProviderFolderId: text("parent_provider_folder_id"),
+  displayName: text("display_name").notNull(),
+  folderType: text("folder_type").notNull().default("custom"),
+  syncEnabled: boolean("sync_enabled").notNull().default(false),
+  lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  firmAccountIdx: index("idx_communication_email_folders_firm_account").on(t.firmId, t.accountId),
+  uniqProviderFolder: uniqueIndex("uq_communication_email_folders_provider_folder").on(t.accountId, t.providerFolderId),
+}));
+
+export const communicationEmailSyncLogsTable = pgTable("communication_email_sync_logs", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  accountId: integer("account_id").notNull(),
+  folderId: integer("folder_id"),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  finishedAt: timestamp("finished_at", { withTimezone: true }),
+  status: text("status").notNull().default("running"),
+  importedCount: integer("imported_count").notNull().default(0),
+  skippedDuplicateCount: integer("skipped_duplicate_count").notNull().default(0),
+  errorMessage: text("error_message"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  firmAccountStartedIdx: index("idx_communication_email_sync_logs_firm_account_started").on(t.firmId, t.accountId, t.startedAt),
+  firmFolderStartedIdx: index("idx_communication_email_sync_logs_firm_folder_started").on(t.firmId, t.folderId, t.startedAt),
+}));
+
+export const communicationEmailRemarksTable = pgTable("communication_email_remarks", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  messageId: integer("message_id").notNull(),
+  userId: integer("user_id").notNull(),
+  body: text("body").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+}, (t) => ({
+  firmMessageCreatedIdx: index("idx_communication_email_remarks_firm_message_created").on(t.firmId, t.messageId, t.createdAt),
+  firmUserCreatedIdx: index("idx_communication_email_remarks_firm_user_created").on(t.firmId, t.userId, t.createdAt),
+}));
+
+export const communicationMessageReadsTable = pgTable("communication_message_reads", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  messageId: integer("message_id").notNull(),
+  userId: integer("user_id").notNull(),
+  firstOpenedAt: timestamp("first_opened_at", { withTimezone: true }),
+  lastOpenedAt: timestamp("last_opened_at", { withTimezone: true }),
+  openedCount: integer("opened_count").notNull().default(0),
+  isRead: boolean("is_read").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  uniqMessageUser: uniqueIndex("uq_communication_message_reads_message_user").on(t.messageId, t.userId),
+  firmMessageIdx: index("idx_communication_message_reads_firm_message").on(t.firmId, t.messageId),
+  firmUserIdx: index("idx_communication_message_reads_firm_user").on(t.firmId, t.userId),
+}));

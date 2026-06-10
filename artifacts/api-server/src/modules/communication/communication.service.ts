@@ -12,26 +12,45 @@ import {
   getMailboxById,
   getMessageById,
   getOrCreateDefaultManualEmailMailbox,
+  getRemarkById,
   getTaskById,
+  insertEmailAccount,
+  insertEmailSyncLog,
+  insertRemark,
   insertDraft,
   insertMessage,
   insertTask,
   linkDraftTasks,
-  listAssigneesForMessage,
+  listActiveAssigneesForMessage,
+  listAllAssigneesForMessage,
   listAssigneesForTasks,
   listAuditLogsForDraft,
   listAuditLogsForMessage,
   listAuditLogsForTask,
+  listAttachmentsForMessage,
+  listEmailAccounts,
+  listEmailFoldersForAccount,
+  listEmailSyncLogsForAccount,
   listDraftTaskIds,
   listDrafts,
   listMailboxes,
+  listReadsForMessage,
+  listRemarksForMessage,
+  lookupCases,
   listMessages,
   listTasksForMessage,
   listTasksMine,
+  listUsersByIds,
   replaceAssigneesForMessage,
   replaceAssigneesForTask,
+  setMessageReadStatus,
+  softDeleteRemark,
+  upsertMessageAssignees,
+  upsertMessageOpened,
   updateDraft,
+  updateEmailAccount,
   updateMessage,
+  updateRemark,
   updateTask,
   buildCaseCommunicationTimeline,
   type DbConn,
@@ -55,20 +74,25 @@ export async function listCommunicationMessages(args: {
   r: DbConn;
   firmId: number;
   userId: number;
-  filter: { status?: string | string[]; isBatch?: boolean; assignedTo?: "me" | "unassigned" | "any"; linkedCaseId?: number | null };
+  filter: {
+    status?: string | string[];
+    isBatch?: boolean;
+    assignedTo?: "me" | "unassigned" | "any";
+    linkedCaseId?: number | null;
+    unreadOnly?: boolean;
+    q?: string;
+  };
   limit: number;
   offset: number;
 }) {
-  const assignedToUserId =
-    args.filter.assignedTo === "me" ? args.userId :
-    args.filter.assignedTo === "unassigned" ? null :
-    undefined;
-
   return listMessages(args.r, args.firmId, {
     status: args.filter.status,
     isBatch: args.filter.isBatch,
-    assignedToUserId,
+    assignedTo: args.filter.assignedTo ?? "any",
+    userId: args.userId,
     linkedCaseId: typeof args.filter.linkedCaseId === "number" || args.filter.linkedCaseId === null ? args.filter.linkedCaseId : undefined,
+    unreadOnly: args.filter.unreadOnly ?? false,
+    q: args.filter.q,
     limit: args.limit,
     offset: args.offset,
   });
@@ -77,7 +101,7 @@ export async function listCommunicationMessages(args: {
 export async function getCommunicationMessage(args: { r: DbConn; firmId: number; messageId: number }) {
   const message = await getMessageById(args.r, args.firmId, args.messageId);
   if (!message) return null;
-  const assignees = await listAssigneesForMessage(args.r, args.firmId, message.id);
+  const assignees = await listActiveAssigneesForMessage(args.r, args.firmId, message.id);
   return { ...message, team: buildTeamFromAssignees(assignees) };
 }
 
@@ -421,6 +445,243 @@ export async function closeMessage(args: { r: DbConn; req: AuthRequest; messageI
     newValue: { internalStatus: updated.internalStatus },
   });
   return updated;
+}
+
+export async function archiveMessage(args: { r: DbConn; req: AuthRequest; messageId: number; archived: boolean }) {
+  const firmId = args.req.firmId!;
+  const existing = await getMessageById(args.r, firmId, args.messageId);
+  if (!existing) return null;
+  const nextStatus = args.archived ? "archived" : (existing.assignedToUserId ? "assigned" : "unassigned");
+  const updated = await updateMessage(args.r, firmId, args.messageId, { internalStatus: nextStatus, lastActivityAt: now() });
+  if (!updated) return null;
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: args.archived ? "communication.message.archived" : "communication.message.unarchived",
+    messageId: updated.id,
+    oldValue: { internalStatus: existing.internalStatus },
+    newValue: { internalStatus: updated.internalStatus },
+  });
+  return updated;
+}
+
+export async function unlinkMessageCase(args: { r: DbConn; req: AuthRequest; messageId: number }) {
+  const firmId = args.req.firmId!;
+  const existing = await getMessageById(args.r, firmId, args.messageId);
+  if (!existing) return null;
+  const updated = await updateMessage(args.r, firmId, args.messageId, { linkedCaseId: null, lastActivityAt: now() });
+  if (!updated) return null;
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: "communication.message.case_unlinked",
+    messageId: updated.id,
+    oldValue: { linkedCaseId: existing.linkedCaseId ?? null },
+    newValue: { linkedCaseId: updated.linkedCaseId ?? null },
+  });
+  return updated;
+}
+
+export async function listMessageRemarks(args: { r: DbConn; req: AuthRequest; messageId: number }) {
+  const firmId = args.req.firmId!;
+  const rows = await listRemarksForMessage(args.r, firmId, args.messageId);
+  const userIds = Array.from(new Set(rows.map((x) => x.userId)));
+  const users = await listUsersByIds(args.r, firmId, userIds);
+  const userMap = new Map(users.map((u) => [u.id, u.name]));
+  return rows.map((row) => ({ ...row, userName: userMap.get(row.userId) ?? null }));
+}
+
+export async function createMessageRemark(args: { r: DbConn; req: AuthRequest; messageId: number; body: string }) {
+  const firmId = args.req.firmId!;
+  const bodyText = args.body.trim();
+  if (!bodyText) return { error: "empty_body" as const };
+  const message = await getMessageById(args.r, firmId, args.messageId);
+  if (!message) return null;
+  const created = await insertRemark(args.r, { firmId, messageId: args.messageId, userId: args.req.userId!, body: bodyText });
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: "communication.remark.created",
+    messageId: args.messageId,
+    newValue: { remarkId: created.id, userId: created.userId, body: created.body },
+  });
+  return created;
+}
+
+export async function updateMessageRemark(args: { r: DbConn; req: AuthRequest; remarkId: number; body: string }) {
+  const firmId = args.req.firmId!;
+  const existing = await getRemarkById(args.r, firmId, args.remarkId);
+  if (!existing) return null;
+  if (existing.deletedAt) return { error: "deleted" as const };
+  const roleName = getRoleNameFromReq(args.req);
+  const canEdit = existing.userId === args.req.userId || isPartnerOrAdminRole(roleName);
+  if (!canEdit) return { error: "forbidden" as const };
+  const bodyText = args.body.trim();
+  if (!bodyText) return { error: "empty_body" as const };
+  const updated = await updateRemark(args.r, firmId, args.remarkId, { body: bodyText });
+  if (!updated) return null;
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: "communication.remark.updated",
+    messageId: updated.messageId,
+    oldValue: { remarkId: existing.id, body: existing.body },
+    newValue: { remarkId: updated.id, body: updated.body },
+  });
+  return updated;
+}
+
+export async function deleteMessageRemark(args: { r: DbConn; req: AuthRequest; remarkId: number }) {
+  const firmId = args.req.firmId!;
+  const existing = await getRemarkById(args.r, firmId, args.remarkId);
+  if (!existing) return null;
+  if (existing.deletedAt) return { ok: true as const };
+  const roleName = getRoleNameFromReq(args.req);
+  const canDelete = existing.userId === args.req.userId || isPartnerOrAdminRole(roleName);
+  if (!canDelete) return { error: "forbidden" as const };
+  const deleted = await softDeleteRemark(args.r, firmId, args.remarkId);
+  if (!deleted) return null;
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: "communication.remark.deleted",
+    messageId: deleted.messageId,
+    oldValue: { remarkId: existing.id, body: existing.body },
+    newValue: { remarkId: deleted.id, deletedAt: deleted.deletedAt },
+  });
+  return { ok: true as const };
+}
+
+export async function recordMessageOpened(args: { r: DbConn; req: AuthRequest; messageId: number }) {
+  const firmId = args.req.firmId!;
+  const message = await getMessageById(args.r, firmId, args.messageId);
+  if (!message) return null;
+  const updated = await upsertMessageOpened(args.r, firmId, args.messageId, args.req.userId!);
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: "communication.message.opened",
+    messageId: args.messageId,
+    newValue: { userId: args.req.userId!, openedCount: updated?.openedCount ?? null, lastOpenedAt: updated?.lastOpenedAt ?? null },
+  });
+  return updated;
+}
+
+export async function listMessageReads(args: { r: DbConn; req: AuthRequest; messageId: number }) {
+  const firmId = args.req.firmId!;
+  const rows = await listReadsForMessage(args.r, firmId, args.messageId);
+  const userIds = Array.from(new Set(rows.map((x) => x.userId)));
+  const users = await listUsersByIds(args.r, firmId, userIds);
+  const userMap = new Map(users.map((u) => [u.id, u.name]));
+  return rows.map((row) => ({ ...row, userName: userMap.get(row.userId) ?? null }));
+}
+
+export async function listMessageAttachments(args: { r: DbConn; req: AuthRequest; messageId: number }) {
+  const firmId = args.req.firmId!;
+  const message = await getMessageById(args.r, firmId, args.messageId);
+  if (!message) return null;
+  return listAttachmentsForMessage(args.r, firmId, args.messageId);
+}
+
+export async function updateMessageReadStatus(args: { r: DbConn; req: AuthRequest; messageId: number; isRead: boolean }) {
+  const firmId = args.req.firmId!;
+  const message = await getMessageById(args.r, firmId, args.messageId);
+  if (!message) return null;
+  await setMessageReadStatus(args.r, { firmId, messageId: args.messageId, userId: args.req.userId!, isRead: args.isRead });
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: args.isRead ? "communication.message.marked_read" : "communication.message.marked_unread",
+    messageId: args.messageId,
+    newValue: { userId: args.req.userId!, isRead: args.isRead },
+  });
+  return { ok: true as const };
+}
+
+export async function getMessageAssignees(args: { r: DbConn; req: AuthRequest; messageId: number }) {
+  const firmId = args.req.firmId!;
+  const rows = await listActiveAssigneesForMessage(args.r, firmId, args.messageId);
+  return { userIds: rows.map((r) => r.userId) };
+}
+
+export async function setMessageAssignees(args: { r: DbConn; req: AuthRequest; messageId: number; userIds: number[] }) {
+  const firmId = args.req.firmId!;
+  const message = await getMessageById(args.r, firmId, args.messageId);
+  if (!message) return null;
+  const oldRows = await listActiveAssigneesForMessage(args.r, firmId, args.messageId);
+  const updatedRows = await upsertMessageAssignees(args.r, { firmId, messageId: args.messageId, actorId: args.req.userId!, userIds: args.userIds });
+  const primaryUserId = updatedRows.find((r) => r.isPrimary)?.userId ?? updatedRows[0]?.userId ?? null;
+  const patch: any = { assignedToUserId: primaryUserId, lastActivityAt: now() };
+  if (message.internalStatus !== "archived") patch.internalStatus = primaryUserId ? "assigned" : "unassigned";
+  const updatedMessage = await updateMessage(args.r, firmId, args.messageId, patch);
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: "communication.message.assignees.updated",
+    messageId: args.messageId,
+    oldValue: { userIds: oldRows.map((r) => r.userId) },
+    newValue: { userIds: updatedRows.map((r) => r.userId), assignedToUserId: updatedMessage?.assignedToUserId ?? null },
+  });
+  return { ok: true as const, assignedToUserId: updatedMessage?.assignedToUserId ?? null, userIds: updatedRows.map((r) => r.userId) };
+}
+
+export async function listConnectedEmailAccounts(args: { r: DbConn; req: AuthRequest }) {
+  return listEmailAccounts(args.r, args.req.firmId!);
+}
+
+export async function listEmailFolders(args: { r: DbConn; req: AuthRequest; accountId: number }) {
+  return listEmailFoldersForAccount(args.r, args.req.firmId!, args.accountId);
+}
+
+export async function listEmailSyncLogs(args: { r: DbConn; req: AuthRequest; accountId: number; limit: number }) {
+  return listEmailSyncLogsForAccount(args.r, args.req.firmId!, args.accountId, args.limit);
+}
+
+export async function lookupCasesForCommunication(args: { r: DbConn; req: AuthRequest; q: string; limit: number }) {
+  return lookupCases(args.r, args.req.firmId!, args.q, args.limit);
+}
+
+export async function createEmailAccount(args: { r: DbConn; req: AuthRequest; input: { provider: string; emailAddress: string; displayName?: string | null } }) {
+  const firmId = args.req.firmId!;
+  const created = await insertEmailAccount(args.r, {
+    firmId,
+    provider: args.input.provider,
+    emailAddress: args.input.emailAddress.trim(),
+    displayName: args.input.displayName?.trim() || null,
+    status: "setup_required",
+    createdBy: args.req.userId ?? null,
+  });
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: "communication.email_account.created",
+    newValue: { accountId: created.id, provider: created.provider, emailAddress: created.emailAddress, status: created.status },
+  });
+  return created;
+}
+
+export async function importEmailNow(args: { r: DbConn; req: AuthRequest; accountId: number }) {
+  const firmId = args.req.firmId!;
+  const startedAt = now();
+  const log = await insertEmailSyncLog(args.r, {
+    firmId,
+    accountId: args.accountId,
+    folderId: null,
+    startedAt,
+    finishedAt: startedAt,
+    status: "failed",
+    importedCount: 0,
+    skippedDuplicateCount: 0,
+    errorMessage: "Email import requires provider sync configuration",
+  });
+  await updateEmailAccount(args.r, firmId, args.accountId, { status: "setup_required", lastError: log.errorMessage });
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: "communication.email_sync.failed",
+    newValue: { accountId: args.accountId, syncLogId: log.id, errorMessage: log.errorMessage },
+  });
+  return { ok: false as const, error: "setup_required" as const, message: log.errorMessage };
 }
 
 export async function listMessageTasks(args: { r: DbConn; firmId: number; messageId: number }) {

@@ -4,9 +4,15 @@ import {
   DraftCreateSchema,
   DraftPatchSchema,
   ManualEmailCreateSchema,
+  MessageArchivePatchSchema,
+  MessageAssigneesPatchSchema,
   MessageAssignSchema,
   MessageTeamPatchSchema,
   MessageLinkCaseSchema,
+  MessageReadStatusPatchSchema,
+  EmailAccountCreateSchema,
+  RemarkCreateSchema,
+  RemarkPatchSchema,
   TaskAssignSchema,
   TaskCreateSchema,
   TaskTeamPatchSchema,
@@ -19,12 +25,16 @@ import {
   approveDraft,
   assignMessageOwner,
   assignTask,
+  archiveMessage,
   cancelDraft,
   closeMessage,
   closeTask,
   createDraft,
+  createEmailAccount,
   createManualIncomingEmail,
+  createMessageRemark,
   createMessageTask,
+  deleteMessageRemark,
   setMessageResponsibleTeam,
   setTaskResponsibleTeam,
   getAuditForDraft,
@@ -32,17 +42,31 @@ import {
   getAuditForTask,
   getCaseCommunicationTimeline,
   getCommunicationMessage,
+  getMessageAssignees,
   getDraftDetail,
   getSlaOverdue,
   getSlaSummary,
   linkMessageCase,
+  unlinkMessageCase,
   linkTaskCase,
   listCommunicationMailboxes,
   listCommunicationMessages,
+  listConnectedEmailAccounts,
+  listEmailFolders,
+  listMessageAttachments,
+  listEmailSyncLogs,
+  listMessageReads,
+  listMessageRemarks,
+  lookupCasesForCommunication,
   listDraftsForFirm,
   listMessageTasks,
   listMyTasks,
+  importEmailNow,
+  recordMessageOpened,
+  setMessageAssignees,
   updateTaskReplyNote,
+  updateMessageReadStatus,
+  updateMessageRemark,
   updateTaskStatus,
   patchDraft,
   submitDraftApproval,
@@ -90,11 +114,14 @@ router.get("/communication/messages", requireAuth, requireFirmUser, requirePermi
   const assignedTo = (one((req.query as any).assignedTo) as any) ?? "any";
   const linkedCaseIdRaw = one((req.query as any).linkedCaseId);
   const linkedCaseId = linkedCaseIdRaw ? parseInt(linkedCaseIdRaw, 10) : undefined;
+  const unreadRaw = one((req.query as any).unread);
+  const unreadOnly = unreadRaw === "true" || unreadRaw === "1";
+  const q = one((req.query as any).q) ?? undefined;
   const rows = await listCommunicationMessages({
     r,
     firmId: req.firmId!,
     userId: req.userId!,
-    filter: { status, isBatch, assignedTo, linkedCaseId: Number.isFinite(linkedCaseId as any) ? (linkedCaseId as any) : undefined },
+    filter: { status, isBatch, assignedTo, linkedCaseId: Number.isFinite(linkedCaseId as any) ? (linkedCaseId as any) : undefined, unreadOnly, q },
     limit,
     offset,
   });
@@ -191,6 +218,206 @@ router.patch("/communication/messages/:id/link-case", requireAuth, requireFirmUs
   if (!result) { res.status(404).json({ error: "Not found" }); return; }
   if ((result as any).error === "case_not_found") { res.status(404).json({ error: "Case not found" }); return; }
   res.json(result);
+});
+
+router.delete("/communication/messages/:id/link-case", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const updated = await unlinkMessageCase({ r, req, messageId: id });
+  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
+  res.json(updated);
+});
+
+router.patch("/communication/messages/:id/archive", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const parsed = MessageArchivePatchSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  const updated = await archiveMessage({ r, req, messageId: id, archived: parsed.data.archived });
+  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
+  res.json(updated);
+});
+
+router.get("/communication/messages/:id/assignees", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const result = await getMessageAssignees({ r, req, messageId: id });
+  res.json(result);
+});
+
+router.patch("/communication/messages/:id/assignees", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const parsed = MessageAssigneesPatchSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  const result = await setMessageAssignees({ r, req, messageId: id, userIds: parsed.data.userIds });
+  if (!result) { res.status(404).json({ error: "Not found" }); return; }
+  res.json(result);
+});
+
+router.get("/communication/messages/:id/remarks", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const rows = await listMessageRemarks({ r, req, messageId: id });
+  res.json(rows);
+});
+
+router.post("/communication/messages/:id/remarks", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const parsed = RemarkCreateSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  const created = await createMessageRemark({ r, req, messageId: id, body: parsed.data.body });
+  if (!created) { res.status(404).json({ error: "Not found" }); return; }
+  if ((created as any).error === "empty_body") { res.status(400).json({ error: "Remark body is required" }); return; }
+  res.status(201).json(created);
+});
+
+router.patch("/communication/remarks/:remarkId", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).remarkId);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid remark id" }); return; }
+  const parsed = RemarkPatchSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  const updated = await updateMessageRemark({ r, req, remarkId: id, body: parsed.data.body });
+  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
+  if ((updated as any).error === "forbidden") { res.status(403).json({ error: "Forbidden" }); return; }
+  if ((updated as any).error === "empty_body") { res.status(400).json({ error: "Remark body is required" }); return; }
+  if ((updated as any).error === "deleted") { res.status(409).json({ error: "Remark already deleted" }); return; }
+  res.json(updated);
+});
+
+router.delete("/communication/remarks/:remarkId", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).remarkId);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid remark id" }); return; }
+  const result = await deleteMessageRemark({ r, req, remarkId: id });
+  if (!result) { res.status(404).json({ error: "Not found" }); return; }
+  if ((result as any).error === "forbidden") { res.status(403).json({ error: "Forbidden" }); return; }
+  res.json(result);
+});
+
+router.get("/communication/messages/:id/reads", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const rows = await listMessageReads({ r, req, messageId: id });
+  res.json(rows);
+});
+
+router.get("/communication/messages/:id/attachments", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const rows = await listMessageAttachments({ r, req, messageId: id });
+  if (!rows) { res.status(404).json({ error: "Not found" }); return; }
+  res.json(rows);
+});
+
+router.post("/communication/messages/:id/read", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const updated = await recordMessageOpened({ r, req, messageId: id });
+  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
+  res.json(updated);
+});
+
+router.patch("/communication/messages/:id/read-status", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const parsed = MessageReadStatusPatchSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  const updated = await updateMessageReadStatus({ r, req, messageId: id, isRead: parsed.data.isRead });
+  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
+  res.json(updated);
+});
+
+router.get("/communication/email/accounts", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const rows = await listConnectedEmailAccounts({ r, req });
+  res.json(rows);
+});
+
+router.post("/communication/email/accounts", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const parsed = EmailAccountCreateSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  const created = await createEmailAccount({ r, req, input: { provider: parsed.data.provider, emailAddress: parsed.data.emailAddress, displayName: parsed.data.displayName ?? null } });
+  res.status(201).json(created);
+});
+
+router.get("/communication/email/accounts/:accountId/folders", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).accountId);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid account id" }); return; }
+  const rows = await listEmailFolders({ r, req, accountId: id });
+  res.json(rows);
+});
+
+router.get("/communication/email/accounts/:accountId/sync-logs", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).accountId);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid account id" }); return; }
+  const limit = Math.min(parseInt(one((req.query as any).limit) ?? "50", 10) || 50, 200);
+  const rows = await listEmailSyncLogs({ r, req, accountId: id, limit });
+  res.json(rows);
+});
+
+router.post("/communication/email/accounts/:accountId/import-now", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).accountId);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid account id" }); return; }
+  const result = await importEmailNow({ r, req, accountId: id });
+  res.status(400).json(result);
+});
+
+router.get("/communication/case-lookup", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const q = one((req.query as any).q) ?? "";
+  const limit = Math.min(parseInt(one((req.query as any).limit) ?? "20", 10) || 20, 50);
+  const rows = await lookupCasesForCommunication({ r, req, q, limit });
+  res.json(rows);
 });
 
 router.patch("/communication/messages/:id/close", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {

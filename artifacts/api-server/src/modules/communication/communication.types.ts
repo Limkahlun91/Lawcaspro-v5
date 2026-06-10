@@ -38,6 +38,34 @@ export const CommunicationTaskStatusSchema = z.enum([
 ]);
 export type CommunicationTaskStatus = z.infer<typeof CommunicationTaskStatusSchema>;
 
+export const MessageAssigneesPatchSchema = z.object({
+  userIds: z.array(z.number().int().positive()).max(50),
+});
+
+export const MessageReadStatusPatchSchema = z.object({
+  isRead: z.boolean(),
+});
+
+export const MessageArchivePatchSchema = z.object({
+  archived: z.boolean(),
+});
+
+export const RemarkCreateSchema = z.object({
+  body: z.string().min(1).max(10000),
+});
+
+export const RemarkPatchSchema = z.object({
+  body: z.string().min(1).max(10000),
+});
+
+export const EmailAccountProviderSchema = z.enum(["microsoft_graph", "imap", "gmail"]);
+
+export const EmailAccountCreateSchema = z.object({
+  provider: EmailAccountProviderSchema,
+  emailAddress: z.string().email(),
+  displayName: z.string().trim().max(200).optional().nullable(),
+});
+
 export const CommunicationDraftTypeSchema = z.enum(["consolidated", "partial", "split_case", "normal_reply"]);
 export type CommunicationDraftType = z.infer<typeof CommunicationDraftTypeSchema>;
 

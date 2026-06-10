@@ -2,14 +2,22 @@ import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   casesTable,
   caseAssignmentsTable,
+  developersTable,
   rolesTable,
+  usersTable,
   communicationMailboxesTable,
   communicationMessagesTable,
   communicationCaseTasksTable,
   communicationDraftsTable,
   communicationDraftTasksTable,
+  communicationAttachmentsTable,
   communicationAuditLogsTable,
   communicationTaskAssigneesTable,
+  communicationEmailRemarksTable,
+  communicationMessageReadsTable,
+  communicationEmailAccountsTable,
+  communicationEmailFoldersTable,
+  communicationEmailSyncLogsTable,
 } from "@workspace/db";
 
 export type DbConn = typeof import("@workspace/db").db;
@@ -102,17 +110,67 @@ export async function getMessageById(r: DbConn, firmId: number, id: number) {
 export async function listMessages(
   r: DbConn,
   firmId: number,
-  args: { status?: string | string[]; isBatch?: boolean; assignedToUserId?: number | null; linkedCaseId?: number | null; limit: number; offset: number }
+  args: {
+    status?: string | string[];
+    isBatch?: boolean;
+    assignedTo?: "me" | "unassigned" | "any";
+    userId: number;
+    linkedCaseId?: number | null;
+    unreadOnly?: boolean;
+    q?: string;
+    limit: number;
+    offset: number;
+  }
 ) {
   const whereParts = [eq(communicationMessagesTable.firmId, firmId)] as any[];
   if (Array.isArray(args.status) && args.status.length === 1) whereParts.push(eq(communicationMessagesTable.internalStatus, args.status[0]));
   else if (Array.isArray(args.status) && args.status.length > 1) whereParts.push(inArray(communicationMessagesTable.internalStatus, args.status));
   else if (typeof args.status === "string" && args.status) whereParts.push(eq(communicationMessagesTable.internalStatus, args.status));
   if (typeof args.isBatch === "boolean") whereParts.push(eq(communicationMessagesTable.isBatch, args.isBatch));
-  if (args.assignedToUserId === null) whereParts.push(isNull(communicationMessagesTable.assignedToUserId));
-  if (typeof args.assignedToUserId === "number") whereParts.push(eq(communicationMessagesTable.assignedToUserId, args.assignedToUserId));
+  if (args.assignedTo === "me") {
+    whereParts.push(or(
+      eq(communicationMessagesTable.assignedToUserId, args.userId),
+      sql`EXISTS (
+        SELECT 1 FROM communication_task_assignees a
+        WHERE a.firm_id = ${firmId}
+          AND a.message_id = ${communicationMessagesTable.id}
+          AND a.task_id IS NULL
+          AND a.user_id = ${args.userId}
+          AND a.status = 'assigned'
+      )`
+    ));
+  }
+  if (args.assignedTo === "unassigned") {
+    whereParts.push(isNull(communicationMessagesTable.assignedToUserId));
+    whereParts.push(sql`NOT EXISTS (
+      SELECT 1 FROM communication_task_assignees a
+      WHERE a.firm_id = ${firmId}
+        AND a.message_id = ${communicationMessagesTable.id}
+        AND a.task_id IS NULL
+        AND a.status = 'assigned'
+    )`);
+  }
   if (args.linkedCaseId === null) whereParts.push(isNull(communicationMessagesTable.linkedCaseId));
   if (typeof args.linkedCaseId === "number") whereParts.push(eq(communicationMessagesTable.linkedCaseId, args.linkedCaseId));
+  if (args.unreadOnly) {
+    whereParts.push(sql`NOT EXISTS (
+      SELECT 1 FROM communication_message_reads r
+      WHERE r.firm_id = ${firmId}
+        AND r.message_id = ${communicationMessagesTable.id}
+        AND r.user_id = ${args.userId}
+        AND r.is_read = true
+    )`);
+  }
+  const q = String(args.q ?? "").trim();
+  if (q) {
+    const like = `%${q}%`;
+    whereParts.push(or(
+      sql`${communicationMessagesTable.fromAddress} ILIKE ${like}`,
+      sql`${communicationMessagesTable.fromName} ILIKE ${like}`,
+      sql`${communicationMessagesTable.subject} ILIKE ${like}`,
+      sql`${communicationMessagesTable.bodyText} ILIKE ${like}`
+    ));
+  }
 
   const rows = await r
     .select({
@@ -121,6 +179,22 @@ export async function listMessages(
       tasksReady: sql<number>`COALESCE((SELECT COUNT(*) FROM communication_case_tasks t WHERE t.firm_id = ${firmId} AND t.parent_message_id = ${communicationMessagesTable.id} AND t.task_status IN ('ready_to_reply','included_in_draft')), 0)`.mapWith(Number),
       tasksReplied: sql<number>`COALESCE((SELECT COUNT(*) FROM communication_case_tasks t WHERE t.firm_id = ${firmId} AND t.parent_message_id = ${communicationMessagesTable.id} AND t.task_status IN ('replied','closed')), 0)`.mapWith(Number),
       tasksUnassigned: sql<number>`COALESCE((SELECT COUNT(*) FROM communication_case_tasks t WHERE t.firm_id = ${firmId} AND t.parent_message_id = ${communicationMessagesTable.id} AND t.assigned_to_user_id IS NULL), 0)`.mapWith(Number),
+      attachmentCount: sql<number>`COALESCE((SELECT COUNT(*) FROM communication_attachments a WHERE a.firm_id = ${firmId} AND a.message_id = ${communicationMessagesTable.id}), 0)`.mapWith(Number),
+      hasAttachments: sql<boolean>`COALESCE((SELECT COUNT(*) FROM communication_attachments a WHERE a.firm_id = ${firmId} AND a.message_id = ${communicationMessagesTable.id}), 0) > 0`.mapWith(Boolean),
+      isRead: sql<boolean>`EXISTS (
+        SELECT 1 FROM communication_message_reads r
+        WHERE r.firm_id = ${firmId}
+          AND r.message_id = ${communicationMessagesTable.id}
+          AND r.user_id = ${args.userId}
+          AND r.is_read = true
+      )`.mapWith(Boolean),
+      assigneeCount: sql<number>`COALESCE((
+        SELECT COUNT(*) FROM communication_task_assignees a
+        WHERE a.firm_id = ${firmId}
+          AND a.message_id = ${communicationMessagesTable.id}
+          AND a.task_id IS NULL
+          AND a.status = 'assigned'
+      ), 0)`.mapWith(Number),
     })
     .from(communicationMessagesTable)
     .where(and(...whereParts))
@@ -129,6 +203,263 @@ export async function listMessages(
     .offset(args.offset);
 
   return rows;
+}
+
+export async function listUsersByIds(r: DbConn, firmId: number, userIds: number[]) {
+  if (!userIds.length) return [];
+  return r
+    .select({ id: usersTable.id, name: usersTable.name })
+    .from(usersTable)
+    .where(and(eq(usersTable.firmId, firmId), inArray(usersTable.id, userIds)));
+}
+
+export async function listActiveAssigneesForMessage(r: DbConn, firmId: number, messageId: number) {
+  return r
+    .select()
+    .from(communicationTaskAssigneesTable)
+    .where(and(
+      eq(communicationTaskAssigneesTable.firmId, firmId),
+      eq(communicationTaskAssigneesTable.messageId, messageId),
+      isNull(communicationTaskAssigneesTable.taskId),
+      eq(communicationTaskAssigneesTable.status, "assigned"),
+    ))
+    .orderBy(asc(communicationTaskAssigneesTable.id));
+}
+
+export async function listAllAssigneesForMessage(r: DbConn, firmId: number, messageId: number) {
+  return r
+    .select()
+    .from(communicationTaskAssigneesTable)
+    .where(and(
+      eq(communicationTaskAssigneesTable.firmId, firmId),
+      eq(communicationTaskAssigneesTable.messageId, messageId),
+      isNull(communicationTaskAssigneesTable.taskId),
+    ))
+    .orderBy(asc(communicationTaskAssigneesTable.id));
+}
+
+export async function upsertMessageAssignees(r: DbConn, args: { firmId: number; messageId: number; actorId: number; userIds: number[] }) {
+  const now = new Date();
+  const deduped = Array.from(new Set(args.userIds)).filter((x) => Number.isFinite(x));
+  const existing = await listAllAssigneesForMessage(r, args.firmId, args.messageId);
+  const handlerByUser = new Map<number, typeof existing[number]>();
+  for (const row of existing) {
+    if (row.assignmentRole === "handler") handlerByUser.set(row.userId, row);
+  }
+
+  const assignedRows = existing.filter((row) => row.status === "assigned");
+  for (const row of assignedRows) {
+    await r.update(communicationTaskAssigneesTable).set({
+      status: "unassigned",
+      isPrimary: false,
+      updatedAt: now,
+    }).where(eq(communicationTaskAssigneesTable.id, row.id));
+  }
+
+  for (const [idx, userId] of deduped.entries()) {
+    const existingRow = handlerByUser.get(userId);
+    if (existingRow) {
+      await r
+        .update(communicationTaskAssigneesTable)
+        .set({ status: "assigned", assignmentRole: "handler", isPrimary: idx === 0, assignedBy: args.actorId, assignedAt: now, updatedAt: now })
+        .where(eq(communicationTaskAssigneesTable.id, existingRow.id));
+      continue;
+    }
+    await r.insert(communicationTaskAssigneesTable).values({
+      firmId: args.firmId,
+      messageId: args.messageId,
+      taskId: null,
+      userId,
+      assignmentRole: "handler",
+      isPrimary: idx === 0,
+      status: "assigned",
+      assignedBy: args.actorId,
+      assignedAt: now,
+    });
+  }
+
+  return listActiveAssigneesForMessage(r, args.firmId, args.messageId);
+}
+
+export async function listRemarksForMessage(r: DbConn, firmId: number, messageId: number) {
+  return r
+    .select()
+    .from(communicationEmailRemarksTable)
+    .where(and(
+      eq(communicationEmailRemarksTable.firmId, firmId),
+      eq(communicationEmailRemarksTable.messageId, messageId),
+      isNull(communicationEmailRemarksTable.deletedAt),
+    ))
+    .orderBy(desc(communicationEmailRemarksTable.createdAt), desc(communicationEmailRemarksTable.id));
+}
+
+export async function getRemarkById(r: DbConn, firmId: number, remarkId: number) {
+  const [row] = await r
+    .select()
+    .from(communicationEmailRemarksTable)
+    .where(and(eq(communicationEmailRemarksTable.firmId, firmId), eq(communicationEmailRemarksTable.id, remarkId)))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function insertRemark(r: DbConn, values: typeof communicationEmailRemarksTable.$inferInsert) {
+  const [row] = await r.insert(communicationEmailRemarksTable).values(values).returning();
+  return row;
+}
+
+export async function updateRemark(r: DbConn, firmId: number, remarkId: number, patch: Partial<typeof communicationEmailRemarksTable.$inferInsert>) {
+  const [row] = await r
+    .update(communicationEmailRemarksTable)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(and(eq(communicationEmailRemarksTable.firmId, firmId), eq(communicationEmailRemarksTable.id, remarkId)))
+    .returning();
+  return row ?? null;
+}
+
+export async function softDeleteRemark(r: DbConn, firmId: number, remarkId: number) {
+  const [row] = await r
+    .update(communicationEmailRemarksTable)
+    .set({ deletedAt: new Date(), updatedAt: new Date() })
+    .where(and(eq(communicationEmailRemarksTable.firmId, firmId), eq(communicationEmailRemarksTable.id, remarkId)))
+    .returning();
+  return row ?? null;
+}
+
+export async function listReadsForMessage(r: DbConn, firmId: number, messageId: number) {
+  return r
+    .select()
+    .from(communicationMessageReadsTable)
+    .where(and(eq(communicationMessageReadsTable.firmId, firmId), eq(communicationMessageReadsTable.messageId, messageId)))
+    .orderBy(desc(communicationMessageReadsTable.lastOpenedAt), desc(communicationMessageReadsTable.openedCount));
+}
+
+export async function getReadByMessageUser(r: DbConn, firmId: number, messageId: number, userId: number) {
+  const [row] = await r
+    .select()
+    .from(communicationMessageReadsTable)
+    .where(and(
+      eq(communicationMessageReadsTable.firmId, firmId),
+      eq(communicationMessageReadsTable.messageId, messageId),
+      eq(communicationMessageReadsTable.userId, userId),
+    ))
+    .limit(1);
+  return row ?? null;
+}
+
+export async function upsertMessageOpened(r: DbConn, firmId: number, messageId: number, userId: number) {
+  const now = new Date();
+  const existing = await getReadByMessageUser(r, firmId, messageId, userId);
+  if (!existing) {
+    const [created] = await r.insert(communicationMessageReadsTable).values({
+      firmId,
+      messageId,
+      userId,
+      firstOpenedAt: now,
+      lastOpenedAt: now,
+      openedCount: 1,
+      isRead: true,
+    }).returning();
+    return created;
+  }
+  const openedCount = (existing.openedCount ?? 0) + 1;
+  const [updated] = await r
+    .update(communicationMessageReadsTable)
+    .set({
+      firstOpenedAt: existing.firstOpenedAt ?? now,
+      lastOpenedAt: now,
+      openedCount,
+      isRead: true,
+      updatedAt: now,
+    })
+    .where(eq(communicationMessageReadsTable.id, existing.id))
+    .returning();
+  return updated ?? null;
+}
+
+export async function setMessageReadStatus(r: DbConn, args: { firmId: number; messageId: number; userId: number; isRead: boolean }) {
+  const now = new Date();
+  const existing = await getReadByMessageUser(r, args.firmId, args.messageId, args.userId);
+  if (args.isRead) {
+    if (!existing) {
+      const [created] = await r.insert(communicationMessageReadsTable).values({
+        firmId: args.firmId,
+        messageId: args.messageId,
+        userId: args.userId,
+        firstOpenedAt: now,
+        lastOpenedAt: now,
+        openedCount: 1,
+        isRead: true,
+      }).returning();
+      return created ?? null;
+    }
+    const [updated] = await r.update(communicationMessageReadsTable).set({
+      firstOpenedAt: existing.firstOpenedAt ?? now,
+      lastOpenedAt: now,
+      openedCount: Math.max(existing.openedCount ?? 0, 1),
+      isRead: true,
+      updatedAt: now,
+    }).where(eq(communicationMessageReadsTable.id, existing.id)).returning();
+    return updated ?? null;
+  }
+
+  if (!existing) return null;
+  const [updated] = await r.update(communicationMessageReadsTable).set({
+    isRead: false,
+    updatedAt: now,
+  }).where(eq(communicationMessageReadsTable.id, existing.id)).returning();
+  return updated ?? null;
+}
+
+export async function listEmailAccounts(r: DbConn, firmId: number) {
+  return r
+    .select()
+    .from(communicationEmailAccountsTable)
+    .where(eq(communicationEmailAccountsTable.firmId, firmId))
+    .orderBy(desc(communicationEmailAccountsTable.updatedAt), desc(communicationEmailAccountsTable.id));
+}
+
+export async function insertEmailAccount(r: DbConn, values: typeof communicationEmailAccountsTable.$inferInsert) {
+  const [row] = await r.insert(communicationEmailAccountsTable).values(values).returning();
+  return row;
+}
+
+export async function updateEmailAccount(r: DbConn, firmId: number, accountId: number, patch: Partial<typeof communicationEmailAccountsTable.$inferInsert>) {
+  const [row] = await r
+    .update(communicationEmailAccountsTable)
+    .set({ ...patch, updatedAt: new Date() })
+    .where(and(eq(communicationEmailAccountsTable.firmId, firmId), eq(communicationEmailAccountsTable.id, accountId)))
+    .returning();
+  return row ?? null;
+}
+
+export async function listEmailFoldersForAccount(r: DbConn, firmId: number, accountId: number) {
+  return r
+    .select()
+    .from(communicationEmailFoldersTable)
+    .where(and(eq(communicationEmailFoldersTable.firmId, firmId), eq(communicationEmailFoldersTable.accountId, accountId)))
+    .orderBy(asc(communicationEmailFoldersTable.displayName));
+}
+
+export async function listEmailSyncLogsForAccount(r: DbConn, firmId: number, accountId: number, limit: number) {
+  return r
+    .select()
+    .from(communicationEmailSyncLogsTable)
+    .where(and(eq(communicationEmailSyncLogsTable.firmId, firmId), eq(communicationEmailSyncLogsTable.accountId, accountId)))
+    .orderBy(desc(communicationEmailSyncLogsTable.startedAt), desc(communicationEmailSyncLogsTable.id))
+    .limit(limit);
+}
+
+export async function insertEmailSyncLog(r: DbConn, values: typeof communicationEmailSyncLogsTable.$inferInsert) {
+  const [row] = await r.insert(communicationEmailSyncLogsTable).values(values).returning();
+  return row;
+}
+
+export async function listAttachmentsForMessage(r: DbConn, firmId: number, messageId: number) {
+  return r
+    .select()
+    .from(communicationAttachmentsTable)
+    .where(and(eq(communicationAttachmentsTable.firmId, firmId), eq(communicationAttachmentsTable.messageId, messageId)))
+    .orderBy(desc(communicationAttachmentsTable.createdAt), desc(communicationAttachmentsTable.id));
 }
 
 export async function listTasksForMessage(r: DbConn, firmId: number, messageId: number) {
@@ -329,6 +660,38 @@ export async function findCaseByIdOrRef(r: DbConn, firmId: number, input: { case
     return row ?? null;
   }
   return null;
+}
+
+export async function lookupCases(r: DbConn, firmId: number, q: string, limit: number) {
+  const query = String(q ?? "").trim();
+  if (!query) return [];
+  const like = `%${query}%`;
+
+  const rows = await r
+    .select({
+      id: casesTable.id,
+      referenceNo: casesTable.referenceNo,
+      parcelNo: casesTable.parcelNo,
+      status: casesTable.status,
+      developerName: developersTable.name,
+      createdAt: casesTable.createdAt,
+    })
+    .from(casesTable)
+    .leftJoin(developersTable, and(eq(developersTable.firmId, firmId), eq(developersTable.id, casesTable.developerId)))
+    .where(and(
+      eq(casesTable.firmId, firmId),
+      or(
+        sql`${casesTable.referenceNo} ILIKE ${like}`,
+        sql`${casesTable.parcelNo} ILIKE ${like}`,
+        sql`${casesTable.borrowers}::text ILIKE ${like}`,
+        sql`${casesTable.propertyDetails}::text ILIKE ${like}`,
+        sql`${developersTable.name} ILIKE ${like}`,
+      )
+    ))
+    .orderBy(desc(casesTable.createdAt), desc(casesTable.id))
+    .limit(Math.min(limit, 50));
+
+  return rows.map((r) => ({ id: r.id, caseRef: r.referenceNo ?? r.parcelNo ?? null, status: r.status, developerName: r.developerName ?? null, createdAt: r.createdAt }));
 }
 
 export async function getCaseRefDisplay(r: DbConn, firmId: number, caseId: number): Promise<{ caseRef: string | null; parcelNo: string | null; referenceNo: string | null } | null> {
