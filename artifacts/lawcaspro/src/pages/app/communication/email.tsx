@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -72,6 +72,27 @@ type Draft = {
   toAddresses: string[];
   ccAddresses: string[];
   bccAddresses: string[];
+};
+
+type MessageDetail = {
+  id: number;
+  channel: string;
+  direction: "incoming" | "outgoing";
+  fromAddress: string | null;
+  fromName: string | null;
+  toAddresses: string[];
+  ccAddresses: string[];
+  bccAddresses: string[];
+  subject: string | null;
+  bodyText: string | null;
+  bodyHtml: string | null;
+  internalStatus: string;
+  isBatch: boolean;
+  assignedToUserId: number | null;
+  linkedCaseId: number | null;
+  receivedAt: string | null;
+  sentAt: string | null;
+  createdAt: string;
 };
 
 type User = {
@@ -165,7 +186,7 @@ export default function EmailControlCenterPage() {
       const params = new URLSearchParams();
       if (view === "unassigned") params.set("assignedTo", "unassigned");
       if (view === "batch_emails") params.set("isBatch", "true");
-      if (view === "closed") params.set("status", "closed");
+      if (view === "closed") params.set("status", "closed,fully_replied");
       return apiFetchJson(`/communication/messages?${params.toString()}`);
     },
     enabled: view !== "drafts_pending_approval" && view !== "my_tasks" && view !== "overdue",
@@ -202,7 +223,7 @@ export default function EmailControlCenterPage() {
     queryFn: () => apiFetchJson(`/communication/messages/${selectedMessageId}`),
     enabled: typeof selectedMessageId === "number",
     retry: false,
-  });
+  }) as ReturnType<typeof useQuery<MessageDetail | null>>;
 
   const selectedTasksQuery = useQuery<Task[]>({
     queryKey: ["communication", "message", selectedMessageId, "tasks"],
@@ -241,6 +262,9 @@ export default function EmailControlCenterPage() {
     cc: "",
     subject: "",
     bodyText: "",
+    receivedAt: "",
+    assignedToUserId: "",
+    caseRef: "",
     isBatchEmail: true,
   });
 
@@ -255,12 +279,27 @@ export default function EmailControlCenterPage() {
         cc: splitCommaList(manualForm.cc),
         subject: manualForm.subject,
         bodyText: manualForm.bodyText,
+        receivedAt: manualForm.receivedAt ? new Date(manualForm.receivedAt).toISOString() : undefined,
+        assignedToUserId: manualForm.assignedToUserId && manualForm.assignedToUserId !== "unassigned" ? parseInt(manualForm.assignedToUserId, 10) : undefined,
+        caseRef: manualForm.caseRef || undefined,
         isBatchEmail: manualForm.isBatchEmail,
       },
     }),
     onSuccess: (created) => {
       setShowManualEmail(false);
-      setManualForm({ mailboxId: "", fromName: "", fromEmail: "", to: "", cc: "", subject: "", bodyText: "", isBatchEmail: true });
+      setManualForm({
+        mailboxId: "",
+        fromName: "",
+        fromEmail: "",
+        to: "",
+        cc: "",
+        subject: "",
+        bodyText: "",
+        receivedAt: "",
+        assignedToUserId: "",
+        caseRef: "",
+        isBatchEmail: true,
+      });
       qc.invalidateQueries({ queryKey: ["communication", "messages"] });
       if (created?.id) setSelectedMessageId(created.id);
       toast({ title: "Manual email created" });
@@ -386,6 +425,39 @@ export default function EmailControlCenterPage() {
   const cancelDraftMutation = useMutation({
     mutationFn: (draftId: number) => apiFetchJson(`/communication/drafts/${draftId}/cancel`, { method: "POST", body: {} }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "drafts"] }),
+    onError: (e) => toastError(toast, e),
+  });
+
+  const [draftEditForm, setDraftEditForm] = useState({ to: "", cc: "", subject: "", bodyText: "" });
+
+  useEffect(() => {
+    if (!selectedDraft) return;
+    setDraftEditForm({
+      to: selectedDraft.draft.toAddresses.join(", "),
+      cc: selectedDraft.draft.ccAddresses.join(", "),
+      subject: selectedDraft.draft.subject || "",
+      bodyText: selectedDraft.draft.bodyText || "",
+    });
+  }, [selectedDraft]);
+
+  const patchDraftMutation = useMutation({
+    mutationFn: () => {
+      if (!selectedDraftId) throw new Error("No draft selected");
+      return apiFetchJson(`/communication/drafts/${selectedDraftId}`, {
+        method: "PATCH",
+        body: {
+          to: splitCommaList(draftEditForm.to),
+          cc: splitCommaList(draftEditForm.cc),
+          subject: draftEditForm.subject,
+          bodyText: draftEditForm.bodyText,
+        },
+      });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["communication", "draft", selectedDraftId] });
+      qc.invalidateQueries({ queryKey: ["communication", "drafts"] });
+      toast({ title: "Draft updated" });
+    },
     onError: (e) => toastError(toast, e),
   });
 
@@ -588,15 +660,24 @@ export default function EmailControlCenterPage() {
                     <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
                       <div className="md:col-span-12 space-y-1.5">
                         <Label>To</Label>
-                        <Input value={selectedDraft.draft.toAddresses.join(", ")} readOnly />
+                        <Input value={draftEditForm.to} onChange={(e) => setDraftEditForm((prev) => ({ ...prev, to: e.target.value }))} />
+                      </div>
+                      <div className="md:col-span-12 space-y-1.5">
+                        <Label>CC</Label>
+                        <Input value={draftEditForm.cc} onChange={(e) => setDraftEditForm((prev) => ({ ...prev, cc: e.target.value }))} />
+                      </div>
+                      <div className="md:col-span-12 space-y-1.5">
+                        <Label>Subject</Label>
+                        <Input value={draftEditForm.subject} onChange={(e) => setDraftEditForm((prev) => ({ ...prev, subject: e.target.value }))} />
                       </div>
                       <div className="md:col-span-12 space-y-1.5">
                         <Label>Body</Label>
-                        <Textarea value={selectedDraft.draft.bodyText || ""} readOnly rows={6} />
+                        <Textarea value={draftEditForm.bodyText} onChange={(e) => setDraftEditForm((prev) => ({ ...prev, bodyText: e.target.value }))} rows={8} />
                       </div>
                     </div>
 
                     <div className="flex flex-wrap gap-2">
+                      <Button variant="outline" onClick={() => patchDraftMutation.mutate()} disabled={patchDraftMutation.isPending}>Save Draft</Button>
                       <Button variant="outline" onClick={() => submitDraftMutation.mutate(selectedDraft.draft.id)} disabled={submitDraftMutation.isPending}>Submit Approval</Button>
                       <Button variant="outline" onClick={() => approveDraftMutation.mutate(selectedDraft.draft.id)} disabled={approveDraftMutation.isPending}>Approve</Button>
                       <Button onClick={() => markSentMutation.mutate(selectedDraft.draft.id)} disabled={markSentMutation.isPending}>Mark Sent</Button>
@@ -670,6 +751,18 @@ export default function EmailControlCenterPage() {
                         <Input value={`${selectedMessage.fromName || ""} <${selectedMessage.fromAddress || ""}>`.trim()} readOnly />
                       </div>
                       <div className="md:col-span-6 space-y-1.5">
+                        <Label>Received / Sent</Label>
+                        <Input value={selectedMessage.receivedAt || selectedMessage.sentAt || selectedMessage.createdAt || ""} readOnly />
+                      </div>
+                      <div className="md:col-span-12 space-y-1.5">
+                        <Label>To</Label>
+                        <Input value={(selectedMessage.toAddresses ?? []).join(", ")} readOnly />
+                      </div>
+                      <div className="md:col-span-12 space-y-1.5">
+                        <Label>CC</Label>
+                        <Input value={(selectedMessage.ccAddresses ?? []).join(", ")} readOnly />
+                      </div>
+                      <div className="md:col-span-6 space-y-1.5">
                         <Label>Assigned Owner</Label>
                         <Select
                           value={selectedMessage.assignedToUserId ? String(selectedMessage.assignedToUserId) : "unassigned"}
@@ -689,12 +782,16 @@ export default function EmailControlCenterPage() {
                       <div className="md:col-span-6 space-y-1.5">
                         <Label>Linked Case (Ref or Parcel No)</Label>
                         <div className="flex gap-2">
-                          <Input placeholder="e.g. REF123 / TEST-REGRESSION-001" onKeyDown={(e) => {
+                          <Input
+                            placeholder="e.g. REF123 / TEST-REGRESSION-001"
+                            defaultValue={selectedMessage.linkedCaseId ? `Case #${selectedMessage.linkedCaseId}` : ""}
+                            onKeyDown={(e) => {
                             if (e.key === "Enter") {
                               const v = (e.target as any).value;
                               if (v) linkMessageCaseMutation.mutate({ messageId: selectedMessage.id, caseRef: String(v) });
                             }
-                          }} />
+                            }}
+                          />
                           <Button variant="outline" onClick={() => closeMessageMutation.mutate(selectedMessage.id)} disabled={closeMessageMutation.isPending}>Close</Button>
                         </div>
                       </div>
@@ -704,113 +801,111 @@ export default function EmailControlCenterPage() {
                       </div>
                     </div>
 
-                    {selectedMessage.isBatch ? (
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between">
-                          <div className="text-sm font-medium">Child Case Tasks</div>
-                          <div className="flex items-center gap-2">
-                            <Button variant="outline" onClick={() => setTaskDialogOpen(true)} disabled={createTaskMutation.isPending}>Add Task</Button>
-                            <Button onClick={() => setDraftDialogOpen(true)} disabled={!selectedTaskIds.length}>Create Draft</Button>
-                          </div>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm font-medium">{selectedMessage.isBatch ? "Child Case Tasks" : "Email Tasks"}</div>
+                        <div className="flex items-center gap-2">
+                          <Button variant="outline" onClick={() => setTaskDialogOpen(true)} disabled={createTaskMutation.isPending}>Add Task</Button>
+                          <Button onClick={() => setDraftDialogOpen(true)} disabled={!selectedTaskIds.length}>Create Draft</Button>
                         </div>
-                        <QuerySection
-                          isLoading={selectedTasksQuery.isLoading}
-                          isError={selectedTasksQuery.isError}
-                          error={selectedTasksQuery.error}
-                          isFetching={selectedTasksQuery.isFetching}
-                          onRetry={() => selectedTasksQuery.refetch()}
-                          isEmpty={selectedTasks.length === 0}
-                          emptyTitle="No child case tasks yet"
-                          emptyDescription="Add a case task to split this batch email."
-                          loadingText="Loading child tasks..."
-                        >
-                          <div className="space-y-2">
-                            {selectedTasks.map((t) => (
-                              <div key={t.id} className="rounded border p-2 space-y-2">
-                                <div className="flex items-center justify-between gap-2">
-                                  <div className="flex items-center gap-2">
-                                    <Checkbox
-                                      checked={selectedTaskIds.includes(t.id)}
-                                      onCheckedChange={(c) => {
-                                        setSelectedTaskIds((prev) => c ? Array.from(new Set([...prev, t.id])) : prev.filter((x) => x !== t.id));
-                                      }}
-                                    />
-                                    <div className="text-sm font-medium">{t.caseRef || `Task #${t.id}`}</div>
-                                  </div>
-                                  <div className="flex items-center gap-2">
-                                    <StatusBadge value={t.taskStatus} />
-                                    <Button variant="outline" size="sm" onClick={() => taskAcknowledgeMutation.mutate(t.id)} disabled={taskAcknowledgeMutation.isPending}>Acknowledge</Button>
-                                  </div>
-                                </div>
-
-                                <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
-                                  <div className="md:col-span-4 space-y-1.5">
-                                    <Label className="text-xs">Assign</Label>
-                                    <Select
-                                      value={t.assignedToUserId ? String(t.assignedToUserId) : "unassigned"}
-                                      onValueChange={(v) => taskAssignMutation.mutate({ taskId: t.id, assignedToUserId: v === "unassigned" ? null : parseInt(v, 10) })}
-                                    >
-                                      <SelectTrigger>
-                                        <SelectValue />
-                                      </SelectTrigger>
-                                      <SelectContent>
-                                        <SelectItem value="unassigned">Unassigned</SelectItem>
-                                        {selectedUserOptions.map((u) => (
-                                          <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
-                                        ))}
-                                      </SelectContent>
-                                    </Select>
-                                  </div>
-                                  <div className="md:col-span-4 space-y-1.5">
-                                    <Label className="text-xs">Status</Label>
-                                    <Select value={t.taskStatus} onValueChange={(v) => taskStatusMutation.mutate({ taskId: t.id, taskStatus: v })}>
-                                      <SelectTrigger>
-                                        <SelectValue />
-                                      </SelectTrigger>
-                                      <SelectContent>
-                                        {[
-                                          "pending_owner_review",
-                                          "seen_by_owner",
-                                          "in_progress",
-                                          "waiting_client",
-                                          "waiting_developer",
-                                          "waiting_bank",
-                                          "waiting_lawyer_review",
-                                          "ready_to_reply",
-                                          "included_in_draft",
-                                          "replied",
-                                          "closed",
-                                        ].map((s) => (
-                                          <SelectItem key={s} value={s}>{s}</SelectItem>
-                                        ))}
-                                      </SelectContent>
-                                    </Select>
-                                  </div>
-                                  <div className="md:col-span-4 space-y-1.5">
-                                    <Label className="text-xs">Link Case</Label>
-                                    <Input placeholder="case ref" onKeyDown={(e) => {
-                                      if (e.key === "Enter") {
-                                        const v = (e.target as any).value;
-                                        if (v) taskLinkCaseMutation.mutate({ taskId: t.id, caseRef: String(v) });
-                                      }
-                                    }} />
-                                  </div>
-                                </div>
-
-                                <div className="space-y-1.5">
-                                  <Label className="text-xs">Reply Note</Label>
-                                  <Textarea
-                                    defaultValue={t.replyNote || ""}
-                                    rows={3}
-                                    onBlur={(e) => taskReplyNoteMutation.mutate({ taskId: t.id, replyNote: e.target.value })}
+                      </div>
+                      <QuerySection
+                        isLoading={selectedTasksQuery.isLoading}
+                        isError={selectedTasksQuery.isError}
+                        error={selectedTasksQuery.error}
+                        isFetching={selectedTasksQuery.isFetching}
+                        onRetry={() => selectedTasksQuery.refetch()}
+                        isEmpty={selectedTasks.length === 0}
+                        emptyTitle="No child case tasks yet"
+                        emptyDescription={selectedMessage.isBatch ? "Add a case task to split this batch email." : "Add a task to process this email and prepare a reply draft."}
+                        loadingText="Loading child tasks..."
+                      >
+                        <div className="space-y-2">
+                          {selectedTasks.map((t) => (
+                            <div key={t.id} className="rounded border p-2 space-y-2">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2">
+                                  <Checkbox
+                                    checked={selectedTaskIds.includes(t.id)}
+                                    onCheckedChange={(c) => {
+                                      setSelectedTaskIds((prev) => c ? Array.from(new Set([...prev, t.id])) : prev.filter((x) => x !== t.id));
+                                    }}
                                   />
+                                  <div className="text-sm font-medium">{t.caseRef || `Task #${t.id}`}</div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <StatusBadge value={t.taskStatus} />
+                                  <Button variant="outline" size="sm" onClick={() => taskAcknowledgeMutation.mutate(t.id)} disabled={taskAcknowledgeMutation.isPending}>Acknowledge</Button>
                                 </div>
                               </div>
-                            ))}
-                          </div>
-                        </QuerySection>
-                      </div>
-                    ) : null}
+
+                              <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
+                                <div className="md:col-span-4 space-y-1.5">
+                                  <Label className="text-xs">Assign</Label>
+                                  <Select
+                                    value={t.assignedToUserId ? String(t.assignedToUserId) : "unassigned"}
+                                    onValueChange={(v) => taskAssignMutation.mutate({ taskId: t.id, assignedToUserId: v === "unassigned" ? null : parseInt(v, 10) })}
+                                  >
+                                    <SelectTrigger>
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem value="unassigned">Unassigned</SelectItem>
+                                      {selectedUserOptions.map((u) => (
+                                        <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                <div className="md:col-span-4 space-y-1.5">
+                                  <Label className="text-xs">Status</Label>
+                                  <Select value={t.taskStatus} onValueChange={(v) => taskStatusMutation.mutate({ taskId: t.id, taskStatus: v })}>
+                                    <SelectTrigger>
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {[
+                                        "pending_owner_review",
+                                        "seen_by_owner",
+                                        "in_progress",
+                                        "waiting_client",
+                                        "waiting_developer",
+                                        "waiting_bank",
+                                        "waiting_lawyer_review",
+                                        "ready_to_reply",
+                                        "included_in_draft",
+                                        "replied",
+                                        "closed",
+                                      ].map((s) => (
+                                        <SelectItem key={s} value={s}>{s}</SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                <div className="md:col-span-4 space-y-1.5">
+                                  <Label className="text-xs">Link Case</Label>
+                                  <Input placeholder="case ref" onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                      const v = (e.target as any).value;
+                                      if (v) taskLinkCaseMutation.mutate({ taskId: t.id, caseRef: String(v) });
+                                    }
+                                  }} />
+                                </div>
+                              </div>
+
+                              <div className="space-y-1.5">
+                                <Label className="text-xs">Reply Note</Label>
+                                <Textarea
+                                  defaultValue={t.replyNote || ""}
+                                  rows={3}
+                                  onBlur={(e) => taskReplyNoteMutation.mutate({ taskId: t.id, replyNote: e.target.value })}
+                                />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </QuerySection>
+                    </div>
 
                     <div className="space-y-2">
                       <div className="text-sm font-medium">Audit</div>
@@ -882,6 +977,28 @@ export default function EmailControlCenterPage() {
             <div className="md:col-span-12 space-y-1.5">
               <Label>CC (comma separated)</Label>
               <Input value={manualForm.cc} onChange={(e) => setManualForm((p) => ({ ...p, cc: e.target.value }))} />
+            </div>
+            <div className="md:col-span-6 space-y-1.5">
+              <Label>Received Date / Time</Label>
+              <Input type="datetime-local" value={manualForm.receivedAt} onChange={(e) => setManualForm((p) => ({ ...p, receivedAt: e.target.value }))} />
+            </div>
+            <div className="md:col-span-6 space-y-1.5">
+              <Label>Responsible Owner</Label>
+              <Select value={manualForm.assignedToUserId} onValueChange={(v) => setManualForm((p) => ({ ...p, assignedToUserId: v }))}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Optional" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="unassigned">Unassigned</SelectItem>
+                  {selectedUserOptions.map((u) => (
+                    <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="md:col-span-12 space-y-1.5">
+              <Label>Related Case (Ref or Parcel No)</Label>
+              <Input value={manualForm.caseRef} onChange={(e) => setManualForm((p) => ({ ...p, caseRef: e.target.value }))} placeholder="Optional" />
             </div>
             <div className="md:col-span-12 space-y-1.5">
               <Label>Subject</Label>

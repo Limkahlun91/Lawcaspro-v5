@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   casesTable,
   caseAssignmentsTable,
@@ -101,10 +101,12 @@ export async function getMessageById(r: DbConn, firmId: number, id: number) {
 export async function listMessages(
   r: DbConn,
   firmId: number,
-  args: { status?: string; isBatch?: boolean; assignedToUserId?: number | null; linkedCaseId?: number | null; limit: number; offset: number }
+  args: { status?: string | string[]; isBatch?: boolean; assignedToUserId?: number | null; linkedCaseId?: number | null; limit: number; offset: number }
 ) {
   const whereParts = [eq(communicationMessagesTable.firmId, firmId)] as any[];
-  if (args.status) whereParts.push(eq(communicationMessagesTable.internalStatus, args.status));
+  if (Array.isArray(args.status) && args.status.length === 1) whereParts.push(eq(communicationMessagesTable.internalStatus, args.status[0]));
+  else if (Array.isArray(args.status) && args.status.length > 1) whereParts.push(inArray(communicationMessagesTable.internalStatus, args.status));
+  else if (typeof args.status === "string" && args.status) whereParts.push(eq(communicationMessagesTable.internalStatus, args.status));
   if (typeof args.isBatch === "boolean") whereParts.push(eq(communicationMessagesTable.isBatch, args.isBatch));
   if (args.assignedToUserId === null) whereParts.push(isNull(communicationMessagesTable.assignedToUserId));
   if (typeof args.assignedToUserId === "number") whereParts.push(eq(communicationMessagesTable.assignedToUserId, args.assignedToUserId));

@@ -60,6 +60,9 @@ export const ManualEmailCreateSchema = z.object({
   subject: z.string().trim().min(1),
   bodyText: z.string().trim().optional().nullable().default(""),
   receivedAt: z.string().datetime().optional().nullable(),
+  assignedToUserId: z.number().int().positive().optional().nullable(),
+  caseId: z.number().int().positive().optional().nullable(),
+  caseRef: z.string().trim().optional().nullable(),
   isBatchEmail: z.boolean().optional().nullable().default(false),
 });
 export type ManualEmailCreateInput = z.infer<typeof ManualEmailCreateSchema>;

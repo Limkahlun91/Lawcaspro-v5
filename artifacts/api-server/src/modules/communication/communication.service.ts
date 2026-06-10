@@ -51,7 +51,7 @@ export async function listCommunicationMessages(args: {
   r: DbConn;
   firmId: number;
   userId: number;
-  filter: { status?: string; isBatch?: boolean; assignedTo?: "me" | "unassigned" | "any"; linkedCaseId?: number | null };
+  filter: { status?: string | string[]; isBatch?: boolean; assignedTo?: "me" | "unassigned" | "any"; linkedCaseId?: number | null };
   limit: number;
   offset: number;
 }) {
@@ -88,6 +88,9 @@ export async function createManualIncomingEmail(args: {
     subject: string;
     bodyText?: string | null;
     receivedAt?: string | null;
+    assignedToUserId?: number | null;
+    caseId?: number | null;
+    caseRef?: string | null;
     isBatchEmail?: boolean | null;
   };
 }) {
@@ -103,6 +106,16 @@ export async function createManualIncomingEmail(args: {
   const receivedAt = args.input.receivedAt ? new Date(args.input.receivedAt) : now();
   const toAddresses = normalizeEmailAddressList(args.input.to);
   const ccAddresses = normalizeEmailAddressList(args.input.cc);
+  let linkedCaseId: number | null = null;
+  if (args.input.caseId || args.input.caseRef) {
+    const foundCase = await findCaseByIdOrRef(args.r, firmId, {
+      caseId: args.input.caseId ?? null,
+      caseRef: args.input.caseRef ?? null,
+    });
+    if (!foundCase) throw new Error("case_not_found");
+    linkedCaseId = foundCase.id;
+  }
+  const assignedToUserId = args.input.assignedToUserId ?? null;
 
   const created = await insertMessage(args.r, {
     firmId,
@@ -118,8 +131,10 @@ export async function createManualIncomingEmail(args: {
     subject: args.input.subject.trim(),
     bodyText: (args.input.bodyText ?? "").trim(),
     receivedAt,
-    internalStatus: "unassigned",
+    internalStatus: assignedToUserId ? "assigned" : "unassigned",
     isBatch,
+    linkedCaseId,
+    assignedToUserId,
     lastActivityAt: receivedAt,
     createdBy: actorId,
   });
@@ -129,7 +144,13 @@ export async function createManualIncomingEmail(args: {
     req: args.req,
     action: "communication.message.manual_email.created",
     messageId: created.id,
-    newValue: { isBatch, mailboxId: mailbox.id },
+    newValue: {
+      isBatch,
+      mailboxId: mailbox.id,
+      linkedCaseId,
+      assignedToUserId,
+      receivedAt: receivedAt.toISOString(),
+    },
   });
 
   return created;

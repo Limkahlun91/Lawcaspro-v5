@@ -125,6 +125,7 @@ if (!skipDb) {
 
 suite("Communication Hub MVP — Manual Email → Tasks → Draft → Sent", () => {
   it("manual email creation works and viewing writes audit only", async () => {
+    const receivedAt = "2026-06-09T09:30:00.000Z";
     const res = await request(app)
       .post("/api/communication/messages/manual-email")
       .set("Authorization", `Bearer ${partnerToken}`)
@@ -135,6 +136,9 @@ suite("Communication Hub MVP — Manual Email → Tasks → Draft → Sent", () 
         cc: [],
         subject: "TEST-COMM-MANUAL-EMAIL",
         bodyText: "Maybank batch email sample",
+        receivedAt,
+        assignedToUserId: userIds[0] ?? null,
+        caseId: caseIds[0] ?? null,
         isBatchEmail: true,
       });
 
@@ -143,6 +147,10 @@ suite("Communication Hub MVP — Manual Email → Tasks → Draft → Sent", () 
     expect(res.body.channel).toBe("email");
     expect(res.body.provider).toBe("manual");
     expect(res.body.direction).toBe("incoming");
+    expect(res.body.internalStatus).toBe("assigned");
+    expect(res.body.assignedToUserId).toBe(userIds[0] ?? null);
+    expect(res.body.linkedCaseId).toBe(caseIds[0] ?? null);
+    expect(new Date(res.body.receivedAt).toISOString()).toBe(receivedAt);
 
     const messageId = res.body.id;
 
@@ -237,6 +245,13 @@ suite("Communication Hub MVP — Manual Email → Tasks → Draft → Sent", () 
       .send({});
     expect(sentRes.status).toBe(200);
     expect(sentRes.body.status).toBe("sent");
+
+    const closedRes = await request(app)
+      .get("/api/communication/messages?status=closed,fully_replied")
+      .set("Authorization", `Bearer ${partnerToken}`);
+    expect(closedRes.status).toBe(200);
+    expect(Array.isArray(closedRes.body)).toBe(true);
+    expect(closedRes.body.some((row: any) => row.message?.id === messageId)).toBe(true);
 
     const timelineRes = await request(app)
       .get(`/api/cases/${case1}/communication-timeline`)

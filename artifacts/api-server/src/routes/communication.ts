@@ -79,7 +79,8 @@ router.get("/communication/messages", requireAuth, requireFirmUser, requirePermi
   if (!r) return;
   const limit = Math.min(parseInt(one((req.query as any).limit) ?? "50", 10) || 50, 200);
   const offset = parseInt(one((req.query as any).offset) ?? "0", 10) || 0;
-  const status = one((req.query as any).status) ?? undefined;
+  const statusRaw = one((req.query as any).status) ?? undefined;
+  const status = statusRaw?.includes(",") ? statusRaw.split(",").map((value) => value.trim()).filter(Boolean) : statusRaw;
   const isBatchRaw = one((req.query as any).isBatch);
   const isBatch = typeof isBatchRaw === "string" ? (isBatchRaw === "true" ? true : isBatchRaw === "false" ? false : undefined) : undefined;
   const assignedTo = (one((req.query as any).assignedTo) as any) ?? "any";
@@ -112,8 +113,21 @@ router.post("/communication/messages/manual-email", requireAuth, requireFirmUser
   if (!r) return;
   const parsed = ManualEmailCreateSchema.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
-  const created = await createManualIncomingEmail({ r, req, input: parsed.data as any });
-  res.status(201).json(created);
+  try {
+    const created = await createManualIncomingEmail({ r, req, input: parsed.data as any });
+    res.status(201).json(created);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "manual_email_create_failed";
+    if (message === "case_not_found") {
+      res.status(404).json({ error: "Case not found" });
+      return;
+    }
+    if (message === "mailbox_not_found" || message === "invalid_mailbox_channel") {
+      res.status(400).json({ error: "Invalid mailbox" });
+      return;
+    }
+    throw error;
+  }
 });
 
 router.post("/communication/messages/:id/view", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
