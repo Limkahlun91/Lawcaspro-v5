@@ -910,6 +910,10 @@ export default function EmailControlCenterPage() {
   const compactAudit = useMemo(() => compactAuditEntries(asArray<AuditEntry>(messageAudit), users), [messageAudit, users]);
   const visibleAudit = auditExpanded ? compactAudit : compactAudit.slice(0, 5);
 
+  const getEffectiveIsRead = (messageId: number, fallbackIsRead: boolean) => {
+    return readOverrides[messageId] ?? fallbackIsRead;
+  };
+
   const filteredMessages = useMemo(() => {
     const base = messages.filter((row) => {
       if (view === "linked_to_case") return row.message.linkedCaseId != null;
@@ -917,10 +921,28 @@ export default function EmailControlCenterPage() {
       return true;
     });
     if (view === "unread") {
-      return base.filter((row) => (readOverrides[row.message.id] ?? row.isRead) === false);
+      return base.filter((row) => getEffectiveIsRead(row.message.id, row.isRead) === false);
     }
     return base;
   }, [messages, readOverrides, view]);
+
+  const handleSelectMessage = (row: MessageRow) => {
+    setSelectedMessageId(row.message.id);
+    setSelectedDraftId(null);
+    setSelectedTaskIds([]);
+
+    const lastOpenedAt = openedMessageIdsRef.current.get(row.message.id) ?? 0;
+    const nowTs = Date.now();
+    if (nowTs - lastOpenedAt > 5 * 60 * 1000) {
+      openedMessageIdsRef.current.set(row.message.id, nowTs);
+      recordMessageOpenedMutation.mutate(row.message.id);
+    }
+
+    const isCurrentlyRead = getEffectiveIsRead(row.message.id, row.isRead);
+    if (!isCurrentlyRead) {
+      readStatusMutation.mutate({ messageId: row.message.id, isRead: true });
+    }
+  };
 
   const [draftEditForm, setDraftEditForm] = useState({ to: "", cc: "", subject: "", bodyText: "" });
 
@@ -1149,20 +1171,10 @@ export default function EmailControlCenterPage() {
                     "w-full rounded-xl border p-3 text-left transition-colors",
                     selectedMessageId === row.message.id ? "border-slate-400 bg-slate-50" : "hover:bg-slate-50",
                   ].join(" ")}
-                  onClick={() => {
-                    setSelectedMessageId(row.message.id);
-                    setSelectedDraftId(null);
-                    setSelectedTaskIds([]);
-                    const lastOpenedAt = openedMessageIdsRef.current.get(row.message.id) ?? 0;
-                    const nowTs = Date.now();
-                    if (nowTs - lastOpenedAt > 5 * 60 * 1000) {
-                      openedMessageIdsRef.current.set(row.message.id, nowTs);
-                      recordMessageOpenedMutation.mutate(row.message.id);
-                    }
-                  }}
+                  onClick={() => handleSelectMessage(row)}
                 >
                   {(() => {
-                    const unread = (readOverrides[row.message.id] ?? row.isRead) === false;
+                    const unread = getEffectiveIsRead(row.message.id, row.isRead) === false;
                     const from = `${row.message.fromName || ""}${row.message.fromName ? " " : ""}<${row.message.fromAddress || ""}>`.trim();
                     const preview = previewText(row.message.bodyText);
                     const ts = formatDateTime(row.message.receivedAt || row.message.lastActivityAt || row.message.createdAt);
