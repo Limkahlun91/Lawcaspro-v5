@@ -398,5 +398,43 @@ export async function buildCaseCommunicationTimeline(r: DbConn, firmId: number, 
     .from(communicationCaseTasksTable)
     .where(and(eq(communicationCaseTasksTable.firmId, firmId), eq(communicationCaseTasksTable.linkedCaseId, caseId)))
     .orderBy(desc(communicationCaseTasksTable.updatedAt), desc(communicationCaseTasksTable.createdAt));
-  return { messages, tasks };
+
+  const messageIds = messages.map((m) => m.id);
+  const taskIds = tasks.map((t) => t.id);
+
+  const draftsByMessage = messageIds.length
+    ? await r
+      .select()
+      .from(communicationDraftsTable)
+      .where(and(eq(communicationDraftsTable.firmId, firmId), inArray(communicationDraftsTable.parentMessageId, messageIds)))
+      .orderBy(desc(communicationDraftsTable.updatedAt), desc(communicationDraftsTable.createdAt))
+    : [];
+
+  const draftsByTask = taskIds.length
+    ? await r
+      .select({ draft: communicationDraftsTable })
+      .from(communicationDraftTasksTable)
+      .innerJoin(communicationDraftsTable, and(
+        eq(communicationDraftsTable.firmId, firmId),
+        eq(communicationDraftsTable.id, communicationDraftTasksTable.draftId),
+      ))
+      .where(and(eq(communicationDraftTasksTable.firmId, firmId), inArray(communicationDraftTasksTable.caseTaskId, taskIds)))
+      .orderBy(desc(communicationDraftsTable.updatedAt), desc(communicationDraftsTable.createdAt))
+    : [];
+
+  const seenDraftIds = new Set<number>();
+  const drafts = [] as Array<typeof communicationDraftsTable.$inferSelect>;
+  for (const d of draftsByMessage) {
+    if (seenDraftIds.has(d.id)) continue;
+    seenDraftIds.add(d.id);
+    drafts.push(d);
+  }
+  for (const row of draftsByTask) {
+    const d = row.draft;
+    if (seenDraftIds.has(d.id)) continue;
+    seenDraftIds.add(d.id);
+    drafts.push(d);
+  }
+
+  return { messages, tasks, drafts };
 }

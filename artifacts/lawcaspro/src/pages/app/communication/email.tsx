@@ -479,12 +479,19 @@ export default function EmailControlCenterPage() {
           subject: args.subject,
         },
       }),
-    onSuccess: (draft) => {
+    onSuccess: async (draft) => {
       qc.invalidateQueries({ queryKey: ["communication", "drafts"] });
       qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "tasks"] });
       if (draft?.id) {
         setSelectedDraftId(draft.id);
         setView("drafts_pending_approval");
+        try {
+          await apiFetchJson(`/communication/drafts/${draft.id}/submit-approval`, { method: "POST", body: {} });
+          qc.invalidateQueries({ queryKey: ["communication", "drafts", "pending"] });
+          qc.invalidateQueries({ queryKey: ["communication", "draft", draft.id] });
+        } catch (e) {
+          toastError(toast, e);
+        }
       }
     },
     onError: (e) => toastError(toast, e),
@@ -498,13 +505,23 @@ export default function EmailControlCenterPage() {
 
   const approveDraftMutation = useMutation({
     mutationFn: (draftId: number) => apiFetchJson(`/communication/drafts/${draftId}/approve`, { method: "POST", body: {} }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "drafts"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["communication", "drafts"] });
+      qc.invalidateQueries({ queryKey: ["communication", "drafts", "pending"] });
+      qc.invalidateQueries({ queryKey: ["communication", "draft", selectedDraftId] });
+    },
     onError: (e) => toastError(toast, e),
   });
 
   const markSentMutation = useMutation({
     mutationFn: (draftId: number) => apiFetchJson(`/communication/drafts/${draftId}/mark-sent`, { method: "POST", body: {} }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "drafts"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["communication", "drafts"] });
+      qc.invalidateQueries({ queryKey: ["communication", "drafts", "pending"] });
+      qc.invalidateQueries({ queryKey: ["communication", "draft", selectedDraftId] });
+      qc.invalidateQueries({ queryKey: ["communication", "messages"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "tasks"] });
+    },
     onError: (e) => toastError(toast, e),
   });
 
@@ -949,7 +966,7 @@ export default function EmailControlCenterPage() {
                         <div className="text-sm font-medium">{selectedMessage.isBatch ? "Child Case Tasks" : "Email Tasks"}</div>
                         <div className="flex items-center gap-2">
                           <Button variant="outline" onClick={() => setTaskDialogOpen(true)} disabled={createTaskMutation.isPending}>Add Task</Button>
-                          <Button onClick={() => setDraftDialogOpen(true)} disabled={!selectedTaskIds.length}>Create Draft</Button>
+                          <Button onClick={() => setDraftDialogOpen(true)} disabled={false}>Create Draft</Button>
                         </div>
                       </div>
                       <QuerySection
@@ -1347,6 +1364,10 @@ export default function EmailControlCenterPage() {
             <Button variant="outline" onClick={() => setDraftDialogOpen(false)}>Cancel</Button>
             <Button variant="outline" onClick={() => {
               if (!selectedMessageId) return;
+              if (selectedTaskIds.length === 0) {
+                toast({ title: "Add at least one task", description: "Create a child task first, then select it to include in the draft.", variant: "destructive" });
+                return;
+              }
               createDraftMutation.mutate({ type: "partial", parentMessageId: selectedMessageId, taskIds: selectedTaskIds, to: draftForm.to, cc: draftForm.cc, subject: draftForm.subject });
               setDraftDialogOpen(false);
             }} disabled={createDraftMutation.isPending}>
@@ -1354,6 +1375,10 @@ export default function EmailControlCenterPage() {
             </Button>
             <Button onClick={() => {
               if (!selectedMessageId) return;
+              if (selectedTaskIds.length === 0) {
+                toast({ title: "Add at least one task", description: "Create a child task first, then select it to include in the draft.", variant: "destructive" });
+                return;
+              }
               createDraftMutation.mutate({ type: "consolidated", parentMessageId: selectedMessageId, taskIds: selectedTaskIds, to: draftForm.to, cc: draftForm.cc, subject: draftForm.subject });
               setDraftDialogOpen(false);
             }} disabled={createDraftMutation.isPending}>

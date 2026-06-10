@@ -1,4 +1,4 @@
-import express, { type Response, type Router as ExpressRouter } from "express";
+import express, { type NextFunction, type Response, type Router as ExpressRouter } from "express";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 import {
   DraftCreateSchema,
@@ -494,6 +494,20 @@ router.get("/cases/:caseId/communication-timeline", requireAuth, requireFirmUser
   if (Number.isNaN(caseId)) { res.status(400).json({ error: "Invalid case id" }); return; }
   const data = await getCaseCommunicationTimeline({ r, firmId: req.firmId!, caseId });
   res.json(data);
+});
+
+expressRouter.use((error: unknown, _req: AuthRequest, res: Response, next: NextFunction) => {
+  const msg = error instanceof Error ? error.message : "";
+  const code = typeof error === "object" && error ? (error as { code?: unknown }).code : undefined;
+  const isMissingAssigneesTable =
+    code === "42P01" ||
+    msg.includes("communication_task_assignees") ||
+    msg.includes("relation") && msg.includes("does not exist") && msg.includes("communication_task_assignees");
+  if (isMissingAssigneesTable) {
+    res.status(500).json({ error: "Migration missing: communication_task_assignees. Apply 0117_communication_task_assignees.sql" });
+    return;
+  }
+  next(error);
 });
 
 export default expressRouter;
