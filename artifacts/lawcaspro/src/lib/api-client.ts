@@ -27,6 +27,12 @@ function isFormData(body: unknown): body is FormData {
   return typeof FormData !== "undefined" && body instanceof FormData;
 }
 
+function isPlainObject(body: unknown): body is Record<string, unknown> {
+  if (!body || typeof body !== "object") return false;
+  const proto = Object.getPrototypeOf(body);
+  return proto === Object.prototype || proto === null;
+}
+
 function looksLikeJson(body: unknown): boolean {
   if (typeof body !== "string") return false;
   const trimmed = body.trimStart();
@@ -92,14 +98,17 @@ export async function apiRequest(path: string, options: ApiFetchOptions = {}): P
   }
 
   const body = options.body;
-  if (body != null && !isFormData(body) && !headers.has("content-type")) {
-    if (typeof body === "string" && looksLikeJson(body)) headers.set("content-type", "application/json");
+  const shouldJsonStringify = Array.isArray(body) || isPlainObject(body);
+  const requestBody = shouldJsonStringify ? JSON.stringify(body) : body;
+  if (requestBody != null && !isFormData(requestBody) && !headers.has("content-type")) {
+    if (typeof requestBody === "string" && looksLikeJson(requestBody)) headers.set("content-type", "application/json");
     else headers.set("content-type", "application/json");
   }
 
   const credentials = options.credentials ?? "include";
   const requestInit: RequestInit = {
     ...options,
+    body: requestBody as any,
     timeoutMs,
     credentials,
     headers,
