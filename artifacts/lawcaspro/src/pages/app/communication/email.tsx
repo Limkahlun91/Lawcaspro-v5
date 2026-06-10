@@ -1131,12 +1131,15 @@ export default function EmailControlCenterPage() {
             </div>
             <div className="md:col-span-6 space-y-1.5">
               <Label>Lawyer in Charge *</Label>
-              <Select value={manualForm.lawyerInChargeUserId} onValueChange={(v) => setManualForm((p) => ({ ...p, lawyerInChargeUserId: v }))}>
+              <Select
+                value={manualForm.lawyerInChargeUserId}
+                onValueChange={(v) => setManualForm((p) => ({ ...p, lawyerInChargeUserId: v === "unassigned" ? "" : v }))}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder="Optional (can be unassigned for draft intake)" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">Unassigned</SelectItem>
+                  <SelectItem value="unassigned">Unassigned</SelectItem>
                   {lawyerUserOptions.map((u) => (
                     <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
                   ))}
@@ -1159,12 +1162,12 @@ export default function EmailControlCenterPage() {
             </div>
             <div className="md:col-span-6 space-y-1.5">
               <Label>Reviewer / Approver</Label>
-              <Select value={manualForm.reviewerUserId} onValueChange={(v) => setManualForm((p) => ({ ...p, reviewerUserId: v }))}>
+              <Select value={manualForm.reviewerUserId} onValueChange={(v) => setManualForm((p) => ({ ...p, reviewerUserId: v === "none" ? "" : v }))}>
                 <SelectTrigger>
                   <SelectValue placeholder="Optional" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">None</SelectItem>
+                  <SelectItem value="none">None</SelectItem>
                   {lawyerUserOptions.map((u) => (
                     <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
                   ))}
@@ -1229,12 +1232,15 @@ export default function EmailControlCenterPage() {
             </div>
             <div className="md:col-span-6 space-y-1.5">
               <Label>Lawyer in Charge *</Label>
-              <Select value={taskForm.lawyerInChargeUserId} onValueChange={(v) => setTaskForm((p) => ({ ...p, lawyerInChargeUserId: v }))}>
+              <Select
+                value={taskForm.lawyerInChargeUserId}
+                onValueChange={(v) => setTaskForm((p) => ({ ...p, lawyerInChargeUserId: v === "unassigned" ? "" : v }))}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder="Optional (recommended)" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">Unassigned</SelectItem>
+                  <SelectItem value="unassigned">Unassigned</SelectItem>
                   {lawyerUserOptions.map((u) => (
                     <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
                   ))}
@@ -1257,12 +1263,12 @@ export default function EmailControlCenterPage() {
             </div>
             <div className="md:col-span-6 space-y-1.5">
               <Label>Reviewer / Approver</Label>
-              <Select value={taskForm.reviewerUserId} onValueChange={(v) => setTaskForm((p) => ({ ...p, reviewerUserId: v }))}>
+              <Select value={taskForm.reviewerUserId} onValueChange={(v) => setTaskForm((p) => ({ ...p, reviewerUserId: v === "none" ? "" : v }))}>
                 <SelectTrigger>
                   <SelectValue placeholder="Optional" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">None</SelectItem>
+                  <SelectItem value="none">None</SelectItem>
                   {lawyerUserOptions.map((u) => (
                     <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
                   ))}
