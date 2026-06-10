@@ -52,8 +52,10 @@ if (!skipDb) {
     ne = ops.ne;
     or = ops.or;
 
-    const [{ reg: remarksReg }] = await db.execute<{ reg: string | null }>(sql`SELECT to_regclass('public.communication_email_remarks') AS reg`);
-    const [{ reg: readsReg }] = await db.execute<{ reg: string | null }>(sql`SELECT to_regclass('public.communication_message_reads') AS reg`);
+    const remarksResult = await db.execute<{ reg: string | null }>(sql`SELECT to_regclass('public.communication_email_remarks') AS reg`);
+    const readsResult = await db.execute<{ reg: string | null }>(sql`SELECT to_regclass('public.communication_message_reads') AS reg`);
+    const remarksReg = remarksResult.rows[0]?.reg ?? null;
+    const readsReg = readsResult.rows[0]?.reg ?? null;
     hasInboxTables = Boolean(remarksReg && readsReg);
 
     const loginRes = await request(app)
@@ -330,4 +332,3 @@ suite("Email Inbox — Remarks / Reads / Assignees / Archive / Link Case", () =>
     expect(Array.isArray(res.body)).toBe(true);
   });
 });
-
