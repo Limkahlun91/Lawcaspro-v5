@@ -17,6 +17,8 @@ import {
   insertMessage,
   insertTask,
   linkDraftTasks,
+  listAssigneesForMessage,
+  listAssigneesForTasks,
   listAuditLogsForDraft,
   listAuditLogsForMessage,
   listAuditLogsForTask,
@@ -26,6 +28,8 @@ import {
   listMessages,
   listTasksForMessage,
   listTasksMine,
+  replaceAssigneesForMessage,
+  replaceAssigneesForTask,
   updateDraft,
   updateMessage,
   updateTask,
@@ -73,7 +77,49 @@ export async function listCommunicationMessages(args: {
 export async function getCommunicationMessage(args: { r: DbConn; firmId: number; messageId: number }) {
   const message = await getMessageById(args.r, args.firmId, args.messageId);
   if (!message) return null;
-  return message;
+  const assignees = await listAssigneesForMessage(args.r, args.firmId, message.id);
+  return { ...message, team: buildTeamFromAssignees(assignees) };
+}
+
+function buildTeamFromAssignees(rows: Array<{ assignmentRole: string; userId: number }>) {
+  const lawyer = rows.find((r) => r.assignmentRole === "lawyer_in_charge")?.userId ?? null;
+  const handlers = rows.filter((r) => r.assignmentRole === "handler").map((r) => r.userId);
+  const reviewer = rows.find((r) => r.assignmentRole === "reviewer")?.userId ?? null;
+  const watchers = rows.filter((r) => r.assignmentRole === "watcher").map((r) => r.userId);
+  return { lawyerInChargeUserId: lawyer, handlerUserIds: handlers, reviewerUserId: reviewer, watcherUserIds: watchers };
+}
+
+function normalizeTeamInput(teamRaw: any, legacyAssignedToUserId?: number | null) {
+  const lawyerInChargeUserId = typeof teamRaw?.lawyerInChargeUserId === "number" ? teamRaw.lawyerInChargeUserId : null;
+  const handlerIds = Array.isArray(teamRaw?.handlerUserIds) ? teamRaw.handlerUserIds.filter((x: any) => typeof x === "number") : [];
+  const reviewerUserId = typeof teamRaw?.reviewerUserId === "number" ? teamRaw.reviewerUserId : null;
+  const watcherIds = Array.isArray(teamRaw?.watcherUserIds) ? teamRaw.watcherUserIds.filter((x: any) => typeof x === "number") : [];
+
+  const handlers = new Set<number>(handlerIds);
+  if (typeof legacyAssignedToUserId === "number") handlers.add(legacyAssignedToUserId);
+  const watchers = new Set<number>(watcherIds);
+
+  if (lawyerInChargeUserId != null) {
+    handlers.delete(lawyerInChargeUserId);
+    watchers.delete(lawyerInChargeUserId);
+  }
+  if (reviewerUserId != null) {
+    handlers.delete(reviewerUserId);
+    watchers.delete(reviewerUserId);
+  }
+  for (const id of handlers) watchers.delete(id);
+
+  return {
+    lawyerInChargeUserId,
+    handlerUserIds: Array.from(handlers),
+    reviewerUserId,
+    watcherUserIds: Array.from(watchers),
+  };
+}
+
+async function isTaskTeamMember(r: DbConn, firmId: number, taskId: number, userId: number) {
+  const assignees = await listAssigneesForTasks(r, firmId, [taskId]);
+  return assignees.some((a) => a.taskId === taskId && a.userId === userId && (a.assignmentRole === "lawyer_in_charge" || a.assignmentRole === "handler"));
 }
 
 export async function createManualIncomingEmail(args: {
@@ -88,10 +134,11 @@ export async function createManualIncomingEmail(args: {
     subject: string;
     bodyText?: string | null;
     receivedAt?: string | null;
-    assignedToUserId?: number | null;
     caseId?: number | null;
     caseRef?: string | null;
     isBatchEmail?: boolean | null;
+    assignedToUserId?: number | null;
+    team?: any | null;
   };
 }) {
   const firmId = args.req.firmId!;
@@ -118,7 +165,8 @@ export async function createManualIncomingEmail(args: {
     if (!foundCase) throw new Error("case_not_found");
     linkedCaseId = foundCase.id;
   }
-  const assignedToUserId = args.input.assignedToUserId ?? null;
+  const normalizedTeam = normalizeTeamInput(args.input.team, args.input.assignedToUserId ?? null);
+  const primaryAssignee = normalizedTeam.handlerUserIds[0] ?? normalizedTeam.lawyerInChargeUserId ?? null;
   const fromName = (args.input.fromName ?? "").trim();
 
   const created = await insertMessage(args.r, {
@@ -135,13 +183,69 @@ export async function createManualIncomingEmail(args: {
     subject: args.input.subject.trim(),
     bodyText: (args.input.bodyText ?? "").trim(),
     receivedAt,
-    internalStatus: assignedToUserId ? "assigned" : "unassigned",
+    internalStatus: primaryAssignee ? "assigned" : "unassigned",
     isBatch,
     linkedCaseId,
-    assignedToUserId,
+    assignedToUserId: primaryAssignee,
     lastActivityAt: receivedAt,
     createdBy: actorId,
   });
+
+  const assignedAt = now();
+  const assigneeRows: Array<any> = [];
+  if (normalizedTeam.lawyerInChargeUserId) {
+    assigneeRows.push({
+      firmId,
+      messageId: created.id,
+      taskId: null,
+      userId: normalizedTeam.lawyerInChargeUserId,
+      assignmentRole: "lawyer_in_charge",
+      isPrimary: true,
+      status: "assigned",
+      assignedBy: actorId,
+      assignedAt,
+    });
+  }
+  for (const [idx, userId] of normalizedTeam.handlerUserIds.entries()) {
+    assigneeRows.push({
+      firmId,
+      messageId: created.id,
+      taskId: null,
+      userId,
+      assignmentRole: "handler",
+      isPrimary: idx === 0,
+      status: "assigned",
+      assignedBy: actorId,
+      assignedAt,
+    });
+  }
+  if (normalizedTeam.reviewerUserId) {
+    assigneeRows.push({
+      firmId,
+      messageId: created.id,
+      taskId: null,
+      userId: normalizedTeam.reviewerUserId,
+      assignmentRole: "reviewer",
+      isPrimary: false,
+      status: "assigned",
+      assignedBy: actorId,
+      assignedAt,
+    });
+  }
+  for (const userId of normalizedTeam.watcherUserIds) {
+    assigneeRows.push({
+      firmId,
+      messageId: created.id,
+      taskId: null,
+      userId,
+      assignmentRole: "watcher",
+      isPrimary: false,
+      status: "assigned",
+      assignedBy: actorId,
+      assignedAt,
+    });
+  }
+  if (assigneeRows.length) await replaceAssigneesForMessage(args.r, firmId, created.id, assigneeRows);
 
   await writeCommunicationAuditLog({
     r: args.r,
@@ -152,12 +256,13 @@ export async function createManualIncomingEmail(args: {
       isBatch,
       mailboxId: mailbox.id,
       linkedCaseId,
-      assignedToUserId,
+      assignedToUserId: primaryAssignee,
+      team: normalizedTeam,
       receivedAt: receivedAt.toISOString(),
     },
   });
 
-  return created;
+  return { ...created, team: normalizedTeam };
 }
 
 export async function viewMessage(args: { r: DbConn; req: AuthRequest; messageId: number }) {
@@ -194,6 +299,92 @@ export async function assignMessageOwner(args: { r: DbConn; req: AuthRequest; me
     newValue: { assignedToUserId: updated.assignedToUserId ?? null, internalStatus: updated.internalStatus },
   });
   return updated;
+}
+
+export async function setMessageResponsibleTeam(args: { r: DbConn; req: AuthRequest; messageId: number; team: any }) {
+  const firmId = args.req.firmId!;
+  const roleName = getRoleNameFromReq(args.req);
+  if (!isLawyerRoleName(roleName) && !isPartnerOrAdminRole(roleName)) return { error: "forbidden" as const };
+
+  const existing = await getMessageById(args.r, firmId, args.messageId);
+  if (!existing) return null;
+
+  const normalizedTeam = normalizeTeamInput(args.team, null);
+  const primaryAssignee = normalizedTeam.handlerUserIds[0] ?? normalizedTeam.lawyerInChargeUserId ?? null;
+  const nextStatus = primaryAssignee ? "assigned" : "unassigned";
+  const updated = await updateMessage(args.r, firmId, args.messageId, {
+    assignedToUserId: primaryAssignee,
+    internalStatus: nextStatus,
+    lastActivityAt: now(),
+  });
+  if (!updated) return null;
+
+  const assignedAt = now();
+  const rows: Array<any> = [];
+  if (normalizedTeam.lawyerInChargeUserId) {
+    rows.push({
+      firmId,
+      messageId: updated.id,
+      taskId: null,
+      userId: normalizedTeam.lawyerInChargeUserId,
+      assignmentRole: "lawyer_in_charge",
+      isPrimary: true,
+      status: "assigned",
+      assignedBy: args.req.userId ?? null,
+      assignedAt,
+    });
+  }
+  for (const [idx, userId] of normalizedTeam.handlerUserIds.entries()) {
+    rows.push({
+      firmId,
+      messageId: updated.id,
+      taskId: null,
+      userId,
+      assignmentRole: "handler",
+      isPrimary: idx === 0,
+      status: "assigned",
+      assignedBy: args.req.userId ?? null,
+      assignedAt,
+    });
+  }
+  if (normalizedTeam.reviewerUserId) {
+    rows.push({
+      firmId,
+      messageId: updated.id,
+      taskId: null,
+      userId: normalizedTeam.reviewerUserId,
+      assignmentRole: "reviewer",
+      isPrimary: false,
+      status: "assigned",
+      assignedBy: args.req.userId ?? null,
+      assignedAt,
+    });
+  }
+  for (const userId of normalizedTeam.watcherUserIds) {
+    rows.push({
+      firmId,
+      messageId: updated.id,
+      taskId: null,
+      userId,
+      assignmentRole: "watcher",
+      isPrimary: false,
+      status: "assigned",
+      assignedBy: args.req.userId ?? null,
+      assignedAt,
+    });
+  }
+  await replaceAssigneesForMessage(args.r, firmId, updated.id, rows);
+
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: "communication.message.team_updated",
+    messageId: updated.id,
+    oldValue: { assignedToUserId: existing.assignedToUserId ?? null, internalStatus: existing.internalStatus },
+    newValue: { assignedToUserId: updated.assignedToUserId ?? null, internalStatus: updated.internalStatus, team: normalizedTeam },
+  });
+
+  return { ...updated, team: normalizedTeam };
 }
 
 export async function linkMessageCase(args: { r: DbConn; req: AuthRequest; messageId: number; caseId?: number | null; caseRef?: string | null }) {
@@ -233,7 +424,17 @@ export async function closeMessage(args: { r: DbConn; req: AuthRequest; messageI
 }
 
 export async function listMessageTasks(args: { r: DbConn; firmId: number; messageId: number }) {
-  return listTasksForMessage(args.r, args.firmId, args.messageId);
+  const tasks = await listTasksForMessage(args.r, args.firmId, args.messageId);
+  const assignees = await listAssigneesForTasks(args.r, args.firmId, tasks.map((t) => t.id));
+  const byTaskId = new Map<number, Array<{ assignmentRole: string; userId: number }>>();
+  for (const a of assignees) {
+    const tid = a.taskId as any;
+    if (typeof tid !== "number") continue;
+    const arr = byTaskId.get(tid) ?? [];
+    arr.push({ assignmentRole: a.assignmentRole, userId: a.userId });
+    byTaskId.set(tid, arr);
+  }
+  return tasks.map((t) => ({ ...t, team: buildTeamFromAssignees(byTaskId.get(t.id) ?? []) }));
 }
 
 export async function listMyTasks(args: { r: DbConn; firmId: number; userId: number; limit: number; offset: number }) {
@@ -254,6 +455,7 @@ export async function createMessageTask(args: {
     assignedToUserId?: number | null;
     requiredAction?: string | null;
     dueAt?: string | null;
+    team?: any | null;
   };
 }) {
   const firmId = args.req.firmId!;
@@ -276,7 +478,14 @@ export async function createMessageTask(args: {
     }
   }
 
-  const assignedToUserId = args.input.assignedToUserId ?? null;
+  const normalizedTeamBase = normalizeTeamInput(args.input.team, args.input.assignedToUserId ?? null);
+  const normalizedTeam = {
+    lawyerInChargeUserId: normalizedTeamBase.lawyerInChargeUserId ?? responsibleLawyerId ?? null,
+    handlerUserIds: normalizedTeamBase.handlerUserIds.length ? normalizedTeamBase.handlerUserIds : (responsibleClerkId ? [responsibleClerkId] : []),
+    reviewerUserId: normalizedTeamBase.reviewerUserId ?? null,
+    watcherUserIds: normalizedTeamBase.watcherUserIds,
+  };
+  const primaryAssignee = normalizedTeam.handlerUserIds[0] ?? normalizedTeam.lawyerInChargeUserId ?? null;
   const task = await insertTask(args.r, {
     firmId,
     parentMessageId: parent.id,
@@ -289,14 +498,70 @@ export async function createMessageTask(args: {
     propertyRef: args.input.propertyRef?.trim() || null,
     responsibleLawyerId,
     responsibleClerkId,
-    assignedToUserId,
-    assignedByUserId: assignedToUserId ? (args.req.userId ?? null) : null,
-    assignedAt: assignedToUserId ? now() : null,
+    assignedToUserId: primaryAssignee,
+    assignedByUserId: primaryAssignee ? (args.req.userId ?? null) : null,
+    assignedAt: primaryAssignee ? now() : null,
     taskStatus: "pending_owner_review",
     requiredAction: args.input.requiredAction?.trim() || null,
     dueAt: args.input.dueAt ? new Date(args.input.dueAt) : null,
     createdBy: args.req.userId ?? null,
   });
+
+  const assignedAt = now();
+  const assigneeRows: Array<any> = [];
+  if (normalizedTeam.lawyerInChargeUserId) {
+    assigneeRows.push({
+      firmId,
+      messageId: parent.id,
+      taskId: task.id,
+      userId: normalizedTeam.lawyerInChargeUserId,
+      assignmentRole: "lawyer_in_charge",
+      isPrimary: true,
+      status: "assigned",
+      assignedBy: args.req.userId ?? null,
+      assignedAt,
+    });
+  }
+  for (const [idx, userId] of normalizedTeam.handlerUserIds.entries()) {
+    assigneeRows.push({
+      firmId,
+      messageId: parent.id,
+      taskId: task.id,
+      userId,
+      assignmentRole: "handler",
+      isPrimary: idx === 0,
+      status: "assigned",
+      assignedBy: args.req.userId ?? null,
+      assignedAt,
+    });
+  }
+  if (normalizedTeam.reviewerUserId) {
+    assigneeRows.push({
+      firmId,
+      messageId: parent.id,
+      taskId: task.id,
+      userId: normalizedTeam.reviewerUserId,
+      assignmentRole: "reviewer",
+      isPrimary: false,
+      status: "assigned",
+      assignedBy: args.req.userId ?? null,
+      assignedAt,
+    });
+  }
+  for (const userId of normalizedTeam.watcherUserIds) {
+    assigneeRows.push({
+      firmId,
+      messageId: parent.id,
+      taskId: task.id,
+      userId,
+      assignmentRole: "watcher",
+      isPrimary: false,
+      status: "assigned",
+      assignedBy: args.req.userId ?? null,
+      assignedAt,
+    });
+  }
+  if (assigneeRows.length) await replaceAssigneesForTask(args.r, firmId, parent.id, task.id, assigneeRows);
 
   await writeCommunicationAuditLog({
     r: args.r,
@@ -304,11 +569,11 @@ export async function createMessageTask(args: {
     action: "communication.task.created",
     messageId: parent.id,
     caseTaskId: task.id,
-    newValue: { linkedCaseId: task.linkedCaseId ?? null, assignedToUserId: task.assignedToUserId ?? null },
+    newValue: { linkedCaseId: task.linkedCaseId ?? null, assignedToUserId: task.assignedToUserId ?? null, team: normalizedTeam },
   });
 
   await recalcParentStatus({ r: args.r, req: args.req, parentMessageId: parent.id });
-  return task;
+  return { ...task, team: normalizedTeam };
 }
 
 export async function assignTask(args: { r: DbConn; req: AuthRequest; taskId: number; assignedToUserId: number | null }) {
@@ -336,18 +601,106 @@ export async function assignTask(args: { r: DbConn; req: AuthRequest; taskId: nu
   return updated;
 }
 
+export async function setTaskResponsibleTeam(args: { r: DbConn; req: AuthRequest; taskId: number; team: any }) {
+  const firmId = args.req.firmId!;
+  const roleName = getRoleNameFromReq(args.req);
+  if (!isPartnerOrAdminRole(roleName)) return { error: "forbidden" as const };
+
+  const existing = await getTaskById(args.r, firmId, args.taskId);
+  if (!existing) return null;
+
+  const normalizedTeam = normalizeTeamInput(args.team, null);
+  const primaryAssignee = normalizedTeam.handlerUserIds[0] ?? normalizedTeam.lawyerInChargeUserId ?? null;
+  const updated = await updateTask(args.r, firmId, args.taskId, {
+    assignedToUserId: primaryAssignee,
+    assignedByUserId: primaryAssignee ? (args.req.userId ?? null) : null,
+    assignedAt: primaryAssignee ? now() : null,
+  });
+  if (!updated) return null;
+
+  const assignedAt = now();
+  const rows: Array<any> = [];
+  if (normalizedTeam.lawyerInChargeUserId) {
+    rows.push({
+      firmId,
+      messageId: updated.parentMessageId,
+      taskId: updated.id,
+      userId: normalizedTeam.lawyerInChargeUserId,
+      assignmentRole: "lawyer_in_charge",
+      isPrimary: true,
+      status: "assigned",
+      assignedBy: args.req.userId ?? null,
+      assignedAt,
+    });
+  }
+  for (const [idx, userId] of normalizedTeam.handlerUserIds.entries()) {
+    rows.push({
+      firmId,
+      messageId: updated.parentMessageId,
+      taskId: updated.id,
+      userId,
+      assignmentRole: "handler",
+      isPrimary: idx === 0,
+      status: "assigned",
+      assignedBy: args.req.userId ?? null,
+      assignedAt,
+    });
+  }
+  if (normalizedTeam.reviewerUserId) {
+    rows.push({
+      firmId,
+      messageId: updated.parentMessageId,
+      taskId: updated.id,
+      userId: normalizedTeam.reviewerUserId,
+      assignmentRole: "reviewer",
+      isPrimary: false,
+      status: "assigned",
+      assignedBy: args.req.userId ?? null,
+      assignedAt,
+    });
+  }
+  for (const userId of normalizedTeam.watcherUserIds) {
+    rows.push({
+      firmId,
+      messageId: updated.parentMessageId,
+      taskId: updated.id,
+      userId,
+      assignmentRole: "watcher",
+      isPrimary: false,
+      status: "assigned",
+      assignedBy: args.req.userId ?? null,
+      assignedAt,
+    });
+  }
+  await replaceAssigneesForTask(args.r, firmId, updated.parentMessageId, updated.id, rows);
+
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: "communication.task.team_updated",
+    messageId: updated.parentMessageId,
+    caseTaskId: updated.id,
+    oldValue: { assignedToUserId: existing.assignedToUserId ?? null },
+    newValue: { assignedToUserId: updated.assignedToUserId ?? null, team: normalizedTeam },
+  });
+
+  await recalcParentStatus({ r: args.r, req: args.req, parentMessageId: updated.parentMessageId });
+  return { ...updated, team: normalizedTeam };
+}
+
 export async function acknowledgeTask(args: { r: DbConn; req: AuthRequest; taskId: number }) {
   const firmId = args.req.firmId!;
   const existing = await getTaskById(args.r, firmId, args.taskId);
   if (!existing) return null;
   const roleName = getRoleNameFromReq(args.req);
-  const allowed = canAcknowledgeTask({
+  let allowed = canAcknowledgeTask({
     actorUserId: args.req.userId!,
     roleName,
     assignedToUserId: existing.assignedToUserId ?? null,
     responsibleLawyerId: existing.responsibleLawyerId ?? null,
     responsibleClerkId: existing.responsibleClerkId ?? null,
   });
+  if (!allowed) allowed = await isTaskTeamMember(args.r, firmId, existing.id, args.req.userId!);
   if (!allowed) return { error: "forbidden" as const };
   const t = now();
   const updated = await updateTask(args.r, firmId, args.taskId, {
@@ -374,14 +727,21 @@ export async function updateTaskStatus(args: { r: DbConn; req: AuthRequest; task
   const existing = await getTaskById(args.r, firmId, args.taskId);
   if (!existing) return null;
   const roleName = getRoleNameFromReq(args.req);
-  const allowed = canMutateTask({
+  let allowed = canMutateTask({
     actorUserId: args.req.userId!,
     roleName,
     assignedToUserId: existing.assignedToUserId ?? null,
     responsibleLawyerId: existing.responsibleLawyerId ?? null,
     responsibleClerkId: existing.responsibleClerkId ?? null,
   });
+  if (!allowed) allowed = await isTaskTeamMember(args.r, firmId, existing.id, args.req.userId!);
   if (!allowed) return { error: "forbidden" as const };
+
+  if (["ready_to_reply", "included_in_draft", "replied", "closed"].includes(args.taskStatus)) {
+    const assignees = await listAssigneesForTasks(args.r, firmId, [existing.id]);
+    const hasLawyerInCharge = assignees.some((a) => a.taskId === existing.id && a.assignmentRole === "lawyer_in_charge");
+    if (!hasLawyerInCharge && !existing.responsibleLawyerId) return { error: "missing_lawyer_in_charge" as const };
+  }
 
   const t = now();
   const patch: any = { taskStatus: args.taskStatus };
@@ -409,13 +769,14 @@ export async function updateTaskReplyNote(args: { r: DbConn; req: AuthRequest; t
   const existing = await getTaskById(args.r, firmId, args.taskId);
   if (!existing) return null;
   const roleName = getRoleNameFromReq(args.req);
-  const allowed = canMutateTask({
+  let allowed = canMutateTask({
     actorUserId: args.req.userId!,
     roleName,
     assignedToUserId: existing.assignedToUserId ?? null,
     responsibleLawyerId: existing.responsibleLawyerId ?? null,
     responsibleClerkId: existing.responsibleClerkId ?? null,
   });
+  if (!allowed) allowed = await isTaskTeamMember(args.r, firmId, existing.id, args.req.userId!);
   if (!allowed) return { error: "forbidden" as const };
   const updated = await updateTask(args.r, firmId, args.taskId, { replyNote: args.replyNote?.trim() || null });
   if (!updated) return null;
@@ -437,7 +798,8 @@ export async function linkTaskCase(args: { r: DbConn; req: AuthRequest; taskId: 
   const existing = await getTaskById(args.r, firmId, args.taskId);
   if (!existing) return null;
   const roleName = getRoleNameFromReq(args.req);
-  const allowed = isPartnerOrAdminRole(roleName) || (existing.assignedToUserId && existing.assignedToUserId === args.req.userId);
+  let allowed = isPartnerOrAdminRole(roleName) || (existing.assignedToUserId && existing.assignedToUserId === args.req.userId);
+  if (!allowed) allowed = await isTaskTeamMember(args.r, firmId, existing.id, args.req.userId!);
   if (!allowed) return { error: "forbidden" as const };
   const found = await findCaseByIdOrRef(args.r, firmId, { caseId: args.caseId ?? null, caseRef: args.caseRef ?? null });
   if (!found) return { error: "case_not_found" as const };
@@ -468,14 +830,18 @@ export async function closeTask(args: { r: DbConn; req: AuthRequest; taskId: num
   const existing = await getTaskById(args.r, firmId, args.taskId);
   if (!existing) return null;
   const roleName = getRoleNameFromReq(args.req);
-  const allowed = canMutateTask({
+  let allowed = canMutateTask({
     actorUserId: args.req.userId!,
     roleName,
     assignedToUserId: existing.assignedToUserId ?? null,
     responsibleLawyerId: existing.responsibleLawyerId ?? null,
     responsibleClerkId: existing.responsibleClerkId ?? null,
   });
+  if (!allowed) allowed = await isTaskTeamMember(args.r, firmId, existing.id, args.req.userId!);
   if (!allowed) return { error: "forbidden" as const };
+  const assignees = await listAssigneesForTasks(args.r, firmId, [existing.id]);
+  const hasLawyerInCharge = assignees.some((a) => a.taskId === existing.id && a.assignmentRole === "lawyer_in_charge");
+  if (!hasLawyerInCharge && !existing.responsibleLawyerId) return { error: "missing_lawyer_in_charge" as const };
   const updated = await updateTask(args.r, firmId, args.taskId, { taskStatus: "closed", closedAt: now() });
   if (!updated) return null;
   await writeCommunicationAuditLog({
@@ -504,13 +870,19 @@ export async function createDraft(args: {
 }) {
   const firmId = args.req.firmId!;
   const roleName = getRoleNameFromReq(args.req);
-  if (!isLawyerRoleName(roleName) && !isPartnerOrAdminRole(roleName)) return { error: "forbidden" as const };
   const parent = await getMessageById(args.r, firmId, args.parentMessageId);
   if (!parent) return null;
 
   const tasks = await listTasksForMessage(args.r, firmId, parent.id);
   const selected = tasks.filter((t) => args.taskIds.includes(t.id));
   if (!selected.length) return { error: "no_tasks" as const };
+
+  const isPrivileged = isPartnerOrAdminRole(roleName) || isLawyerRoleName(roleName);
+  if (!isPrivileged) {
+    const assignees = await listAssigneesForTasks(args.r, firmId, selected.map((t) => t.id));
+    const allowedByTeam = assignees.some((a) => a.userId === args.req.userId && (a.assignmentRole === "handler" || a.assignmentRole === "lawyer_in_charge"));
+    if (!allowedByTeam) return { error: "forbidden" as const };
+  }
 
   const body = buildConsolidatedDraftBody({
     channel: parent.channel as any,

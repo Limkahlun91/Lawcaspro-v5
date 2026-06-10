@@ -179,3 +179,24 @@ export const communicationAuditLogsTable = pgTable("communication_audit_logs", {
   draftIdx: index("idx_communication_audit_logs_draft").on(t.firmId, t.draftId, t.createdAt),
 }));
 
+export const communicationTaskAssigneesTable = pgTable("communication_task_assignees", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  messageId: integer("message_id").notNull(),
+  taskId: integer("task_id"),
+  userId: integer("user_id").notNull(),
+  assignmentRole: text("assignment_role").notNull(),
+  isPrimary: boolean("is_primary").notNull().default(false),
+  status: text("status").notNull().default("assigned"),
+  assignedBy: integer("assigned_by"),
+  assignedAt: timestamp("assigned_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  uniqAssignee: uniqueIndex("uq_communication_task_assignees").on(t.messageId, t.taskId, t.userId, t.assignmentRole),
+  firmIdIdx: index("idx_communication_task_assignees_firm").on(t.firmId),
+  firmMessageIdx: index("idx_communication_task_assignees_message").on(t.firmId, t.messageId),
+  firmTaskIdx: index("idx_communication_task_assignees_task").on(t.firmId, t.taskId),
+  firmUserRoleIdx: index("idx_communication_task_assignees_user_role").on(t.firmId, t.userId, t.assignmentRole),
+  firmUserStatusIdx: index("idx_communication_task_assignees_user_status").on(t.firmId, t.userId, t.status),
+}));

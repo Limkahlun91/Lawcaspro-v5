@@ -5,9 +5,11 @@ import {
   DraftPatchSchema,
   ManualEmailCreateSchema,
   MessageAssignSchema,
+  MessageTeamPatchSchema,
   MessageLinkCaseSchema,
   TaskAssignSchema,
   TaskCreateSchema,
+  TaskTeamPatchSchema,
   TaskLinkCaseSchema,
   TaskReplyNoteSchema,
   TaskStatusUpdateSchema,
@@ -23,6 +25,8 @@ import {
   createDraft,
   createManualIncomingEmail,
   createMessageTask,
+  setMessageResponsibleTeam,
+  setTaskResponsibleTeam,
   getAuditForDraft,
   getAuditForMessage,
   getAuditForTask,
@@ -162,6 +166,19 @@ router.patch("/communication/messages/:id/assign", requireAuth, requireFirmUser,
   res.json(msg);
 });
 
+router.patch("/communication/messages/:id/team", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const parsed = MessageTeamPatchSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  const msg = await setMessageResponsibleTeam({ r, req, messageId: id, team: parsed.data as any });
+  if (!msg) { res.status(404).json({ error: "Not found" }); return; }
+  res.json(msg);
+});
+
 router.patch("/communication/messages/:id/link-case", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -233,6 +250,20 @@ router.patch("/communication/tasks/:taskId/assign", requireAuth, requireFirmUser
   res.json(result);
 });
 
+router.patch("/communication/tasks/:taskId/team", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).taskId);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid task id" }); return; }
+  const parsed = TaskTeamPatchSchema.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  const result = await setTaskResponsibleTeam({ r, req, taskId: id, team: parsed.data as any });
+  if (!result) { res.status(404).json({ error: "Not found" }); return; }
+  if ((result as any).error === "forbidden") { res.status(403).json({ error: "Forbidden" }); return; }
+  res.json(result);
+});
+
 router.patch("/communication/tasks/:taskId/acknowledge", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
   const r = getRlsDb(req, res);
   if (!r) return;
@@ -256,6 +287,7 @@ router.patch("/communication/tasks/:taskId/status", requireAuth, requireFirmUser
   const result = await updateTaskStatus({ r, req, taskId: id, taskStatus: parsed.data.taskStatus });
   if (!result) { res.status(404).json({ error: "Not found" }); return; }
   if ((result as any).error === "forbidden") { res.status(403).json({ error: "Forbidden" }); return; }
+  if ((result as any).error === "missing_lawyer_in_charge") { res.status(400).json({ error: "Lawyer in charge is required" }); return; }
   res.json(result);
 });
 
@@ -297,6 +329,7 @@ router.patch("/communication/tasks/:taskId/close", requireAuth, requireFirmUser,
   const result = await closeTask({ r, req, taskId: id });
   if (!result) { res.status(404).json({ error: "Not found" }); return; }
   if ((result as any).error === "forbidden") { res.status(403).json({ error: "Forbidden" }); return; }
+  if ((result as any).error === "missing_lawyer_in_charge") { res.status(400).json({ error: "Lawyer in charge is required" }); return; }
   res.json(result);
 });
 

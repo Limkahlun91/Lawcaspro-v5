@@ -51,6 +51,17 @@ export const CommunicationDraftStatusSchema = z.enum([
 ]);
 export type CommunicationDraftStatus = z.infer<typeof CommunicationDraftStatusSchema>;
 
+export const CommunicationAssignmentRoleSchema = z.enum(["lawyer_in_charge", "handler", "reviewer", "watcher"]);
+export type CommunicationAssignmentRole = z.infer<typeof CommunicationAssignmentRoleSchema>;
+
+export const ResponsibleTeamSchema = z.object({
+  lawyerInChargeUserId: z.number().int().positive().optional().nullable(),
+  handlerUserIds: z.array(z.number().int().positive()).optional().nullable().default([]),
+  reviewerUserId: z.number().int().positive().optional().nullable(),
+  watcherUserIds: z.array(z.number().int().positive()).optional().nullable().default([]),
+});
+export type ResponsibleTeam = z.infer<typeof ResponsibleTeamSchema>;
+
 export const ManualEmailCreateSchema = z.object({
   mailboxId: z.number().int().positive().optional().nullable(),
   fromName: z.string().trim().optional().nullable().default(""),
@@ -64,12 +75,15 @@ export const ManualEmailCreateSchema = z.object({
   caseId: z.number().int().positive().optional().nullable(),
   caseRef: z.string().trim().optional().nullable(),
   isBatchEmail: z.boolean().optional().nullable().default(false),
+  team: ResponsibleTeamSchema.optional().nullable(),
 });
 export type ManualEmailCreateInput = z.infer<typeof ManualEmailCreateSchema>;
 
 export const MessageAssignSchema = z.object({
   assignedToUserId: z.number().int().positive().nullable(),
 });
+
+export const MessageTeamPatchSchema = ResponsibleTeamSchema;
 
 export const MessageLinkCaseSchema = z.object({
   caseId: z.number().int().positive().optional().nullable(),
@@ -86,11 +100,14 @@ export const TaskCreateSchema = z.object({
   assignedToUserId: z.number().int().positive().optional().nullable(),
   requiredAction: z.string().trim().optional().nullable(),
   dueAt: z.string().datetime().optional().nullable(),
+  team: ResponsibleTeamSchema.optional().nullable(),
 });
 
 export const TaskAssignSchema = z.object({
   assignedToUserId: z.number().int().positive().nullable(),
 });
+
+export const TaskTeamPatchSchema = ResponsibleTeamSchema;
 
 export const TaskLinkCaseSchema = z.object({
   caseId: z.number().int().positive().optional().nullable(),

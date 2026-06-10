@@ -59,6 +59,12 @@ type Task = {
   replyNote: string | null;
   assignedToUserId: number | null;
   linkedCaseId: number | null;
+  team?: {
+    lawyerInChargeUserId: number | null;
+    handlerUserIds: number[];
+    reviewerUserId: number | null;
+    watcherUserIds: number[];
+  };
 };
 
 type Draft = {
@@ -93,6 +99,12 @@ type MessageDetail = {
   receivedAt: string | null;
   sentAt: string | null;
   createdAt: string;
+  team?: {
+    lawyerInChargeUserId: number | null;
+    handlerUserIds: number[];
+    reviewerUserId: number | null;
+    watcherUserIds: number[];
+  };
 };
 
 type User = {
@@ -117,6 +129,25 @@ function asStringArray(value: unknown): string[] {
   return asArray<string>(value).map((entry) => String(entry ?? "")).filter(Boolean);
 }
 
+function asNumberArray(value: unknown): number[] {
+  return asArray<unknown>(value).map((entry) => (typeof entry === "number" ? entry : Number(entry))).filter((n) => Number.isFinite(n));
+}
+
+function normalizeTeam(value: unknown): { lawyerInChargeUserId: number | null; handlerUserIds: number[]; reviewerUserId: number | null; watcherUserIds: number[] } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  const lawyerInChargeUserIdRaw = record.lawyerInChargeUserId;
+  const reviewerUserIdRaw = record.reviewerUserId;
+  const lawyerInChargeUserId = typeof lawyerInChargeUserIdRaw === "number" ? lawyerInChargeUserIdRaw : (lawyerInChargeUserIdRaw == null ? null : Number(lawyerInChargeUserIdRaw));
+  const reviewerUserId = typeof reviewerUserIdRaw === "number" ? reviewerUserIdRaw : (reviewerUserIdRaw == null ? null : Number(reviewerUserIdRaw));
+  return {
+    lawyerInChargeUserId: Number.isFinite(lawyerInChargeUserId as any) ? (lawyerInChargeUserId as any) : null,
+    handlerUserIds: asNumberArray(record.handlerUserIds),
+    reviewerUserId: Number.isFinite(reviewerUserId as any) ? (reviewerUserId as any) : null,
+    watcherUserIds: asNumberArray(record.watcherUserIds),
+  };
+}
+
 function normalizeMessageDetail(value: unknown): MessageDetail | null {
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
@@ -125,6 +156,7 @@ function normalizeMessageDetail(value: unknown): MessageDetail | null {
     toAddresses: asStringArray(record.toAddresses),
     ccAddresses: asStringArray(record.ccAddresses),
     bccAddresses: asStringArray(record.bccAddresses),
+    team: normalizeTeam(record.team),
   };
 }
 
@@ -132,9 +164,18 @@ function splitCommaList(v: string): string[] {
   return v.split(",").map((x) => x.trim()).filter(Boolean);
 }
 
+function toggleString(list: string[], value: string): string[] {
+  return list.includes(value) ? list.filter((x) => x !== value) : [...list, value];
+}
+
 function StatusBadge({ value }: { value: string }) {
   const v = String(value ?? "");
   return <Badge variant="outline">{v}</Badge>;
+}
+
+function isLawyerLikeRole(roleName: unknown): boolean {
+  const n = String(roleName ?? "").trim().toLowerCase();
+  return n.includes("lawyer") || n.includes("partner") || n.includes("admin");
 }
 
 function QuerySection({
@@ -306,9 +347,12 @@ export default function EmailControlCenterPage() {
     subject: "",
     bodyText: "",
     receivedAt: "",
-    assignedToUserId: "",
     caseRef: "",
     isBatchEmail: true,
+    lawyerInChargeUserId: "",
+    handlerUserIds: [] as string[],
+    reviewerUserId: "",
+    watcherUserIds: [] as string[],
   });
 
   useEffect(() => {
@@ -330,9 +374,14 @@ export default function EmailControlCenterPage() {
         subject: manualForm.subject,
         bodyText: manualForm.bodyText,
         receivedAt: manualForm.receivedAt ? new Date(manualForm.receivedAt).toISOString() : undefined,
-        assignedToUserId: manualForm.assignedToUserId && manualForm.assignedToUserId !== "unassigned" ? parseInt(manualForm.assignedToUserId, 10) : undefined,
         caseRef: manualForm.caseRef || undefined,
         isBatchEmail: manualForm.isBatchEmail,
+        team: {
+          lawyerInChargeUserId: manualForm.lawyerInChargeUserId ? parseInt(manualForm.lawyerInChargeUserId, 10) : null,
+          handlerUserIds: manualForm.handlerUserIds.map((v) => parseInt(v, 10)).filter((n) => Number.isFinite(n)),
+          reviewerUserId: manualForm.reviewerUserId ? parseInt(manualForm.reviewerUserId, 10) : null,
+          watcherUserIds: manualForm.watcherUserIds.map((v) => parseInt(v, 10)).filter((n) => Number.isFinite(n)),
+        },
       },
     }),
     onSuccess: (created) => {
@@ -346,9 +395,12 @@ export default function EmailControlCenterPage() {
         subject: "",
         bodyText: "",
         receivedAt: "",
-        assignedToUserId: "",
         caseRef: "",
         isBatchEmail: true,
+        lawyerInChargeUserId: "",
+        handlerUserIds: [],
+        reviewerUserId: "",
+        watcherUserIds: [],
       });
       qc.invalidateQueries({ queryKey: ["communication", "messages"] });
       if (created?.id) setSelectedMessageId(created.id);
@@ -360,16 +412,6 @@ export default function EmailControlCenterPage() {
   const viewMessageMutation = useMutation({
     mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/view`, { method: "POST", body: {} }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "audit", "message"] }),
-    onError: (e) => toastError(toast, e),
-  });
-
-  const assignMessageMutation = useMutation({
-    mutationFn: (args: { messageId: number; assignedToUserId: number | null }) =>
-      apiFetchJson(`/communication/messages/${args.messageId}/assign`, { method: "PATCH", body: { assignedToUserId: args.assignedToUserId } }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["communication", "messages"] });
-      qc.invalidateQueries({ queryKey: ["communication", "message"] });
-    },
     onError: (e) => toastError(toast, e),
   });
 
@@ -395,12 +437,6 @@ export default function EmailControlCenterPage() {
       qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "tasks"] });
       qc.invalidateQueries({ queryKey: ["communication", "messages"] });
     },
-    onError: (e) => toastError(toast, e),
-  });
-
-  const taskAssignMutation = useMutation({
-    mutationFn: (args: { taskId: number; assignedToUserId: number | null }) => apiFetchJson(`/communication/tasks/${args.taskId}/assign`, { method: "PATCH", body: { assignedToUserId: args.assignedToUserId } }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "tasks"] }),
     onError: (e) => toastError(toast, e),
   });
 
@@ -527,8 +563,22 @@ export default function EmailControlCenterPage() {
     return users.map((u) => ({ id: u.id, label: u.name || `User ${u.id}` }));
   }, [users]);
 
+  const lawyerUserOptions = useMemo(() => {
+    return users.filter((u) => isLawyerLikeRole(u.roleName)).map((u) => ({ id: u.id, label: u.name || `User ${u.id}` }));
+  }, [users]);
+
   const [taskDialogOpen, setTaskDialogOpen] = useState(false);
-  const [taskForm, setTaskForm] = useState({ caseRef: "", partyName: "", bankRef: "", propertyRef: "", assignedToUserId: "", requiredAction: "" });
+  const [taskForm, setTaskForm] = useState({
+    caseRef: "",
+    partyName: "",
+    bankRef: "",
+    propertyRef: "",
+    requiredAction: "",
+    lawyerInChargeUserId: "",
+    handlerUserIds: [] as string[],
+    reviewerUserId: "",
+    watcherUserIds: [] as string[],
+  });
 
   const [draftDialogOpen, setDraftDialogOpen] = useState(false);
   const [draftForm, setDraftForm] = useState({ to: "", cc: "", subject: "" });
@@ -836,21 +886,41 @@ export default function EmailControlCenterPage() {
                         <Input value={(selectedMessage.ccAddresses ?? []).join(", ")} readOnly />
                       </div>
                       <div className="md:col-span-6 space-y-1.5">
-                        <Label>Assigned Owner</Label>
-                        <Select
-                          value={selectedMessage.assignedToUserId ? String(selectedMessage.assignedToUserId) : "unassigned"}
-                          onValueChange={(v) => assignMessageMutation.mutate({ messageId: selectedMessage.id, assignedToUserId: v === "unassigned" ? null : parseInt(v, 10) })}
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select owner" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="unassigned">Unassigned</SelectItem>
-                            {selectedUserOptions.map((u) => (
-                              <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+                        <Label>Responsible Team</Label>
+                        <div className="rounded border p-2 text-sm space-y-1">
+                          <div>
+                            <span className="text-slate-500">Lawyer in Charge:</span>{" "}
+                            {(() => {
+                              const id = selectedMessage.team?.lawyerInChargeUserId ?? null;
+                              if (!id) return "Unassigned";
+                              return selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`;
+                            })()}
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Handlers:</span>{" "}
+                            {(() => {
+                              const ids = selectedMessage.team?.handlerUserIds ?? [];
+                              if (!ids.length) return "-";
+                              return ids.map((id) => selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`).join(", ");
+                            })()}
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Reviewer:</span>{" "}
+                            {(() => {
+                              const id = selectedMessage.team?.reviewerUserId ?? null;
+                              if (!id) return "-";
+                              return selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`;
+                            })()}
+                          </div>
+                          <div>
+                            <span className="text-slate-500">Watchers:</span>{" "}
+                            {(() => {
+                              const ids = selectedMessage.team?.watcherUserIds ?? [];
+                              if (!ids.length) return "-";
+                              return ids.map((id) => selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`).join(", ");
+                            })()}
+                          </div>
+                        </div>
                       </div>
                       <div className="md:col-span-6 space-y-1.5">
                         <Label>Linked Case (Ref or Parcel No)</Label>
@@ -914,21 +984,25 @@ export default function EmailControlCenterPage() {
 
                               <div className="grid grid-cols-1 md:grid-cols-12 gap-2">
                                 <div className="md:col-span-4 space-y-1.5">
-                                  <Label className="text-xs">Assign</Label>
-                                  <Select
-                                    value={t.assignedToUserId ? String(t.assignedToUserId) : "unassigned"}
-                                    onValueChange={(v) => taskAssignMutation.mutate({ taskId: t.id, assignedToUserId: v === "unassigned" ? null : parseInt(v, 10) })}
-                                  >
-                                    <SelectTrigger>
-                                      <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      <SelectItem value="unassigned">Unassigned</SelectItem>
-                                      {selectedUserOptions.map((u) => (
-                                        <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
+                                  <Label className="text-xs">Responsible Team</Label>
+                                  <div className="rounded border p-2 text-xs space-y-1">
+                                    <div>
+                                      <span className="text-slate-500">Lawyer:</span>{" "}
+                                      {(() => {
+                                        const id = t.team?.lawyerInChargeUserId ?? null;
+                                        if (!id) return "-";
+                                        return selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`;
+                                      })()}
+                                    </div>
+                                    <div>
+                                      <span className="text-slate-500">Handlers:</span>{" "}
+                                      {(() => {
+                                        const ids = t.team?.handlerUserIds ?? [];
+                                        if (!ids.length) return "-";
+                                        return ids.map((id) => selectedUserOptions.find((u) => u.id === id)?.label ?? `User ${id}`).join(", ");
+                                      })()}
+                                    </div>
+                                  </div>
                                 </div>
                                 <div className="md:col-span-4 space-y-1.5">
                                   <Label className="text-xs">Status</Label>
@@ -1056,18 +1130,60 @@ export default function EmailControlCenterPage() {
               <Input type="datetime-local" value={manualForm.receivedAt} onChange={(e) => setManualForm((p) => ({ ...p, receivedAt: e.target.value }))} />
             </div>
             <div className="md:col-span-6 space-y-1.5">
-              <Label>Responsible Owner</Label>
-              <Select value={manualForm.assignedToUserId} onValueChange={(v) => setManualForm((p) => ({ ...p, assignedToUserId: v }))}>
+              <Label>Lawyer in Charge *</Label>
+              <Select value={manualForm.lawyerInChargeUserId} onValueChange={(v) => setManualForm((p) => ({ ...p, lawyerInChargeUserId: v }))}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Optional" />
+                  <SelectValue placeholder="Optional (can be unassigned for draft intake)" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="unassigned">Unassigned</SelectItem>
-                  {selectedUserOptions.map((u) => (
+                  <SelectItem value="">Unassigned</SelectItem>
+                  {lawyerUserOptions.map((u) => (
                     <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="md:col-span-12 space-y-1.5">
+              <Label>Handlers / Clerks</Label>
+              <div className="rounded border p-2 max-h-40 overflow-auto space-y-2">
+                {selectedUserOptions.map((u) => (
+                  <div key={u.id} className="flex items-center gap-2">
+                    <Checkbox
+                      checked={manualForm.handlerUserIds.includes(String(u.id))}
+                      onCheckedChange={() => setManualForm((p) => ({ ...p, handlerUserIds: toggleString(p.handlerUserIds, String(u.id)) }))}
+                    />
+                    <div className="text-sm">{u.label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="md:col-span-6 space-y-1.5">
+              <Label>Reviewer / Approver</Label>
+              <Select value={manualForm.reviewerUserId} onValueChange={(v) => setManualForm((p) => ({ ...p, reviewerUserId: v }))}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Optional" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">None</SelectItem>
+                  {lawyerUserOptions.map((u) => (
+                    <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="md:col-span-6 space-y-1.5">
+              <Label>Watchers</Label>
+              <div className="rounded border p-2 max-h-28 overflow-auto space-y-2">
+                {selectedUserOptions.map((u) => (
+                  <div key={u.id} className="flex items-center gap-2">
+                    <Checkbox
+                      checked={manualForm.watcherUserIds.includes(String(u.id))}
+                      onCheckedChange={() => setManualForm((p) => ({ ...p, watcherUserIds: toggleString(p.watcherUserIds, String(u.id)) }))}
+                    />
+                    <div className="text-sm">{u.label}</div>
+                  </div>
+                ))}
+              </div>
             </div>
             <div className="md:col-span-12 space-y-1.5">
               <Label>Related Case (Ref or Parcel No)</Label>
@@ -1112,18 +1228,60 @@ export default function EmailControlCenterPage() {
               <Input value={taskForm.propertyRef} onChange={(e) => setTaskForm((p) => ({ ...p, propertyRef: e.target.value }))} />
             </div>
             <div className="md:col-span-6 space-y-1.5">
-              <Label>Assign To</Label>
-              <Select value={taskForm.assignedToUserId} onValueChange={(v) => setTaskForm((p) => ({ ...p, assignedToUserId: v }))}>
+              <Label>Lawyer in Charge *</Label>
+              <Select value={taskForm.lawyerInChargeUserId} onValueChange={(v) => setTaskForm((p) => ({ ...p, lawyerInChargeUserId: v }))}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Optional" />
+                  <SelectValue placeholder="Optional (recommended)" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="unassigned">Unassigned</SelectItem>
-                  {selectedUserOptions.map((u) => (
+                  <SelectItem value="">Unassigned</SelectItem>
+                  {lawyerUserOptions.map((u) => (
                     <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+            <div className="md:col-span-12 space-y-1.5">
+              <Label>Handlers / Clerks</Label>
+              <div className="rounded border p-2 max-h-36 overflow-auto space-y-2">
+                {selectedUserOptions.map((u) => (
+                  <div key={u.id} className="flex items-center gap-2">
+                    <Checkbox
+                      checked={taskForm.handlerUserIds.includes(String(u.id))}
+                      onCheckedChange={() => setTaskForm((p) => ({ ...p, handlerUserIds: toggleString(p.handlerUserIds, String(u.id)) }))}
+                    />
+                    <div className="text-sm">{u.label}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="md:col-span-6 space-y-1.5">
+              <Label>Reviewer / Approver</Label>
+              <Select value={taskForm.reviewerUserId} onValueChange={(v) => setTaskForm((p) => ({ ...p, reviewerUserId: v }))}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Optional" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">None</SelectItem>
+                  {lawyerUserOptions.map((u) => (
+                    <SelectItem key={u.id} value={String(u.id)}>{u.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="md:col-span-6 space-y-1.5">
+              <Label>Watchers</Label>
+              <div className="rounded border p-2 max-h-28 overflow-auto space-y-2">
+                {selectedUserOptions.map((u) => (
+                  <div key={u.id} className="flex items-center gap-2">
+                    <Checkbox
+                      checked={taskForm.watcherUserIds.includes(String(u.id))}
+                      onCheckedChange={() => setTaskForm((p) => ({ ...p, watcherUserIds: toggleString(p.watcherUserIds, String(u.id)) }))}
+                    />
+                    <div className="text-sm">{u.label}</div>
+                  </div>
+                ))}
+              </div>
             </div>
             <div className="md:col-span-12 space-y-1.5">
               <Label>Required Action</Label>
@@ -1141,12 +1299,17 @@ export default function EmailControlCenterPage() {
                   partyName: taskForm.partyName || undefined,
                   bankRef: taskForm.bankRef || undefined,
                   propertyRef: taskForm.propertyRef || undefined,
-                  assignedToUserId: taskForm.assignedToUserId && taskForm.assignedToUserId !== "unassigned" ? parseInt(taskForm.assignedToUserId, 10) : undefined,
                   requiredAction: taskForm.requiredAction || undefined,
+                  team: {
+                    lawyerInChargeUserId: taskForm.lawyerInChargeUserId ? parseInt(taskForm.lawyerInChargeUserId, 10) : null,
+                    handlerUserIds: taskForm.handlerUserIds.map((v) => parseInt(v, 10)).filter((n) => Number.isFinite(n)),
+                    reviewerUserId: taskForm.reviewerUserId ? parseInt(taskForm.reviewerUserId, 10) : null,
+                    watcherUserIds: taskForm.watcherUserIds.map((v) => parseInt(v, 10)).filter((n) => Number.isFinite(n)),
+                  },
                 },
               });
               setTaskDialogOpen(false);
-              setTaskForm({ caseRef: "", partyName: "", bankRef: "", propertyRef: "", assignedToUserId: "", requiredAction: "" });
+              setTaskForm({ caseRef: "", partyName: "", bankRef: "", propertyRef: "", requiredAction: "", lawyerInChargeUserId: "", handlerUserIds: [], reviewerUserId: "", watcherUserIds: [] });
             }} disabled={createTaskMutation.isPending}>
               Add
             </Button>

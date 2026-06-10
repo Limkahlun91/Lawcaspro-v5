@@ -9,6 +9,7 @@ import {
   communicationDraftsTable,
   communicationDraftTasksTable,
   communicationAuditLogsTable,
+  communicationTaskAssigneesTable,
 } from "@workspace/db";
 
 export type DbConn = typeof import("@workspace/db").db;
@@ -162,13 +163,93 @@ export async function updateTask(r: DbConn, firmId: number, taskId: number, patc
 }
 
 export async function listTasksMine(r: DbConn, firmId: number, userId: number, limit: number, offset: number) {
-  return r
+  const byLegacyAssigned = await r
     .select()
     .from(communicationCaseTasksTable)
     .where(and(eq(communicationCaseTasksTable.firmId, firmId), eq(communicationCaseTasksTable.assignedToUserId, userId)))
     .orderBy(desc(communicationCaseTasksTable.updatedAt), desc(communicationCaseTasksTable.createdAt))
     .limit(limit)
     .offset(offset);
+
+  const byTeam = await r
+    .select({ task: communicationCaseTasksTable })
+    .from(communicationTaskAssigneesTable)
+    .innerJoin(communicationCaseTasksTable, and(
+      eq(communicationCaseTasksTable.firmId, firmId),
+      eq(communicationCaseTasksTable.id, communicationTaskAssigneesTable.taskId),
+    ))
+    .where(and(
+      eq(communicationTaskAssigneesTable.firmId, firmId),
+      eq(communicationTaskAssigneesTable.userId, userId),
+      inArray(communicationTaskAssigneesTable.assignmentRole, ["lawyer_in_charge", "handler"]),
+    ))
+    .orderBy(desc(communicationCaseTasksTable.updatedAt), desc(communicationCaseTasksTable.createdAt))
+    .limit(limit)
+    .offset(offset);
+
+  const seen = new Set<number>();
+  const merged: Array<typeof communicationCaseTasksTable.$inferSelect> = [];
+  for (const row of byTeam.map((x) => x.task)) {
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    merged.push(row);
+  }
+  for (const row of byLegacyAssigned) {
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    merged.push(row);
+  }
+  return merged;
+}
+
+export async function listAssigneesForMessage(r: DbConn, firmId: number, messageId: number) {
+  return r
+    .select()
+    .from(communicationTaskAssigneesTable)
+    .where(and(
+      eq(communicationTaskAssigneesTable.firmId, firmId),
+      eq(communicationTaskAssigneesTable.messageId, messageId),
+      isNull(communicationTaskAssigneesTable.taskId),
+    ))
+    .orderBy(asc(communicationTaskAssigneesTable.id));
+}
+
+export async function listAssigneesForTasks(r: DbConn, firmId: number, taskIds: number[]) {
+  if (!taskIds.length) return [];
+  return r
+    .select()
+    .from(communicationTaskAssigneesTable)
+    .where(and(
+      eq(communicationTaskAssigneesTable.firmId, firmId),
+      inArray(communicationTaskAssigneesTable.taskId, taskIds),
+    ))
+    .orderBy(asc(communicationTaskAssigneesTable.id));
+}
+
+export async function replaceAssigneesForMessage(r: DbConn, firmId: number, messageId: number, rows: Array<typeof communicationTaskAssigneesTable.$inferInsert>) {
+  await r
+    .delete(communicationTaskAssigneesTable)
+    .where(and(
+      eq(communicationTaskAssigneesTable.firmId, firmId),
+      eq(communicationTaskAssigneesTable.messageId, messageId),
+      isNull(communicationTaskAssigneesTable.taskId),
+    ));
+  if (!rows.length) return [];
+  const inserted = await r.insert(communicationTaskAssigneesTable).values(rows).returning();
+  return inserted;
+}
+
+export async function replaceAssigneesForTask(r: DbConn, firmId: number, messageId: number, taskId: number, rows: Array<typeof communicationTaskAssigneesTable.$inferInsert>) {
+  await r
+    .delete(communicationTaskAssigneesTable)
+    .where(and(
+      eq(communicationTaskAssigneesTable.firmId, firmId),
+      eq(communicationTaskAssigneesTable.messageId, messageId),
+      eq(communicationTaskAssigneesTable.taskId, taskId),
+    ));
+  if (!rows.length) return [];
+  const inserted = await r.insert(communicationTaskAssigneesTable).values(rows).returning();
+  return inserted;
 }
 
 export async function insertDraft(r: DbConn, values: typeof communicationDraftsTable.$inferInsert) {
