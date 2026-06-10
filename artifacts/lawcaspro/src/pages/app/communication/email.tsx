@@ -471,6 +471,18 @@ export default function EmailControlCenterPage() {
     onError: (e) => toastError(toast, e),
   });
 
+  const messages = asArray<MessageRow>(messagesQuery.data);
+  const tasksMine = asArray<Task>(tasksMineQuery.data);
+  const draftsPending = asArray<Draft>(draftsPendingQuery.data);
+  const overdue = asArray<any>(overdueQuery.data);
+
+  const selectedMessage = selectedMessageQuery.data ?? null;
+  const selectedTasks = asArray<Task>(selectedTasksQuery.data);
+  const messageAudit = asArray<any>(selectedMessageAuditQuery.data);
+
+  const selectedDraft = selectedDraftQuery.data ?? null;
+  const draftAudit = asArray<any>(selectedDraftAuditQuery.data);
+
   const [draftEditForm, setDraftEditForm] = useState({ to: "", cc: "", subject: "", bodyText: "" });
 
   useEffect(() => {
@@ -503,18 +515,6 @@ export default function EmailControlCenterPage() {
     },
     onError: (e) => toastError(toast, e),
   });
-
-  const messages = asArray<MessageRow>(messagesQuery.data);
-  const tasksMine = asArray<Task>(tasksMineQuery.data);
-  const draftsPending = asArray<Draft>(draftsPendingQuery.data);
-  const overdue = asArray<any>(overdueQuery.data);
-
-  const selectedMessage = selectedMessageQuery.data ?? null;
-  const selectedTasks = asArray<Task>(selectedTasksQuery.data);
-  const messageAudit = asArray<any>(selectedMessageAuditQuery.data);
-
-  const selectedDraft = selectedDraftQuery.data ?? null;
-  const draftAudit = asArray<any>(selectedDraftAuditQuery.data);
 
   const selectedUserOptions = useMemo(() => {
     return users.map((u) => ({ id: u.id, label: u.name || `User ${u.id}` }));
