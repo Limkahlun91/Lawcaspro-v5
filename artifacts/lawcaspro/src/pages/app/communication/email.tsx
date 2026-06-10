@@ -405,6 +405,7 @@ export default function EmailControlCenterPage() {
   const [search, setSearch] = useState("");
   const [linkCaseRef, setLinkCaseRef] = useState("");
   const [linkCaseError, setLinkCaseError] = useState("");
+  const [readOverrides, setReadOverrides] = useState<Record<number, boolean>>({});
   const [assignedUserIds, setAssignedUserIds] = useState<number[]>([]);
   const [newRemarkBody, setNewRemarkBody] = useState("");
   const [editingRemarkId, setEditingRemarkId] = useState<number | null>(null);
@@ -703,12 +704,31 @@ export default function EmailControlCenterPage() {
   const readStatusMutation = useMutation({
     mutationFn: (args: { messageId: number; isRead: boolean }) =>
       apiFetchJson(`/communication/messages/${args.messageId}/read-status`, { method: "PATCH", body: { isRead: args.isRead } }),
+    onMutate: async (args) => {
+      setReadOverrides((prev) => ({ ...prev, [args.messageId]: args.isRead }));
+      const previousQueries = qc.getQueriesData<MessageRow[]>({ queryKey: ["communication", "messages"] });
+      for (const [queryKey, data] of previousQueries) {
+        if (!data) continue;
+        qc.setQueryData<MessageRow[]>(queryKey, data.map((row) => (
+          row.message.id === args.messageId ? { ...row, isRead: args.isRead } : row
+        )));
+      }
+      return { previousQueries };
+    },
     onSuccess: (_r, args) => {
       qc.invalidateQueries({ queryKey: ["communication", "messages"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId] });
       qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId, "reads"] });
       qc.invalidateQueries({ queryKey: ["communication", "audit", "message", args.messageId] });
     },
-    onError: (e) => toastError(toast, e),
+    onError: (e, _args, context) => {
+      if (context?.previousQueries) {
+        for (const [queryKey, data] of context.previousQueries) {
+          qc.setQueryData(queryKey, data);
+        }
+      }
+      toastError(toast, e);
+    },
   });
 
   const assigneesMutation = useMutation({
@@ -883,7 +903,7 @@ export default function EmailControlCenterPage() {
   const selectedDraft = selectedDraftQuery.data ?? null;
   const draftAudit = asArray<any>(selectedDraftAuditQuery.data);
   const selectedMessageRow = messages.find((row) => row.message.id === selectedMessageId) ?? null;
-  const selectedMessageIsRead = selectedMessageRow?.isRead ?? false;
+  const selectedMessageIsRead = selectedMessageId == null ? false : (readOverrides[selectedMessageId] ?? selectedMessageRow?.isRead ?? false);
   const selectedMessageHasAttachments = selectedMessageRow?.hasAttachments ?? false;
   const selectedMessageAttachmentCount = selectedMessageRow?.attachmentCount ?? asArray<Attachment>(selectedAttachmentsQuery.data).length;
   const selectedMessageAssignedCount = selectedMessageRow?.assigneeCount ?? assignedUserIds.length;
@@ -896,8 +916,11 @@ export default function EmailControlCenterPage() {
       if (view === "no_case") return row.message.linkedCaseId == null;
       return true;
     });
+    if (view === "unread") {
+      return base.filter((row) => (readOverrides[row.message.id] ?? row.isRead) === false);
+    }
     return base;
-  }, [messages, view]);
+  }, [messages, readOverrides, view]);
 
   const [draftEditForm, setDraftEditForm] = useState({ to: "", cc: "", subject: "", bodyText: "" });
 
@@ -1139,7 +1162,7 @@ export default function EmailControlCenterPage() {
                   }}
                 >
                   {(() => {
-                    const unread = row.isRead === false;
+                    const unread = (readOverrides[row.message.id] ?? row.isRead) === false;
                     const from = `${row.message.fromName || ""}${row.message.fromName ? " " : ""}<${row.message.fromAddress || ""}>`.trim();
                     const preview = previewText(row.message.bodyText);
                     const ts = formatDateTime(row.message.receivedAt || row.message.lastActivityAt || row.message.createdAt);

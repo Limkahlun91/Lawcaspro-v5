@@ -357,7 +357,6 @@ export async function upsertMessageOpened(r: DbConn, firmId: number, messageId: 
       firstOpenedAt: now,
       lastOpenedAt: now,
       openedCount: 1,
-      isRead: true,
     }).returning();
     return created;
   }
@@ -368,7 +367,6 @@ export async function upsertMessageOpened(r: DbConn, firmId: number, messageId: 
       firstOpenedAt: existing.firstOpenedAt ?? now,
       lastOpenedAt: now,
       openedCount,
-      isRead: true,
       updatedAt: now,
     })
     .where(eq(communicationMessageReadsTable.id, existing.id))
