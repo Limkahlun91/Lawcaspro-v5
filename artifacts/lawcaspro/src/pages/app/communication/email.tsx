@@ -866,7 +866,10 @@ export default function EmailControlCenterPage() {
           >
             Refresh
           </Button>
-          <Button variant="outline" onClick={() => toast({ title: "Import requires mailbox connection and sync setup" })}>
+          <Button
+            variant="outline"
+            onClick={() => toast({ title: "Import is not available yet. Please connect and configure a mailbox sync first." })}
+          >
             Import Now
           </Button>
           <Button variant="outline" onClick={() => setConnectDialogOpen(true)}>
@@ -1513,7 +1516,7 @@ export default function EmailControlCenterPage() {
                   <SelectValue placeholder="Select provider" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="microsoft_graph">Microsoft 365 (setup required)</SelectItem>
+                  <SelectItem value="microsoft_graph">Microsoft 365 / Outlook (setup required)</SelectItem>
                   <SelectItem value="imap">IMAP (setup required)</SelectItem>
                   <SelectItem value="gmail">Gmail (coming soon)</SelectItem>
                 </SelectContent>
@@ -1527,7 +1530,9 @@ export default function EmailControlCenterPage() {
               <Label>Display Name</Label>
               <Input value={connectForm.displayName} onChange={(e) => setConnectForm((p) => ({ ...p, displayName: e.target.value }))} placeholder="e.g. Conveyancing Shared Inbox" />
             </div>
-            <div className="text-xs text-slate-500">Connection requires OAuth/IMAP credentials setup. This creates a placeholder account record only.</div>
+            <div className="text-xs text-slate-500">
+              Connection setup is not enabled yet. This will create a placeholder mailbox account only. Real Microsoft 365 OAuth / IMAP sync will be enabled in the next provider integration phase.
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConnectDialogOpen(false)}>Cancel</Button>
