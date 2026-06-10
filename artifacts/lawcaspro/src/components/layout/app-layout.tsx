@@ -85,6 +85,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
       label: "SETTINGS / SYSTEM",
       items: [
         { label: "Settings", href: "/app/settings", icon: Settings, perm: ["settings", "read"] as const },
+        { label: "Email Settings", href: "/app/settings/email", icon: Settings, perm: ["communications", "read"] as const },
         { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText, perm: ["audit", "read"] as const },
         { label: "Doc Gen Logs", href: "/app/documents/generation-logs", icon: ScrollText, perm: ["audit", "read"] as const },
       ],

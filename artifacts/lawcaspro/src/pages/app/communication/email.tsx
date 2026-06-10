@@ -29,6 +29,9 @@ type InboxView =
   | "overdue"
   | "closed";
 
+type MailboxScope = "all" | `mailbox:${number}` | `account:${number}`;
+type FolderScope = "all" | "inbox" | "sent" | "archive" | "junk" | "deleted";
+
 type Mailbox = {
   id: number;
   channel: string;
@@ -45,39 +48,6 @@ type EmailAccount = {
   emailAddress: string;
   displayName: string | null;
   status: string;
-  mailboxType: string | null;
-  imapHost: string | null;
-  imapPort: number | null;
-  imapUsername: string | null;
-  useTls: boolean;
-  lastSyncAt: string | null;
-  lastError: string | null;
-  tokenExpiresAt: string | null;
-  createdAt: string;
-  updatedAt: string;
-};
-
-type EmailFolder = {
-  id: number;
-  accountId: number;
-  providerFolderId: string;
-  displayName: string;
-  folderType: string;
-  syncEnabled: boolean;
-  lastSyncAt: string | null;
-};
-
-type EmailSyncLog = {
-  id: number;
-  accountId: number;
-  folderId: number | null;
-  startedAt: string;
-  finishedAt: string | null;
-  status: string;
-  importedCount: number;
-  skippedDuplicateCount: number;
-  errorMessage: string | null;
-  createdAt: string;
 };
 
 type Attachment = {
@@ -121,6 +91,9 @@ type MessageRow = {
     id: number;
     channel: string;
     direction: "incoming" | "outgoing";
+    mailboxId: number | null;
+    emailAccountId: number | null;
+    providerFolder: string | null;
     providerIsRead: boolean;
     fromAddress: string | null;
     fromName: string | null;
@@ -286,6 +259,15 @@ function previewText(value: unknown): string {
   return `${s.slice(0, 137)}...`;
 }
 
+function getFolderScopeForMessage(message: MessageRow["message"]): FolderScope {
+  const providerFolder = String(message.providerFolder ?? "").trim().toLowerCase();
+  if (message.internalStatus === "archived" || providerFolder.includes("archive")) return "archive";
+  if (providerFolder.includes("junk") || providerFolder.includes("spam")) return "junk";
+  if (providerFolder.includes("deleted") || providerFolder.includes("trash")) return "deleted";
+  if (message.direction === "outgoing" || providerFolder.includes("sent")) return "sent";
+  return "inbox";
+}
+
 function formatRelativeAction(action: unknown): string {
   const value = String(action ?? "").trim();
   if (!value) return "Updated";
@@ -438,7 +420,8 @@ export default function EmailControlCenterPage() {
   const [linkCaseError, setLinkCaseError] = useState("");
   const [readOverrides, setReadOverrides] = useState<Record<number, boolean>>({});
   const [assignedUserIds, setAssignedUserIds] = useState<number[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
+  const [selectedMailboxScope, setSelectedMailboxScope] = useState<MailboxScope>("all");
+  const [selectedFolderScope, setSelectedFolderScope] = useState<FolderScope>("all");
   const [newRemarkBody, setNewRemarkBody] = useState("");
   const [editingRemarkId, setEditingRemarkId] = useState<number | null>(null);
   const [editingRemarkBody, setEditingRemarkBody] = useState("");
@@ -466,32 +449,6 @@ export default function EmailControlCenterPage() {
     retry: false,
   });
   const emailAccounts = asArray<EmailAccount>(emailAccountsQuery.data);
-
-  useEffect(() => {
-    if (!emailAccounts.length) {
-      setSelectedAccountId(null);
-      return;
-    }
-    setSelectedAccountId((prev) => (prev && emailAccounts.some((account) => account.id === prev) ? prev : emailAccounts[0].id));
-  }, [emailAccounts]);
-
-  const selectedAccount = emailAccounts.find((account) => account.id === selectedAccountId) ?? null;
-
-  const selectedAccountFoldersQuery = useQuery<EmailFolder[]>({
-    queryKey: ["communication", "email", "accounts", selectedAccountId, "folders"],
-    queryFn: () => apiFetchJson(`/communication/email/accounts/${selectedAccountId}/folders`).then((r) => asArray<EmailFolder>(r)),
-    enabled: typeof selectedAccountId === "number",
-    retry: false,
-  });
-  const selectedAccountFolders = asArray<EmailFolder>(selectedAccountFoldersQuery.data);
-
-  const selectedAccountLogsQuery = useQuery<EmailSyncLog[]>({
-    queryKey: ["communication", "email", "accounts", selectedAccountId, "sync-logs"],
-    queryFn: () => apiFetchJson(`/communication/email/accounts/${selectedAccountId}/sync-logs?limit=10`).then((r) => asArray<EmailSyncLog>(r)),
-    enabled: typeof selectedAccountId === "number",
-    retry: false,
-  });
-  const selectedAccountLogs = asArray<EmailSyncLog>(selectedAccountLogsQuery.data);
 
   const messagesQuery = useQuery<MessageRow[]>({
     queryKey: ["communication", "messages", view, search],
@@ -835,121 +792,6 @@ export default function EmailControlCenterPage() {
     onError: (e) => toastError(toast, e),
   });
 
-  const [connectDialogOpen, setConnectDialogOpen] = useState(false);
-  const [connectProvider, setConnectProvider] = useState("microsoft_graph");
-  const [gmailPlaceholderForm, setGmailPlaceholderForm] = useState({ emailAddress: "", displayName: "" });
-  const [imapForm, setImapForm] = useState({
-    emailAddress: "",
-    displayName: "",
-    host: "",
-    port: "993",
-    username: "",
-    password: "",
-    useTls: true,
-  });
-
-  const createEmailAccountMutation = useMutation({
-    mutationFn: () => apiFetchJson("/communication/email/accounts", { method: "POST", body: { provider: "gmail", ...gmailPlaceholderForm } }),
-    onSuccess: () => {
-      setConnectDialogOpen(false);
-      setGmailPlaceholderForm({ emailAddress: "", displayName: "" });
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
-      toast({ title: "Gmail placeholder saved" });
-    },
-    onError: (e) => toastError(toast, e),
-  });
-
-  const startMicrosoftConnectMutation = useMutation({
-    mutationFn: () => apiFetchJson<{ url: string }>(`/communication/email/microsoft/connect?returnTo=${encodeURIComponent(window.location.href)}`),
-    onSuccess: (result) => {
-      if (result?.url) window.location.assign(result.url);
-    },
-    onError: (e) => toastError(toast, e),
-  });
-
-  const testImapMutation = useMutation({
-    mutationFn: () => apiFetchJson("/communication/email/imap/test", {
-      method: "POST",
-      body: {
-        emailAddress: imapForm.emailAddress,
-        displayName: imapForm.displayName || null,
-        host: imapForm.host,
-        port: parseInt(imapForm.port, 10) || 993,
-        username: imapForm.username,
-        password: imapForm.password,
-        useTls: imapForm.useTls,
-      },
-    }),
-    onSuccess: () => toast({ title: "IMAP connection succeeded" }),
-    onError: (e) => toastError(toast, e),
-  });
-
-  const connectImapMutation = useMutation({
-    mutationFn: () => apiFetchJson<{ account: EmailAccount }>(`/communication/email/imap/connect`, {
-      method: "POST",
-      body: {
-        emailAddress: imapForm.emailAddress,
-        displayName: imapForm.displayName || null,
-        host: imapForm.host,
-        port: parseInt(imapForm.port, 10) || 993,
-        username: imapForm.username,
-        password: imapForm.password,
-        useTls: imapForm.useTls,
-      },
-    }),
-    onSuccess: (result) => {
-      setConnectDialogOpen(false);
-      setImapForm({ emailAddress: "", displayName: "", host: "", port: "993", username: "", password: "", useTls: true });
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
-      qc.invalidateQueries({ queryKey: ["communication", "messages"] });
-      if (result?.account?.id) setSelectedAccountId(result.account.id);
-      toast({ title: "IMAP mailbox connected" });
-    },
-    onError: (e) => toastError(toast, e),
-  });
-
-  const syncFoldersMutation = useMutation({
-    mutationFn: (accountId: number) => apiFetchJson(`/communication/email/accounts/${accountId}/sync-folders`, { method: "POST", body: {} }),
-    onSuccess: (_result, accountId) => {
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", accountId, "folders"] });
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
-      toast({ title: "Mailbox folders synced" });
-    },
-    onError: (e) => toastError(toast, e),
-  });
-
-  const toggleFolderSyncMutation = useMutation({
-    mutationFn: (args: { folderId: number; syncEnabled: boolean }) =>
-      apiFetchJson(`/communication/email/folders/${args.folderId}`, { method: "PATCH", body: { syncEnabled: args.syncEnabled } }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", selectedAccountId, "folders"] });
-      toast({ title: "Folder sync updated" });
-    },
-    onError: (e) => toastError(toast, e),
-  });
-
-  const importEmailMutation = useMutation({
-    mutationFn: (accountId: number) => apiFetchJson<{ ok: boolean; importedCount: number; skippedDuplicateCount: number }>(`/communication/email/accounts/${accountId}/import-now`, { method: "POST", body: {} }),
-    onSuccess: (result, accountId) => {
-      qc.invalidateQueries({ queryKey: ["communication", "messages"] });
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", accountId, "sync-logs"] });
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", accountId, "folders"] });
-      toast({ title: "Import completed", description: `Imported ${result.importedCount} emails, skipped ${result.skippedDuplicateCount} duplicates.` });
-    },
-    onError: (e) => toastError(toast, e),
-  });
-
-  const disconnectEmailAccountMutation = useMutation({
-    mutationFn: (accountId: number) => apiFetchJson(`/communication/email/accounts/${accountId}`, { method: "DELETE" }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
-      qc.invalidateQueries({ queryKey: ["communication", "messages"] });
-      toast({ title: "Mailbox disconnected" });
-    },
-    onError: (e) => toastError(toast, e),
-  });
-
   const createTaskMutation = useMutation({
     mutationFn: (args: { messageId: number; payload: any }) => apiFetchJson(`/communication/messages/${args.messageId}/tasks`, { method: "POST", body: args.payload }),
     onSuccess: () => {
@@ -1079,11 +921,23 @@ export default function EmailControlCenterPage() {
       if (view === "no_case") return row.message.linkedCaseId == null;
       return true;
     });
-    if (view === "unread") {
-      return base.filter((row) => getEffectiveIsRead(row.message.id, row.isRead) === false);
-    }
-    return base;
-  }, [messages, readOverrides, view]);
+    const withReadFilter = view === "unread"
+      ? base.filter((row) => getEffectiveIsRead(row.message.id, row.isRead) === false)
+      : base;
+
+    return withReadFilter.filter((row) => {
+      if (selectedMailboxScope.startsWith("mailbox:")) {
+        const mailboxId = parseInt(selectedMailboxScope.slice("mailbox:".length), 10);
+        if (row.message.mailboxId !== mailboxId) return false;
+      }
+      if (selectedMailboxScope.startsWith("account:")) {
+        const accountId = parseInt(selectedMailboxScope.slice("account:".length), 10);
+        if (row.message.emailAccountId !== accountId) return false;
+      }
+      if (selectedFolderScope !== "all" && getFolderScopeForMessage(row.message) !== selectedFolderScope) return false;
+      return true;
+    });
+  }, [messages, readOverrides, selectedFolderScope, selectedMailboxScope, view]);
 
   const handleSelectMessage = (row: MessageRow) => {
     setSelectedMessageId(row.message.id);
@@ -1170,46 +1024,10 @@ export default function EmailControlCenterPage() {
     setLinkCaseError("");
   }, [selectedMessage]);
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const providerStatus = params.get("providerStatus");
-    if (!providerStatus) return;
-    const provider = params.get("provider");
-    const providerError = params.get("providerError");
-    const accountIdRaw = params.get("accountId");
-    if (providerStatus === "connected") {
-      toast({ title: provider === "microsoft_graph" ? "Microsoft 365 mailbox connected" : "Mailbox connected" });
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
-      if (accountIdRaw) {
-        const accountId = parseInt(accountIdRaw, 10);
-        if (Number.isFinite(accountId)) setSelectedAccountId(accountId);
-      }
-    } else if (providerStatus === "error") {
-      toast({
-        title: "Mailbox connection failed",
-        description: providerError || "Provider setup could not be completed.",
-        variant: "destructive",
-      });
-    }
-    params.delete("providerStatus");
-    params.delete("provider");
-    params.delete("providerError");
-    params.delete("accountId");
-    const next = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ""}${window.location.hash}`;
-    window.history.replaceState({}, "", next);
-  }, [qc, toast]);
-
-  const selectedAccountSyncEnabledFolders = selectedAccountFolders.filter((folder) => folder.syncEnabled);
-  const lastSyncLog = selectedAccountLogs[0] ?? null;
-
   const refreshAll = () => {
     qc.invalidateQueries({ queryKey: ["communication", "messages"] });
     qc.invalidateQueries({ queryKey: ["communication", "mailboxes"] });
     qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
-    if (selectedAccountId != null) {
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", selectedAccountId, "folders"] });
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", selectedAccountId, "sync-logs"] });
-    }
     if (selectedMessageId != null) {
       qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId] });
       qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "remarks"] });
@@ -1218,25 +1036,8 @@ export default function EmailControlCenterPage() {
     }
   };
 
-  const handleImportNow = () => {
-    if (!selectedAccount) {
-      toast({ title: "Please connect a mailbox before importing emails.", variant: "destructive" });
-      return;
-    }
-    if (selectedAccount.provider === "gmail") {
-      toast({ title: "Connect Gmail - coming soon" });
-      return;
-    }
-    if (selectedAccount.status === "setup_required") {
-      toast({ title: "Mailbox setup is incomplete. Please complete provider connection first.", variant: "destructive" });
-      return;
-    }
-    if (selectedAccount.status === "disconnected") {
-      toast({ title: "Mailbox is disconnected. Reconnect before importing.", variant: "destructive" });
-      return;
-    }
-    importEmailMutation.mutate(selectedAccount.id);
-  };
+  const activeManualMailboxes = mailboxes.filter((mailbox) => mailbox.isActive);
+  const visibleEmailAccounts = emailAccounts.filter((account) => account.status !== "disconnected");
 
   return (
     <div className="flex h-[calc(100vh-7rem)] min-h-0 flex-col gap-3 overflow-hidden">
@@ -1247,22 +1048,7 @@ export default function EmailControlCenterPage() {
             <div className="text-sm text-slate-500">Simple internal inbox for assignment, remarks, case linking, and read tracking.</div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button
-              variant="outline"
-              onClick={refreshAll}
-            >
-              Refresh
-            </Button>
-            <Button
-              variant="outline"
-              onClick={handleImportNow}
-              disabled={importEmailMutation.isPending}
-            >
-              Import Now
-            </Button>
-            <Button variant="outline" onClick={() => setConnectDialogOpen(true)}>
-              Connect Mailbox
-            </Button>
+            <Button variant="outline" onClick={refreshAll}>Refresh</Button>
             <Button onClick={() => setShowManualEmail(true)}>Manual Add Email</Button>
           </div>
         </div>
@@ -1294,145 +1080,76 @@ export default function EmailControlCenterPage() {
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-hidden xl:grid-cols-[280px_420px_minmax(0,1fr)]">
         <Card className="flex min-h-0 flex-col overflow-hidden">
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Mailboxes & Filters</CardTitle>
+            <CardTitle className="text-sm">Mailbox / Folders</CardTitle>
           </CardHeader>
           <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto">
             <div className="space-y-2">
-              <div className="text-xs font-medium text-slate-600">Connected mailboxes</div>
-              {mailboxes.length === 0 ? (
-                <div className="text-xs text-slate-500">No mailboxes found.</div>
-              ) : (
-                <div className="space-y-1">
-                  {mailboxes.map((m) => (
-                    <div key={m.id} className="rounded-lg border px-3 py-2 text-xs">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="truncate">{m.displayName || m.address || `Mailbox ${m.id}`}</div>
-                        {m.isActive ? <Badge variant="secondary">Active</Badge> : null}
-                      </div>
-                      <div className="truncate text-[11px] text-slate-500">{m.provider}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
+              <div className="text-xs font-medium text-slate-600">Mailboxes</div>
+              <Button
+                variant={selectedMailboxScope === "all" ? "default" : "outline"}
+                className="w-full justify-start"
+                onClick={() => {
+                  setSelectedMailboxScope("all");
+                  setSelectedMessageId(null);
+                }}
+              >
+                All Mailboxes
+              </Button>
+              {activeManualMailboxes.map((mailbox) => (
+                <Button
+                  key={mailbox.id}
+                  variant={selectedMailboxScope === `mailbox:${mailbox.id}` ? "default" : "outline"}
+                  className="w-full justify-start"
+                  onClick={() => {
+                    setSelectedMailboxScope(`mailbox:${mailbox.id}`);
+                    setSelectedMessageId(null);
+                  }}
+                >
+                  {mailbox.displayName || mailbox.address || `Mailbox ${mailbox.id}`}
+                </Button>
+              ))}
+              {visibleEmailAccounts.map((account) => (
+                <Button
+                  key={account.id}
+                  variant={selectedMailboxScope === `account:${account.id}` ? "default" : "outline"}
+                  className="w-full justify-start"
+                  onClick={() => {
+                    setSelectedMailboxScope(`account:${account.id}`);
+                    setSelectedMessageId(null);
+                  }}
+                >
+                  {account.displayName || account.emailAddress}
+                </Button>
+              ))}
             </div>
 
             <div className="space-y-2">
-              <div className="text-xs font-medium text-slate-600">Connected mailbox accounts</div>
-              {emailAccounts.length === 0 ? (
-                <div className="text-xs text-slate-500">No connected accounts.</div>
-              ) : (
-                <div className="space-y-1">
-                  {emailAccounts.map((a) => (
-                    <button
-                      key={a.id}
-                      className={[
-                        "w-full rounded-lg border px-3 py-2 text-left text-xs transition-colors",
-                        selectedAccountId === a.id ? "border-slate-400 bg-slate-50" : "hover:bg-slate-50",
-                      ].join(" ")}
-                      onClick={() => setSelectedAccountId(a.id)}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="truncate">{a.displayName || a.emailAddress}</div>
-                        <Badge variant={a.status === "active" ? "secondary" : "outline"}>{a.status}</Badge>
-                      </div>
-                      <div className="truncate text-[11px] text-slate-500">{a.provider} · {a.emailAddress}</div>
-                      <div className="mt-1 text-[11px] text-slate-500">Last sync: {formatDateTime(a.lastSyncAt) || "Never"}</div>
-                    </button>
-                  ))}
-                </div>
-              )}
-              {selectedAccount ? (
-                <div className="rounded-lg border bg-slate-50/70 p-3 text-xs text-slate-700 space-y-3">
-                  <div className="space-y-1">
-                    <div className="font-medium">{selectedAccount.displayName || selectedAccount.emailAddress}</div>
-                    <div>{selectedAccount.provider} · {selectedAccount.emailAddress}</div>
-                    <div>Status: {selectedAccount.status}</div>
-                    <div>Last sync: {formatDateTime(selectedAccount.lastSyncAt) || "Never"}</div>
-                    {selectedAccount.lastError ? <div className="text-red-600">{selectedAccount.lastError}</div> : null}
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => syncFoldersMutation.mutate(selectedAccount.id)}
-                      disabled={syncFoldersMutation.isPending || selectedAccount.provider === "gmail"}
-                    >
-                      Sync Folders
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => importEmailMutation.mutate(selectedAccount.id)}
-                      disabled={importEmailMutation.isPending || selectedAccount.provider === "gmail" || selectedAccount.status === "setup_required" || selectedAccount.status === "disconnected"}
-                    >
-                      Import Now
-                    </Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => disconnectEmailAccountMutation.mutate(selectedAccount.id)}
-                      disabled={disconnectEmailAccountMutation.isPending}
-                    >
-                      Disconnect
-                    </Button>
-                  </div>
-                  <div className="space-y-2">
-                    <div className="font-medium">Sync folders</div>
-                    {selectedAccountFoldersQuery.isFetching ? (
-                      <div className="text-slate-500">Loading folders...</div>
-                    ) : selectedAccountFolders.length ? (
-                      <div className="space-y-2">
-                        {selectedAccountFolders.map((folder) => (
-                          <label key={folder.id} className="flex items-center justify-between gap-2 rounded border bg-white px-2 py-2">
-                            <div className="min-w-0">
-                              <div className="truncate">{folder.displayName}</div>
-                              <div className="truncate text-[11px] text-slate-500">{folder.folderType} · Last sync {formatDateTime(folder.lastSyncAt) || "Never"}</div>
-                            </div>
-                            <Checkbox
-                              checked={folder.syncEnabled}
-                              onCheckedChange={(checked) => toggleFolderSyncMutation.mutate({ folderId: folder.id, syncEnabled: Boolean(checked) })}
-                            />
-                          </label>
-                        ))}
-                      </div>
-                    ) : (
-                      <div className="text-slate-500">No folders loaded yet. Use Sync Folders.</div>
-                    )}
-                  </div>
-                  <div className="space-y-2">
-                    <div className="font-medium">Latest sync result</div>
-                    {lastSyncLog ? (
-                      <div className="rounded border bg-white px-2 py-2 text-[11px] space-y-1">
-                        <div>Status: {lastSyncLog.status}</div>
-                        <div>Started: {formatDateTime(lastSyncLog.startedAt)}</div>
-                        <div>Imported: {lastSyncLog.importedCount}</div>
-                        <div>Skipped duplicates: {lastSyncLog.skippedDuplicateCount}</div>
-                        {lastSyncLog.errorMessage ? <div className="text-red-600">{lastSyncLog.errorMessage}</div> : null}
-                      </div>
-                    ) : (
-                      <div className="text-slate-500">No sync logs yet.</div>
-                    )}
-                  </div>
-                  <div className="text-[11px] text-slate-500">
-                    Sync-enabled folders: {selectedAccountSyncEnabledFolders.length ? selectedAccountSyncEnabledFolders.map((folder) => folder.displayName).join(", ") : "None"}
-                  </div>
-                </div>
-              ) : (
-                <div className="rounded-lg border border-dashed bg-slate-50 p-3 text-xs text-slate-600">
-                  <div className="font-medium">Provider setup status</div>
-                  <div className="mt-2 space-y-1">
-                    <div>Microsoft 365 / Outlook — ready for OAuth configuration</div>
-                    <div>IMAP — ready for secure connection setup</div>
-                    <div>Gmail — coming soon</div>
-                  </div>
-                </div>
-              )}
+              <div className="text-xs font-medium text-slate-600">Folders</div>
+              {([
+                ["all", "All Inboxes"],
+                ["inbox", "Inbox"],
+                ["sent", "Sent"],
+                ["archive", "Archive"],
+                ["junk", "Junk"],
+                ["deleted", "Deleted"],
+              ] as Array<[FolderScope, string]>).map(([scope, label]) => (
+                <Button
+                  key={scope}
+                  variant={selectedFolderScope === scope ? "default" : "outline"}
+                  className="w-full justify-start"
+                  onClick={() => {
+                    setSelectedFolderScope(scope);
+                    setSelectedMessageId(null);
+                  }}
+                >
+                  {label}
+                </Button>
+              ))}
             </div>
 
             <div className="space-y-1">
               <div className="text-xs font-medium text-slate-600">Filters</div>
               {([
-                ["shared_inbox", "All Emails"],
                 ["unread", "Unread"],
                 ["assigned_to_me", "Assigned to Me"],
                 ["unassigned", "Unassigned"],
@@ -1454,6 +1171,9 @@ export default function EmailControlCenterPage() {
                   {label}
                 </Button>
               ))}
+              <div className="rounded-lg border border-dashed bg-slate-50 px-3 py-2 text-xs text-slate-500">
+                Mailbox setup and Import Now moved to Settings &gt; Email Settings.
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -1872,122 +1592,6 @@ export default function EmailControlCenterPage() {
             >
               Save Assigned Users
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={connectDialogOpen} onOpenChange={setConnectDialogOpen}>
-        <DialogContent className="max-w-lg max-h-[85vh] overflow-hidden flex flex-col">
-          <DialogHeader>
-            <DialogTitle>Connect Mailbox</DialogTitle>
-          </DialogHeader>
-          <div className="flex-1 space-y-3 overflow-y-auto pr-1">
-            <div className="space-y-1.5">
-              <Label>Provider</Label>
-              <Select value={connectProvider} onValueChange={setConnectProvider}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select provider" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="microsoft_graph">Microsoft 365 / Outlook</SelectItem>
-                  <SelectItem value="imap">IMAP</SelectItem>
-                  <SelectItem value="gmail">Gmail (coming soon)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-
-            {connectProvider === "microsoft_graph" ? (
-              <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
-                <div className="text-sm font-medium">Microsoft 365 / Outlook</div>
-                <div className="text-xs text-slate-500">
-                  Connect with Microsoft to authorize read-only mailbox import. Tokens are stored encrypted and the app only imports email/folder metadata plus message content for Inbox use.
-                </div>
-                <div className="rounded-lg border bg-white p-3 text-xs text-slate-600 space-y-1">
-                  <div>Required env: MICROSOFT_CLIENT_ID</div>
-                  <div>MICROSOFT_CLIENT_SECRET</div>
-                  <div>MICROSOFT_REDIRECT_URI</div>
-                  <div>EMAIL_TOKEN_ENCRYPTION_KEY</div>
-                </div>
-                <Button onClick={() => startMicrosoftConnectMutation.mutate()} disabled={startMicrosoftConnectMutation.isPending}>
-                  Connect with Microsoft
-                </Button>
-              </div>
-            ) : null}
-
-            {connectProvider === "imap" ? (
-              <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
-                <div className="text-sm font-medium">IMAP Connection</div>
-                <div className="grid grid-cols-1 gap-3">
-                  <div className="space-y-1.5">
-                    <Label>Email Address</Label>
-                    <Input value={imapForm.emailAddress} onChange={(e) => setImapForm((prev) => ({ ...prev, emailAddress: e.target.value }))} placeholder="mailbox@firm.com" />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Display Name</Label>
-                    <Input value={imapForm.displayName} onChange={(e) => setImapForm((prev) => ({ ...prev, displayName: e.target.value }))} placeholder="e.g. Conveyancing Shared Inbox" />
-                  </div>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <div className="space-y-1.5">
-                      <Label>IMAP Host</Label>
-                      <Input value={imapForm.host} onChange={(e) => setImapForm((prev) => ({ ...prev, host: e.target.value }))} placeholder="outlook.office365.com" />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Port</Label>
-                      <Input value={imapForm.port} onChange={(e) => setImapForm((prev) => ({ ...prev, port: e.target.value }))} placeholder="993" />
-                    </div>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Username</Label>
-                    <Input value={imapForm.username} onChange={(e) => setImapForm((prev) => ({ ...prev, username: e.target.value }))} placeholder="Usually the mailbox email address" />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Password / App Password</Label>
-                    <Input type="password" value={imapForm.password} onChange={(e) => setImapForm((prev) => ({ ...prev, password: e.target.value }))} placeholder="Stored encrypted only" />
-                  </div>
-                  <label className="flex items-center gap-2 text-sm">
-                    <Checkbox checked={imapForm.useTls} onCheckedChange={(checked) => setImapForm((prev) => ({ ...prev, useTls: Boolean(checked) }))} />
-                    <span>Use SSL/TLS</span>
-                  </label>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" onClick={() => testImapMutation.mutate()} disabled={testImapMutation.isPending}>
-                    Test Connection
-                  </Button>
-                  <Button onClick={() => connectImapMutation.mutate()} disabled={connectImapMutation.isPending}>
-                    Save IMAP Mailbox
-                  </Button>
-                </div>
-                <div className="text-xs text-slate-500">
-                  IMAP credentials are encrypted before storage. If EMAIL_TOKEN_ENCRYPTION_KEY is missing, save/test will return a setup error.
-                </div>
-              </div>
-            ) : null}
-
-            {connectProvider === "gmail" ? (
-              <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
-                <div className="text-sm font-medium">Gmail</div>
-                <div className="text-xs text-slate-500">
-                  Connect Gmail — coming soon. Gmail will use OAuth / Gmail API only. Password login is not supported.
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Email Address</Label>
-                  <Input value={gmailPlaceholderForm.emailAddress} onChange={(e) => setGmailPlaceholderForm((prev) => ({ ...prev, emailAddress: e.target.value }))} placeholder="name@gmail.com" />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Display Name</Label>
-                  <Input value={gmailPlaceholderForm.displayName} onChange={(e) => setGmailPlaceholderForm((prev) => ({ ...prev, displayName: e.target.value }))} placeholder="Optional label for planning" />
-                </div>
-                <Button onClick={() => createEmailAccountMutation.mutate()} disabled={createEmailAccountMutation.isPending}>
-                  Save Gmail Placeholder
-                </Button>
-              </div>
-            ) : null}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConnectDialogOpen(false)}>Cancel</Button>
-            <div className="text-xs text-slate-500">
-              Only partner/admin users should manage mailbox credentials.
-            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>
