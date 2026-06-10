@@ -83,6 +83,16 @@ import {
   refreshMicrosoftAccessToken,
 } from "./providers/microsoft-graph.provider.js";
 import {
+  buildGoogleConnectUrl,
+  ensureGoogleOauthConfigured,
+  exchangeGoogleCodeForTokens,
+  fetchGoogleLabelMessages,
+  fetchGoogleLabels,
+  fetchGoogleMailboxProfile,
+  getGoogleOauthSetupStatus,
+  refreshGoogleAccessToken,
+} from "./providers/gmail.provider.js";
+import {
   fetchImapFolderMessages,
   fetchImapFolders,
   testImapConnection,
@@ -103,6 +113,17 @@ type EmailImportOptions = {
   maxEmails: 100 | 500 | 1000;
   from?: string | null;
   to?: string | null;
+};
+
+type ImapMailboxInput = {
+  provider: "imap" | "yahoo_imap";
+  emailAddress: string;
+  displayName?: string | null;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  useTls: boolean;
 };
 
 function normalizeImportOptions(input?: Partial<EmailImportOptions> | null): EmailImportOptions {
@@ -149,6 +170,26 @@ function buildFriendlyImapError(error: unknown): ApiError {
     code: "IMAP_CONNECTION_FAILED",
     message: "Unable to connect to IMAP server. Please check host, port, username, password, and SSL setting.",
   });
+}
+
+function normalizeImapMailboxInput(input: ImapMailboxInput): ImapMailboxInput {
+  if (input.provider === "yahoo_imap") {
+    const emailAddress = input.emailAddress.trim();
+    return {
+      ...input,
+      emailAddress,
+      host: "imap.mail.yahoo.com",
+      port: 993,
+      username: emailAddress,
+      useTls: true,
+    };
+  }
+  return {
+    ...input,
+    emailAddress: input.emailAddress.trim(),
+    host: input.host.trim(),
+    username: input.username.trim(),
+  };
 }
 
 async function attachLinkedCaseSummary<T extends { linkedCaseId?: number | null }>(r: DbConn, firmId: number, row: T): Promise<T & { linkedCase: LinkedCaseSummary | null }> {
@@ -815,6 +856,38 @@ async function ensureMicrosoftAccessToken(args: { r: DbConn; firmId: number; acc
   return { account: updated ?? account, accessToken: refreshed.accessToken };
 }
 
+async function ensureGoogleAccessToken(args: { r: DbConn; firmId: number; accountId: number }) {
+  const account = await getAccountOrThrow(args.r, args.firmId, args.accountId);
+  if (account.provider !== "gmail") {
+    throw new ApiError({
+      status: 400,
+      code: "EMAIL_PROVIDER_INVALID",
+      message: "Mailbox account is not a Gmail account.",
+    });
+  }
+  const tokenExpiresAt = account.tokenExpiresAt ? new Date(account.tokenExpiresAt).getTime() : 0;
+  if (account.encryptedAccessToken && tokenExpiresAt > Date.now() + 30_000) {
+    return { account, accessToken: decryptEmailSecret(account.encryptedAccessToken) ?? "" };
+  }
+  const refreshToken = decryptEmailSecret(account.encryptedRefreshToken) ?? "";
+  if (!refreshToken) {
+    throw new ApiError({
+      status: 400,
+      code: "GOOGLE_REFRESH_TOKEN_MISSING",
+      message: "Gmail refresh token is missing. Please reconnect the mailbox.",
+    });
+  }
+  const refreshed = await refreshGoogleAccessToken(refreshToken);
+  const updated = await updateEmailAccount(args.r, args.firmId, args.accountId, {
+    encryptedAccessToken: encryptEmailSecret(refreshed.accessToken),
+    encryptedRefreshToken: refreshed.refreshToken ? encryptEmailSecret(refreshed.refreshToken) : account.encryptedRefreshToken,
+    tokenExpiresAt: refreshed.expiresAt,
+    status: "active",
+    lastError: null,
+  });
+  return { account: updated ?? account, accessToken: refreshed.accessToken };
+}
+
 async function upsertProviderFolders(args: {
   r: DbConn;
   firmId: number;
@@ -969,7 +1042,30 @@ async function importMessagesForAccount(args: { r: DbConn; req: AuthRequest; acc
         }
         await updateEmailFolder(args.r, firmId, folder.id, { lastSyncAt: now() });
       }
-    } else if (account.provider === "imap") {
+    } else if (account.provider === "gmail") {
+      const { accessToken, account: currentAccount } = await ensureGoogleAccessToken({ r: args.r, firmId, accountId: args.accountId });
+      for (const folder of enabledFolders) {
+        if (remaining <= 0) break;
+        const messages = await fetchGoogleLabelMessages(accessToken, folder.providerFolderId, {
+          limit: remaining,
+          since: importWindow.since,
+          until: importWindow.until,
+        });
+        for (const item of messages) {
+          try {
+            const result = await storeImportedMessage({ r: args.r, req: args.req, account: currentAccount, folder, message: item });
+            if (result.status === "imported") importedCount += 1;
+            else skippedDuplicateCount += 1;
+          } catch (error) {
+            failedCount += 1;
+            firstFailureMessage = firstFailureMessage ?? (error instanceof Error ? error.message : "Email import failed");
+          }
+          remaining -= 1;
+          if (remaining <= 0) break;
+        }
+        await updateEmailFolder(args.r, firmId, folder.id, { lastSyncAt: now() });
+      }
+    } else if (account.provider === "imap" || account.provider === "yahoo_imap") {
       const password = decryptEmailSecret(account.encryptedImapPassword);
       if (!password || !account.imapHost || !account.imapPort || !account.imapUsername) {
         throw new ApiError({
@@ -998,7 +1094,16 @@ async function importMessagesForAccount(args: { r: DbConn; req: AuthRequest; acc
         }
         for (const item of messages) {
           try {
-            const result = await storeImportedMessage({ r: args.r, req: args.req, account, folder, message: item });
+            const result = await storeImportedMessage({
+              r: args.r,
+              req: args.req,
+              account,
+              folder,
+              message: {
+                ...item,
+                provider: account.provider === "yahoo_imap" ? "yahoo_imap" : "imap",
+              },
+            });
             if (result.status === "imported") importedCount += 1;
             else skippedDuplicateCount += 1;
           } catch (error) {
@@ -1078,14 +1183,29 @@ export async function listEmailSyncLogs(args: { r: DbConn; req: AuthRequest; acc
 
 export async function getEmailProviderSetupStatus(_args: { req: AuthRequest }) {
   const microsoft = getMicrosoftOauthSetupStatus();
+  const gmail = getGoogleOauthSetupStatus();
   const encryptionConfigured = isEmailEncryptionConfigured();
   return {
     encryptionConfigured,
     encryptionMissing: encryptionConfigured ? [] : ["EMAIL_TOKEN_ENCRYPTION_KEY"],
     microsoft,
     gmail: {
-      available: false,
-      message: "Gmail coming soon",
+      configured: gmail.configured,
+      missing: gmail.missing,
+      available: gmail.configured && encryptionConfigured,
+      message: gmail.configured
+        ? "Gmail OAuth configuration is available."
+        : "Gmail connection requires Google OAuth configuration.",
+    },
+    yahoo: {
+      available: encryptionConfigured,
+      missing: encryptionConfigured ? [] : ["EMAIL_TOKEN_ENCRYPTION_KEY"],
+      message: "Yahoo Mail uses IMAP with a Yahoo App Password.",
+    },
+    otherImap: {
+      available: encryptionConfigured,
+      missing: encryptionConfigured ? [] : ["EMAIL_TOKEN_ENCRYPTION_KEY"],
+      message: "Custom domain mailboxes can connect with IMAP credentials or app passwords.",
     },
   };
 }
@@ -1096,29 +1216,11 @@ export async function lookupCasesForCommunication(args: { r: DbConn; req: AuthRe
 
 export async function createEmailAccount(args: { r: DbConn; req: AuthRequest; input: { provider: string; emailAddress: string; displayName?: string | null } }) {
   requireMailboxManagementRole(args.req);
-  if (args.input.provider !== "gmail") {
-    throw new ApiError({
-      status: 400,
-      code: "EMAIL_PROVIDER_CREATE_NOT_SUPPORTED",
-      message: "Use the provider-specific connection flow for Microsoft 365 or IMAP.",
-    });
-  }
-  const firmId = args.req.firmId!;
-  const created = await insertEmailAccount(args.r, {
-    firmId,
-    provider: args.input.provider,
-    emailAddress: args.input.emailAddress.trim(),
-    displayName: args.input.displayName?.trim() || null,
-    status: "setup_required",
-    createdBy: args.req.userId ?? null,
+  throw new ApiError({
+    status: 400,
+    code: "EMAIL_PROVIDER_CREATE_NOT_SUPPORTED",
+    message: "Use the provider-specific connection flow for Microsoft, Gmail, Yahoo Mail, or Other IMAP.",
   });
-  await writeCommunicationAuditLog({
-    r: args.r,
-    req: args.req,
-    action: "communication.email_account.created",
-    newValue: { accountId: created.id, provider: created.provider, emailAddress: created.emailAddress, status: created.status },
-  });
-  return sanitizeEmailAccount(created);
 }
 
 export async function startMicrosoftOauth(args: { req: AuthRequest; returnTo?: string | null }) {
@@ -1182,6 +1284,67 @@ export async function completeMicrosoftOauth(args: { r: DbConn; req: AuthRequest
   return { account: sanitizeEmailAccount(account), returnTo: statePayload.returnTo };
 }
 
+export async function startGoogleOauth(args: { req: AuthRequest; returnTo?: string | null }) {
+  requireMailboxManagementRole(args.req);
+  ensureEmailEncryptionConfigured();
+  ensureGoogleOauthConfigured();
+  const state = signEmailState({
+    firmId: args.req.firmId!,
+    userId: args.req.userId!,
+    provider: "gmail",
+    returnTo: ensureAbsoluteReturnTo(args.returnTo) ?? "/app/settings/email",
+    issuedAt: Date.now(),
+  });
+  return { url: buildGoogleConnectUrl(state) };
+}
+
+export async function completeGoogleOauth(args: { r: DbConn; req: AuthRequest; code: string; state: string }) {
+  requireMailboxManagementRole(args.req);
+  ensureEmailEncryptionConfigured();
+  const statePayload = verifyEmailState<{ firmId: number; userId: number; provider: string; returnTo: string }>(args.state);
+  if (statePayload.firmId !== args.req.firmId || statePayload.userId !== args.req.userId || statePayload.provider !== "gmail") {
+    throw new ApiError({
+      status: 400,
+      code: "EMAIL_OAUTH_STATE_MISMATCH",
+      message: "Mailbox connection state does not match the current session.",
+    });
+  }
+  const tokenResult = await exchangeGoogleCodeForTokens(args.code);
+  const profile = await fetchGoogleMailboxProfile(tokenResult.accessToken);
+  const existing = await getEmailAccountByProviderEmail(args.r, args.req.firmId!, "gmail", profile.emailAddress);
+  const saved = existing
+    ? await updateEmailAccount(args.r, args.req.firmId!, existing.id, {
+        displayName: profile.displayName,
+        status: "active",
+        encryptedAccessToken: encryptEmailSecret(tokenResult.accessToken),
+        encryptedRefreshToken: tokenResult.refreshToken ? encryptEmailSecret(tokenResult.refreshToken) : existing.encryptedRefreshToken,
+        tokenExpiresAt: tokenResult.expiresAt,
+        lastError: null,
+      })
+    : await insertEmailAccount(args.r, {
+        firmId: args.req.firmId!,
+        provider: "gmail",
+        emailAddress: profile.emailAddress,
+        displayName: profile.displayName,
+        status: "active",
+        encryptedAccessToken: encryptEmailSecret(tokenResult.accessToken),
+        encryptedRefreshToken: tokenResult.refreshToken ? encryptEmailSecret(tokenResult.refreshToken) : null,
+        tokenExpiresAt: tokenResult.expiresAt,
+        createdBy: args.req.userId ?? null,
+      });
+  const account = saved ?? existing;
+  if (!account) throw new ApiError({ status: 500, code: "EMAIL_ACCOUNT_SAVE_FAILED", message: "Unable to save Gmail mailbox account." });
+  const folders = await fetchGoogleLabels(tokenResult.accessToken);
+  await upsertProviderFolders({ r: args.r, firmId: args.req.firmId!, accountId: account.id, folders });
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: existing ? "communication.email_account.updated" : "communication.email_account.connected",
+    newValue: { accountId: account.id, provider: "gmail", emailAddress: account.emailAddress },
+  });
+  return { account: sanitizeEmailAccount(account), returnTo: statePayload.returnTo };
+}
+
 export async function syncEmailAccountFolders(args: { r: DbConn; req: AuthRequest; accountId: number }) {
   requireMailboxManagementRole(args.req);
   const firmId = args.req.firmId!;
@@ -1193,7 +1356,14 @@ export async function syncEmailAccountFolders(args: { r: DbConn; req: AuthReques
     await updateEmailAccount(args.r, firmId, args.accountId, { status: "active", lastError: null });
     return saved;
   }
-  if (account.provider === "imap") {
+  if (account.provider === "gmail") {
+    const { accessToken } = await ensureGoogleAccessToken({ r: args.r, firmId, accountId: args.accountId });
+    const folders = await fetchGoogleLabels(accessToken);
+    const saved = await upsertProviderFolders({ r: args.r, firmId, accountId: args.accountId, folders });
+    await updateEmailAccount(args.r, firmId, args.accountId, { status: "active", lastError: null });
+    return saved;
+  }
+  if (account.provider === "imap" || account.provider === "yahoo_imap") {
     const password = decryptEmailSecret(account.encryptedImapPassword);
     if (!password || !account.imapHost || !account.imapPort || !account.imapUsername) {
       throw new ApiError({
@@ -1227,17 +1397,18 @@ export async function syncEmailAccountFolders(args: { r: DbConn; req: AuthReques
 
 export async function testImapMailbox(args: {
   req: AuthRequest;
-  input: { emailAddress: string; displayName?: string | null; host: string; port: number; username: string; password: string; useTls: boolean };
+  input: ImapMailboxInput;
 }) {
   requireMailboxManagementRole(args.req);
   ensureEmailEncryptionConfigured();
+  const normalized = normalizeImapMailboxInput(args.input);
   try {
     return await testImapConnection({
-      host: args.input.host,
-      port: args.input.port,
-      username: args.input.username,
-      password: args.input.password,
-      useTls: args.input.useTls,
+      host: normalized.host,
+      port: normalized.port,
+      username: normalized.username,
+      password: normalized.password,
+      useTls: normalized.useTls,
     });
   } catch (error) {
     throw buildFriendlyImapError(error);
@@ -1247,45 +1418,46 @@ export async function testImapMailbox(args: {
 export async function connectImapMailbox(args: {
   r: DbConn;
   req: AuthRequest;
-  input: { emailAddress: string; displayName?: string | null; host: string; port: number; username: string; password: string; useTls: boolean };
+  input: ImapMailboxInput;
 }) {
   requireMailboxManagementRole(args.req);
   ensureEmailEncryptionConfigured();
+  const normalized = normalizeImapMailboxInput(args.input);
   let folders;
   try {
     folders = await fetchImapFolders({
-      host: args.input.host,
-      port: args.input.port,
-      username: args.input.username,
-      password: args.input.password,
-      useTls: args.input.useTls,
+      host: normalized.host,
+      port: normalized.port,
+      username: normalized.username,
+      password: normalized.password,
+      useTls: normalized.useTls,
     });
   } catch (error) {
     throw buildFriendlyImapError(error);
   }
-  const existing = await getEmailAccountByProviderEmail(args.r, args.req.firmId!, "imap", args.input.emailAddress.trim());
+  const existing = await getEmailAccountByProviderEmail(args.r, args.req.firmId!, normalized.provider, normalized.emailAddress);
   const saved = existing
     ? await updateEmailAccount(args.r, args.req.firmId!, existing.id, {
-        displayName: args.input.displayName?.trim() || null,
+        displayName: normalized.displayName?.trim() || null,
         status: "active",
-        imapHost: args.input.host.trim(),
-        imapPort: args.input.port,
-        imapUsername: args.input.username.trim(),
-        encryptedImapPassword: encryptEmailSecret(args.input.password),
-        useTls: args.input.useTls,
+        imapHost: normalized.host,
+        imapPort: normalized.port,
+        imapUsername: normalized.username,
+        encryptedImapPassword: encryptEmailSecret(normalized.password),
+        useTls: normalized.useTls,
         lastError: null,
       })
     : await insertEmailAccount(args.r, {
         firmId: args.req.firmId!,
-        provider: "imap",
-        emailAddress: args.input.emailAddress.trim(),
-        displayName: args.input.displayName?.trim() || null,
+        provider: normalized.provider,
+        emailAddress: normalized.emailAddress,
+        displayName: normalized.displayName?.trim() || null,
         status: "active",
-        imapHost: args.input.host.trim(),
-        imapPort: args.input.port,
-        imapUsername: args.input.username.trim(),
-        encryptedImapPassword: encryptEmailSecret(args.input.password),
-        useTls: args.input.useTls,
+        imapHost: normalized.host,
+        imapPort: normalized.port,
+        imapUsername: normalized.username,
+        encryptedImapPassword: encryptEmailSecret(normalized.password),
+        useTls: normalized.useTls,
         createdBy: args.req.userId ?? null,
       });
   const account = saved ?? existing;
@@ -1295,7 +1467,7 @@ export async function connectImapMailbox(args: {
     r: args.r,
     req: args.req,
     action: existing ? "communication.email_account.updated" : "communication.email_account.connected",
-    newValue: { accountId: account.id, provider: "imap", emailAddress: account.emailAddress },
+    newValue: { accountId: account.id, provider: normalized.provider, emailAddress: account.emailAddress },
   });
   return { account: sanitizeEmailAccount(account), folders: folderRows };
 }

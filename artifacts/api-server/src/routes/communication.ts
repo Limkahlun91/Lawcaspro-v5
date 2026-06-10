@@ -34,6 +34,7 @@ import {
   cancelDraft,
   closeMessage,
   closeTask,
+  completeGoogleOauth,
   completeMicrosoftOauth,
   connectImapMailbox,
   createDraft,
@@ -75,6 +76,7 @@ import {
   patchEmailFolderDetails,
   recordMessageOpened,
   setMessageAssignees,
+  startGoogleOauth,
   startMicrosoftOauth,
   syncEmailAccountFolders,
   testImapMailbox,
@@ -400,6 +402,17 @@ router.get("/communication/email/microsoft/connect", requireAuth, requireFirmUse
   }
 });
 
+router.get("/communication/email/google/connect", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  try {
+    const parsed = MicrosoftConnectQuerySchema.safeParse({ returnTo: one((req.query as any).returnTo) ?? null });
+    if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+    const result = await startGoogleOauth({ req, returnTo: parsed.data.returnTo ?? null });
+    res.json(result);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
+});
+
 router.get("/communication/email/setup-status", requireAuth, requireFirmUser, requirePermission("communications", "read"), async (req: AuthRequest, res: Response) => {
   try {
     const result = await getEmailProviderSetupStatus({ req });
@@ -449,11 +462,52 @@ router.get("/communication/email/microsoft/callback", requireAuth, requireFirmUs
   }
 });
 
+router.get("/communication/email/google/callback", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const code = one((req.query as any).code) ?? "";
+  const state = one((req.query as any).state) ?? "";
+  const providerError = one((req.query as any).error) ?? "";
+  if (providerError) {
+    const description = one((req.query as any).error_description) ?? providerError;
+    res.status(400).json({ error: description, code: providerError });
+    return;
+  }
+  if (!code || !state) {
+    res.status(400).json({ error: "Missing Google OAuth callback parameters." });
+    return;
+  }
+  try {
+    const result = await completeGoogleOauth({ r, req, code, state });
+    const target = new URL(result.returnTo);
+    target.searchParams.set("provider", "gmail");
+    target.searchParams.set("providerStatus", "connected");
+    target.searchParams.set("accountId", String(result.account.id));
+    res.redirect(target.toString());
+  } catch (error) {
+    const fallback = one((req.query as any).returnTo);
+    if (fallback) {
+      try {
+        const target = new URL(fallback);
+        target.searchParams.set("provider", "gmail");
+        target.searchParams.set("providerStatus", "error");
+        target.searchParams.set("providerError", error instanceof Error ? error.message : "Gmail connection failed");
+        res.redirect(target.toString());
+        return;
+      } catch {
+        // Fall through to JSON error.
+      }
+    }
+    sendProviderError(res, error);
+  }
+});
+
 router.post("/communication/email/imap/test", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
   try {
     const parsed = ImapConnectionInputSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
     const result = await testImapMailbox({ req, input: {
+      provider: parsed.data.provider,
       emailAddress: parsed.data.emailAddress,
       displayName: parsed.data.displayName ?? null,
       host: parsed.data.host,
@@ -475,6 +529,7 @@ router.post("/communication/email/imap/connect", requireAuth, requireFirmUser, r
     const parsed = ImapConnectionInputSchema.safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
     const result = await connectImapMailbox({ r, req, input: {
+      provider: parsed.data.provider,
       emailAddress: parsed.data.emailAddress,
       displayName: parsed.data.displayName ?? null,
       host: parsed.data.host,

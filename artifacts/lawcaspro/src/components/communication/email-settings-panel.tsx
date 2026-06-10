@@ -62,12 +62,25 @@ type EmailSetupStatus = {
     missing: string[];
   };
   gmail: {
+    configured: boolean;
+    missing: string[];
     available: boolean;
+    message: string;
+  };
+  yahoo: {
+    available: boolean;
+    missing: string[];
+    message: string;
+  };
+  otherImap: {
+    available: boolean;
+    missing: string[];
     message: string;
   };
 };
 
 type EmailImportRange = "7d" | "30d" | "90d" | "all" | "custom";
+type ConnectProvider = "microsoft_graph" | "gmail" | "yahoo_imap" | "imap";
 
 function asArray<T>(value: unknown): T[] {
   if (Array.isArray(value)) return value as T[];
@@ -95,9 +108,10 @@ function formatDateTime(value: unknown): string {
 }
 
 function providerLabel(provider: string): string {
-  if (provider === "microsoft_graph") return "Microsoft 365 / Outlook";
-  if (provider === "imap") return "IMAP";
+  if (provider === "microsoft_graph") return "Microsoft 365 / Outlook / Hotmail";
+  if (provider === "imap") return "Other IMAP";
   if (provider === "gmail") return "Gmail";
+  if (provider === "yahoo_imap") return "Yahoo Mail";
   return provider;
 }
 
@@ -108,6 +122,29 @@ function humanizeMailboxStatus(account: Pick<EmailAccount, "status" | "lastError
   if (account.status === "disconnected") return "Disconnected";
   if (account.status === "error") return account.lastError ? "Last sync failed" : "Connection error";
   return account.status;
+}
+
+function getProviderPreset(provider: ConnectProvider) {
+  if (provider === "yahoo_imap") {
+    return {
+      host: "imap.mail.yahoo.com",
+      port: "993",
+      useTls: true,
+      usernameMode: "email" as const,
+      hostLocked: true,
+      portLocked: true,
+      useTlsLocked: true,
+    };
+  }
+  return {
+    host: "",
+    port: "993",
+    useTls: true,
+    usernameMode: "custom" as const,
+    hostLocked: false,
+    portLocked: false,
+    useTlsLocked: false,
+  };
 }
 
 function QuerySection(props: {
@@ -144,12 +181,11 @@ export function EmailSettingsPanel() {
 
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
   const [connectDialogOpen, setConnectDialogOpen] = useState(false);
-  const [connectProvider, setConnectProvider] = useState("microsoft_graph");
+  const [connectProvider, setConnectProvider] = useState<ConnectProvider>("microsoft_graph");
   const [importRange, setImportRange] = useState<EmailImportRange>("30d");
   const [importMaxEmails, setImportMaxEmails] = useState<100 | 500 | 1000>(500);
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
-  const [gmailPlaceholderForm, setGmailPlaceholderForm] = useState({ emailAddress: "", displayName: "" });
   const [imapForm, setImapForm] = useState({
     emailAddress: "",
     displayName: "",
@@ -200,19 +236,16 @@ export function EmailSettingsPanel() {
   });
   const selectedAccountLogs = asArray<EmailSyncLog>(selectedAccountLogsQuery.data);
 
-  const createEmailAccountMutation = useMutation({
-    mutationFn: () => apiFetchJson("/communication/email/accounts", { method: "POST", body: { provider: "gmail", ...gmailPlaceholderForm } }),
-    onSuccess: () => {
-      setConnectDialogOpen(false);
-      setGmailPlaceholderForm({ emailAddress: "", displayName: "" });
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
-      toast({ title: "Gmail placeholder saved" });
+  const startMicrosoftConnectMutation = useMutation({
+    mutationFn: () => apiFetchJson<{ url: string }>(`/communication/email/microsoft/connect?returnTo=${encodeURIComponent(window.location.href)}`),
+    onSuccess: (result) => {
+      if (result?.url) window.location.assign(result.url);
     },
     onError: (e) => toastError(toast, e),
   });
 
-  const startMicrosoftConnectMutation = useMutation({
-    mutationFn: () => apiFetchJson<{ url: string }>(`/communication/email/microsoft/connect?returnTo=${encodeURIComponent(window.location.href)}`),
+  const startGoogleConnectMutation = useMutation({
+    mutationFn: () => apiFetchJson<{ url: string }>(`/communication/email/google/connect?returnTo=${encodeURIComponent(window.location.href)}`),
     onSuccess: (result) => {
       if (result?.url) window.location.assign(result.url);
     },
@@ -223,6 +256,7 @@ export function EmailSettingsPanel() {
     mutationFn: () => apiFetchJson("/communication/email/imap/test", {
       method: "POST",
       body: {
+        provider: connectProvider === "yahoo_imap" ? "yahoo_imap" : "imap",
         emailAddress: imapForm.emailAddress,
         displayName: imapForm.displayName || null,
         host: imapForm.host,
@@ -240,6 +274,7 @@ export function EmailSettingsPanel() {
     mutationFn: () => apiFetchJson<{ account: EmailAccount }>(`/communication/email/imap/connect`, {
       method: "POST",
       body: {
+        provider: connectProvider === "yahoo_imap" ? "yahoo_imap" : "imap",
         emailAddress: imapForm.emailAddress,
         displayName: imapForm.displayName || null,
         host: imapForm.host,
@@ -315,6 +350,23 @@ export function EmailSettingsPanel() {
   });
 
   useEffect(() => {
+    if (connectProvider !== "imap" && connectProvider !== "yahoo_imap") return;
+    const preset = getProviderPreset(connectProvider);
+    setImapForm((prev) => ({
+      ...prev,
+      host: preset.host || prev.host,
+      port: preset.port,
+      useTls: preset.useTls,
+      username: preset.usernameMode === "email" ? prev.emailAddress : prev.username,
+    }));
+  }, [connectProvider]);
+
+  useEffect(() => {
+    if (connectProvider !== "yahoo_imap") return;
+    setImapForm((prev) => ({ ...prev, username: prev.emailAddress }));
+  }, [connectProvider, imapForm.emailAddress]);
+
+  useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const providerStatus = params.get("providerStatus");
     if (!providerStatus) return;
@@ -322,7 +374,14 @@ export function EmailSettingsPanel() {
     const providerError = params.get("providerError");
     const accountIdRaw = params.get("accountId");
     if (providerStatus === "connected") {
-      toast({ title: provider === "microsoft_graph" ? "Microsoft 365 mailbox connected" : "Mailbox connected" });
+      toast({
+        title:
+          provider === "microsoft_graph"
+            ? "Microsoft 365 mailbox connected"
+            : provider === "gmail"
+              ? "Gmail mailbox connected"
+              : "Mailbox connected",
+      });
       qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
       if (accountIdRaw) {
         const accountId = parseInt(accountIdRaw, 10);
@@ -358,13 +417,70 @@ export function EmailSettingsPanel() {
     ...(setupStatus?.microsoft.missing ?? []),
     ...(setupStatus?.encryptionConfigured === false ? ["EMAIL_TOKEN_ENCRYPTION_KEY"] : []),
   ];
+  const gmailMissing = [
+    ...(setupStatus?.gmail.missing ?? []),
+    ...(setupStatus?.encryptionConfigured === false ? ["EMAIL_TOKEN_ENCRYPTION_KEY"] : []),
+  ];
   const selectedAccountLastLog = selectedAccountLogs[0] ?? null;
   const canImportSelectedAccount = Boolean(
     selectedAccount &&
-    selectedAccount.provider !== "gmail" &&
     selectedAccount.status !== "setup_required" &&
     selectedAccount.status !== "disconnected"
   );
+  const providerCards = [
+    {
+      key: "microsoft_graph" as const,
+      title: "Microsoft 365 / Outlook / Hotmail",
+      description: "Use Microsoft OAuth for Outlook, Hotmail, Live, and Microsoft 365 work or school mailboxes.",
+      missing: microsoftMissing,
+      connectedAccounts: emailAccounts.filter((account) => account.provider === "microsoft_graph"),
+      actionLabel: "Connect Microsoft / Outlook",
+      action: () => startMicrosoftConnectMutation.mutate(),
+      actionDisabled: startMicrosoftConnectMutation.isPending || microsoftMissing.length > 0,
+      status: microsoftMissing.length ? "Setup required" : "Ready",
+    },
+    {
+      key: "gmail" as const,
+      title: "Gmail",
+      description: "Use Google OAuth / Gmail API to connect Gmail without normal password login.",
+      missing: gmailMissing,
+      connectedAccounts: emailAccounts.filter((account) => account.provider === "gmail"),
+      actionLabel: "Connect Gmail",
+      action: () => startGoogleConnectMutation.mutate(),
+      actionDisabled: startGoogleConnectMutation.isPending || gmailMissing.length > 0,
+      status: gmailMissing.length ? "Setup required" : "Ready",
+    },
+    {
+      key: "yahoo_imap" as const,
+      title: "Yahoo Mail",
+      description: "Yahoo uses IMAP with Yahoo App Password. Host and port are auto-filled and locked.",
+      missing: setupStatus?.yahoo.missing ?? [],
+      connectedAccounts: emailAccounts.filter((account) => account.provider === "yahoo_imap"),
+      actionLabel: "Connect Yahoo Mail",
+      action: () => {
+        setConnectProvider("yahoo_imap");
+        setConnectDialogOpen(true);
+      },
+      actionDisabled: !setupStatus?.yahoo.available,
+      status: setupStatus?.yahoo.available ? "Ready" : "Setup required",
+    },
+    {
+      key: "imap" as const,
+      title: "Other IMAP",
+      description: "Use this for custom domain mailboxes. Host and port stay editable.",
+      missing: setupStatus?.otherImap.missing ?? [],
+      connectedAccounts: emailAccounts.filter((account) => account.provider === "imap"),
+      actionLabel: "Connect Other IMAP",
+      action: () => {
+        setConnectProvider("imap");
+        setConnectDialogOpen(true);
+      },
+      actionDisabled: !setupStatus?.otherImap.available,
+      status: setupStatus?.otherImap.available ? "Ready" : "Setup required",
+    },
+  ];
+  const activeImapPreset = getProviderPreset(connectProvider);
+  const isPresetImapProvider = connectProvider === "imap" || connectProvider === "yahoo_imap";
 
   return (
     <div className="space-y-6">
@@ -372,7 +488,7 @@ export function EmailSettingsPanel() {
         <div>
           <div className="text-lg font-semibold">Email Settings</div>
           <div className="text-sm text-slate-500">
-            Manage Microsoft 365, IMAP, Gmail placeholder, folder sync, import runs, and mailbox connection status.
+            Manage Outlook, Gmail, Yahoo Mail, and other IMAP mailbox connections, folder sync, and historical email import.
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -385,7 +501,7 @@ export function EmailSettingsPanel() {
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-sm">Section 1 — Setup Warnings</CardTitle>
+          <CardTitle className="text-sm">Section 1 — Provider Setup</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-sm text-slate-600">
           {setupStatusQuery.isLoading ? <div>Loading setup status...</div> : null}
@@ -394,24 +510,57 @@ export function EmailSettingsPanel() {
           ) : null}
           {!setupStatusQuery.isLoading && !setupStatusQuery.isError ? (
             <>
-              {microsoftMissing.length ? (
-                <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
-                  <div className="font-medium text-amber-900">Microsoft 365 setup is incomplete.</div>
-                  <div className="mt-2 text-amber-800">Missing:</div>
-                  <ul className="mt-1 list-disc pl-5 text-amber-800">
-                    {microsoftMissing.map((item) => <li key={item}>{item}</li>)}
-                  </ul>
-                </div>
-              ) : (
-                <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-emerald-800">
-                  Microsoft 365 OAuth configuration is available.
-                </div>
-              )}
               {!setupStatus?.encryptionConfigured ? (
                 <div className="rounded-lg border border-amber-200 bg-amber-50 p-3">
                   Credential storage is blocked until <span className="font-medium">EMAIL_TOKEN_ENCRYPTION_KEY</span> is configured.
                 </div>
               ) : null}
+              <div className="grid gap-3 lg:grid-cols-2">
+                {providerCards.map((card) => {
+                  const latestConnected = card.connectedAccounts[0] ?? null;
+                  return (
+                    <div key={card.key} className="rounded-lg border p-4">
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <div className="font-medium text-slate-900">{card.title}</div>
+                          <div className="mt-1 text-xs text-slate-500">{card.description}</div>
+                        </div>
+                        <Badge variant={latestConnected ? "secondary" : "outline"}>
+                          {latestConnected ? humanizeMailboxStatus(latestConnected) : card.status}
+                        </Badge>
+                      </div>
+                      <div className="mt-3 space-y-2 text-xs text-slate-600">
+                        <div>Status: {latestConnected ? humanizeMailboxStatus(latestConnected) : card.status}</div>
+                        <div>Required setup: {card.missing.length ? card.missing.join(", ") : "Ready"}</div>
+                        <div>Last sync: {latestConnected ? (formatDateTime(latestConnected.lastSyncAt) || "Never") : "Not connected"}</div>
+                        {card.key === "microsoft_graph" && card.missing.length ? (
+                          <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">
+                            <div className="font-medium">Microsoft connection is not configured.</div>
+                            <div className="mt-1">Missing:</div>
+                            <ul className="list-disc pl-5">
+                              {card.missing.map((item) => <li key={item}>{item}</li>)}
+                            </ul>
+                          </div>
+                        ) : null}
+                        {card.key === "gmail" && card.missing.length ? (
+                          <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">
+                            <div className="font-medium">Gmail connection is not configured.</div>
+                            <div className="mt-1">Missing:</div>
+                            <ul className="list-disc pl-5">
+                              {card.missing.map((item) => <li key={item}>{item}</li>)}
+                            </ul>
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="mt-3">
+                        <Button variant="outline" onClick={card.action} disabled={card.actionDisabled}>
+                          {card.actionLabel}
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </>
           ) : null}
         </CardContent>
@@ -430,7 +579,7 @@ export function EmailSettingsPanel() {
             onRetry={() => emailAccountsQuery.refetch()}
             isEmpty={emailAccounts.length === 0}
             emptyTitle="No mailbox accounts"
-            emptyDescription="Connect Microsoft 365 or IMAP to start importing email."
+            emptyDescription="Connect Microsoft, Gmail, Yahoo Mail, or Other IMAP to start importing email."
           >
             {emailAccounts.map((account) => {
               const selected = selectedAccountId === account.id;
@@ -477,7 +626,7 @@ export function EmailSettingsPanel() {
                   <div className="text-sm text-slate-600">Last sync: {formatDateTime(selectedAccount.lastSyncAt) || "Never"}</div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" size="sm" onClick={() => syncFoldersMutation.mutate(selectedAccount.id)} disabled={syncFoldersMutation.isPending || selectedAccount.provider === "gmail"}>
+                  <Button variant="outline" size="sm" onClick={() => syncFoldersMutation.mutate(selectedAccount.id)} disabled={syncFoldersMutation.isPending}>
                     Sync Folders
                   </Button>
                   <Button variant="outline" size="sm" onClick={() => importEmailMutation.mutate(selectedAccount.id)} disabled={!canImportSelectedAccount || importEmailMutation.isPending}>
@@ -641,27 +790,28 @@ export function EmailSettingsPanel() {
           <div className="flex-1 space-y-3 overflow-y-auto pr-1">
             <div className="space-y-1.5">
               <Label>Provider</Label>
-              <Select value={connectProvider} onValueChange={setConnectProvider}>
+              <Select value={connectProvider} onValueChange={(value) => setConnectProvider(value as ConnectProvider)}>
                 <SelectTrigger>
                   <SelectValue placeholder="Select provider" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="microsoft_graph">Microsoft 365 / Outlook</SelectItem>
-                  <SelectItem value="imap">IMAP</SelectItem>
-                  <SelectItem value="gmail">Gmail (coming soon)</SelectItem>
+                  <SelectItem value="microsoft_graph">Microsoft 365 / Outlook / Hotmail</SelectItem>
+                  <SelectItem value="gmail">Gmail</SelectItem>
+                  <SelectItem value="yahoo_imap">Yahoo Mail</SelectItem>
+                  <SelectItem value="imap">Other IMAP</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
             {connectProvider === "microsoft_graph" ? (
               <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
-                <div className="text-sm font-medium">Microsoft 365 / Outlook</div>
+                <div className="text-sm font-medium">Microsoft 365 / Outlook / Hotmail</div>
                 <div className="text-xs text-slate-500">
                   User clicks Connect with Microsoft, signs in on Microsoft login, approves read-only access, returns to Lawcaspro, then the mailbox becomes connected for folder sync and import.
                 </div>
                 {microsoftMissing.length ? (
                   <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-                    <div className="font-medium">Microsoft 365 setup is incomplete.</div>
+                    <div className="font-medium">Microsoft connection is not configured.</div>
                     <div className="mt-2">Missing:</div>
                     <ul className="mt-1 list-disc pl-5">
                       {microsoftMissing.map((item) => <li key={item}>{item}</li>)}
@@ -673,14 +823,19 @@ export function EmailSettingsPanel() {
                   </div>
                 )}
                 <Button onClick={() => startMicrosoftConnectMutation.mutate()} disabled={startMicrosoftConnectMutation.isPending || microsoftMissing.length > 0}>
-                  Connect with Microsoft
+                  Connect Microsoft / Outlook
                 </Button>
               </div>
             ) : null}
 
-            {connectProvider === "imap" ? (
+            {isPresetImapProvider ? (
               <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
-                <div className="text-sm font-medium">IMAP Connection</div>
+                <div className="text-sm font-medium">{connectProvider === "yahoo_imap" ? "Yahoo Mail" : "Other IMAP"}</div>
+                <div className="text-xs text-slate-500">
+                  {connectProvider === "yahoo_imap"
+                    ? "Yahoo requires an App Password for third-party mail import. Generate it from Yahoo Account Security, then paste it here."
+                    : "Use this form for custom domain mailboxes and other providers that support IMAP."}
+                </div>
                 <div className="grid grid-cols-1 gap-3">
                   <div className="space-y-1.5">
                     <Label>Email Address</Label>
@@ -693,23 +848,47 @@ export function EmailSettingsPanel() {
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div className="space-y-1.5">
                       <Label>IMAP Host</Label>
-                      <Input value={imapForm.host} onChange={(e) => setImapForm((prev) => ({ ...prev, host: e.target.value }))} placeholder="outlook.office365.com" />
+                      <Input
+                        value={imapForm.host}
+                        onChange={(e) => setImapForm((prev) => ({ ...prev, host: e.target.value }))}
+                        placeholder={connectProvider === "yahoo_imap" ? "imap.mail.yahoo.com" : "mail.example.com"}
+                        readOnly={activeImapPreset.hostLocked}
+                      />
                     </div>
                     <div className="space-y-1.5">
                       <Label>Port</Label>
-                      <Input value={imapForm.port} onChange={(e) => setImapForm((prev) => ({ ...prev, port: e.target.value }))} placeholder="993" />
+                      <Input
+                        value={imapForm.port}
+                        onChange={(e) => setImapForm((prev) => ({ ...prev, port: e.target.value }))}
+                        placeholder="993"
+                        readOnly={activeImapPreset.portLocked}
+                      />
                     </div>
                   </div>
                   <div className="space-y-1.5">
                     <Label>Username</Label>
-                    <Input value={imapForm.username} onChange={(e) => setImapForm((prev) => ({ ...prev, username: e.target.value }))} placeholder="Usually the mailbox email address" />
+                    <Input
+                      value={connectProvider === "yahoo_imap" ? imapForm.emailAddress : imapForm.username}
+                      onChange={(e) => setImapForm((prev) => ({ ...prev, username: e.target.value }))}
+                      placeholder="Usually the mailbox email address"
+                      readOnly={connectProvider === "yahoo_imap"}
+                    />
                   </div>
                   <div className="space-y-1.5">
                     <Label>Password / App Password</Label>
-                    <Input type="password" value={imapForm.password} onChange={(e) => setImapForm((prev) => ({ ...prev, password: e.target.value }))} placeholder="Stored encrypted only" />
+                    <Input
+                      type="password"
+                      value={imapForm.password}
+                      onChange={(e) => setImapForm((prev) => ({ ...prev, password: e.target.value }))}
+                      placeholder={connectProvider === "yahoo_imap" ? "Yahoo App Password" : "Stored encrypted only"}
+                    />
                   </div>
                   <label className="flex items-center gap-2 text-sm">
-                    <Checkbox checked={imapForm.useTls} onCheckedChange={(checked) => setImapForm((prev) => ({ ...prev, useTls: Boolean(checked) }))} />
+                    <Checkbox
+                      checked={imapForm.useTls}
+                      onCheckedChange={(checked) => setImapForm((prev) => ({ ...prev, useTls: Boolean(checked) }))}
+                      disabled={activeImapPreset.useTlsLocked}
+                    />
                     <span>Use SSL/TLS</span>
                   </label>
                 </div>
@@ -718,11 +897,13 @@ export function EmailSettingsPanel() {
                     Test Connection
                   </Button>
                   <Button onClick={() => connectImapMutation.mutate()} disabled={connectImapMutation.isPending}>
-                    Save IMAP Mailbox
+                    {connectProvider === "yahoo_imap" ? "Save Yahoo Mailbox" : "Save IMAP Mailbox"}
                   </Button>
                 </div>
                 <div className="text-xs text-slate-500">
-                  IMAP credentials are encrypted before storage. If EMAIL_TOKEN_ENCRYPTION_KEY is missing, save/test will return a setup error.
+                  {connectProvider === "yahoo_imap"
+                    ? "Yahoo Mail uses imap.mail.yahoo.com on port 993 with SSL/TLS and a Yahoo App Password. Credentials are stored encrypted only."
+                    : "IMAP credentials are encrypted before storage. If EMAIL_TOKEN_ENCRYPTION_KEY is missing, save/test will return a setup error."}
                 </div>
               </div>
             ) : null}
@@ -731,18 +912,23 @@ export function EmailSettingsPanel() {
               <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
                 <div className="text-sm font-medium">Gmail</div>
                 <div className="text-xs text-slate-500">
-                  Connect Gmail — coming soon. Gmail will use OAuth / Gmail API only. Password login is not supported.
+                  Gmail uses Google OAuth / Gmail API. Normal password login is not supported.
                 </div>
-                <div className="space-y-1.5">
-                  <Label>Email Address</Label>
-                  <Input value={gmailPlaceholderForm.emailAddress} onChange={(e) => setGmailPlaceholderForm((prev) => ({ ...prev, emailAddress: e.target.value }))} placeholder="name@gmail.com" />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Display Name</Label>
-                  <Input value={gmailPlaceholderForm.displayName} onChange={(e) => setGmailPlaceholderForm((prev) => ({ ...prev, displayName: e.target.value }))} placeholder="Optional label for planning" />
-                </div>
-                <Button onClick={() => createEmailAccountMutation.mutate()} disabled={createEmailAccountMutation.isPending}>
-                  Save Gmail Placeholder
+                {gmailMissing.length ? (
+                  <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                    <div className="font-medium">Gmail connection is not configured.</div>
+                    <div className="mt-2">Missing:</div>
+                    <ul className="mt-1 list-disc pl-5">
+                      {gmailMissing.map((item) => <li key={item}>{item}</li>)}
+                    </ul>
+                  </div>
+                ) : (
+                  <div className="rounded-lg border bg-white p-3 text-xs text-slate-600">
+                    Google OAuth is configured. Tokens are encrypted before storage and never returned by the API.
+                  </div>
+                )}
+                <Button onClick={() => startGoogleConnectMutation.mutate()} disabled={startGoogleConnectMutation.isPending || gmailMissing.length > 0}>
+                  Connect Gmail
                 </Button>
               </div>
             ) : null}

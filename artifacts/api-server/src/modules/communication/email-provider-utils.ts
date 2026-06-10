@@ -8,7 +8,7 @@ export type ImportedAttachmentMetadata = {
 };
 
 export type ImportedMessage = {
-  provider: "microsoft_graph" | "imap";
+  provider: "microsoft_graph" | "gmail" | "imap" | "yahoo_imap";
   providerMessageId: string | null;
   providerThreadId: string | null;
   providerConversationId: string | null;
@@ -102,7 +102,7 @@ export function toDateOrNull(value: string | null | undefined): Date | null {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-export function mapFolderType(provider: "microsoft_graph" | "imap", folderName: string, providerId?: string | null): string {
+export function mapFolderType(provider: "microsoft_graph" | "gmail" | "imap" | "yahoo_imap", folderName: string, providerId?: string | null): string {
   const normalizedName = String(folderName ?? "").trim().toLowerCase();
   const normalizedProviderId = String(providerId ?? "").trim().toLowerCase();
   if (provider === "microsoft_graph") {
@@ -112,6 +112,17 @@ export function mapFolderType(provider: "microsoft_graph" | "imap", folderName: 
     if (normalizedName === "archive" || normalizedProviderId === "archive") return "archive";
     if (normalizedName === "junk email" || normalizedProviderId === "junkemail") return "junk";
     if (normalizedName === "deleted items" || normalizedProviderId === "deleteditems") return "deleted";
+    return "custom";
+  }
+
+  if (provider === "gmail") {
+    if (normalizedProviderId === "__gmail_all__" || normalizedName === "all mail") return "archive";
+    if (normalizedProviderId === "inbox" || normalizedName === "inbox") return "inbox";
+    if (normalizedProviderId === "sent" || normalizedName === "sent") return "sent";
+    if (normalizedProviderId === "draft" || normalizedName === "drafts") return "drafts";
+    if (normalizedProviderId === "spam" || normalizedName === "spam") return "junk";
+    if (normalizedProviderId === "trash" || normalizedName === "trash") return "deleted";
+    if (normalizedProviderId === "important" || normalizedProviderId.startsWith("category_")) return "custom";
     return "custom";
   }
 

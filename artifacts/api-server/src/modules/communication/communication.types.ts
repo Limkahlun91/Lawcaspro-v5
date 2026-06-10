@@ -3,7 +3,7 @@ import { z } from "zod";
 export const CommunicationChannelSchema = z.enum(["email", "whatsapp"]);
 export type CommunicationChannel = z.infer<typeof CommunicationChannelSchema>;
 
-export const CommunicationProviderSchema = z.enum(["manual", "microsoft_graph", "gmail", "imap", "whatsapp_cloud"]);
+export const CommunicationProviderSchema = z.enum(["manual", "microsoft_graph", "gmail", "yahoo_imap", "imap", "whatsapp_cloud"]);
 export type CommunicationProvider = z.infer<typeof CommunicationProviderSchema>;
 
 export const CommunicationDirectionSchema = z.enum(["incoming", "outgoing"]);
@@ -58,7 +58,7 @@ export const RemarkPatchSchema = z.object({
   body: z.string().min(1).max(10000),
 });
 
-export const EmailAccountProviderSchema = z.enum(["microsoft_graph", "imap", "gmail"]);
+export const EmailAccountProviderSchema = z.enum(["microsoft_graph", "gmail", "yahoo_imap", "imap"]);
 
 export const EmailAccountCreateSchema = z.object({
   provider: EmailAccountProviderSchema,
@@ -107,6 +107,7 @@ export const MicrosoftConnectQuerySchema = z.object({
 });
 
 export const ImapConnectionInputSchema = z.object({
+  provider: z.enum(["imap", "yahoo_imap"]).default("imap"),
   emailAddress: z.string().email(),
   displayName: z.string().trim().max(200).optional().nullable(),
   host: z.string().trim().min(1).max(255),
