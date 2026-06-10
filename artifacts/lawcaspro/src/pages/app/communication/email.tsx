@@ -1104,11 +1104,12 @@ export default function EmailControlCenterPage() {
       </div>
 
       <Dialog open={showManualEmail} onOpenChange={setShowManualEmail}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+          <DialogHeader className="shrink-0">
             <DialogTitle>Manual Incoming Email</DialogTitle>
           </DialogHeader>
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+          <div className="flex-1 overflow-y-auto pr-2">
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             <div className="md:col-span-6 space-y-1.5">
               <Label>Mailbox</Label>
               <Select value={manualForm.mailboxId} onValueChange={(v) => setManualForm((p) => ({ ...p, mailboxId: v }))}>
@@ -1165,7 +1166,7 @@ export default function EmailControlCenterPage() {
             </div>
             <div className="md:col-span-12 space-y-1.5">
               <Label>Handlers / Clerks</Label>
-              <div className="rounded border p-2 max-h-40 overflow-auto space-y-2">
+              <div className="rounded border p-2 max-h-32 overflow-y-auto space-y-2">
                 {selectedUserOptions.map((u) => (
                   <div key={u.id} className="flex items-center gap-2">
                     <Checkbox
@@ -1193,7 +1194,7 @@ export default function EmailControlCenterPage() {
             </div>
             <div className="md:col-span-6 space-y-1.5">
               <Label>Watchers</Label>
-              <div className="rounded border p-2 max-h-28 overflow-auto space-y-2">
+              <div className="rounded border p-2 max-h-32 overflow-y-auto space-y-2">
                 {selectedUserOptions.map((u) => (
                   <div key={u.id} className="flex items-center gap-2">
                     <Checkbox
@@ -1218,7 +1219,8 @@ export default function EmailControlCenterPage() {
               <Textarea value={manualForm.bodyText} onChange={(e) => setManualForm((p) => ({ ...p, bodyText: e.target.value }))} rows={8} />
             </div>
           </div>
-          <DialogFooter>
+          </div>
+          <DialogFooter className="shrink-0 border-t pt-3 bg-background sticky bottom-0">
             <Button variant="outline" onClick={() => setShowManualEmail(false)}>Cancel</Button>
             <Button onClick={() => manualEmailMutation.mutate()} disabled={manualEmailMutation.isPending}>Create</Button>
           </DialogFooter>
@@ -1226,11 +1228,12 @@ export default function EmailControlCenterPage() {
       </Dialog>
 
       <Dialog open={taskDialogOpen} onOpenChange={setTaskDialogOpen}>
-        <DialogContent className="max-w-xl">
-          <DialogHeader>
+        <DialogContent className="max-w-xl max-h-[90vh] overflow-hidden flex flex-col">
+          <DialogHeader className="shrink-0">
             <DialogTitle>Add Case Task</DialogTitle>
           </DialogHeader>
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+          <div className="flex-1 overflow-y-auto pr-2">
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             <div className="md:col-span-12 space-y-1.5">
               <Label>Case Ref / Parcel No</Label>
               <Input value={taskForm.caseRef} onChange={(e) => setTaskForm((p) => ({ ...p, caseRef: e.target.value }))} />
@@ -1266,7 +1269,7 @@ export default function EmailControlCenterPage() {
             </div>
             <div className="md:col-span-12 space-y-1.5">
               <Label>Handlers / Clerks</Label>
-              <div className="rounded border p-2 max-h-36 overflow-auto space-y-2">
+              <div className="rounded border p-2 max-h-32 overflow-y-auto space-y-2">
                 {selectedUserOptions.map((u) => (
                   <div key={u.id} className="flex items-center gap-2">
                     <Checkbox
@@ -1294,7 +1297,7 @@ export default function EmailControlCenterPage() {
             </div>
             <div className="md:col-span-6 space-y-1.5">
               <Label>Watchers</Label>
-              <div className="rounded border p-2 max-h-28 overflow-auto space-y-2">
+              <div className="rounded border p-2 max-h-32 overflow-y-auto space-y-2">
                 {selectedUserOptions.map((u) => (
                   <div key={u.id} className="flex items-center gap-2">
                     <Checkbox
@@ -1311,7 +1314,8 @@ export default function EmailControlCenterPage() {
               <Input value={taskForm.requiredAction} onChange={(e) => setTaskForm((p) => ({ ...p, requiredAction: e.target.value }))} />
             </div>
           </div>
-          <DialogFooter>
+          </div>
+          <DialogFooter className="shrink-0 border-t pt-3 bg-background sticky bottom-0">
             <Button variant="outline" onClick={() => setTaskDialogOpen(false)}>Cancel</Button>
             <Button onClick={() => {
               if (!selectedMessageId) return;
@@ -1341,11 +1345,12 @@ export default function EmailControlCenterPage() {
       </Dialog>
 
       <Dialog open={draftDialogOpen} onOpenChange={setDraftDialogOpen}>
-        <DialogContent className="max-w-xl">
-          <DialogHeader>
+        <DialogContent className="max-w-xl max-h-[90vh] overflow-hidden flex flex-col">
+          <DialogHeader className="shrink-0">
             <DialogTitle>Create Draft</DialogTitle>
           </DialogHeader>
-          <div className="space-y-3">
+          <div className="flex-1 overflow-y-auto pr-2">
+            <div className="space-y-3">
             <div className="space-y-1.5">
               <Label>To</Label>
               <Input value={draftForm.to} onChange={(e) => setDraftForm((p) => ({ ...p, to: e.target.value }))} />
@@ -1360,7 +1365,8 @@ export default function EmailControlCenterPage() {
             </div>
             <div className="text-xs text-slate-500">Selected tasks: {selectedTaskIds.join(", ")}</div>
           </div>
-          <DialogFooter>
+          </div>
+          <DialogFooter className="shrink-0 border-t pt-3 bg-background sticky bottom-0">
             <Button variant="outline" onClick={() => setDraftDialogOpen(false)}>Cancel</Button>
             <Button variant="outline" onClick={() => {
               if (!selectedMessageId) return;
