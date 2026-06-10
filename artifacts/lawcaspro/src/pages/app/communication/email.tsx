@@ -44,14 +44,17 @@ type MessageRow = {
     id: number;
     channel: string;
     direction: "incoming" | "outgoing";
+    providerIsRead: boolean;
     fromAddress: string | null;
     fromName: string | null;
     subject: string | null;
+    bodyText: string | null;
     internalStatus: string;
     isBatch: boolean;
     assignedToUserId: number | null;
     linkedCaseId: number | null;
     receivedAt: string | null;
+    lastActivityAt: string | null;
     createdAt: string;
   };
   tasksTotal: number;
@@ -178,6 +181,21 @@ function splitCommaList(v: string): string[] {
 
 function toggleString(list: string[], value: string): string[] {
   return list.includes(value) ? list.filter((x) => x !== value) : [...list, value];
+}
+
+function formatDateTime(value: unknown): string {
+  const s = String(value ?? "").trim();
+  if (!s) return "";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  return new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(d);
+}
+
+function previewText(value: unknown): string {
+  const s = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!s) return "";
+  if (s.length <= 140) return s;
+  return `${s.slice(0, 137)}...`;
 }
 
 function StatusBadge({ value }: { value: string }) {
@@ -663,7 +681,7 @@ export default function EmailControlCenterPage() {
   }, [selectedMessage]);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div className="text-lg font-semibold">Email Inbox</div>
         <Button onClick={() => setShowManualEmail(true)}>Manual Add Email</Button>
@@ -692,12 +710,12 @@ export default function EmailControlCenterPage() {
         </Card>
       ) : null}
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-        <Card className="lg:col-span-3">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 lg:min-h-[calc(100vh-180px)]">
+        <Card className="lg:col-span-3 flex flex-col">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">Mailboxes & Filters</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-3">
+          <CardContent className="flex-1 overflow-y-auto space-y-3">
             <div className="space-y-1">
               <div className="text-xs font-medium text-slate-600">Connected mailboxes</div>
               {mailboxes.length === 0 ? (
@@ -716,7 +734,7 @@ export default function EmailControlCenterPage() {
                 </div>
               )}
 
-              <Button variant="outline" className="w-full justify-start" disabled>
+              <Button variant="outline" className="w-full justify-start opacity-60" disabled>
                 Connect Microsoft 365
               </Button>
               <div className="text-[11px] text-slate-500">Coming soon / setup required</div>
@@ -753,13 +771,12 @@ export default function EmailControlCenterPage() {
           </CardContent>
         </Card>
 
-        <Card className="lg:col-span-4">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Emails</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
+        <Card className="lg:col-span-4 flex flex-col">
+          <CardHeader className="pb-2 space-y-2">
+            <CardTitle className="text-sm">Email List</CardTitle>
             <Input placeholder="Search sender or subject..." value={search} onChange={(e) => setSearch(e.target.value)} />
-
+          </CardHeader>
+          <CardContent className="flex-1 overflow-y-auto space-y-2">
             {view === "unread" ? (
               <Empty className="border border-dashed border-slate-200 bg-slate-50/50 py-10">
                 <EmptyHeader>
@@ -781,7 +798,10 @@ export default function EmailControlCenterPage() {
                 {filteredMessages.map((row) => (
                   <button
                     key={row.message.id}
-                    className="w-full text-left rounded border p-2 hover:bg-slate-50"
+                    className={[
+                      "w-full text-left rounded border p-2 transition-colors",
+                      selectedMessageId === row.message.id ? "border-slate-400 bg-slate-50" : "hover:bg-slate-50",
+                    ].join(" ")}
                     onClick={() => {
                       setSelectedMessageId(row.message.id);
                       setSelectedDraftId(null);
@@ -789,15 +809,34 @@ export default function EmailControlCenterPage() {
                       viewMessageMutation.mutate(row.message.id);
                     }}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="text-sm font-medium truncate">{row.message.subject || "(no subject)"}</div>
-                      <StatusBadge value={row.message.internalStatus} />
-                    </div>
-                    <div className="text-xs text-slate-500 truncate">{row.message.fromAddress || ""}</div>
-                    <div className="text-xs text-slate-500 mt-1 flex items-center justify-between gap-2">
-                      <div className="truncate">{row.message.receivedAt || ""}</div>
-                      {row.message.linkedCaseId ? <Badge variant="secondary">Case</Badge> : null}
-                    </div>
+                    {(() => {
+                      const unread = row.message.providerIsRead === false || String(row.message.internalStatus ?? "").trim().toLowerCase() === "new";
+                      const from = `${row.message.fromName || ""}${row.message.fromName ? " " : ""}<${row.message.fromAddress || ""}>`.trim();
+                      const preview = previewText(row.message.bodyText);
+                      const ts = formatDateTime(row.message.receivedAt || row.message.lastActivityAt || row.message.createdAt);
+                      const assignedLabel = row.message.assignedToUserId
+                        ? (selectedUserOptions.find((u) => u.id === row.message.assignedToUserId)?.label ?? `User ${row.message.assignedToUserId}`)
+                        : "";
+
+                      return (
+                        <div className="space-y-1">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className={unread ? "text-sm font-semibold truncate" : "text-sm font-medium truncate"}>{row.message.subject || "(no subject)"}</div>
+                              <div className="text-xs text-slate-500 truncate">{from}</div>
+                            </div>
+                            <div className="shrink-0 text-[11px] text-slate-500">{ts}</div>
+                          </div>
+                          {preview ? <div className="text-xs text-slate-600">{preview}</div> : null}
+                          <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                            {unread ? <span className="inline-block h-2 w-2 rounded-full bg-blue-500" /> : null}
+                            {assignedLabel ? <Badge variant="secondary">{assignedLabel}</Badge> : <Badge variant="outline">Unassigned</Badge>}
+                            {row.message.linkedCaseId ? <Badge variant="secondary">Case</Badge> : null}
+                            <StatusBadge value={row.message.internalStatus} />
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </button>
                 ))}
               </QuerySection>
@@ -805,11 +844,11 @@ export default function EmailControlCenterPage() {
           </CardContent>
         </Card>
 
-        <Card className="lg:col-span-5">
+        <Card className="lg:col-span-5 flex flex-col">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm">Email Detail</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
+          <CardContent className="flex-1 overflow-y-auto space-y-4">
             {selectedDraftId ? (
               <Empty className="border border-dashed border-slate-200 bg-slate-50/50 py-10">
                 <EmptyHeader>
@@ -863,7 +902,7 @@ export default function EmailControlCenterPage() {
                       </div>
                       <div className="md:col-span-6 space-y-1.5">
                         <Label>Received / Sent</Label>
-                        <Input value={selectedMessage.receivedAt || selectedMessage.sentAt || selectedMessage.createdAt || ""} readOnly />
+                        <Input value={formatDateTime(selectedMessage.receivedAt || selectedMessage.sentAt || selectedMessage.createdAt || "")} readOnly />
                       </div>
                       <div className="md:col-span-12 space-y-1.5">
                         <Label>To</Label>
@@ -913,7 +952,7 @@ export default function EmailControlCenterPage() {
                       </div>
                       <div className="md:col-span-12 space-y-1.5">
                         <Label>Body</Label>
-                        <Textarea value={selectedMessage.bodyText || ""} readOnly rows={6} />
+                        <div className="rounded border p-2 text-sm whitespace-pre-wrap">{selectedMessage.bodyText || ""}</div>
                       </div>
                       <div className="md:col-span-12 space-y-1.5">
                         <Label>Remarks</Label>
@@ -1063,7 +1102,7 @@ export default function EmailControlCenterPage() {
                 ) : null}
               </QuerySection>
             ) : (
-              <div className="text-sm text-slate-500">Select a message or draft.</div>
+              <div className="text-sm text-slate-500">Select a message.</div>
             )}
           </CardContent>
         </Card>
