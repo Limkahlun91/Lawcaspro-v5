@@ -97,6 +97,36 @@ export default function CasesList() {
     return false;
   })();
 
+  const notificationCountsQuery = useQuery<{
+    totalUnreadCount: number;
+    pendingApprovalUnreadCount: number;
+    amendUnreadCount: number;
+    approvedUnreadCount: number;
+  }>({
+    queryKey: ["case-notifications", "unread-counts"],
+    enabled: Boolean(user),
+    queryFn: () => apiFetchJson("/case-notifications/unread-counts").catch(() => ({
+      totalUnreadCount: 0,
+      pendingApprovalUnreadCount: 0,
+      amendUnreadCount: 0,
+      approvedUnreadCount: 0,
+    })),
+    refetchInterval: 30000,
+    retry: false,
+  });
+
+  const markReadMutation = useMutation({
+    mutationFn: async (vars: { types: string[] }) => {
+      return await apiFetchJson("/case-notifications/mark-read", {
+        method: "POST",
+        body: JSON.stringify({ types: vars.types }),
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["case-notifications", "unread-counts"] });
+    },
+  });
+
   const me = Number.isFinite(myUserId) && myUserId > 0 ? myUserId : null;
   const normalizeAssignedToUserId = (raw: string | null): string =>
     normalizeAssignedToUserIdParam(raw, { myUserId: me, isPartnerOrManager });
@@ -278,6 +308,27 @@ export default function CasesList() {
     retry: false,
     placeholderData: (prev) => prev,
   });
+
+  useEffect(() => {
+    if (!notificationCountsQuery.data) return;
+    const types =
+      approvalStatus === "pending_approval"
+        ? ["OPEN_FILE_PENDING_APPROVAL"]
+        : approvalStatus === "rejected"
+          ? ["CASE_DETAILS_TO_AMEND"]
+          : ["CASE_APPROVED", "REFERENCE_NO_CHANGED"];
+    const count =
+      approvalStatus === "pending_approval"
+        ? notificationCountsQuery.data.pendingApprovalUnreadCount
+        : approvalStatus === "rejected"
+          ? notificationCountsQuery.data.amendUnreadCount
+          : notificationCountsQuery.data.approvedUnreadCount;
+    if (count <= 0) return;
+    const ready = approvalStatus === "approved" ? approvedQuery.isSuccess : approvalListQuery.isSuccess;
+    if (!ready) return;
+    if (markReadMutation.isPending) return;
+    markReadMutation.mutate({ types });
+  }, [approvalListQuery.isSuccess, approvalStatus, approvedQuery.isSuccess, markReadMutation, notificationCountsQuery.data]);
 
   type CaseFilterOptionsResponse = {
     spaStatuses?: string[];
@@ -707,9 +758,36 @@ export default function CasesList() {
 
       <Tabs value={approvalStatus} onValueChange={(v) => { setApprovalStatus(normalizeApprovalStatus(v)); setPage(1); }}>
         <TabsList>
-          <TabsTrigger value="pending_approval">Pending Approval</TabsTrigger>
-          <TabsTrigger value="approved">Approved Cases</TabsTrigger>
-          <TabsTrigger value="rejected">Case Details to Amend</TabsTrigger>
+          <TabsTrigger value="pending_approval">
+            <span className="flex items-center gap-2">
+              Pending Approval
+              {(notificationCountsQuery.data?.pendingApprovalUnreadCount ?? 0) > 0 ? (
+                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
+                  {notificationCountsQuery.data?.pendingApprovalUnreadCount ?? 0}
+                </span>
+              ) : null}
+            </span>
+          </TabsTrigger>
+          <TabsTrigger value="approved">
+            <span className="flex items-center gap-2">
+              Approved Cases
+              {(notificationCountsQuery.data?.approvedUnreadCount ?? 0) > 0 ? (
+                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
+                  {notificationCountsQuery.data?.approvedUnreadCount ?? 0}
+                </span>
+              ) : null}
+            </span>
+          </TabsTrigger>
+          <TabsTrigger value="rejected">
+            <span className="flex items-center gap-2">
+              Case Details to Amend
+              {(notificationCountsQuery.data?.amendUnreadCount ?? 0) > 0 ? (
+                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
+                  {notificationCountsQuery.data?.amendUnreadCount ?? 0}
+                </span>
+              ) : null}
+            </span>
+          </TabsTrigger>
         </TabsList>
       </Tabs>
 

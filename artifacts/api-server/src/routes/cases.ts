@@ -17,6 +17,7 @@ import {
   projectsTable, developersTable, clientsTable, usersTable, rolesTable, auditLogsTable,
   firmFileRefSettingsTable,
   permissionsTable,
+  caseNotificationsTable,
   sql,
 } from "@workspace/db";
 import {
@@ -186,6 +187,68 @@ function isCaseApprovalRoleName(roleName: string): boolean {
   if (n.includes("account") && n.includes("admin")) return true;
   if (n.includes("account") && n.includes("manager")) return true;
   return false;
+}
+
+type CaseNotificationType =
+  | "OPEN_FILE_PENDING_APPROVAL"
+  | "CASE_DETAILS_TO_AMEND"
+  | "CASE_APPROVED"
+  | "REFERENCE_NO_CHANGED";
+
+async function listCaseApproverUserIds(r: DbConn, firmId: number): Promise<number[]> {
+  const rows = await r
+    .select({
+      userId: usersTable.id,
+      roleName: rolesTable.name,
+    })
+    .from(usersTable)
+    .innerJoin(rolesTable, and(eq(usersTable.roleId, rolesTable.id), eq(rolesTable.firmId, firmId)))
+    .innerJoin(permissionsTable, and(
+      eq(permissionsTable.roleId, rolesTable.id),
+      eq(permissionsTable.module, "cases"),
+      eq(permissionsTable.action, "update"),
+      eq(permissionsTable.allowed, true),
+    ))
+    .where(and(
+      eq(usersTable.firmId, firmId),
+      sql`COALESCE(${usersTable.status}, 'active') = 'active'`,
+    ))
+    .limit(500);
+
+  const out: number[] = [];
+  for (const row of rows) {
+    if (!isCaseApprovalRoleName(String(row.roleName ?? ""))) continue;
+    out.push(row.userId);
+  }
+  return Array.from(new Set(out));
+}
+
+async function insertCaseNotifications(r: DbConn, args: {
+  firmId: number;
+  caseId: number;
+  recipientUserIds: number[];
+  actorUserId: number | null;
+  type: CaseNotificationType;
+  title: string;
+  message?: string | null;
+  meta?: Record<string, unknown> | null;
+}): Promise<void> {
+  const recipients = Array.from(new Set(args.recipientUserIds.filter((x) => Number.isFinite(x))));
+  if (recipients.length === 0) return;
+  await r.insert(caseNotificationsTable).values(
+    recipients.map((uid) => ({
+      firmId: args.firmId,
+      caseId: args.caseId,
+      recipientUserId: uid,
+      actorUserId: args.actorUserId,
+      type: args.type,
+      title: args.title,
+      message: args.message ?? null,
+      meta: args.meta ?? null,
+      isRead: false,
+      readAt: null,
+    }))
+  );
 }
 
 async function canBypassCaseAssignment(r: DbConn, firmId: number, roleId: number | null | undefined): Promise<boolean> {
@@ -808,6 +871,10 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     id: c.id,
     firmId: c.firmId,
     referenceNo: c.referenceNo,
+    proposedReferenceNo: (c as any).proposedReferenceNo ?? null,
+    referenceNoChangedBy: (c as any).referenceNoChangedBy ?? null,
+    referenceNoChangedAt: toIsoStringSafeOrNull((c as any).referenceNoChangedAt),
+    referenceNoChangeReason: (c as any).referenceNoChangeReason ?? null,
     projectId: c.projectId,
     projectName: proj?.name ?? "Unknown",
     developerId: c.developerId,
@@ -3057,6 +3124,10 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
     .select({
       id: casesTable.id,
       referenceNo: casesTable.referenceNo,
+      proposedReferenceNo: casesTable.proposedReferenceNo,
+      referenceNoChangedBy: casesTable.referenceNoChangedBy,
+      referenceNoChangedAt: casesTable.referenceNoChangedAt,
+      referenceNoChangeReason: casesTable.referenceNoChangeReason,
       status: casesTable.status,
       projectName: projectsTable.name,
       developerName: developersTable.name,
@@ -3139,6 +3210,10 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
     return {
       id: row.id,
       referenceNo: row.referenceNo,
+      proposedReferenceNo: row.proposedReferenceNo ?? null,
+      referenceNoChangedBy: row.referenceNoChangedBy ?? null,
+      referenceNoChangedAt: row.referenceNoChangedAt ? new Date(row.referenceNoChangedAt as any).toISOString() : null,
+      referenceNoChangeReason: row.referenceNoChangeReason ?? null,
       clientName: clientDisplayName,
       projectName: row.projectName ?? "Unknown",
       developerName: row.developerName ?? "Unknown",
@@ -3253,6 +3328,10 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
         .select({
           id: casesTable.id,
           referenceNo: casesTable.referenceNo,
+          proposedReferenceNo: casesTable.proposedReferenceNo,
+          referenceNoChangedBy: casesTable.referenceNoChangedBy,
+          referenceNoChangedAt: casesTable.referenceNoChangedAt,
+          referenceNoChangeReason: casesTable.referenceNoChangeReason,
           status: casesTable.status,
           purchaseMode: casesTable.purchaseMode,
           titleType: casesTable.titleType,
@@ -3285,6 +3364,10 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
       const data = baseRows.map((row) => ({
         id: row.id,
         referenceNo: row.referenceNo,
+        proposedReferenceNo: (row as any).proposedReferenceNo ?? null,
+        referenceNoChangedBy: (row as any).referenceNoChangedBy ?? null,
+        referenceNoChangedAt: (row as any).referenceNoChangedAt ? new Date((row as any).referenceNoChangedAt as any).toISOString() : null,
+        referenceNoChangeReason: (row as any).referenceNoChangeReason ?? null,
         clientName: null,
         projectName: "Unknown",
         developerName: "Unknown",
@@ -3380,6 +3463,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       projectId: z.coerce.number().int().positive().optional(),
       developerId: z.coerce.number().int().positive().optional(),
       referenceNo: z.string().trim().max(80).optional(),
+      proposedReferenceNo: z.string().trim().max(80).optional(),
       purchaseMode: z.preprocess((v) => normalizeOptionalLower(v), z.string().optional()).default("cash"),
       titleType: z.preprocess((v) => normalizeOptionalLower(v), z.string().optional()),
       landCondition: z.preprocess((v) => normalizeOptionalLower(v), z.string().optional()),
@@ -3522,6 +3606,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       propertyAddress,
       loanDetails: loanDetailsRaw,
       companyDetails,
+      proposedReferenceNo,
     } = parsed.data;
 
     safeReqBody = {
@@ -3529,6 +3614,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       trackingToken: trackingToken ?? null,
       projectId: projectIdRaw ?? null,
       developerId: clientDeveloperId ?? null,
+      proposedReferenceNo: proposedReferenceNo ?? null,
       titleType: titleType ?? null,
       purchaseMode: purchaseMode ?? null,
       landCondition: landCondition ?? null,
@@ -3874,6 +3960,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       firmId: req.firmId!,
       projectId: effectiveProjectId,
       developerId: effectiveDeveloperId,
+      proposedReferenceNo: proposedReferenceNo ? proposedReferenceNo.trim() : null,
       purchaseMode,
       titleType: normalizedTitleType,
       isEncumbered: effectiveIsEncumbered,
@@ -3932,6 +4019,23 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
     if (!newCase) {
       res.status(500).json({ error: "Internal Server Error" });
       return;
+    }
+
+    try {
+      const approverUserIds = await listCaseApproverUserIds(r, req.firmId!);
+      const recipients = approverUserIds.filter((id) => id !== req.userId);
+      await insertCaseNotifications(r, {
+        firmId: req.firmId!,
+        caseId: newCase.id,
+        recipientUserIds: recipients,
+        actorUserId: req.userId ?? null,
+        type: "OPEN_FILE_PENDING_APPROVAL",
+        title: "Open file pending approval",
+        message: `Case #${newCase.id} submitted for approval`,
+        meta: { caseId: newCase.id, approvalStatus: "pending_approval" },
+      });
+    } catch (err) {
+      req.log.error({ err, route: "POST /api/cases", firmId: req.firmId, userId: req.userId }, "failed to create case notifications");
     }
 
     const responseAssignments: Array<{
@@ -4107,7 +4211,7 @@ router.patch("/cases/:caseId/approval", requireAuthHandler, requireFirmUserHandl
     return;
   }
   const [c] = await r
-    .select({ id: casesTable.id, approvalStatus: casesTable.approvalStatus })
+    .select({ id: casesTable.id, approvalStatus: casesTable.approvalStatus, createdBy: casesTable.createdBy })
     .from(casesTable)
     .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
     .limit(1);
@@ -4268,6 +4372,38 @@ router.get("/cases/reference-suggestions", requireAuthHandler, requireFirmUserHa
       const derived = initials || deriveShortCode(a.name, { maxLen: 5, mode: "initials" });
       if (!lawyerInitials && role === "lawyer") lawyerInitials = derived;
       if (!clerkInitials && role === "clerk") clerkInitials = derived;
+    }
+  }
+
+  if (!caseId) {
+    if (developerId) {
+      const [dev] = await r
+        .select({ name: developersTable.name })
+        .from(developersTable)
+        .where(and(eq(developersTable.id, developerId), eq(developersTable.firmId, req.firmId!)))
+        .limit(1);
+      developerName = String(dev?.name ?? "").trim();
+    }
+    if (projectId) {
+      const [proj] = await r
+        .select({ name: projectsTable.name, extraFields: projectsTable.extraFields })
+        .from(projectsTable)
+        .where(and(eq(projectsTable.id, projectId), eq(projectsTable.firmId, req.firmId!)))
+        .limit(1);
+      projectName = String(proj?.name ?? "").trim();
+      const extra = (proj as any)?.extraFields;
+      const rawCode = extra && typeof extra === "object" ? (extra as any).projectRefCode : null;
+      projectRefCode = typeof rawCode === "string" ? rawCode.trim() : "";
+    }
+    if (req.userId) {
+      const [u] = await r
+        .select({ initials: usersTable.initials, name: usersTable.name })
+        .from(usersTable)
+        .where(and(eq(usersTable.id, req.userId), eq(usersTable.firmId, req.firmId!)))
+        .limit(1);
+      const derived = String(u?.initials ?? "").trim().toUpperCase() || deriveShortCode(u?.name, { maxLen: 5, mode: "initials" });
+      lawyerInitials = derived;
+      clerkInitials = derived;
     }
   }
 
@@ -4501,6 +4637,7 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
   const bodySchema = z.object({
     referenceNo: z.string().trim().min(1).max(80),
     approvalNote: z.string().trim().max(5000).optional().nullable(),
+    changeReason: z.string().trim().max(500).optional().nullable(),
   });
   const body = bodySchema.safeParse(req.body);
   if (!body.success) {
@@ -4514,6 +4651,8 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
       caseType: casesTable.caseType,
       purchaseMode: casesTable.purchaseMode,
       titleType: casesTable.titleType,
+      proposedReferenceNo: casesTable.proposedReferenceNo,
+      createdBy: casesTable.createdBy,
     })
     .from(casesTable)
     .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
@@ -4527,33 +4666,61 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
     return;
   }
   const trimmedReferenceNo = body.data.referenceNo.trim();
-  const [dup] = await r
-    .select({ id: casesTable.id })
-    .from(casesTable)
-    .where(and(
-      eq(casesTable.firmId, req.firmId!),
-      eq(casesTable.referenceNo, trimmedReferenceNo),
-      sql`${casesTable.deletedAt} IS NULL`,
-      sql`${casesTable.id} <> ${params.data.caseId}`,
-    ))
-    .limit(1);
-  if (dup) {
-    res.status(409).json({ error: "Reference Number already exists in this firm" });
-    return;
-  }
+  const existingProposedRef = typeof (c as any).proposedReferenceNo === "string" ? String((c as any).proposedReferenceNo).trim() : "";
+  const effectiveProposedRef = existingProposedRef || trimmedReferenceNo;
+  const isReferenceChanged = effectiveProposedRef !== trimmedReferenceNo;
+  const now = new Date();
+  const changeReason = body.data.changeReason ? body.data.changeReason.trim() : null;
+
   try {
-    await r
-      .update(casesTable)
-      .set({
-        approvalStatus: "approved",
-        referenceNo: trimmedReferenceNo,
-        approvedBy: req.userId ?? null,
-        approvedAt: new Date(),
-        approvalNote: body.data.approvalNote ?? null,
-        status: "File Opened / SPA Pending Signing",
-      })
-      .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)));
+    await r.transaction(async (tx) => {
+      const [dup] = await tx
+        .select({ id: casesTable.id })
+        .from(casesTable)
+        .where(and(
+          eq(casesTable.firmId, req.firmId!),
+          eq(casesTable.referenceNo, trimmedReferenceNo),
+          sql`${casesTable.deletedAt} IS NULL`,
+          sql`${casesTable.id} <> ${params.data.caseId}`,
+        ))
+        .limit(1);
+      if (dup) {
+        throw new ApiError({ status: 409, code: "DUPLICATE_REFERENCE_NO", message: "Reference Number already exists in this firm" });
+      }
+
+      const [updated] = await tx
+        .update(casesTable)
+        .set({
+          approvalStatus: "approved",
+          referenceNo: trimmedReferenceNo,
+          proposedReferenceNo: effectiveProposedRef,
+          referenceNoChangedBy: isReferenceChanged ? (req.userId ?? null) : null,
+          referenceNoChangedAt: isReferenceChanged ? now : null,
+          referenceNoChangeReason: isReferenceChanged ? (changeReason || null) : null,
+          approvedBy: req.userId ?? null,
+          approvedAt: now,
+          approvalNote: body.data.approvalNote ?? null,
+          status: "File Opened / SPA Pending Signing",
+        })
+        .where(and(
+          eq(casesTable.id, params.data.caseId),
+          eq(casesTable.firmId, req.firmId!),
+          eq(casesTable.approvalStatus, "pending_approval"),
+        ))
+        .returning({ id: casesTable.id });
+      if (!updated) {
+        throw new ApiError({ status: 409, code: "CASE_NOT_PENDING_APPROVAL", message: "Case is not pending approval" });
+      }
+    });
   } catch (err: any) {
+    if (err instanceof ApiError) {
+      if (err.code === "DUPLICATE_REFERENCE_NO") {
+        res.status(409).json({ error: "Reference Number already exists in this firm" });
+        return;
+      }
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
     const code = typeof err?.code === "string" ? err.code : "";
     if (code === "23505") {
       res.status(409).json({ error: "Reference Number already exists in this firm" });
@@ -4599,6 +4766,51 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   }, { db: req.rlsDb });
+
+  if (isReferenceChanged) {
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: "firm_user",
+      action: "cases.reference_no_changed",
+      entityType: "case",
+      entityId: params.data.caseId,
+      detail: `proposed=${effectiveProposedRef};final=${trimmedReferenceNo}${changeReason ? `;reason=${changeReason}` : ""}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    }, { db: req.rlsDb });
+  }
+
+  try {
+    const creatorId = Number.isFinite((c as any).createdBy) ? Number((c as any).createdBy) : null;
+    if (creatorId && creatorId !== req.userId) {
+      await insertCaseNotifications(r, {
+        firmId: req.firmId!,
+        caseId: params.data.caseId,
+        recipientUserIds: [creatorId],
+        actorUserId: req.userId ?? null,
+        type: "CASE_APPROVED",
+        title: "Case approved",
+        message: `Case #${params.data.caseId} approved`,
+        meta: { caseId: params.data.caseId, referenceNo: trimmedReferenceNo },
+      });
+      if (isReferenceChanged) {
+        await insertCaseNotifications(r, {
+          firmId: req.firmId!,
+          caseId: params.data.caseId,
+          recipientUserIds: [creatorId],
+          actorUserId: req.userId ?? null,
+          type: "REFERENCE_NO_CHANGED",
+          title: "Reference number changed after approval",
+          message: `Previous: ${effectiveProposedRef}\nFinal: ${trimmedReferenceNo}`,
+          meta: { caseId: params.data.caseId, previous: effectiveProposedRef, final: trimmedReferenceNo, reason: changeReason },
+        });
+      }
+    }
+  } catch (err) {
+    req.log.error({ err, route: "POST /api/cases/:caseId/approve", firmId: req.firmId, userId: req.userId }, "failed to create approval notifications");
+  }
+
   res.json({ ok: true });
 }));
 
@@ -4625,7 +4837,7 @@ router.post("/cases/:caseId/reject", requireAuthHandler, requireFirmUserHandler,
     return;
   }
   const [c] = await r
-    .select({ id: casesTable.id, approvalStatus: casesTable.approvalStatus })
+    .select({ id: casesTable.id, approvalStatus: casesTable.approvalStatus, createdBy: casesTable.createdBy })
     .from(casesTable)
     .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
     .limit(1);
@@ -4658,6 +4870,24 @@ router.post("/cases/:caseId/reject", requireAuthHandler, requireFirmUserHandler,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   }, { db: req.rlsDb });
+
+  try {
+    const creatorId = Number.isFinite((c as any).createdBy) ? Number((c as any).createdBy) : null;
+    if (creatorId && creatorId !== req.userId) {
+      await insertCaseNotifications(r, {
+        firmId: req.firmId!,
+        caseId: params.data.caseId,
+        recipientUserIds: [creatorId],
+        actorUserId: req.userId ?? null,
+        type: "CASE_DETAILS_TO_AMEND",
+        title: "Case details to amend",
+        message: body.data.approvalNote.trim(),
+        meta: { caseId: params.data.caseId, approvalStatus: "rejected" },
+      });
+    }
+  } catch (err) {
+    req.log.error({ err, route: "POST /api/cases/:caseId/reject", firmId: req.firmId, userId: req.userId }, "failed to create reject notifications");
+  }
   res.json({ ok: true });
 }));
 
@@ -4706,6 +4936,23 @@ router.post("/cases/:caseId/resubmit", requireAuthHandler, requireFirmUserHandle
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   }, { db: req.rlsDb });
+
+  try {
+    const approverUserIds = await listCaseApproverUserIds(r, req.firmId!);
+    const recipients = approverUserIds.filter((id) => id !== req.userId);
+    await insertCaseNotifications(r, {
+      firmId: req.firmId!,
+      caseId: params.data.caseId,
+      recipientUserIds: recipients,
+      actorUserId: req.userId ?? null,
+      type: "OPEN_FILE_PENDING_APPROVAL",
+      title: "Open file pending approval",
+      message: `Case #${params.data.caseId} resubmitted for approval`,
+      meta: { caseId: params.data.caseId, approvalStatus: "pending_approval" },
+    });
+  } catch (err) {
+    req.log.error({ err, route: "POST /api/cases/:caseId/resubmit", firmId: req.firmId, userId: req.userId }, "failed to create resubmit notifications");
+  }
   res.json({ ok: true });
 }));
 

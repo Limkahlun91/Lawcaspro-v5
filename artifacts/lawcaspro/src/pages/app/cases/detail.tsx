@@ -2192,6 +2192,18 @@ export default function CaseDetail() {
             <p className="text-slate-500 mt-1 break-words">
               {[String((caseInfo as any).projectName ?? ""), String((caseInfo as any).developerName ?? "")].filter((x) => x.trim()).join(" • ")}
             </p>
+            {(() => {
+              const proposed = String((caseInfo as any).proposedReferenceNo ?? "").trim();
+              const finalRef = String((caseInfo as any).referenceNo ?? "").trim();
+              if (!proposed || !finalRef || proposed === finalRef) return null;
+              return (
+                <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                  <div className="font-semibold text-slate-900">Reference No. Updated</div>
+                  <div className="mt-1 font-mono text-slate-800 break-words">Proposed: {proposed}</div>
+                  <div className="mt-1 font-mono text-slate-800 break-words">Final: {finalRef}</div>
+                </div>
+              );
+            })()}
             {Number.isFinite(outstandingAdvances) && outstandingAdvances > 0 ? (
               <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                 ⚠️ This case has <span className="font-semibold">{formatRMAmount(outstandingAdvances)}</span> in outstanding advances. Please issue an Invoice / Collect payment.

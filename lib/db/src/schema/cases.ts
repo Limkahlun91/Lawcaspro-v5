@@ -120,6 +120,10 @@ export const casesTable = pgTable("cases", {
   projectId: integer("project_id"),
   developerId: integer("developer_id"),
   referenceNo: text("reference_no"),
+  proposedReferenceNo: text("proposed_reference_no"),
+  referenceNoChangedBy: integer("reference_no_changed_by"),
+  referenceNoChangedAt: timestamp("reference_no_changed_at", { withTimezone: true }),
+  referenceNoChangeReason: text("reference_no_change_reason"),
   purchaseMode: text("purchase_mode").notNull().default("cash"),
   titleType: text("title_type").notNull().default("master"),
   isEncumbered: boolean("is_encumbered").notNull().default(false),
@@ -390,6 +394,26 @@ export const auditLogsTable = pgTable("audit_logs", {
   entityIdx: index("idx_audit_entity").on(t.entityType, t.entityId),
   createdAtIdx: index("idx_audit_created_at").on(t.createdAt),
   actionIdx: index("idx_audit_action").on(t.action),
+}));
+
+export const caseNotificationsTable = pgTable("case_notifications", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  recipientUserId: integer("recipient_user_id").notNull(),
+  actorUserId: integer("actor_user_id"),
+  type: text("type").notNull(),
+  title: text("title").notNull(),
+  message: text("message"),
+  meta: jsonb("meta").$type<Record<string, unknown>>(),
+  isRead: boolean("is_read").notNull().default(false),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  readAt: timestamp("read_at", { withTimezone: true }),
+}, (t) => ({
+  firmRecipientCreatedAtIdx: index("idx_case_notifications_firm_recipient_created_at").on(t.firmId, t.recipientUserId, t.createdAt),
+  firmRecipientUnreadIdx: index("idx_case_notifications_firm_recipient_unread").on(t.firmId, t.recipientUserId, t.isRead, t.createdAt),
+  firmRecipientTypeUnreadIdx: index("idx_case_notifications_firm_recipient_type_unread").on(t.firmId, t.recipientUserId, t.type, t.isRead),
+  firmCaseIdx: index("idx_case_notifications_firm_case").on(t.firmId, t.caseId),
 }));
 
 export const insertCaseSchema = createInsertSchema(casesTable).omit({ id: true, createdAt: true, updatedAt: true });

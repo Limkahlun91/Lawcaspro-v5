@@ -128,6 +128,7 @@ export function CaseForm(props: {
   submitting?: boolean;
   submitLabel?: string;
   canOverrideProjectDerivedFields?: boolean;
+  proposedReferenceNo?: string;
 }) {
   const submitting = Boolean(props.submitting);
   const canOverrideProjectDerivedFields = Boolean(props.canOverrideProjectDerivedFields);
@@ -368,6 +369,14 @@ export function CaseForm(props: {
           </Button>
         </div>
       </div>
+
+      {props.mode === "create" ? (
+        <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+          <div className="text-xs font-medium text-slate-700">Proposed Reference No.</div>
+          <div className="mt-1 font-mono text-sm text-slate-900 break-words">{String(props.proposedReferenceNo ?? "").trim() || "—"}</div>
+          <div className="mt-1 text-xs text-slate-600">This is a proposed reference number. Final reference number will be confirmed upon approval.</div>
+        </div>
+      ) : null}
 
       {!v.caseType ? (
         <div className="text-sm text-slate-600">Select a Case Type to continue.</div>

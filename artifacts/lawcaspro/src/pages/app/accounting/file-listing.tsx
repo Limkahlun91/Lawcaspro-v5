@@ -150,10 +150,63 @@ export default function AccountingFileListing() {
 
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewCaseId, setReviewCaseId] = useState<number | null>(null);
+  const [reviewProposedReferenceNo, setReviewProposedReferenceNo] = useState("");
   const [reviewReferenceNo, setReviewReferenceNo] = useState("");
   const [reviewNote, setReviewNote] = useState("");
+  const [reviewChangeReason, setReviewChangeReason] = useState("");
 
   const isPendingTab = status === "pending_approval";
+
+  const notificationCountsQuery = useQuery<{
+    totalUnreadCount: number;
+    pendingApprovalUnreadCount: number;
+    amendUnreadCount: number;
+    approvedUnreadCount: number;
+  }>({
+    queryKey: ["case-notifications", "unread-counts"],
+    enabled: Boolean(user),
+    queryFn: () => apiFetchJson("/case-notifications/unread-counts").catch(() => ({
+      totalUnreadCount: 0,
+      pendingApprovalUnreadCount: 0,
+      amendUnreadCount: 0,
+      approvedUnreadCount: 0,
+    })),
+    refetchInterval: 30000,
+    retry: false,
+  });
+
+  const markReadMutation = useMutation({
+    mutationFn: async (vars: { types: string[] }) => {
+      return await apiFetchJson("/case-notifications/mark-read", {
+        method: "POST",
+        body: JSON.stringify({ types: vars.types }),
+      });
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["case-notifications", "unread-counts"] });
+    },
+  });
+
+  useEffect(() => {
+    if (!notificationCountsQuery.data) return;
+    const types =
+      status === "pending_approval"
+        ? ["OPEN_FILE_PENDING_APPROVAL"]
+        : status === "rejected"
+          ? ["CASE_DETAILS_TO_AMEND"]
+          : ["CASE_APPROVED", "REFERENCE_NO_CHANGED"];
+    const count =
+      status === "pending_approval"
+        ? notificationCountsQuery.data.pendingApprovalUnreadCount
+        : status === "rejected"
+          ? notificationCountsQuery.data.amendUnreadCount
+          : notificationCountsQuery.data.approvedUnreadCount;
+    if (count <= 0) return;
+    const ready = status === "approved" ? approvedFilesQuery.isSuccess : listQuery.isSuccess;
+    if (!ready) return;
+    if (markReadMutation.isPending) return;
+    markReadMutation.mutate({ types });
+  }, [approvedFilesQuery.isSuccess, listQuery.isSuccess, markReadMutation, notificationCountsQuery.data, status]);
 
   const debouncedReferenceNo = useDebouncedValue(reviewReferenceNo, 250).trim();
   const referenceSuggestionsQuery = useQuery<{
@@ -182,11 +235,22 @@ export default function AccountingFileListing() {
   const sequenceWarning = referenceSuggestionsQuery.data?.sequenceWarning ?? null;
   const duplicateWarning = referenceSuggestionsQuery.data?.duplicateWarning;
 
+  useEffect(() => {
+    if (!reviewOpen || !isPendingTab) return;
+    if (reviewReferenceNo.trim()) return;
+    if (!suggestedReference.trim()) return;
+    setReviewReferenceNo(suggestedReference.trim());
+  }, [isPendingTab, reviewOpen, reviewReferenceNo, suggestedReference]);
+
   const approveMutation = useMutation({
-    mutationFn: async (vars: { caseId: number; referenceNo: string; approvalNote: string }) => {
+    mutationFn: async (vars: { caseId: number; referenceNo: string; approvalNote: string; changeReason: string }) => {
       return await apiFetchJson(`/cases/${vars.caseId}/approve`, {
         method: "POST",
-        body: JSON.stringify({ referenceNo: vars.referenceNo.trim(), approvalNote: vars.approvalNote.trim() ? vars.approvalNote.trim() : null }),
+        body: JSON.stringify({
+          referenceNo: vars.referenceNo.trim(),
+          approvalNote: vars.approvalNote.trim() ? vars.approvalNote.trim() : null,
+          changeReason: vars.changeReason.trim() ? vars.changeReason.trim() : null,
+        }),
       });
     },
     onSuccess: async () => {
@@ -201,6 +265,7 @@ export default function AccountingFileListing() {
         qc.refetchQueries({ queryKey: ["dashboard"], type: "active" }),
         qc.refetchQueries({ queryKey: ["cases"], type: "active" }),
         qc.refetchQueries({ queryKey: ["case-files"], type: "active" }),
+        qc.refetchQueries({ queryKey: ["case-notifications", "unread-counts"], type: "active" }),
       ]);
       toast({ title: "Approved" });
       setReviewOpen(false);
@@ -227,6 +292,7 @@ export default function AccountingFileListing() {
         qc.refetchQueries({ queryKey: ["dashboard"], type: "active" }),
         qc.refetchQueries({ queryKey: ["cases"], type: "active" }),
         qc.refetchQueries({ queryKey: ["case-files"], type: "active" }),
+        qc.refetchQueries({ queryKey: ["case-notifications", "unread-counts"], type: "active" }),
       ]);
       toast({ title: "Returned for amendment" });
       setReviewOpen(false);
@@ -263,9 +329,36 @@ export default function AccountingFileListing() {
 
       <Tabs value={status} onValueChange={(v) => setStatus(v as ApprovalStatus)}>
         <TabsList>
-          <TabsTrigger value="pending_approval">Open File Pending Approval</TabsTrigger>
-          <TabsTrigger value="rejected">Case Details to Amend</TabsTrigger>
-          <TabsTrigger value="approved">Approved Files</TabsTrigger>
+          <TabsTrigger value="pending_approval">
+            <span className="flex items-center gap-2">
+              Open File Pending Approval
+              {(notificationCountsQuery.data?.pendingApprovalUnreadCount ?? 0) > 0 ? (
+                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
+                  {notificationCountsQuery.data?.pendingApprovalUnreadCount ?? 0}
+                </span>
+              ) : null}
+            </span>
+          </TabsTrigger>
+          <TabsTrigger value="rejected">
+            <span className="flex items-center gap-2">
+              Case Details to Amend
+              {(notificationCountsQuery.data?.amendUnreadCount ?? 0) > 0 ? (
+                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
+                  {notificationCountsQuery.data?.amendUnreadCount ?? 0}
+                </span>
+              ) : null}
+            </span>
+          </TabsTrigger>
+          <TabsTrigger value="approved">
+            <span className="flex items-center gap-2">
+              Approved Files
+              {(notificationCountsQuery.data?.approvedUnreadCount ?? 0) > 0 ? (
+                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
+                  {notificationCountsQuery.data?.approvedUnreadCount ?? 0}
+                </span>
+              ) : null}
+            </span>
+          </TabsTrigger>
         </TabsList>
       </Tabs>
 
@@ -347,8 +440,11 @@ export default function AccountingFileListing() {
                               variant="outline"
                               onClick={() => {
                                 setReviewCaseId(c.id);
-                                setReviewReferenceNo(String((c as any).referenceNo ?? ""));
+                                const proposed = String((c as any).proposedReferenceNo ?? "");
+                                setReviewProposedReferenceNo(proposed);
+                                setReviewReferenceNo(proposed);
                                 setReviewNote(String((c as any).approvalNote ?? ""));
+                                setReviewChangeReason("");
                                 setReviewOpen(true);
                               }}
                             >
@@ -378,8 +474,10 @@ export default function AccountingFileListing() {
         setReviewOpen(o);
         if (!o) {
           setReviewCaseId(null);
+          setReviewProposedReferenceNo("");
           setReviewReferenceNo("");
           setReviewNote("");
+          setReviewChangeReason("");
         }
       }}>
         <DialogContent className="max-w-[900px] w-[95vw]">
@@ -389,7 +487,14 @@ export default function AccountingFileListing() {
           </DialogHeader>
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             <div className="md:col-span-12 space-y-1.5">
-              <Label>Reference Number *</Label>
+              <Label>Proposed Reference No.</Label>
+              <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-900 break-words">
+                {reviewProposedReferenceNo.trim() || "—"}
+              </div>
+              <div className="text-xs text-slate-500">This is a proposed reference number. Final reference number will be confirmed upon approval.</div>
+            </div>
+            <div className="md:col-span-12 space-y-1.5">
+              <Label>Final Approved Reference No. *</Label>
               <Input
                 value={reviewReferenceNo}
                 onChange={(e) => setReviewReferenceNo(e.target.value)}
@@ -430,6 +535,17 @@ export default function AccountingFileListing() {
               ) : null}
               {!isPendingTab ? <div className="text-xs text-slate-500">Reference Number can only be set while Open File Pending Approval.</div> : null}
             </div>
+            {isPendingTab && reviewProposedReferenceNo.trim() && reviewReferenceNo.trim() && reviewReferenceNo.trim() !== reviewProposedReferenceNo.trim() ? (
+              <div className="md:col-span-12 space-y-1.5">
+                <Label>Change Reason (optional)</Label>
+                <Input
+                  value={reviewChangeReason}
+                  onChange={(e) => setReviewChangeReason(e.target.value)}
+                  disabled={!isPendingTab || approveMutation.isPending || rejectMutation.isPending}
+                  placeholder="Optional reason for changing reference number"
+                />
+              </div>
+            ) : null}
             <div className="md:col-span-12 space-y-1.5">
               <Label>Amendment Notes</Label>
               <Textarea
@@ -469,7 +585,7 @@ export default function AccountingFileListing() {
                   toast({ title: "Duplicate Reference Number", description: "Please change the Reference Number before approving.", variant: "destructive" });
                   return;
                 }
-                approveMutation.mutate({ caseId: reviewCaseId, referenceNo: reviewReferenceNo.trim(), approvalNote: reviewNote });
+                approveMutation.mutate({ caseId: reviewCaseId, referenceNo: reviewReferenceNo.trim(), approvalNote: reviewNote, changeReason: reviewChangeReason });
               }}
               disabled={!isPendingTab || !reviewCaseId || approveMutation.isPending}
             >

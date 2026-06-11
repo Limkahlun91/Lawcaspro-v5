@@ -15,6 +15,7 @@ import {
   ScrollText, 
   Settings,
   FileText,
+  Bell,
   LogOut,
   ChevronDown,
   ChevronRight,
@@ -37,6 +38,15 @@ export function AppLayout({ children }: { children: ReactNode }) {
     retry: false,
   });
   const unreadCount = unreadData?.count ?? 0;
+
+  const { data: caseUnreadData } = useQuery({
+    queryKey: ["case-notifications", "unread-counts"],
+    queryFn: () => apiFetchJson<{ totalUnreadCount: number }>("/case-notifications/unread-counts").catch(() => ({ totalUnreadCount: 0 })),
+    refetchInterval: 30000,
+    enabled: !!user && user.userType === "firm_user" && hasPermission(user, "cases", "read"),
+    retry: false,
+  });
+  const caseUnreadCount = caseUnreadData?.totalUnreadCount ?? 0;
 
   if (!user || user.userType !== "firm_user") {
     return null;
@@ -241,6 +251,19 @@ export function AppLayout({ children }: { children: ReactNode }) {
           <div className="mt-4">
             <div className="text-sm font-medium text-slate-200">{user.firmName}</div>
             <div className="text-xs text-slate-400 mt-1">{user.roleName || "User"}</div>
+            <div className="mt-3 flex items-center justify-between">
+              <div className="text-xs text-slate-500">Notifications</div>
+              <Link href="/app/cases">
+                <div className="relative inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-slate-800">
+                  <Bell className="w-4 h-4 text-slate-200" />
+                  {caseUnreadCount > 0 ? (
+                    <span className="absolute -top-1 -right-1 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
+                      {caseUnreadCount}
+                    </span>
+                  ) : null}
+                </div>
+              </Link>
+            </div>
           </div>
         </div>
         

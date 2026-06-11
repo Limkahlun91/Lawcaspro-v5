@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import { getHttpStatus, isApiErrorLike } from "@/lib/error-message";
@@ -10,6 +10,8 @@ import type { CaseFormValues, CaseType, Encumbrances, LandCondition, LoanPartyTy
 import { composeMalaysiaAddress, joinAddressLines, splitAddressToLines } from "./address";
 import { getStateFromPostcode } from "@/utils/my-address-helper";
 import { useAuth } from "@/lib/auth-context";
+import { useQuery } from "@tanstack/react-query";
+import { apiFetchJson } from "@/lib/api-client";
 
 function parseMoneyOrNull(v: string): number | null {
   const normalized = String(v ?? "").trim();
@@ -132,14 +134,16 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
   };
 }
 
-export function buildCasePayloadFromFormValues(values: CaseFormValues): Record<string, unknown> {
+export function buildCasePayloadFromFormValues(values: CaseFormValues, opts?: { proposedReferenceNo?: string | null }): Record<string, unknown> {
   const toPositiveIntOrUndefined = (v: string): number | undefined => {
     const n = Number(v);
     return Number.isInteger(n) && n > 0 ? n : undefined;
   };
 
+  const proposedReferenceNo = typeof opts?.proposedReferenceNo === "string" ? opts.proposedReferenceNo.trim() : "";
   const base: Record<string, unknown> = {
     caseType: values.caseType,
+    ...(proposedReferenceNo ? { proposedReferenceNo } : {}),
   };
 
   if (values.caseType === "subsale") {
@@ -291,6 +295,32 @@ export function CaseFormModal(props: {
   const [submitting, setSubmitting] = useState(false);
   const [value, setValue] = useState<CaseFormValues>(() => props.initialValues ?? createDefaultCaseFormValues());
 
+  const referenceSuggestionParams = useMemo(() => {
+    if (!props.open) return null;
+    if (props.mode !== "create") return null;
+    if (!value.caseType) return null;
+    if (value.caseType === "developer_sales") {
+      if (!value.projectId || !value.developerId) return null;
+    }
+    const params = new URLSearchParams();
+    params.set("caseType", value.caseType);
+    if (value.projectId) params.set("projectId", value.projectId);
+    if (value.developerId) params.set("developerId", value.developerId);
+    return params;
+  }, [props.mode, props.open, value.caseType, value.projectId, value.developerId]);
+
+  const referenceSuggestionQuery = useQuery<{ suggestedReference: string }>({
+    queryKey: ["cases", "reference-suggestions", "create", referenceSuggestionParams?.toString() ?? ""],
+    enabled: Boolean(referenceSuggestionParams),
+    queryFn: async () => {
+      const suffix = referenceSuggestionParams?.toString() ? `?${referenceSuggestionParams.toString()}` : "";
+      return await apiFetchJson(`/cases/reference-suggestions${suffix}`);
+    },
+    retry: false,
+    staleTime: 30_000,
+  });
+  const proposedReferenceNo = referenceSuggestionQuery.data?.suggestedReference ?? "";
+
   useEffect(() => {
     if (!props.open) return;
     setValue(props.initialValues ?? createDefaultCaseFormValues());
@@ -341,7 +371,7 @@ export function CaseFormModal(props: {
     }
     setSubmitting(true);
     try {
-      await props.onSubmit(buildCasePayloadFromFormValues(value));
+      await props.onSubmit(buildCasePayloadFromFormValues(value, { proposedReferenceNo: props.mode === "create" ? proposedReferenceNo : null }));
       if (props.showSuccessToast !== false) {
         toast({ title: props.mode === "create" ? "Open file submitted for approval." : "Case updated" });
       }
@@ -394,6 +424,7 @@ export function CaseFormModal(props: {
           onSubmit={handleSubmit}
           submitting={submitting}
           canOverrideProjectDerivedFields={canOverrideProjectDerivedFields}
+          proposedReferenceNo={props.mode === "create" ? proposedReferenceNo : ""}
         />
       </DialogContent>
     </Dialog>
