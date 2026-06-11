@@ -81,6 +81,7 @@ type EmailSetupStatus = {
 
 type EmailImportRange = "7d" | "30d" | "90d" | "all" | "custom";
 type ConnectProvider = "microsoft_graph" | "gmail" | "yahoo_imap" | "imap";
+type WizardStep = "email" | "method";
 
 function asArray<T>(value: unknown): T[] {
   if (Array.isArray(value)) return value as T[];
@@ -147,6 +148,47 @@ function getProviderPreset(provider: ConnectProvider) {
   };
 }
 
+function createInitialImapForm() {
+  return {
+    emailAddress: "",
+    displayName: "",
+    host: "",
+    port: "993",
+    username: "",
+    password: "",
+    useTls: true,
+  };
+}
+
+function detectProviderFromEmail(email: string): ConnectProvider {
+  const normalized = String(email ?? "").trim().toLowerCase();
+  const [, domain = ""] = normalized.split("@");
+  if (["outlook.com", "hotmail.com", "live.com"].includes(domain)) return "microsoft_graph";
+  if (["gmail.com", "googlemail.com"].includes(domain)) return "gmail";
+  if (domain === "yahoo.com" || domain === "yahoo.com.my" || domain === "yahoo.co.uk") return "yahoo_imap";
+  return "imap";
+}
+
+function recommendedMethodLabel(provider: ConnectProvider): string {
+  if (provider === "microsoft_graph") return "Microsoft secure login";
+  if (provider === "gmail") return "Google secure login";
+  if (provider === "yahoo_imap") return "Yahoo App Password + IMAP";
+  return "Manual IMAP";
+}
+
+function providerSecurityCopy(provider: ConnectProvider): string {
+  if (provider === "microsoft_graph") {
+    return "Lawcaspro will redirect you to Microsoft. Your Microsoft password is never entered or stored in Lawcaspro.";
+  }
+  if (provider === "gmail") {
+    return "Lawcaspro will redirect you to Google. Your Gmail password is never entered or stored in Lawcaspro.";
+  }
+  if (provider === "yahoo_imap") {
+    return "Yahoo requires an App Password for third-party mailbox import. Do not use your normal Yahoo password.";
+  }
+  return "Some providers require an App Password instead of the normal mailbox password.";
+}
+
 function formatMissingList(items: string[]): string {
   if (items.length === 0) return "";
   if (items.length === 1) return items[0];
@@ -202,21 +244,16 @@ export function EmailSettingsPanel() {
 
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
   const [connectDialogOpen, setConnectDialogOpen] = useState(false);
+  const [wizardStep, setWizardStep] = useState<WizardStep>("email");
+  const [wizardEmail, setWizardEmail] = useState("");
+  const [showMethodOverride, setShowMethodOverride] = useState(false);
   const [connectProvider, setConnectProvider] = useState<ConnectProvider>("microsoft_graph");
   const [importRange, setImportRange] = useState<EmailImportRange>("30d");
   const [importMaxEmails, setImportMaxEmails] = useState<100 | 500 | 1000>(500);
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [expandedGuide, setExpandedGuide] = useState<Partial<Record<ConnectProvider, boolean>>>({});
-  const [imapForm, setImapForm] = useState({
-    emailAddress: "",
-    displayName: "",
-    host: "",
-    port: "993",
-    username: "",
-    password: "",
-    useTls: true,
-  });
+  const [imapForm, setImapForm] = useState(createInitialImapForm());
 
   const emailAccountsQuery = useQuery<EmailAccount[]>({
     queryKey: ["communication", "email", "accounts"],
@@ -539,6 +576,42 @@ export function EmailSettingsPanel() {
   const toggleGuide = (provider: ConnectProvider) => {
     setExpandedGuide((prev) => ({ ...prev, [provider]: !prev[provider] }));
   };
+  const wizardEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(wizardEmail.trim());
+  const openConnectWizard = () => {
+    setConnectDialogOpen(true);
+    setWizardStep("email");
+    setWizardEmail("");
+    setShowMethodOverride(false);
+    setConnectProvider("microsoft_graph");
+    setImapForm(createInitialImapForm());
+  };
+  const applyWizardProvider = (provider: ConnectProvider, email: string) => {
+    const preset = getProviderPreset(provider);
+    setConnectProvider(provider);
+    setImapForm((prev) => ({
+      ...prev,
+      emailAddress: email,
+      host: preset.host || (provider === "imap" ? prev.host : ""),
+      port: preset.port,
+      username: provider === "yahoo_imap" ? email : prev.username,
+      useTls: preset.useTls,
+    }));
+  };
+  const continueWithDetectedProvider = () => {
+    const email = wizardEmail.trim();
+    const detected = detectProviderFromEmail(email);
+    applyWizardProvider(detected, email);
+    setShowMethodOverride(false);
+    setWizardStep("method");
+  };
+  const selectedProviderMissing =
+    connectProvider === "microsoft_graph"
+      ? microsoftMissing
+      : connectProvider === "gmail"
+        ? gmailMissing
+        : connectProvider === "yahoo_imap"
+          ? (setupStatus?.yahoo.missing ?? [])
+          : (setupStatus?.otherImap.missing ?? []);
 
   return (
     <div className="space-y-6">
@@ -546,14 +619,14 @@ export function EmailSettingsPanel() {
         <div>
           <div className="text-lg font-semibold">Email Settings</div>
           <div className="text-sm text-slate-500">
-            Choose your email provider below. Outlook and Gmail use secure login. Yahoo and custom mailboxes may require an app password.
+            Enter your mailbox email address. Lawcaspro will recommend the safest connection method. Outlook and Gmail use secure login. Yahoo and some custom mailboxes may require an app password.
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" onClick={refreshAll}>
             Refresh
           </Button>
-          <Button onClick={() => setConnectDialogOpen(true)}>Connect Mailbox</Button>
+          <Button onClick={openConnectWizard}>Connect Mailbox</Button>
         </div>
       </div>
 
@@ -573,6 +646,15 @@ export function EmailSettingsPanel() {
                   {encryptionDisabledReason}
                 </div>
               ) : null}
+              <div className="rounded-lg border bg-slate-50 p-4">
+                <div className="text-sm font-medium text-slate-900">Add account by email address</div>
+                <div className="mt-1 text-sm text-slate-600">
+                  Enter the mailbox email address first. Lawcaspro will recommend Microsoft secure login, Google secure login, Yahoo App Password, or manual IMAP.
+                </div>
+                <div className="mt-3">
+                  <Button onClick={openConnectWizard}>Add Email Account</Button>
+                </div>
+              </div>
               <div className="grid gap-3 lg:grid-cols-2">
                 {providerCards.map((card) => {
                   const latestConnected = card.connectedAccounts[0] ?? null;
@@ -595,8 +677,8 @@ export function EmailSettingsPanel() {
                         <div>Next: {card.nextStep}</div>
                       </div>
                       <div className="mt-3 flex flex-wrap items-center gap-3">
-                        <Button variant="outline" onClick={card.action}>
-                          {card.actionLabel}
+                        <Button variant="outline" onClick={openConnectWizard}>
+                          Add account
                         </Button>
                         <button
                           type="button"
@@ -916,33 +998,126 @@ export function EmailSettingsPanel() {
           <div className="text-sm font-medium text-slate-900">No mailbox selected</div>
           <div className="mt-1 text-sm text-slate-500">Choose an existing mailbox account or connect a new mailbox.</div>
           <div className="mt-4">
-            <Button onClick={() => setConnectDialogOpen(true)}>Connect Mailbox</Button>
+            <Button onClick={openConnectWizard}>Connect Mailbox</Button>
           </div>
         </div>
       )}
 
-      <Dialog open={connectDialogOpen} onOpenChange={setConnectDialogOpen}>
+      <Dialog
+        open={connectDialogOpen}
+        onOpenChange={(open) => {
+          setConnectDialogOpen(open);
+          if (!open) {
+            setWizardStep("email");
+            setWizardEmail("");
+            setShowMethodOverride(false);
+            setConnectProvider("microsoft_graph");
+            setImapForm(createInitialImapForm());
+          }
+        }}
+      >
         <DialogContent className="flex max-h-[85vh] max-w-lg flex-col overflow-hidden">
           <DialogHeader>
-            <DialogTitle>Connect Mailbox</DialogTitle>
+            <DialogTitle>{wizardStep === "email" ? "Add Email Account" : "Connect Mailbox"}</DialogTitle>
           </DialogHeader>
           <div className="flex-1 space-y-3 overflow-y-auto pr-1">
-            <div className="space-y-1.5">
-              <Label>Provider</Label>
-              <Select value={connectProvider} onValueChange={(value) => setConnectProvider(value as ConnectProvider)}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select provider" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="microsoft_graph">Microsoft 365 / Outlook / Hotmail</SelectItem>
-                  <SelectItem value="gmail">Gmail</SelectItem>
-                  <SelectItem value="yahoo_imap">Yahoo Mail</SelectItem>
-                  <SelectItem value="imap">Other IMAP</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
+            {wizardStep === "email" ? (
+              <div className="space-y-4 rounded-lg border bg-slate-50 p-4">
+                <div>
+                  <div className="text-sm font-medium text-slate-900">Add an email account</div>
+                  <div className="mt-1 text-sm text-slate-600">
+                    Enter your email address to connect your mailbox.
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Email address</Label>
+                  <Input
+                    type="email"
+                    value={wizardEmail}
+                    onChange={(e) => setWizardEmail(e.target.value)}
+                    placeholder="you@example.com"
+                  />
+                </div>
+                <div className="text-xs text-slate-500">
+                  Supported:
+                  <ul className="mt-1 list-disc pl-5">
+                    <li>Outlook / Hotmail / Live / Microsoft 365</li>
+                    <li>Gmail</li>
+                    <li>Yahoo Mail</li>
+                    <li>Other IMAP mailbox</li>
+                  </ul>
+                </div>
+                <div>
+                  <Button onClick={continueWithDetectedProvider} disabled={!wizardEmailValid}>
+                    Continue
+                  </Button>
+                </div>
+              </div>
+            ) : null}
 
-            {connectProvider === "microsoft_graph" ? (
+            {wizardStep === "method" ? (
+              <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
+                <div className="rounded-lg border bg-white p-3 text-sm">
+                  <div className="font-medium text-slate-900">Connected email address</div>
+                  <div className="mt-1 text-slate-600">{wizardEmail}</div>
+                  <button
+                    type="button"
+                    className="mt-2 text-xs text-slate-600 underline underline-offset-4"
+                    onClick={() => setWizardStep("email")}
+                  >
+                    Change email address
+                  </button>
+                </div>
+                <div className="rounded-lg border bg-white p-3 text-sm">
+                  <div className="font-medium text-slate-900">Recommended method: {recommendedMethodLabel(connectProvider)}</div>
+                  <div className="mt-1 text-slate-600">{providerSecurityCopy(connectProvider)}</div>
+                  {(connectProvider === "microsoft_graph" || connectProvider === "gmail") && selectedProviderMissing.length ? (
+                    <div className="mt-2 text-amber-900">
+                      {connectProvider === "microsoft_graph"
+                        ? "Microsoft login is not configured yet. Please ask system admin to configure Microsoft OAuth settings."
+                        : "Gmail login is not configured yet. Please ask system admin to configure Google OAuth settings."}
+                      <details className="mt-2">
+                        <summary className="cursor-pointer text-xs underline underline-offset-4">Show technical details</summary>
+                        <ul className="mt-2 list-disc pl-5 text-xs">
+                          {selectedProviderMissing.map((item) => <li key={item}>{item}</li>)}
+                        </ul>
+                      </details>
+                    </div>
+                  ) : null}
+                </div>
+                <div className="text-xs text-slate-500">
+                  <button
+                    type="button"
+                    className="underline underline-offset-4"
+                    onClick={() => setShowMethodOverride((prev) => !prev)}
+                  >
+                    Use a different connection method
+                  </button>
+                  <div className="mt-1">Custom domains like abc-law.com may be Microsoft 365, Google Workspace, or custom IMAP.</div>
+                </div>
+                {showMethodOverride ? (
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {([
+                      ["microsoft_graph", "Microsoft secure login"],
+                      ["gmail", "Google secure login"],
+                      ["yahoo_imap", "Yahoo App Password"],
+                      ["imap", "Other IMAP"],
+                    ] as const).map(([provider, label]) => (
+                      <Button
+                        key={provider}
+                        type="button"
+                        variant={connectProvider === provider ? "default" : "outline"}
+                        onClick={() => applyWizardProvider(provider, wizardEmail.trim())}
+                      >
+                        {label}
+                      </Button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {wizardStep === "method" && connectProvider === "microsoft_graph" ? (
               <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
                 <div className="text-sm font-medium">Microsoft 365 / Outlook / Hotmail</div>
                 <div className="rounded-lg border bg-white p-3 text-sm">
@@ -994,7 +1169,7 @@ export function EmailSettingsPanel() {
               </div>
             ) : null}
 
-            {isPresetImapProvider ? (
+            {wizardStep === "method" && isPresetImapProvider ? (
               <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
                 <div className="text-sm font-medium">{connectProvider === "yahoo_imap" ? "Yahoo Mail" : "Other IMAP"}</div>
                 <div className="rounded-lg border bg-white p-3 text-sm">
@@ -1082,7 +1257,7 @@ export function EmailSettingsPanel() {
                 <div className="grid grid-cols-1 gap-3">
                   <div className="space-y-1.5">
                     <Label>Email Address</Label>
-                    <Input value={imapForm.emailAddress} onChange={(e) => setImapForm((prev) => ({ ...prev, emailAddress: e.target.value }))} placeholder="mailbox@firm.com" />
+                    <Input value={imapForm.emailAddress} readOnly placeholder="mailbox@firm.com" />
                   </div>
                   <div className="space-y-1.5">
                     <Label>Display Name</Label>
@@ -1172,7 +1347,7 @@ export function EmailSettingsPanel() {
               </div>
             ) : null}
 
-            {connectProvider === "gmail" ? (
+            {wizardStep === "method" && connectProvider === "gmail" ? (
               <div className="space-y-3 rounded-lg border bg-slate-50 p-3">
                 <div className="text-sm font-medium">Gmail</div>
                 <div className="rounded-lg border bg-white p-3 text-sm">
