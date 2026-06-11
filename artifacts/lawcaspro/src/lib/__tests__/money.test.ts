@@ -32,16 +32,16 @@ describe("amountToEnglishWords", () => {
 
   it("formats whole amounts with zero sen", () => {
     expect(amountToEnglishWords(780000)).toBe(
-      "Ringgit Malaysia Seven Hundred Eighty Thousand and Sen Zero",
+      "Ringgit Malaysia Seven Hundred Eighty Thousand",
     );
   });
 
   it("formats loan total amounts", () => {
     expect(amountToEnglishWords(794500)).toBe(
-      "Ringgit Malaysia Seven Hundred Ninety Four Thousand Five Hundred and Sen Zero",
+      "Ringgit Malaysia Seven Hundred Ninety Four Thousand Five Hundred",
     );
     expect(amountToEnglishWords(786500)).toBe(
-      "Ringgit Malaysia Seven Hundred Eighty Six Thousand Five Hundred and Sen Zero",
+      "Ringgit Malaysia Seven Hundred Eighty Six Thousand Five Hundred",
     );
   });
 
@@ -52,7 +52,7 @@ describe("amountToEnglishWords", () => {
   });
 
   it("formats zero amount explicitly", () => {
-    expect(amountToEnglishWords(0)).toBe("Ringgit Malaysia Zero and Sen Zero");
+    expect(amountToEnglishWords(0)).toBe("Ringgit Malaysia Zero");
   });
 });
 

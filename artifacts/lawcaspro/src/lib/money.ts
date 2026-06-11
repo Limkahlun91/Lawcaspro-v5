@@ -95,5 +95,8 @@ export function amountToEnglishWords(value: unknown): string {
   const sen = rounded % 100;
   const prefix = amount < 0 ? "Negative " : "";
 
+  if (sen === 0) {
+    return `${prefix}Ringgit Malaysia ${integerToWords(ringgit)}`;
+  }
   return `${prefix}Ringgit Malaysia ${integerToWords(ringgit)} and Sen ${integerToWords(sen)}`;
 }

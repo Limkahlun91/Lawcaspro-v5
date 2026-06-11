@@ -1602,20 +1602,43 @@ export default function CaseDetail() {
   })();
 
   const safeBorrowers = (() => {
-    const fromColumn = Array.isArray((caseInfo as any)?.borrowers) ? ((caseInfo as any).borrowers as any[]) : [];
-    const namesFromColumn = fromColumn
-      .map((b) => (typeof b?.name === "string" ? b.name.trim() : ""))
-      .filter(Boolean);
-    if (namesFromColumn.length > 0) return namesFromColumn.map((name) => ({ name }));
+    const normalize = (raw: any) => ({
+      name: typeof raw?.name === "string" ? raw.name.trim() : "",
+      ic: typeof raw?.ic === "string" ? raw.ic.trim() : "",
+      tin: typeof raw?.tin === "string" ? raw.tin.trim() : "",
+      phone: typeof raw?.hp === "string" ? raw.hp.trim() : typeof raw?.phone === "string" ? raw.phone.trim() : "",
+      email: typeof raw?.email === "string" ? raw.email.trim() : "",
+      address: typeof raw?.address === "string" ? raw.address.trim() : "",
+    });
 
-    const b1 = typeof loanDetailsObj?.borrower1Name === "string" ? String(loanDetailsObj.borrower1Name).trim() : "";
-    const b2 = typeof loanDetailsObj?.borrower2Name === "string" ? String(loanDetailsObj.borrower2Name).trim() : "";
-    const list = [b1, b2].filter(Boolean);
-    return list.map((name) => ({ name }));
+    const fromColumn = Array.isArray((caseInfo as any)?.borrowers) ? ((caseInfo as any).borrowers as any[]) : [];
+    const normalizedFromColumn = fromColumn
+      .map((b) => normalize(b))
+      .filter((b) => b.name.length > 0);
+    if (normalizedFromColumn.length > 0) return normalizedFromColumn;
+
+    const fromLoanDetailsList = Array.isArray((loanDetailsObj as any)?.borrowers) ? (((loanDetailsObj as any).borrowers) as any[]) : [];
+    const normalizedFromLoanDetailsList = fromLoanDetailsList
+      .map((b) => normalize(b))
+      .filter((b) => b.name.length > 0);
+    if (normalizedFromLoanDetailsList.length > 0) return normalizedFromLoanDetailsList;
+
+    const fromLegacy = (idx: 1 | 2) => {
+      const name = typeof (loanDetailsObj as any)?.[`borrower${idx}Name`] === "string" ? String((loanDetailsObj as any)[`borrower${idx}Name`]).trim() : "";
+      if (!name) return null;
+      const ic = typeof (loanDetailsObj as any)?.[`borrower${idx}Ic`] === "string" ? String((loanDetailsObj as any)[`borrower${idx}Ic`]).trim() : "";
+      const tin = typeof (loanDetailsObj as any)?.[`borrower${idx}Tin`] === "string" ? String((loanDetailsObj as any)[`borrower${idx}Tin`]).trim() : "";
+      const hp = typeof (loanDetailsObj as any)?.[`borrower${idx}Hp`] === "string" ? String((loanDetailsObj as any)[`borrower${idx}Hp`]).trim() : "";
+      const email = typeof (loanDetailsObj as any)?.[`borrower${idx}Email`] === "string" ? String((loanDetailsObj as any)[`borrower${idx}Email`]).trim() : "";
+      const address = typeof (loanDetailsObj as any)?.[`borrower${idx}Address`] === "string" ? String((loanDetailsObj as any)[`borrower${idx}Address`]).trim() : "";
+      return { name, ic, tin, phone: hp, email, address };
+    };
+    const legacy = [fromLegacy(1), fromLegacy(2)].filter(Boolean);
+    return legacy as Array<{ name: string; ic: string; tin: string; phone: string; email: string; address: string }>;
   })();
 
   const loanBank = (() => {
-    const v = loanDetailsObj?.end_financier ?? loanDetailsObj?.endFinancier ?? loanDetailsObj?.bank ?? loanDetailsObj?.financier;
+    const v = loanDetailsObj?.endFinancierBank ?? loanDetailsObj?.end_financier ?? loanDetailsObj?.endFinancier ?? loanDetailsObj?.bank ?? loanDetailsObj?.financier;
     return v ? String(v).trim() : "";
   })();
 
@@ -2670,7 +2693,13 @@ export default function CaseDetail() {
                         <div key={`${b.name}-${idx}`} className="flex items-start gap-3 p-3 bg-slate-50 rounded-lg border border-slate-100">
                           <User className="w-5 h-5 text-slate-400 mt-0.5" />
                           <div className="min-w-0">
-                            <div className="font-medium text-slate-900 break-words">{b.name}</div>
+                            <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Borrower {idx + 1}</div>
+                            <div className="mt-0.5 font-medium text-slate-900 break-words">{b.name}</div>
+                            {b.ic ? <div className="text-xs text-slate-500 break-words">IC: {b.ic}</div> : null}
+                            {b.tin ? <div className="text-xs text-slate-500 break-words">TIN: {b.tin}</div> : null}
+                            {b.phone ? <div className="text-xs text-slate-500 break-words">Phone: {b.phone}</div> : null}
+                            {b.email ? <div className="text-xs text-slate-500 break-words">Email: {b.email}</div> : null}
+                            {b.address ? <div className="mt-1 text-xs text-slate-500 break-words">{b.address}</div> : null}
                           </div>
                         </div>
                       ))}

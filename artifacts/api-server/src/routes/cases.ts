@@ -909,6 +909,7 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     spaDetails,
     propertyDetails,
     loanDetails,
+    borrowers: (c as any).borrowers ?? [],
     companyDetails,
     keyDates: kd ? {
       spa_signed_date: pickDateString(kd, "spaSignedDate", "spa_signed_date"),
@@ -3545,8 +3546,15 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
         }
       }
       if (v.purchaseMode === "loan" && v.loanPartyType === "3rd_party") {
-        const borrowers = Array.isArray(v.borrowers) ? v.borrowers : [];
-        const hasBorrowers = borrowers.some((b) => (b?.name ?? "").trim().length > 0);
+        const nestedBorrowers = (() => {
+          const top = Array.isArray(v.borrowers) ? v.borrowers : [];
+          if (top.length > 0) return top;
+          const ld = v.loanDetails;
+          if (!ld || typeof ld !== "object" || Array.isArray(ld)) return [];
+          const b = (ld as any).borrowers;
+          return Array.isArray(b) ? b : [];
+        })();
+        const hasBorrowers = nestedBorrowers.some((b) => (b?.name ?? "").trim().length > 0);
         if (!hasBorrowers) {
           ctx.addIssue({ code: "custom", path: ["borrowers"], message: "At least one borrower name is required for 3rd-party loan" });
         }
@@ -3889,14 +3897,23 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       return out;
     };
 
-    const normalizedRequestedBorrowers = normalizeBorrowers(requestedBorrowers);
+    const borrowerPayloadRaw = (
+      Array.isArray(requestedBorrowers) && requestedBorrowers.length > 0
+        ? requestedBorrowers
+        : (loanDetailsRaw && typeof loanDetailsRaw === "object" && !Array.isArray(loanDetailsRaw) && Array.isArray((loanDetailsRaw as any).borrowers))
+          ? (loanDetailsRaw as any).borrowers
+          : []
+    );
+    const normalizedBorrowerPayload = normalizeBorrowers(borrowerPayloadRaw);
     const isLoan = purchaseMode === "loan";
     const effectiveLoanPartyType: "1st_party" | "3rd_party" = isLoan ? (loanPartyType ?? "1st_party") : "1st_party";
     let borrowersToStore: Array<{ name: string; ic?: string; tin?: string; hp?: string; email?: string; address: string }> = [];
 
     if (isLoan) {
       if (effectiveLoanPartyType === "1st_party") {
-        if (resolvedPurchaserIds.length === 0) {
+        if (normalizedBorrowerPayload.length > 0) {
+          borrowersToStore = normalizedBorrowerPayload;
+        } else if (resolvedPurchaserIds.length === 0) {
           borrowersToStore = [];
         } else {
         const rows = await r
@@ -3923,7 +3940,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
           .filter((b) => b.name.trim().length > 0);
         }
       } else {
-        borrowersToStore = normalizedRequestedBorrowers;
+        borrowersToStore = normalizedBorrowerPayload;
         if (borrowersToStore.length === 0 && loanDetailsRaw && typeof loanDetailsRaw === "object") {
           const ld: any = loanDetailsRaw as any;
           const b1 = typeof ld.borrower1Name === "string" ? ld.borrower1Name.trim() : "";

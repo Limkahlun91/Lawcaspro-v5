@@ -18,7 +18,7 @@ describe("buildCasePayloadFromFormValues", () => {
       othersSum: 6500,
       othersText: "4,500.00 AND LEGAL FEES OF RM2,000.00",
       totalLoan: 786500,
-      totalLoanWords: "Ringgit Malaysia Seven Hundred Eighty Six Thousand Five Hundred and Sen Zero",
+      totalLoanWords: "Ringgit Malaysia Seven Hundred Eighty Six Thousand Five Hundred",
     });
   });
 });

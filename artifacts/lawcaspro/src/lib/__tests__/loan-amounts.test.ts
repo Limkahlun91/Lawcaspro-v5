@@ -33,7 +33,7 @@ describe("calculateLoanAmounts", () => {
       detectedAmounts: [4500, 2000],
       othersTotal: 6500,
       totalLoan: 786500,
-      totalLoanWords: "Ringgit Malaysia Seven Hundred Eighty Six Thousand Five Hundred and Sen Zero",
+      totalLoanWords: "Ringgit Malaysia Seven Hundred Eighty Six Thousand Five Hundred",
     });
   });
 
@@ -46,7 +46,7 @@ describe("calculateLoanAmounts", () => {
       detectedAmounts: [14500],
       othersTotal: 14500,
       totalLoan: 794500,
-      totalLoanWords: "Ringgit Malaysia Seven Hundred Ninety Four Thousand Five Hundred and Sen Zero",
+      totalLoanWords: "Ringgit Malaysia Seven Hundred Ninety Four Thousand Five Hundred",
     });
   });
 
@@ -59,7 +59,7 @@ describe("calculateLoanAmounts", () => {
       detectedAmounts: [],
       othersTotal: 0,
       totalLoan: 780000,
-      totalLoanWords: "Ringgit Malaysia Seven Hundred Eighty Thousand and Sen Zero",
+      totalLoanWords: "Ringgit Malaysia Seven Hundred Eighty Thousand",
     });
   });
 });
