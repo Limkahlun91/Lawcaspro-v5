@@ -1,4 +1,5 @@
 import express, { type NextFunction, type Response, type Router as ExpressRouter } from "express";
+import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 import {
   DraftCreateSchema,
@@ -105,30 +106,39 @@ const expressRouter: ExpressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
-type ParsedEmailSendPayload = {
-  to?: string[];
-  cc?: string[];
-  bcc?: string[];
-  subject?: string | null;
-  bodyHtml?: string | null;
-  bodyText?: string | null;
-  attachments?: Array<{
-    filename?: string;
-    mimeType?: string | null;
-    sizeBytes?: number | null;
-    storagePath?: string | null;
-  }>;
-};
+type ParsedEmailSendPayload = z.infer<typeof EmailSendPayloadSchema>;
+type EmailSendInput = Parameters<typeof replyToMessage>[0]["input"];
+type EmailSendInputError = { error: string; code: string };
 
-const normalizeEmailSendInput = (data: ParsedEmailSendPayload) => {
+const normalizeEmailSendInput = (data: ParsedEmailSendPayload): EmailSendInput | EmailSendInputError => {
   const to = Array.isArray(data.to) ? data.to : [];
-  if (!to.length) return null;
+  if (!to.length) {
+    return { error: "Recipient is required", code: "EMAIL_TO_REQUIRED" };
+  }
+
+  const attachments: NonNullable<EmailSendInput["attachments"]> = [];
+  for (const attachment of data.attachments ?? []) {
+    if (typeof attachment.filename !== "string" || attachment.filename.trim().length === 0) {
+      return {
+        error: "Attachment filename is required",
+        code: "EMAIL_ATTACHMENT_FILENAME_REQUIRED",
+      };
+    }
+
+    attachments.push({
+      filename: attachment.filename.trim(),
+      mimeType: attachment.mimeType ?? null,
+      sizeBytes: attachment.sizeBytes ?? null,
+      storagePath: attachment.storagePath ?? null,
+    });
+  }
+
   return {
     ...data,
     to,
     cc: Array.isArray(data.cc) ? data.cc : [],
     bcc: Array.isArray(data.bcc) ? data.bcc : [],
-    attachments: Array.isArray(data.attachments) ? data.attachments : [],
+    attachments,
   };
 };
 
@@ -195,7 +205,7 @@ router.post("/communication/messages/:id/reply", requireAuth, requireFirmUser, r
   const parsed = EmailSendPayloadSchema.safeParse(req.body ?? {});
   if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
   const input = normalizeEmailSendInput(parsed.data);
-  if (!input) { res.status(400).json({ error: "Recipient is required", code: "EMAIL_TO_REQUIRED" }); return; }
+  if ("error" in input) { res.status(400).json(input); return; }
   try {
     const result = await replyToMessage({ r, req, messageId: id, input });
     if (!result) { res.status(404).json({ error: "Not found" }); return; }
@@ -214,7 +224,7 @@ router.post("/communication/messages/:id/reply-all", requireAuth, requireFirmUse
   const parsed = EmailSendPayloadSchema.safeParse(req.body ?? {});
   if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
   const input = normalizeEmailSendInput(parsed.data);
-  if (!input) { res.status(400).json({ error: "Recipient is required", code: "EMAIL_TO_REQUIRED" }); return; }
+  if ("error" in input) { res.status(400).json(input); return; }
   try {
     const result = await replyAllToMessage({ r, req, messageId: id, input });
     if (!result) { res.status(404).json({ error: "Not found" }); return; }
@@ -233,7 +243,7 @@ router.post("/communication/messages/:id/forward", requireAuth, requireFirmUser,
   const parsed = EmailSendPayloadSchema.safeParse(req.body ?? {});
   if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
   const input = normalizeEmailSendInput(parsed.data);
-  if (!input) { res.status(400).json({ error: "Recipient is required", code: "EMAIL_TO_REQUIRED" }); return; }
+  if ("error" in input) { res.status(400).json(input); return; }
   try {
     const result = await forwardMessage({ r, req, messageId: id, input });
     if (!result) { res.status(404).json({ error: "Not found" }); return; }
