@@ -78,8 +78,8 @@ export const EmailFolderPatchSchema = z.object({
 export const EmailImportRangeSchema = z.enum(["7d", "30d", "90d", "all", "custom"]);
 
 export const EmailImportRequestSchema = z.object({
-  range: EmailImportRangeSchema.default("30d"),
-  maxEmails: z.union([z.literal(100), z.literal(500), z.literal(1000)]).default(500),
+  range: EmailImportRangeSchema.default("7d"),
+  maxEmails: z.union([z.literal(50), z.literal(100), z.literal(500), z.literal(1000)]).default(50),
   from: z.string().datetime().optional().nullable(),
   to: z.string().datetime().optional().nullable(),
 }).superRefine((value, ctx) => {

@@ -12,6 +12,7 @@ const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1";
 const GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo";
 const GMAIL_ALL_MAIL_LABEL_ID = "__gmail_all__";
+const GMAIL_MESSAGE_FETCH_CONCURRENCY = 5;
 const GOOGLE_SCOPES = [
   "openid",
   "email",
@@ -349,10 +350,16 @@ export async function fetchGoogleLabelMessages(accessToken: string, providerFold
     const messages = list.messages ?? [];
     if (!messages.length) break;
 
-    for (const item of messages) {
-      const messageId = String(item.id ?? "").trim();
-      if (!messageId) continue;
-      out.push(await fetchGmailMessage(accessToken, messageId, providerFolderId));
+    for (let index = 0; index < messages.length && out.length < window.limit; index += GMAIL_MESSAGE_FETCH_CONCURRENCY) {
+      const batch = messages
+        .slice(index, index + GMAIL_MESSAGE_FETCH_CONCURRENCY)
+        .map((item) => String(item.id ?? "").trim())
+        .filter(Boolean);
+      if (!batch.length) continue;
+      const importedBatch = await Promise.all(
+        batch.map((messageId) => fetchGmailMessage(accessToken, messageId, providerFolderId)),
+      );
+      out.push(...importedBatch.slice(0, window.limit - out.length));
       if (out.length >= window.limit) break;
     }
 

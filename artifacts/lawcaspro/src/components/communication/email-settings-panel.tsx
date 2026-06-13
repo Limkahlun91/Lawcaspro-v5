@@ -10,6 +10,7 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Checkbox } from "@/components/ui/checkbox";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchJson } from "@/lib/api-client";
+import { isRequestTimeoutError } from "@/lib/error-message";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 
@@ -82,6 +83,7 @@ type EmailSetupStatus = {
 type EmailImportRange = "7d" | "30d" | "90d" | "all" | "custom";
 type ConnectProvider = "microsoft_graph" | "gmail" | "yahoo_imap" | "imap";
 type WizardStep = "email" | "method";
+type EmailImportMax = 50 | 100 | 500 | 1000;
 
 function asArray<T>(value: unknown): T[] {
   if (Array.isArray(value)) return value as T[];
@@ -248,8 +250,8 @@ export function EmailSettingsPanel() {
   const [wizardEmail, setWizardEmail] = useState("");
   const [showMethodOverride, setShowMethodOverride] = useState(false);
   const [connectProvider, setConnectProvider] = useState<ConnectProvider>("microsoft_graph");
-  const [importRange, setImportRange] = useState<EmailImportRange>("30d");
-  const [importMaxEmails, setImportMaxEmails] = useState<100 | 500 | 1000>(500);
+  const [importRange, setImportRange] = useState<EmailImportRange>("7d");
+  const [importMaxEmails, setImportMaxEmails] = useState<EmailImportMax>(50);
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [expandedGuide, setExpandedGuide] = useState<Partial<Record<ConnectProvider, boolean>>>({});
@@ -376,8 +378,9 @@ export function EmailSettingsPanel() {
 
   const importEmailMutation = useMutation({
     mutationFn: (accountId: number) =>
-      apiFetchJson<{ ok: boolean; importedCount: number; skippedDuplicateCount: number; failedCount: number; status: string }>(`/communication/email/accounts/${accountId}/import-now`, {
+      apiFetchJson<{ ok: boolean; importedCount: number; skippedDuplicateCount: number; failedCount: number; status: string; errorMessage?: string | null }>(`/communication/email/accounts/${accountId}/import-now`, {
         method: "POST",
+        timeoutMs: 25000,
         body: {
           range: importRange,
           maxEmails: importMaxEmails,
@@ -386,16 +389,31 @@ export function EmailSettingsPanel() {
         },
       }),
     onSuccess: (result, accountId) => {
-      qc.invalidateQueries({ queryKey: ["communication", "messages"] });
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", accountId, "sync-logs"] });
-      qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", accountId, "folders"] });
+      refreshImportQueries(accountId);
       toast({
-        title: "Import completed",
-        description: `Imported ${result.importedCount}, skipped ${result.skippedDuplicateCount} duplicates, failed ${result.failedCount}.`,
+        title: result.status === "partial" ? "Import partially completed" : "Import completed",
+        description: [
+          `Imported ${result.importedCount}, skipped ${result.skippedDuplicateCount} duplicates, failed ${result.failedCount}.`,
+          result.errorMessage ? result.errorMessage : null,
+        ].filter(Boolean).join(" "),
       });
     },
-    onError: (e) => toastError(toast, e),
+    onError: (e, accountId) => {
+      scheduleImportRefresh(accountId);
+      if (isRequestTimeoutError(e)) {
+        const description =
+          importRange === "7d" && importMaxEmails <= 50
+            ? "Import timed out. Try again in a moment and check Sync Logs for partial results."
+            : "Import timed out. Try Last 7 days and max 50 emails first.";
+        toast({
+          title: "Import timeout",
+          description,
+          variant: "destructive",
+        });
+        return;
+      }
+      toastError(toast, e);
+    },
   });
 
   const disconnectEmailAccountMutation = useMutation({
@@ -468,6 +486,21 @@ export function EmailSettingsPanel() {
     if (selectedAccountId != null) {
       qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", selectedAccountId, "folders"] });
       qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", selectedAccountId, "sync-logs"] });
+    }
+  };
+
+  const refreshImportQueries = (accountId: number) => {
+    qc.invalidateQueries({ queryKey: ["communication", "messages"] });
+    qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
+    qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", accountId, "sync-logs"] });
+    qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", accountId, "folders"] });
+  };
+
+  const scheduleImportRefresh = (accountId: number) => {
+    refreshImportQueries(accountId);
+    if (typeof window !== "undefined") {
+      window.setTimeout(() => refreshImportQueries(accountId), 2000);
+      window.setTimeout(() => refreshImportQueries(accountId), 6000);
     }
   };
 
@@ -964,9 +997,10 @@ export function EmailSettingsPanel() {
                 </div>
                 <div className="space-y-1.5">
                   <Label>Max emails per import</Label>
-                  <Select value={String(importMaxEmails)} onValueChange={(value) => setImportMaxEmails(Number(value) as 100 | 500 | 1000)}>
+                  <Select value={String(importMaxEmails)} onValueChange={(value) => setImportMaxEmails(Number(value) as EmailImportMax)}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
+                      <SelectItem value="50">50</SelectItem>
                       <SelectItem value="100">100</SelectItem>
                       <SelectItem value="500">500</SelectItem>
                       <SelectItem value="1000">1000</SelectItem>
@@ -990,7 +1024,7 @@ export function EmailSettingsPanel() {
                 <Button onClick={() => importEmailMutation.mutate(selectedAccount.id)} disabled={!canImportSelectedAccount || importEmailMutation.isPending}>
                   Import Now
                 </Button>
-                <div className="text-xs text-slate-500">Default recommendation: Last 30 days + max 500 emails.</div>
+                <div className="text-xs text-slate-500">Default recommendation: Last 7 days + max 50 emails.</div>
               </div>
               <div className="rounded-lg border bg-slate-50 p-3 text-sm text-slate-600">
                 <div>Sync-enabled folders: {selectedAccountSyncEnabledFolders.length ? selectedAccountSyncEnabledFolders.map((folder) => folder.displayName).join(", ") : "None"}</div>

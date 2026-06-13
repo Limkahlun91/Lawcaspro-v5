@@ -103,6 +103,9 @@ function now(): Date {
   return new Date();
 }
 
+const GMAIL_IMPORT_BATCH_LIMIT = 100;
+const GMAIL_IMPORT_BATCH_MESSAGE = "Import is too large for one request. Please reduce range/max emails or run smaller batches.";
+
 function isLawyerRoleName(roleName: string): boolean {
   const n = roleName.trim().toLowerCase();
   return n.includes("lawyer") || n.includes("partner");
@@ -110,7 +113,7 @@ function isLawyerRoleName(roleName: string): boolean {
 
 type EmailImportOptions = {
   range: "7d" | "30d" | "90d" | "all" | "custom";
-  maxEmails: 100 | 500 | 1000;
+  maxEmails: 50 | 100 | 500 | 1000;
   from?: string | null;
   to?: string | null;
 };
@@ -127,11 +130,11 @@ type ImapMailboxInput = {
 };
 
 function normalizeImportOptions(input?: Partial<EmailImportOptions> | null): EmailImportOptions {
-  const range = input?.range ?? "30d";
-  const maxEmails = input?.maxEmails ?? 500;
+  const range = input?.range ?? "7d";
+  const maxEmails = input?.maxEmails ?? 50;
   return {
     range,
-    maxEmails: maxEmails === 100 || maxEmails === 500 || maxEmails === 1000 ? maxEmails : 500,
+    maxEmails: maxEmails === 50 || maxEmails === 100 || maxEmails === 500 || maxEmails === 1000 ? maxEmails : 50,
     from: input?.from ?? null,
     to: input?.to ?? null,
   };
@@ -1016,7 +1019,13 @@ async function importMessagesForAccount(args: { r: DbConn; req: AuthRequest; acc
   let skippedDuplicateCount = 0;
   let failedCount = 0;
   let firstFailureMessage: string | null = null;
-  let remaining = importWindow.limit;
+  const requestedLimit = importWindow.limit;
+  const effectiveLimit = account.provider === "gmail" ? Math.min(requestedLimit, GMAIL_IMPORT_BATCH_LIMIT) : requestedLimit;
+  const limitCapped = effectiveLimit < requestedLimit;
+  if (limitCapped) {
+    firstFailureMessage = GMAIL_IMPORT_BATCH_MESSAGE;
+  }
+  let remaining = effectiveLimit;
 
   try {
     if (account.provider === "microsoft_graph") {
@@ -1123,7 +1132,7 @@ async function importMessagesForAccount(args: { r: DbConn; req: AuthRequest; acc
       });
     }
 
-    const completedStatus = failedCount > 0 ? "partial" : "success";
+    const completedStatus = failedCount > 0 || limitCapped ? "partial" : "success";
     await updateEmailSyncLog(args.r, firmId, syncLog.id, {
       finishedAt: now(),
       status: completedStatus,
@@ -1134,15 +1143,23 @@ async function importMessagesForAccount(args: { r: DbConn; req: AuthRequest; acc
     await updateEmailAccount(args.r, firmId, args.accountId, {
       status: failedCount > 0 ? "error" : "active",
       lastSyncAt: now(),
-      lastError: firstFailureMessage,
+      lastError: failedCount > 0 ? firstFailureMessage : null,
     });
     await writeCommunicationAuditLog({
       r: args.r,
       req: args.req,
-      action: failedCount > 0 ? "communication.email_sync.failed" : "communication.email_sync.success",
-      newValue: { accountId: args.accountId, syncLogId: syncLog.id, importedCount, skippedDuplicateCount, failedCount, options: args.options, errorMessage: firstFailureMessage },
+      action: failedCount > 0 || limitCapped ? "communication.email_sync.failed" : "communication.email_sync.success",
+      newValue: { accountId: args.accountId, syncLogId: syncLog.id, importedCount, skippedDuplicateCount, failedCount, requestedLimit, effectiveLimit, options: args.options, errorMessage: firstFailureMessage },
     });
-    return { ok: failedCount === 0 as const, importedCount, skippedDuplicateCount, failedCount, syncLogId: syncLog.id, status: completedStatus };
+    return {
+      ok: completedStatus === "success",
+      importedCount,
+      skippedDuplicateCount,
+      failedCount,
+      syncLogId: syncLog.id,
+      status: completedStatus,
+      errorMessage: firstFailureMessage,
+    };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Email import failed";
     await updateEmailSyncLog(args.r, firmId, syncLog.id, {
