@@ -84,6 +84,10 @@ type EmailImportRange = "7d" | "30d" | "90d" | "all" | "custom";
 type ConnectProvider = "microsoft_graph" | "gmail" | "yahoo_imap" | "imap";
 type WizardStep = "email" | "method";
 type EmailImportMax = 50 | 100 | 500 | 1000;
+type ImportMutationContext = {
+  latestLogIdBeforeImport: number | null;
+  startedAtMs: number;
+};
 
 function asArray<T>(value: unknown): T[] {
   if (Array.isArray(value)) return value as T[];
@@ -108,6 +112,16 @@ function formatDateTime(value: unknown): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(d);
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function summarizeSyncLogFailures(log: Pick<EmailSyncLog, "status" | "errorMessage">) {
+  return log.status === "error" || log.errorMessage ? 1 : 0;
 }
 
 function providerLabel(provider: string): string {
@@ -256,6 +270,7 @@ export function EmailSettingsPanel() {
   const [customTo, setCustomTo] = useState("");
   const [expandedGuide, setExpandedGuide] = useState<Partial<Record<ConnectProvider, boolean>>>({});
   const [imapForm, setImapForm] = useState(createInitialImapForm());
+  const [checkingImportAccountId, setCheckingImportAccountId] = useState<number | null>(null);
 
   const emailAccountsQuery = useQuery<EmailAccount[]>({
     queryKey: ["communication", "email", "accounts"],
@@ -377,6 +392,15 @@ export function EmailSettingsPanel() {
   });
 
   const importEmailMutation = useMutation({
+    onMutate: async (accountId): Promise<ImportMutationContext> => {
+      const currentLogs = selectedAccountId === accountId && selectedAccountLogs.length
+        ? selectedAccountLogs
+        : await fetchRecentSyncLogs(accountId);
+      return {
+        latestLogIdBeforeImport: currentLogs[0]?.id ?? null,
+        startedAtMs: Date.now(),
+      };
+    },
     mutationFn: (accountId: number) =>
       apiFetchJson<{ ok: boolean; importedCount: number; skippedDuplicateCount: number; failedCount: number; status: string; errorMessage?: string | null }>(`/communication/email/accounts/${accountId}/import-now`, {
         method: "POST",
@@ -389,6 +413,7 @@ export function EmailSettingsPanel() {
         },
       }),
     onSuccess: (result, accountId) => {
+      setCheckingImportAccountId((current) => (current === accountId ? null : current));
       refreshImportQueries(accountId);
       toast({
         title: result.status === "partial" ? "Import partially completed" : "Import completed",
@@ -398,20 +423,29 @@ export function EmailSettingsPanel() {
         ].filter(Boolean).join(" "),
       });
     },
-    onError: (e, accountId) => {
+    onError: async (e, accountId, context) => {
       scheduleImportRefresh(accountId);
       if (isRequestTimeoutError(e)) {
-        const description =
-          importRange === "7d" && importMaxEmails <= 50
-            ? "Import timed out. Try again in a moment and check Sync Logs for partial results."
-            : "Import timed out. Try Last 7 days and max 50 emails first.";
         toast({
-          title: "Import timeout",
-          description,
-          variant: "destructive",
+          title: "Checking import status",
+          description: "Import is still running. Please wait while Lawcaspro checks the latest import log.",
         });
+        setCheckingImportAccountId(accountId);
+        try {
+          await pollImportCompletion(accountId, context);
+        } catch {
+          refreshImportQueries(accountId);
+          toast({
+            title: "Import still running",
+            description: "Import may still be running. Please check Sync Logs and Email Inbox after a few seconds.",
+            variant: "destructive",
+          });
+        } finally {
+          setCheckingImportAccountId((current) => (current === accountId ? null : current));
+        }
         return;
       }
+      setCheckingImportAccountId((current) => (current === accountId ? null : current));
       toastError(toast, e);
     },
   });
@@ -496,6 +530,59 @@ export function EmailSettingsPanel() {
     qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", accountId, "folders"] });
   };
 
+  const fetchRecentSyncLogs = async (accountId: number) => {
+    const rows = await apiFetchJson(`/communication/email/accounts/${accountId}/sync-logs?limit=20`);
+    return asArray<EmailSyncLog>(rows);
+  };
+
+  const pollImportCompletion = async (accountId: number, context?: ImportMutationContext) => {
+    const previousLogId = context?.latestLogIdBeforeImport ?? null;
+    const startedAtMs = context?.startedAtMs ?? Date.now();
+    const deadline = Date.now() + 60_000;
+
+    while (Date.now() <= deadline) {
+      const logs = await fetchRecentSyncLogs(accountId);
+      const matchingLog = logs.find((log) => {
+        if (previousLogId != null && log.id > previousLogId) return true;
+        const logStartedAtMs = Date.parse(log.startedAt);
+        return Number.isFinite(logStartedAtMs) && logStartedAtMs >= startedAtMs - 5_000;
+      });
+
+      if (matchingLog) {
+        if (matchingLog.status === "success" || matchingLog.status === "partial") {
+          refreshImportQueries(accountId);
+          toast({
+            title: matchingLog.status === "partial" ? "Import partially completed" : "Import completed",
+            description: [
+              `Imported ${matchingLog.importedCount}, skipped ${matchingLog.skippedDuplicateCount} duplicates, failed ${summarizeSyncLogFailures(matchingLog)}.`,
+              matchingLog.errorMessage ? matchingLog.errorMessage : null,
+            ].filter(Boolean).join(" "),
+          });
+          return;
+        }
+
+        if (matchingLog.status === "error" || matchingLog.status === "failed") {
+          refreshImportQueries(accountId);
+          toast({
+            title: "Import failed",
+            description: matchingLog.errorMessage || "Import failed. Check Sync Logs for details.",
+            variant: "destructive",
+          });
+          return;
+        }
+      }
+
+      await wait(4_000);
+    }
+
+    refreshImportQueries(accountId);
+    toast({
+      title: "Import still running",
+      description: "Import is taking longer than expected. Please refresh Sync Logs or try a smaller batch.",
+      variant: "destructive",
+    });
+  };
+
   const scheduleImportRefresh = (accountId: number) => {
     refreshImportQueries(accountId);
     if (typeof window !== "undefined") {
@@ -517,7 +604,8 @@ export function EmailSettingsPanel() {
   const canImportSelectedAccount = Boolean(
     selectedAccount &&
     selectedAccount.status !== "setup_required" &&
-    selectedAccount.status !== "disconnected"
+    selectedAccount.status !== "disconnected" &&
+    checkingImportAccountId !== selectedAccount.id
   );
   const encryptionDisabledReason = !setupStatus?.encryptionConfigured
     ? "Credential storage is disabled because EMAIL_TOKEN_ENCRYPTION_KEY is missing. Tokens and app passwords cannot be saved until this is configured."
@@ -929,7 +1017,7 @@ export function EmailSettingsPanel() {
                     Sync Folders
                   </Button>
                   <Button variant="outline" size="sm" onClick={() => importEmailMutation.mutate(selectedAccount.id)} disabled={!canImportSelectedAccount || importEmailMutation.isPending}>
-                    Import Emails
+                    {checkingImportAccountId === selectedAccount.id ? "Checking Import..." : "Import Emails"}
                   </Button>
                   <Button variant="outline" size="sm" onClick={() => disconnectEmailAccountMutation.mutate(selectedAccount.id)} disabled={disconnectEmailAccountMutation.isPending}>
                     Disconnect
@@ -1022,7 +1110,7 @@ export function EmailSettingsPanel() {
               ) : null}
               <div className="flex flex-wrap items-center gap-2">
                 <Button onClick={() => importEmailMutation.mutate(selectedAccount.id)} disabled={!canImportSelectedAccount || importEmailMutation.isPending}>
-                  Import Now
+                  {checkingImportAccountId === selectedAccount.id ? "Checking Import Status..." : "Import Now"}
                 </Button>
                 <div className="text-xs text-slate-500">Default recommendation: Last 7 days + max 50 emails.</div>
               </div>
@@ -1031,7 +1119,7 @@ export function EmailSettingsPanel() {
                 <div className="mt-1">Last import result: {selectedAccountLastLog ? `${selectedAccountLastLog.status} at ${formatDateTime(selectedAccountLastLog.startedAt)}` : "No import yet"}</div>
                 {selectedAccountLastLog ? (
                   <div className="mt-1">
-                    Imported: {selectedAccountLastLog.importedCount} · Skipped duplicates: {selectedAccountLastLog.skippedDuplicateCount} · Failed: {selectedAccountLastLog.errorMessage ? 1 : 0}
+                    Imported: {selectedAccountLastLog.importedCount} · Skipped duplicates: {selectedAccountLastLog.skippedDuplicateCount} · Failed: {summarizeSyncLogFailures(selectedAccountLastLog)}
                   </div>
                 ) : null}
               </div>
