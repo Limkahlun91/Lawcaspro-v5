@@ -105,6 +105,33 @@ const expressRouter: ExpressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
+type ParsedEmailSendPayload = {
+  to?: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject?: string | null;
+  bodyHtml?: string | null;
+  bodyText?: string | null;
+  attachments?: Array<{
+    filename?: string;
+    mimeType?: string | null;
+    sizeBytes?: number | null;
+    storagePath?: string | null;
+  }>;
+};
+
+const normalizeEmailSendInput = (data: ParsedEmailSendPayload) => {
+  const to = Array.isArray(data.to) ? data.to : [];
+  if (!to.length) return null;
+  return {
+    ...data,
+    to,
+    cc: Array.isArray(data.cc) ? data.cc : [],
+    bcc: Array.isArray(data.bcc) ? data.bcc : [],
+    attachments: Array.isArray(data.attachments) ? data.attachments : [],
+  };
+};
+
 const getRlsDb = (req: AuthRequest, res: Response) => {
   const r = req.rlsDb;
   if (!r) {
@@ -167,8 +194,10 @@ router.post("/communication/messages/:id/reply", requireAuth, requireFirmUser, r
   if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
   const parsed = EmailSendPayloadSchema.safeParse(req.body ?? {});
   if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  const input = normalizeEmailSendInput(parsed.data);
+  if (!input) { res.status(400).json({ error: "Recipient is required", code: "EMAIL_TO_REQUIRED" }); return; }
   try {
-    const result = await replyToMessage({ r, req, messageId: id, input: parsed.data });
+    const result = await replyToMessage({ r, req, messageId: id, input });
     if (!result) { res.status(404).json({ error: "Not found" }); return; }
     res.json(result);
   } catch (error) {
@@ -184,8 +213,10 @@ router.post("/communication/messages/:id/reply-all", requireAuth, requireFirmUse
   if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
   const parsed = EmailSendPayloadSchema.safeParse(req.body ?? {});
   if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  const input = normalizeEmailSendInput(parsed.data);
+  if (!input) { res.status(400).json({ error: "Recipient is required", code: "EMAIL_TO_REQUIRED" }); return; }
   try {
-    const result = await replyAllToMessage({ r, req, messageId: id, input: parsed.data });
+    const result = await replyAllToMessage({ r, req, messageId: id, input });
     if (!result) { res.status(404).json({ error: "Not found" }); return; }
     res.json(result);
   } catch (error) {
@@ -201,8 +232,10 @@ router.post("/communication/messages/:id/forward", requireAuth, requireFirmUser,
   if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
   const parsed = EmailSendPayloadSchema.safeParse(req.body ?? {});
   if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  const input = normalizeEmailSendInput(parsed.data);
+  if (!input) { res.status(400).json({ error: "Recipient is required", code: "EMAIL_TO_REQUIRED" }); return; }
   try {
-    const result = await forwardMessage({ r, req, messageId: id, input: parsed.data });
+    const result = await forwardMessage({ r, req, messageId: id, input });
     if (!result) { res.status(404).json({ error: "Not found" }); return; }
     res.json(result);
   } catch (error) {
