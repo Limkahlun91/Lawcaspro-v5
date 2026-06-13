@@ -18,6 +18,7 @@ export const CommunicationMessageInternalStatusSchema = z.enum([
   "fully_ready",
   "partially_replied",
   "fully_replied",
+  "sent",
   "closed",
   "archived",
 ]);
@@ -73,6 +74,25 @@ export const EmailAccountPatchSchema = z.object({
 
 export const EmailFolderPatchSchema = z.object({
   syncEnabled: z.boolean(),
+});
+
+const EmailAddressSchema = z.string().trim().email();
+
+export const EmailSendAttachmentSchema = z.object({
+  filename: z.string().trim().min(1).max(255),
+  mimeType: z.string().trim().max(255).optional().nullable(),
+  sizeBytes: z.number().int().nonnegative().optional().nullable(),
+  storagePath: z.string().trim().max(1000).optional().nullable(),
+});
+
+export const EmailSendPayloadSchema = z.object({
+  to: z.array(EmailAddressSchema).max(100).default([]),
+  cc: z.array(EmailAddressSchema).max(100).default([]),
+  bcc: z.array(EmailAddressSchema).max(100).default([]),
+  subject: z.string().max(998).optional().nullable().default(""),
+  bodyHtml: z.string().max(1_000_000).optional().nullable().default(""),
+  bodyText: z.string().max(1_000_000).optional().nullable().default(""),
+  attachments: z.array(EmailSendAttachmentSchema).max(20).default([]),
 });
 
 export const EmailImportRangeSchema = z.enum(["7d", "30d", "90d", "all", "custom"]);

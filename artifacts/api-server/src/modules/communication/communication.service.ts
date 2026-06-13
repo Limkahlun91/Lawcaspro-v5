@@ -3,6 +3,7 @@ import { ApiError } from "../../lib/api-response.js";
 import type { AuthRequest } from "../../lib/auth.js";
 import { buildConsolidatedDraftBody } from "./communication.draft-builder.js";
 import { writeCommunicationAuditLog } from "./communication.audit.js";
+import { sanitizeEmailHtml } from "./email-html-sanitizer.js";
 import { canAcknowledgeTask, canMutateTask, getRoleNameFromReq, isPartnerOrAdminRole } from "./communication.permissions.js";
 import type { CommunicationDraftStatus, CommunicationDraftType } from "./communication.types.js";
 import {
@@ -71,7 +72,7 @@ import {
   type DbConn,
 } from "./communication.repository.js";
 import { decryptEmailSecret, encryptEmailSecret, ensureEmailEncryptionConfigured, isEmailEncryptionConfigured, signEmailState, verifyEmailState } from "./email-crypto.js";
-import { ensureAbsoluteReturnTo, type ImportedMessage } from "./email-provider-utils.js";
+import { clampPreview, ensureAbsoluteReturnTo, htmlToPlainText, type ImportedMessage } from "./email-provider-utils.js";
 import {
   buildMicrosoftConnectUrl,
   getMicrosoftOauthSetupStatus,
@@ -89,8 +90,12 @@ import {
   fetchGoogleLabelMessages,
   fetchGoogleLabels,
   fetchGoogleMailboxProfile,
+  fetchGmailMessageReferenceMetadata,
+  GMAIL_SEND_SCOPE,
   getGoogleOauthSetupStatus,
+  hasGoogleScope,
   refreshGoogleAccessToken,
+  sendGmailMessage,
 } from "./providers/gmail.provider.js";
 import {
   fetchImapFolderMessages,
@@ -117,6 +122,23 @@ type EmailImportOptions = {
   from?: string | null;
   to?: string | null;
 };
+
+type EmailSendInput = {
+  to: string[];
+  cc?: string[] | null;
+  bcc?: string[] | null;
+  subject?: string | null;
+  bodyHtml?: string | null;
+  bodyText?: string | null;
+  attachments?: Array<{
+    filename: string;
+    mimeType?: string | null;
+    sizeBytes?: number | null;
+    storagePath?: string | null;
+  }> | null;
+};
+
+type EmailSendMode = "reply" | "reply_all" | "forward";
 
 type ImapMailboxInput = {
   provider: "imap" | "yahoo_imap";
@@ -791,7 +813,93 @@ function requireMailboxManagementRole(req: AuthRequest) {
   }
 }
 
+function parseStoredScopes(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.map((entry) => String(entry ?? "").trim()).filter(Boolean)
+    : [];
+}
+
+function buildDefaultSignature(account: { displayName?: string | null; emailAddress: string; signatureHtml?: string | null; signatureText?: string | null }) {
+  const storedHtml = String(account.signatureHtml ?? "").trim();
+  const storedText = String(account.signatureText ?? "").trim();
+  if (storedHtml || storedText) {
+    return {
+      html: storedHtml || null,
+      text: storedText || null,
+    };
+  }
+  const nameLine = String(account.displayName ?? "").trim() || account.emailAddress;
+  return {
+    html: `<p>Regards,</p><p>${nameLine}<br>${account.emailAddress}</p>`,
+    text: `Regards,\n${nameLine}\n${account.emailAddress}`,
+  };
+}
+
+function getEmailAccountSendState(account: any) {
+  const scopes = parseStoredScopes(account.oauthScopes);
+  if (account.status !== "active") {
+    return {
+      canSend: false,
+      requiresReconnect: false,
+      reason: "Mailbox setup is incomplete. Please complete provider connection first.",
+      scopes,
+    };
+  }
+  if (account.provider === "gmail") {
+    if (!hasGoogleScope(scopes, GMAIL_SEND_SCOPE)) {
+      return {
+        canSend: false,
+        requiresReconnect: true,
+        reason: "Reconnect Gmail to enable sending.",
+        scopes,
+      };
+    }
+    return {
+      canSend: true,
+      requiresReconnect: false,
+      reason: null,
+      scopes,
+    };
+  }
+  if (account.provider === "imap" || account.provider === "yahoo_imap") {
+    return {
+      canSend: false,
+      requiresReconnect: false,
+      reason: "Sending is not configured for this mailbox. Please configure SMTP in Email Settings.",
+      scopes,
+    };
+  }
+  return {
+    canSend: false,
+    requiresReconnect: false,
+    reason: "Sending is not configured for this mailbox.",
+    scopes,
+  };
+}
+
+function normalizeOutgoingEmailContent(input: EmailSendInput) {
+  const to = normalizeEmailAddressList(input.to);
+  const cc = normalizeEmailAddressList(input.cc ?? []);
+  const bcc = normalizeEmailAddressList(input.bcc ?? []);
+  const subject = String(input.subject ?? "");
+  const sanitizedHtml = sanitizeEmailHtml(input.bodyHtml ?? null);
+  const bodyTextSource = String(input.bodyText ?? "").trim();
+  const bodyText = bodyTextSource || (sanitizedHtml ? htmlToPlainText(sanitizedHtml) ?? "" : "");
+  const attachments = Array.isArray(input.attachments) ? input.attachments : [];
+  return {
+    to,
+    cc,
+    bcc,
+    subject,
+    bodyHtml: sanitizedHtml,
+    bodyText,
+    attachments,
+  };
+}
+
 function sanitizeEmailAccount(account: any) {
+  const sendState = getEmailAccountSendState(account);
+  const signature = buildDefaultSignature(account);
   return {
     id: account.id,
     provider: account.provider,
@@ -806,6 +914,12 @@ function sanitizeEmailAccount(account: any) {
     lastSyncAt: account.lastSyncAt ?? null,
     lastError: account.lastError ?? null,
     tokenExpiresAt: account.tokenExpiresAt ?? null,
+    canSend: sendState.canSend,
+    sendDisabledReason: sendState.reason,
+    requiresReconnectForSend: sendState.requiresReconnect,
+    oauthScopes: sendState.scopes,
+    signatureHtml: signature.html,
+    signatureText: signature.text,
     createdAt: account.createdAt,
     updatedAt: account.updatedAt,
   };
@@ -885,6 +999,7 @@ async function ensureGoogleAccessToken(args: { r: DbConn; firmId: number; accoun
     encryptedAccessToken: encryptEmailSecret(refreshed.accessToken),
     encryptedRefreshToken: refreshed.refreshToken ? encryptEmailSecret(refreshed.refreshToken) : account.encryptedRefreshToken,
     tokenExpiresAt: refreshed.expiresAt,
+    oauthScopes: refreshed.scopes.length ? refreshed.scopes : parseStoredScopes(account.oauthScopes),
     status: "active",
     lastError: null,
   });
@@ -1267,14 +1382,18 @@ export async function completeMicrosoftOauth(args: { r: DbConn; req: AuthRequest
   }
   const tokenResult = await exchangeMicrosoftCodeForTokens(args.code);
   const profile = await fetchMicrosoftMailboxProfile(tokenResult.accessToken);
+  const defaultSignature = buildDefaultSignature({ displayName: profile.displayName, emailAddress: profile.emailAddress });
   const existing = await getEmailAccountByProviderEmail(args.r, args.req.firmId!, "microsoft_graph", profile.emailAddress);
   const saved = existing
     ? await updateEmailAccount(args.r, args.req.firmId!, existing.id, {
         displayName: profile.displayName,
         status: "active",
+        oauthScopes: parseStoredScopes(existing.oauthScopes),
         encryptedAccessToken: encryptEmailSecret(tokenResult.accessToken),
         encryptedRefreshToken: tokenResult.refreshToken ? encryptEmailSecret(tokenResult.refreshToken) : existing.encryptedRefreshToken,
         tokenExpiresAt: tokenResult.expiresAt,
+        signatureHtml: existing.signatureHtml ?? defaultSignature.html,
+        signatureText: existing.signatureText ?? defaultSignature.text,
         lastError: null,
       })
     : await insertEmailAccount(args.r, {
@@ -1283,9 +1402,12 @@ export async function completeMicrosoftOauth(args: { r: DbConn; req: AuthRequest
         emailAddress: profile.emailAddress,
         displayName: profile.displayName,
         status: "active",
+        oauthScopes: [],
         encryptedAccessToken: encryptEmailSecret(tokenResult.accessToken),
         encryptedRefreshToken: tokenResult.refreshToken ? encryptEmailSecret(tokenResult.refreshToken) : null,
         tokenExpiresAt: tokenResult.expiresAt,
+        signatureHtml: defaultSignature.html,
+        signatureText: defaultSignature.text,
         createdBy: args.req.userId ?? null,
       });
   const account = saved ?? existing;
@@ -1328,14 +1450,18 @@ export async function completeGoogleOauth(args: { r: DbConn; req: AuthRequest; c
   }
   const tokenResult = await exchangeGoogleCodeForTokens(args.code);
   const profile = await fetchGoogleMailboxProfile(tokenResult.accessToken);
+  const defaultSignature = buildDefaultSignature({ displayName: profile.displayName, emailAddress: profile.emailAddress });
   const existing = await getEmailAccountByProviderEmail(args.r, args.req.firmId!, "gmail", profile.emailAddress);
   const saved = existing
     ? await updateEmailAccount(args.r, args.req.firmId!, existing.id, {
         displayName: profile.displayName,
         status: "active",
+        oauthScopes: tokenResult.scopes,
         encryptedAccessToken: encryptEmailSecret(tokenResult.accessToken),
         encryptedRefreshToken: tokenResult.refreshToken ? encryptEmailSecret(tokenResult.refreshToken) : existing.encryptedRefreshToken,
         tokenExpiresAt: tokenResult.expiresAt,
+        signatureHtml: existing.signatureHtml ?? defaultSignature.html,
+        signatureText: existing.signatureText ?? defaultSignature.text,
         lastError: null,
       })
     : await insertEmailAccount(args.r, {
@@ -1344,9 +1470,12 @@ export async function completeGoogleOauth(args: { r: DbConn; req: AuthRequest; c
         emailAddress: profile.emailAddress,
         displayName: profile.displayName,
         status: "active",
+        oauthScopes: tokenResult.scopes,
         encryptedAccessToken: encryptEmailSecret(tokenResult.accessToken),
         encryptedRefreshToken: tokenResult.refreshToken ? encryptEmailSecret(tokenResult.refreshToken) : null,
         tokenExpiresAt: tokenResult.expiresAt,
+        signatureHtml: defaultSignature.html,
+        signatureText: defaultSignature.text,
         createdBy: args.req.userId ?? null,
       });
   const account = saved ?? existing;
@@ -1544,6 +1673,171 @@ export async function importEmailNow(args: { r: DbConn; req: AuthRequest; accoun
     });
   }
   return await importMessagesForAccount({ ...args, options: normalizeImportOptions(args.options) });
+}
+
+function toSendCapabilityError(account: any): ApiError {
+  const sendState = getEmailAccountSendState(account);
+  if (sendState.canSend) {
+    return new ApiError({
+      status: 400,
+      code: "EMAIL_SEND_UNAVAILABLE",
+      message: "Sending is not available for this mailbox.",
+    });
+  }
+  return new ApiError({
+    status: 400,
+    code: sendState.requiresReconnect ? "GMAIL_SEND_SCOPE_MISSING" : "EMAIL_SEND_NOT_CONFIGURED",
+    message: sendState.reason ?? "Sending is not configured for this mailbox.",
+  });
+}
+
+async function sendEmailForMessage(args: { r: DbConn; req: AuthRequest; messageId: number; mode: EmailSendMode; input: EmailSendInput }) {
+  const firmId = args.req.firmId!;
+  const original = await getMessageById(args.r, firmId, args.messageId);
+  if (!original) return null;
+  if (original.channel !== "email" || !original.emailAccountId) {
+    throw new ApiError({
+      status: 400,
+      code: "EMAIL_SEND_ACCOUNT_MISSING",
+      message: "This email is not linked to a connected mailbox.",
+    });
+  }
+
+  const account = await getAccountOrThrow(args.r, firmId, original.emailAccountId);
+  const sendState = getEmailAccountSendState(account);
+  if (!sendState.canSend) throw toSendCapabilityError(account);
+
+  const content = normalizeOutgoingEmailContent(args.input);
+  if (!content.to.length) {
+    throw new ApiError({
+      status: 400,
+      code: "EMAIL_TO_REQUIRED",
+      message: "At least one recipient is required.",
+    });
+  }
+  if (content.attachments.length) {
+    throw new ApiError({
+      status: 400,
+      code: "EMAIL_ATTACHMENTS_NOT_SUPPORTED",
+      message: "Attachment sending will be enabled in the next phase.",
+    });
+  }
+
+  if (account.provider !== "gmail") throw toSendCapabilityError(account);
+
+  const { accessToken } = await ensureGoogleAccessToken({ r: args.r, firmId, accountId: account.id });
+  let referenceMeta = {
+    threadId: original.providerThreadId ?? null,
+    messageIdHeader: original.internetMessageId ?? null,
+    referencesHeader: null as string | null,
+  };
+  if (args.mode !== "forward" && original.providerMessageId) {
+    try {
+      const liveReferenceMeta = await fetchGmailMessageReferenceMetadata(accessToken, original.providerMessageId);
+      referenceMeta = {
+        threadId: liveReferenceMeta.threadId ?? referenceMeta.threadId,
+        messageIdHeader: liveReferenceMeta.messageIdHeader ?? referenceMeta.messageIdHeader,
+        referencesHeader: liveReferenceMeta.referencesHeader ?? null,
+      };
+    } catch {
+      // Fall back to stored metadata when Gmail metadata lookup is unavailable.
+    }
+  }
+
+  const inReplyTo = args.mode === "forward" ? null : (referenceMeta.messageIdHeader ?? null);
+  const references = args.mode === "forward"
+    ? null
+    : [referenceMeta.referencesHeader, referenceMeta.messageIdHeader]
+      .filter((value): value is string => Boolean(value))
+      .join(" ")
+      .trim() || null;
+
+  const providerResult = await sendGmailMessage({
+    accessToken,
+    fromAddress: account.emailAddress,
+    to: content.to,
+    cc: content.cc,
+    bcc: content.bcc,
+    subject: content.subject,
+    bodyHtml: content.bodyHtml,
+    bodyText: content.bodyText,
+    threadId: args.mode === "forward" ? null : (original.providerThreadId ?? referenceMeta.threadId ?? null),
+    inReplyTo,
+    references,
+  });
+
+  const sentAt = now();
+  const outboundMessage = await insertMessage(args.r, {
+    firmId,
+    mailboxId: original.mailboxId ?? null,
+    emailAccountId: account.id,
+    emailFolderId: null,
+    channel: "email",
+    provider: account.provider,
+    providerMessageId: String(providerResult.id ?? "").trim() || null,
+    providerThreadId: String(providerResult.threadId ?? "").trim() || original.providerThreadId || null,
+    providerConversationId: String(providerResult.threadId ?? "").trim() || original.providerThreadId || null,
+    providerFolder: "Sent",
+    internetMessageId: null,
+    providerUid: null,
+    providerIsRead: true,
+    direction: "outgoing",
+    fromAddress: account.emailAddress,
+    fromName: account.displayName ?? null,
+    toAddresses: content.to,
+    ccAddresses: content.cc,
+    bccAddresses: content.bcc,
+    subject: content.subject || null,
+    bodyPreview: clampPreview(content.bodyText || (content.bodyHtml ? htmlToPlainText(content.bodyHtml) : null)),
+    bodyText: content.bodyText || null,
+    bodyHtml: content.bodyHtml,
+    attachmentCount: 0,
+    receivedAt: null,
+    sentAt,
+    internalStatus: "sent",
+    isBatch: false,
+    linkedCaseId: original.linkedCaseId ?? null,
+    assignedToUserId: args.req.userId ?? null,
+    lastActivityAt: sentAt,
+    lastSyncedAt: sentAt,
+    createdBy: args.req.userId ?? null,
+  });
+
+  await writeCommunicationAuditLog({
+    r: args.r,
+    req: args.req,
+    action: `communication.message.${args.mode}.sent`,
+    messageId: args.messageId,
+    newValue: {
+      outboundMessageId: outboundMessage.id,
+      emailAccountId: account.id,
+      providerMessageId: outboundMessage.providerMessageId,
+      providerThreadId: outboundMessage.providerThreadId,
+      to: content.to,
+      cc: content.cc,
+      bcc: content.bcc,
+      subject: content.subject,
+      sentAt: sentAt.toISOString(),
+    },
+  });
+
+  return {
+    success: true as const,
+    providerMessageId: outboundMessage.providerMessageId,
+    sentAt: sentAt.toISOString(),
+  };
+}
+
+export async function replyToMessage(args: { r: DbConn; req: AuthRequest; messageId: number; input: EmailSendInput }) {
+  return sendEmailForMessage({ ...args, mode: "reply" });
+}
+
+export async function replyAllToMessage(args: { r: DbConn; req: AuthRequest; messageId: number; input: EmailSendInput }) {
+  return sendEmailForMessage({ ...args, mode: "reply_all" });
+}
+
+export async function forwardMessage(args: { r: DbConn; req: AuthRequest; messageId: number; input: EmailSendInput }) {
+  return sendEmailForMessage({ ...args, mode: "forward" });
 }
 
 export async function listMessageTasks(args: { r: DbConn; firmId: number; messageId: number }) {

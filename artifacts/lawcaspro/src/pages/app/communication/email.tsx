@@ -11,7 +11,9 @@ import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "
 import { Checkbox } from "@/components/ui/checkbox";
 import { QueryFallback } from "@/components/query-fallback";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
+import { EmailComposeDialog } from "@/components/communication/email-compose-dialog";
 import { apiFetchJson } from "@/lib/api-client";
+import { sanitizeEmailHtml } from "@/lib/email-html";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 
@@ -42,12 +44,19 @@ type Mailbox = {
   isActive: boolean;
 };
 
+type ComposeMode = "reply" | "replyAll" | "forward";
+
 type EmailAccount = {
   id: number;
   provider: string;
   emailAddress: string;
   displayName: string | null;
   status: string;
+  canSend: boolean;
+  sendDisabledReason: string | null;
+  requiresReconnectForSend?: boolean;
+  signatureHtml?: string | null;
+  signatureText?: string | null;
 };
 
 type Attachment = {
@@ -169,6 +178,10 @@ type MessageDetail = {
   id: number;
   channel: string;
   direction: "incoming" | "outgoing";
+  provider: string;
+  emailAccountId: number | null;
+  providerThreadId: string | null;
+  internetMessageId: string | null;
   fromAddress: string | null;
   fromName: string | null;
   toAddresses: string[];
@@ -455,6 +468,7 @@ export default function EmailControlCenterPage() {
   const [editingRemarkBody, setEditingRemarkBody] = useState("");
   const [assigneesDialogOpen, setAssigneesDialogOpen] = useState(false);
   const [auditExpanded, setAuditExpanded] = useState(false);
+  const [composeMode, setComposeMode] = useState<ComposeMode | null>(null);
   const showWorkflowUi = false;
 
   const usersQuery = useQuery<User[]>({
@@ -479,14 +493,18 @@ export default function EmailControlCenterPage() {
   const emailAccounts = asArray<EmailAccount>(emailAccountsQuery.data);
 
   const messagesQuery = useQuery<MessageRow[]>({
-    queryKey: ["communication", "messages", view, search],
+    queryKey: ["communication", "messages", view, search, selectedFolderScope],
     queryFn: () => {
       if (view === "drafts_pending_approval") return [];
       if (view === "my_tasks") return [];
       if (view === "overdue") return [];
       const params = new URLSearchParams();
       const activeStatuses = "new,assigned,unassigned";
-      if (view !== "archived" && view !== "closed") params.set("status", activeStatuses);
+      if (selectedFolderScope === "sent") {
+        params.set("status", "sent");
+      } else if (view !== "archived" && view !== "closed") {
+        params.set("status", activeStatuses);
+      }
       if (view === "unassigned") params.set("assignedTo", "unassigned");
       if (view === "assigned_to_me") params.set("assignedTo", "me");
       if (view === "unread") params.set("unread", "true");
@@ -938,6 +956,12 @@ export default function EmailControlCenterPage() {
   const selectedMessageAssignedCount = selectedMessageRow?.assigneeCount ?? assignedUserIds.length;
   const compactAudit = useMemo(() => compactAuditEntries(asArray<AuditEntry>(messageAudit), users), [messageAudit, users]);
   const visibleAudit = auditExpanded ? compactAudit : compactAudit.slice(0, 5);
+  const selectedMessageAccountId = selectedMessage?.emailAccountId ?? selectedMessageRow?.message.emailAccountId ?? null;
+  const selectedMessageAccount = selectedMessageAccountId == null
+    ? null
+    : emailAccounts.find((account) => account.id === selectedMessageAccountId) ?? null;
+  const selectedMessageSendDisabledReason = selectedMessageAccount?.sendDisabledReason
+    ?? (selectedMessageAccountId == null ? "Sending is not configured for this mailbox." : null);
 
   const getEffectiveIsRead = (messageId: number, fallbackIsRead: boolean) => {
     return readOverrides[messageId] ?? fallbackIsRead;
@@ -1062,6 +1086,12 @@ export default function EmailControlCenterPage() {
       qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "reads"] });
       qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "attachments"] });
     }
+  };
+
+  const handleComposeSent = () => {
+    setComposeMode(null);
+    refreshAll();
+    qc.invalidateQueries({ queryKey: ["communication", "audit", "message", selectedMessageId] });
   };
 
   const activeManualMailboxes = mailboxes.filter((mailbox) => mailbox.isActive);
@@ -1316,6 +1346,30 @@ export default function EmailControlCenterPage() {
                         <Button
                           variant="outline"
                           size="sm"
+                          onClick={() => setComposeMode("reply")}
+                          disabled={!selectedMessageAccount?.canSend}
+                        >
+                          Reply
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setComposeMode("replyAll")}
+                          disabled={!selectedMessageAccount?.canSend}
+                        >
+                          Reply All
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setComposeMode("forward")}
+                          disabled={!selectedMessageAccount?.canSend}
+                        >
+                          Forward
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
                           onClick={() => readStatusMutation.mutate({ messageId: selectedMessage.id, isRead: !selectedMessageIsRead })}
                           disabled={readStatusMutation.isPending}
                         >
@@ -1338,6 +1392,11 @@ export default function EmailControlCenterPage() {
                           </Button>
                         ) : null}
                       </div>
+                      {!selectedMessageAccount?.canSend && selectedMessageSendDisabledReason ? (
+                        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                          {selectedMessageSendDisabledReason}
+                        </div>
+                      ) : null}
                     </div>
 
                     <div className="rounded-xl border p-4 space-y-3">
@@ -1360,7 +1419,14 @@ export default function EmailControlCenterPage() {
                           <Input value={(selectedMessage.ccAddresses ?? []).join(", ")} readOnly />
                         </div>
                       </div>
-                      <div className="rounded-lg bg-slate-50 p-3 text-sm whitespace-pre-wrap">{selectedMessage.bodyText || ""}</div>
+                      {selectedMessage.bodyHtml ? (
+                        <div
+                          className="prose prose-slate max-w-none rounded-lg bg-slate-50 p-3 text-sm"
+                          dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(selectedMessage.bodyHtml) }}
+                        />
+                      ) : (
+                        <div className="rounded-lg bg-slate-50 p-3 text-sm whitespace-pre-wrap">{selectedMessage.bodyText || ""}</div>
+                      )}
                       <div className="space-y-2">
                         <Label>Attachments</Label>
                         <div className="rounded-lg border p-3 space-y-2">
@@ -1629,6 +1695,31 @@ export default function EmailControlCenterPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <EmailComposeDialog
+        open={composeMode != null}
+        mode={composeMode ?? "reply"}
+        account={selectedMessageAccount}
+        message={selectedMessage ? {
+          id: selectedMessage.id,
+          emailAccountId: selectedMessage.emailAccountId,
+          fromAddress: selectedMessage.fromAddress,
+          fromName: selectedMessage.fromName,
+          toAddresses: selectedMessage.toAddresses,
+          ccAddresses: selectedMessage.ccAddresses,
+          subject: selectedMessage.subject,
+          bodyText: selectedMessage.bodyText,
+          bodyHtml: selectedMessage.bodyHtml,
+          receivedAt: selectedMessage.receivedAt,
+          sentAt: selectedMessage.sentAt,
+          createdAt: selectedMessage.createdAt,
+        } : null}
+        attachments={asArray<Attachment>(selectedAttachmentsQuery.data)}
+        onOpenChange={(open) => {
+          if (!open) setComposeMode(null);
+        }}
+        onSent={handleComposeSent}
+      />
 
       <Dialog open={showManualEmail} onOpenChange={setShowManualEmail}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">

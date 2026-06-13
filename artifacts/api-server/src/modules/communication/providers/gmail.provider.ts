@@ -13,17 +13,21 @@ const GOOGLE_GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1";
 const GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo";
 const GMAIL_ALL_MAIL_LABEL_ID = "__gmail_all__";
 const GMAIL_MESSAGE_FETCH_CONCURRENCY = 5;
+export const GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+export const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 const GOOGLE_SCOPES = [
   "openid",
   "email",
   "profile",
-  "https://www.googleapis.com/auth/gmail.readonly",
+  GMAIL_READ_SCOPE,
+  GMAIL_SEND_SCOPE,
 ];
 
 type GoogleTokenResult = {
   accessToken: string;
   refreshToken: string | null;
   expiresAt: Date | null;
+  scopes: string[];
 };
 
 type GmailLabel = {
@@ -37,6 +41,12 @@ type GmailFetchWindow = {
   limit: number;
   since?: Date | null;
   until?: Date | null;
+};
+
+type GmailMessageReferenceMetadata = {
+  threadId: string | null;
+  messageIdHeader: string | null;
+  referencesHeader: string | null;
 };
 
 function readGoogleConfig() {
@@ -136,6 +146,7 @@ export async function exchangeGoogleCodeForTokens(code: string): Promise<GoogleT
     accessToken: String((json as any)?.access_token ?? ""),
     refreshToken: String((json as any)?.refresh_token ?? "").trim() || null,
     expiresAt: Number.isFinite(expiresIn) && expiresIn > 0 ? new Date(Date.now() + (expiresIn - 60) * 1000) : null,
+    scopes: parseGoogleScopeList((json as any)?.scope),
   };
 }
 
@@ -167,6 +178,7 @@ export async function refreshGoogleAccessToken(refreshToken: string): Promise<Go
     accessToken: String((json as any)?.access_token ?? ""),
     refreshToken,
     expiresAt: Number.isFinite(expiresIn) && expiresIn > 0 ? new Date(Date.now() + (expiresIn - 60) * 1000) : null,
+    scopes: parseGoogleScopeList((json as any)?.scope),
   };
 }
 
@@ -231,6 +243,17 @@ function buildGmailSearchQuery(window: GmailFetchWindow) {
   return parts.join(" ").trim();
 }
 
+function parseGoogleScopeList(value: unknown): string[] {
+  return String(value ?? "")
+    .split(/\s+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+export function hasGoogleScope(scopes: string[] | null | undefined, scope: string): boolean {
+  return Array.isArray(scopes) && scopes.includes(scope);
+}
+
 function decodeBase64Url(value: string | null | undefined): string | null {
   const raw = String(value ?? "").trim();
   if (!raw) return null;
@@ -245,6 +268,79 @@ function decodeBase64Url(value: string | null | undefined): string | null {
 function extractHeader(headers: Array<{ name?: string | null; value?: string | null }> | undefined, name: string) {
   const lower = name.toLowerCase();
   return headers?.find((header) => String(header.name ?? "").toLowerCase() === lower)?.value ?? null;
+}
+
+function encodeMimeWord(value: string): string {
+  return /[^\x20-\x7E]/.test(value)
+    ? `=?UTF-8?B?${Buffer.from(value, "utf8").toString("base64")}?=`
+    : value;
+}
+
+function foldHeaderLine(name: string, value: string): string {
+  const header = `${name}: ${value}`;
+  if (header.length <= 998) return header;
+  const parts: string[] = [];
+  let rest = header;
+  while (rest.length > 998) {
+    parts.push(rest.slice(0, 998));
+    rest = ` ${rest.slice(998)}`;
+  }
+  parts.push(rest);
+  return parts.join("\r\n");
+}
+
+function toBase64Url(value: string): string {
+  return Buffer.from(value, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function joinAddressHeader(addresses: string[]): string {
+  return addresses.map((value) => value.trim()).filter(Boolean).join(", ");
+}
+
+function buildMultipartMimeMessage(args: {
+  from: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  html: string | null;
+  text: string | null;
+  inReplyTo?: string | null;
+  references?: string | null;
+}) {
+  const boundary = `lawcaspro_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  const headers = [
+    foldHeaderLine("From", args.from),
+    foldHeaderLine("To", joinAddressHeader(args.to)),
+    args.cc?.length ? foldHeaderLine("Cc", joinAddressHeader(args.cc)) : null,
+    args.bcc?.length ? foldHeaderLine("Bcc", joinAddressHeader(args.bcc)) : null,
+    foldHeaderLine("Subject", encodeMimeWord(args.subject || "")),
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    args.inReplyTo ? foldHeaderLine("In-Reply-To", args.inReplyTo) : null,
+    args.references ? foldHeaderLine("References", args.references) : null,
+  ].filter((value): value is string => Boolean(value));
+
+  const bodyParts = [
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=UTF-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    args.text ?? "",
+    `--${boundary}`,
+    "Content-Type: text/html; charset=UTF-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    args.html ?? "",
+    `--${boundary}--`,
+    "",
+  ];
+
+  return `${headers.join("\r\n")}\r\n\r\n${bodyParts.join("\r\n")}`;
 }
 
 function collectPayloadParts(
@@ -327,6 +423,72 @@ async function fetchGmailMessage(accessToken: string, messageId: string, labelId
     })(),
     attachments: collected.attachments,
   };
+}
+
+export async function fetchGmailMessageReferenceMetadata(accessToken: string, providerMessageId: string): Promise<GmailMessageReferenceMetadata> {
+  const json = await fetchGoogleJson<Record<string, any>>(
+    `${GOOGLE_GMAIL_BASE}/users/me/messages/${encodeURIComponent(providerMessageId)}?format=metadata&metadataHeaders=Message-ID&metadataHeaders=References`,
+    accessToken,
+  );
+  const headers = Array.isArray(json.payload?.headers) ? json.payload.headers : [];
+  return {
+    threadId: String(json.threadId ?? "").trim() || null,
+    messageIdHeader: String(extractHeader(headers, "Message-ID") ?? "").trim() || null,
+    referencesHeader: String(extractHeader(headers, "References") ?? "").trim() || null,
+  };
+}
+
+export async function sendGmailMessage(args: {
+  accessToken: string;
+  fromAddress: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  bodyHtml: string | null;
+  bodyText: string | null;
+  threadId?: string | null;
+  inReplyTo?: string | null;
+  references?: string | null;
+}) {
+  const raw = buildMultipartMimeMessage({
+    from: args.fromAddress,
+    to: args.to,
+    cc: args.cc ?? [],
+    bcc: args.bcc ?? [],
+    subject: args.subject,
+    html: args.bodyHtml,
+    text: args.bodyText ?? (args.bodyHtml ? htmlToPlainText(args.bodyHtml) : null),
+    inReplyTo: args.inReplyTo ?? null,
+    references: args.references ?? null,
+  });
+
+  try {
+    return await fetchGoogleJson<{ id?: string; threadId?: string; labelIds?: string[] }>(
+      `${GOOGLE_GMAIL_BASE}/users/me/messages/send`,
+      args.accessToken,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          raw: toBase64Url(raw),
+          threadId: args.threadId ?? undefined,
+        }),
+      },
+    );
+  } catch (error) {
+    const details = typeof (error as any)?.details?.body === "string" ? String((error as any).details.body) : "";
+    if (details.includes("insufficientPermissions") || details.includes("Metadata scope does not allow") || details.includes("Request had insufficient authentication scopes")) {
+      throw new ApiError({
+        status: 400,
+        code: "GMAIL_SEND_SCOPE_MISSING",
+        message: "Reconnect Gmail to enable sending.",
+      });
+    }
+    throw error;
+  }
 }
 
 export async function fetchGoogleLabelMessages(accessToken: string, providerFolderId: string, window: GmailFetchWindow): Promise<ImportedMessage[]> {

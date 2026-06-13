@@ -5,6 +5,7 @@ import {
   DraftPatchSchema,
   EmailAccountPatchSchema,
   EmailImportRequestSchema,
+  EmailSendPayloadSchema,
   ManualEmailCreateSchema,
   MessageArchivePatchSchema,
   MessageAssigneesPatchSchema,
@@ -45,6 +46,7 @@ import {
   disconnectEmailAccount,
   getEmailProviderSetupStatus,
   deleteMessageRemark,
+  forwardMessage,
   setMessageResponsibleTeam,
   setTaskResponsibleTeam,
   getAuditForDraft,
@@ -75,6 +77,8 @@ import {
   patchEmailAccountDetails,
   patchEmailFolderDetails,
   recordMessageOpened,
+  replyAllToMessage,
+  replyToMessage,
   setMessageAssignees,
   startGoogleOauth,
   startMicrosoftOauth,
@@ -153,6 +157,57 @@ router.get("/communication/messages/:id", requireAuth, requireFirmUser, requireP
   const msg = await getCommunicationMessage({ r, firmId: req.firmId!, messageId: id });
   if (!msg) { res.status(404).json({ error: "Not found" }); return; }
   res.json(msg);
+});
+
+router.post("/communication/messages/:id/reply", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const parsed = EmailSendPayloadSchema.safeParse(req.body ?? {});
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  try {
+    const result = await replyToMessage({ r, req, messageId: id, input: parsed.data });
+    if (!result) { res.status(404).json({ error: "Not found" }); return; }
+    res.json(result);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
+});
+
+router.post("/communication/messages/:id/reply-all", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const parsed = EmailSendPayloadSchema.safeParse(req.body ?? {});
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  try {
+    const result = await replyAllToMessage({ r, req, messageId: id, input: parsed.data });
+    if (!result) { res.status(404).json({ error: "Not found" }); return; }
+    res.json(result);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
+});
+
+router.post("/communication/messages/:id/forward", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = one((req.params as any).id);
+  const id = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
+  const parsed = EmailSendPayloadSchema.safeParse(req.body ?? {});
+  if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
+  try {
+    const result = await forwardMessage({ r, req, messageId: id, input: parsed.data });
+    if (!result) { res.status(404).json({ error: "Not found" }); return; }
+    res.json(result);
+  } catch (error) {
+    sendProviderError(res, error);
+  }
 });
 
 router.post("/communication/messages/manual-email", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
