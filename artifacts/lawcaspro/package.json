@@ -83,6 +83,7 @@
     "zod": "catalog:"
   },
   "dependencies": {
+    "@tiptap/core": "^3.27.1",
     "@tiptap/extension-color": "^3.26.1",
     "@tiptap/extension-font-family": "^3.26.1",
     "@tiptap/extension-highlight": "^3.26.1",
