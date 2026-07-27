@@ -67,6 +67,10 @@ export default function Workbench() {
   const sp = useMemo(() => new URLSearchParams(location.split("?")[1] ?? ""), [location]);
 
   const tab = sp.get("tab") === "missing" || sp.get("tab") === "overdue" ? sp.get("tab")! : "my-work";
+  const pvActionFilter = (() => {
+    const raw = sp.get("pvActionFilter");
+    return raw === "active" || raw === "overdue" ? raw : "all";
+  })();
   const userId = sp.get("userId") ?? "me";
   const projectId = sp.get("projectId") ?? "all";
   const purchaseMode = sp.get("purchaseMode") ?? "all";
@@ -189,6 +193,22 @@ export default function Workbench() {
   }
 
   const staffOptions = data.staffOptions ?? [];
+  const filteredPaymentVoucherActions = useMemo(() => {
+    const rows = paymentVoucherActionsQuery.data ?? [];
+    const now = Date.now();
+    if (pvActionFilter === "active") {
+      return rows.filter((row) => row.status === "assigned" || row.status === "acknowledged");
+    }
+    if (pvActionFilter === "overdue") {
+      return rows.filter((row) => {
+        const ackDue = row.acknowledgeDueAt ? new Date(row.acknowledgeDueAt).getTime() : NaN;
+        const completionDue = row.completionDueAt ? new Date(row.completionDueAt).getTime() : NaN;
+        return (row.status === "assigned" && Number.isFinite(ackDue) && ackDue <= now)
+          || (row.status === "acknowledged" && Number.isFinite(completionDue) && completionDue <= now);
+      });
+    }
+    return rows;
+  }, [paymentVoucherActionsQuery.data, pvActionFilter]);
 
   return (
     <div className="space-y-6">
@@ -272,6 +292,17 @@ export default function Workbench() {
               <CardTitle>Payment Voucher Actions</CardTitle>
             </CardHeader>
             <CardContent>
+              <div className="mb-3 flex items-center gap-2">
+                <Button variant={pvActionFilter === "all" ? "default" : "outline"} size="sm" onClick={() => setParam("pvActionFilter", "all")}>
+                  All
+                </Button>
+                <Button variant={pvActionFilter === "active" ? "default" : "outline"} size="sm" onClick={() => setParam("pvActionFilter", "active")}>
+                  Active
+                </Button>
+                <Button variant={pvActionFilter === "overdue" ? "default" : "outline"} size="sm" onClick={() => setParam("pvActionFilter", "overdue")}>
+                  Overdue
+                </Button>
+              </div>
               {paymentVoucherActionsQuery.isError ? (
                 <QueryFallback
                   title="Payment voucher actions unavailable"
@@ -281,11 +312,13 @@ export default function Workbench() {
                 />
               ) : paymentVoucherActionsQuery.isLoading ? (
                 <div className="text-sm text-slate-500">Loading payment voucher actions...</div>
-              ) : (paymentVoucherActionsQuery.data?.length ?? 0) === 0 ? (
-                <div className="text-sm text-slate-500">No assigned payment voucher actions.</div>
+              ) : filteredPaymentVoucherActions.length === 0 ? (
+                <div className="text-sm text-slate-500">
+                  {pvActionFilter === "all" ? "No assigned payment voucher actions." : "No payment voucher actions match this filter."}
+                </div>
               ) : (
                 <div className="space-y-3">
-                  {(paymentVoucherActionsQuery.data ?? []).map((action) => (
+                  {filteredPaymentVoucherActions.map((action) => (
                     <div key={action.id} className="rounded-lg border border-slate-200 p-4">
                       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                         <div className="space-y-1">

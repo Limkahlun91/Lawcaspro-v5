@@ -21,6 +21,8 @@ import {
   communicationEmailAccountsTable,
   communicationEmailFoldersTable,
   communicationEmailSyncLogsTable,
+  paymentVouchersTable,
+  paymentVoucherActionsTable,
 } from "@workspace/db";
 
 export type DbConn = typeof import("@workspace/db").db;
@@ -1012,6 +1014,37 @@ export async function buildCaseCommunicationTimeline(r: DbConn, firmId: number, 
     .from(communicationCaseTasksTable)
     .where(and(eq(communicationCaseTasksTable.firmId, firmId), eq(communicationCaseTasksTable.linkedCaseId, caseId)))
     .orderBy(desc(communicationCaseTasksTable.updatedAt), desc(communicationCaseTasksTable.createdAt));
+  const paymentVouchers = await r
+    .select({
+      id: paymentVouchersTable.id,
+      voucherNo: paymentVouchersTable.voucherNo,
+      payeeName: paymentVouchersTable.payeeName,
+      approvalStatus: paymentVouchersTable.approvalStatus,
+      status: paymentVouchersTable.status,
+      nextActionType: paymentVouchersTable.nextActionType,
+      createdAt: paymentVouchersTable.createdAt,
+      receivedAt: paymentVouchersTable.receivedAt,
+      paidAt: paymentVouchersTable.paidAt,
+    })
+    .from(paymentVouchersTable)
+    .where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.caseId, caseId)))
+    .orderBy(desc(paymentVouchersTable.createdAt));
+  const paymentVoucherActions = await r
+    .select({
+      id: paymentVoucherActionsTable.id,
+      paymentVoucherId: paymentVoucherActionsTable.paymentVoucherId,
+      actionType: paymentVoucherActionsTable.actionType,
+      customAction: paymentVoucherActionsTable.customAction,
+      status: paymentVoucherActionsTable.status,
+      assignedAt: paymentVoucherActionsTable.assignedAt,
+      acknowledgeDueAt: paymentVoucherActionsTable.acknowledgeDueAt,
+      acknowledgedAt: paymentVoucherActionsTable.acknowledgedAt,
+      completionDueAt: paymentVoucherActionsTable.completionDueAt,
+      completedAt: paymentVoucherActionsTable.completedAt,
+    })
+    .from(paymentVoucherActionsTable)
+    .where(and(eq(paymentVoucherActionsTable.firmId, firmId), eq(paymentVoucherActionsTable.caseId, caseId)))
+    .orderBy(desc(paymentVoucherActionsTable.assignedAt), desc(paymentVoucherActionsTable.createdAt));
 
   const messageIds = messages.map((m) => m.id);
   const taskIds = tasks.map((t) => t.id);
@@ -1050,5 +1083,120 @@ export async function buildCaseCommunicationTimeline(r: DbConn, firmId: number, 
     drafts.push(d);
   }
 
-  return { messages, tasks, drafts };
+  const voucherById = new Map(paymentVouchers.map((voucher) => [voucher.id, voucher]));
+  const paymentEvents: Array<{
+    id: string;
+    paymentVoucherId: number;
+    voucherNo: string;
+    eventType: string;
+    status: string | null;
+    approvalStatus: string | null;
+    payeeName: string | null;
+    nextActionType: string | null;
+    eventAt: Date | null;
+    actionId?: number;
+    actionStatus?: string | null;
+    acknowledgeDueAt?: Date | null;
+    completionDueAt?: Date | null;
+  }> = paymentVouchers.flatMap((voucher) => {
+    const events = [
+      {
+        id: `voucher-created-${voucher.id}`,
+        paymentVoucherId: voucher.id,
+        voucherNo: voucher.voucherNo,
+        eventType: "voucher_created",
+        status: voucher.status,
+        approvalStatus: voucher.approvalStatus,
+        payeeName: voucher.payeeName,
+        nextActionType: voucher.nextActionType,
+        eventAt: voucher.createdAt,
+      },
+    ];
+    if (voucher.receivedAt) {
+      events.push({
+        id: `voucher-received-${voucher.id}`,
+        paymentVoucherId: voucher.id,
+        voucherNo: voucher.voucherNo,
+        eventType: "account_received",
+        status: voucher.status,
+        approvalStatus: voucher.approvalStatus,
+        payeeName: voucher.payeeName,
+        nextActionType: voucher.nextActionType,
+        eventAt: voucher.receivedAt,
+      });
+    }
+    if (voucher.paidAt) {
+      events.push({
+        id: `voucher-paid-${voucher.id}`,
+        paymentVoucherId: voucher.id,
+        voucherNo: voucher.voucherNo,
+        eventType: "payment_completed",
+        status: voucher.status,
+        approvalStatus: voucher.approvalStatus,
+        payeeName: voucher.payeeName,
+        nextActionType: voucher.nextActionType,
+        eventAt: voucher.paidAt,
+      });
+    }
+    return events;
+  });
+  for (const action of paymentVoucherActions) {
+    const voucher = voucherById.get(action.paymentVoucherId);
+    paymentEvents.push({
+      id: `action-assigned-${action.id}`,
+      paymentVoucherId: action.paymentVoucherId,
+      voucherNo: voucher?.voucherNo ?? `PV-${action.paymentVoucherId}`,
+      eventType: "action_assigned",
+      status: action.status,
+      approvalStatus: voucher?.approvalStatus ?? null,
+      payeeName: voucher?.payeeName ?? null,
+      nextActionType: action.customAction ?? action.actionType,
+      eventAt: action.assignedAt,
+      actionId: action.id,
+      actionStatus: action.status,
+      acknowledgeDueAt: action.acknowledgeDueAt,
+      completionDueAt: action.completionDueAt,
+    });
+    if (action.acknowledgedAt) {
+      paymentEvents.push({
+        id: `action-acknowledged-${action.id}`,
+        paymentVoucherId: action.paymentVoucherId,
+        voucherNo: voucher?.voucherNo ?? `PV-${action.paymentVoucherId}`,
+        eventType: "action_acknowledged",
+        status: action.status,
+        approvalStatus: voucher?.approvalStatus ?? null,
+        payeeName: voucher?.payeeName ?? null,
+        nextActionType: action.customAction ?? action.actionType,
+        eventAt: action.acknowledgedAt,
+        actionId: action.id,
+        actionStatus: action.status,
+        acknowledgeDueAt: action.acknowledgeDueAt,
+        completionDueAt: action.completionDueAt,
+      });
+    }
+    if (action.completedAt) {
+      paymentEvents.push({
+        id: `action-completed-${action.id}`,
+        paymentVoucherId: action.paymentVoucherId,
+        voucherNo: voucher?.voucherNo ?? `PV-${action.paymentVoucherId}`,
+        eventType: "action_completed",
+        status: action.status,
+        approvalStatus: voucher?.approvalStatus ?? null,
+        payeeName: voucher?.payeeName ?? null,
+        nextActionType: action.customAction ?? action.actionType,
+        eventAt: action.completedAt,
+        actionId: action.id,
+        actionStatus: action.status,
+        acknowledgeDueAt: action.acknowledgeDueAt,
+        completionDueAt: action.completionDueAt,
+      });
+    }
+  }
+  paymentEvents.sort((a, b) => {
+    const at = a.eventAt ? new Date(a.eventAt).getTime() : 0;
+    const bt = b.eventAt ? new Date(b.eventAt).getTime() : 0;
+    return bt - at;
+  });
+
+  return { messages, tasks, drafts, paymentEvents };
 }

@@ -855,8 +855,10 @@ function QuotationsTab() {
 // ── PAYMENT VOUCHERS TAB ──────────────────────────────────────────────────────
 
 function PaymentVouchersTab() {
+  const [, setLocation] = useLocation();
   const searchString = useSearch();
   const printVoucherIdParam = useMemo(() => new URLSearchParams(searchString).get("printVoucherId"), [searchString]);
+  const paymentVoucherFilterParam = useMemo(() => new URLSearchParams(searchString).get("pvFilter") ?? "all", [searchString]);
   const didAutoPrintRef = useRef(false);
   const [showCreate, setShowCreate] = useState(false);
   const { toast } = useToast();
@@ -965,6 +967,54 @@ function PaymentVouchersTab() {
   const vouchers = (data ?? []) as any[];
   const dashboard = (dashboardQuery.data ?? {}) as Record<string, number>;
   const markPaidVoucher = markPaidVoucherId ? (vouchers.find((v: any) => Number(v.id) === Number(markPaidVoucherId)) ?? null) : null;
+  const activeVoucherFilter = paymentVoucherFilterParam;
+  const voucherFilterLabelMap: Record<string, string> = {
+    awaitingReceipt: "Awaiting Accounts Receipt",
+    receivedAndProcessing: "Received And Processing",
+    waitingApproval: "Waiting For Approval",
+    dueSoon: "Due Soon",
+    overdue: "Overdue Payments",
+    paidToday: "Paid Today",
+    completedMonth: "Completed This Month",
+  };
+  const setVoucherFilter = (filterKey: string) => {
+    const next = new URLSearchParams(searchString);
+    next.set("tab", "payment-vouchers");
+    if (!filterKey || filterKey === "all") next.delete("pvFilter");
+    else next.set("pvFilter", filterKey);
+    setLocation(`/app/accounting?${next.toString()}`);
+  };
+  const filteredVouchers = useMemo(() => {
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const endOfToday = startOfToday + 24 * 60 * 60 * 1000;
+    return vouchers.filter((pv: any) => {
+      const receivedAt = pv.receivedAt ? new Date(String(pv.receivedAt)).getTime() : NaN;
+      const dueAt = pv.paymentDueAt ? new Date(String(pv.paymentDueAt)).getTime() : NaN;
+      const paidAt = pv.paidAt ? new Date(String(pv.paidAt)).getTime() : NaN;
+      const updatedAt = pv.updatedAt ? new Date(String(pv.updatedAt)).getTime() : NaN;
+      switch (activeVoucherFilter) {
+        case "awaitingReceipt":
+          return pv.status === "pending_account" && !pv.receivedAt;
+        case "receivedAndProcessing":
+          return pv.status === "pending_account" && Number.isFinite(receivedAt);
+        case "waitingApproval":
+          return pv.approvalStatus === "pending_approval";
+        case "dueSoon":
+          return pv.status === "pending_account" && Number.isFinite(dueAt) && dueAt <= now.getTime() + 2 * 60 * 60 * 1000;
+        case "overdue":
+          return pv.status === "pending_account" && Number.isFinite(dueAt) && dueAt <= now.getTime();
+        case "paidToday":
+          return pv.status === "paid_pending_collection" && Number.isFinite(paidAt) && paidAt >= startOfToday && paidAt < endOfToday;
+        case "completedMonth":
+          return pv.status === "completed" && Number.isFinite(updatedAt) && updatedAt >= monthStart && updatedAt < monthEnd;
+        default:
+          return true;
+      }
+    });
+  }, [activeVoucherFilter, vouchers]);
 
   const createBatchMut = useMutation({
     mutationFn: async () => {
@@ -1576,17 +1626,17 @@ function PaymentVouchersTab() {
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3 xl:grid-cols-5">
         {[
-          { key: "awaitingReceipt", label: "Awaiting Accounts Receipt" },
-          { key: "receivedAndProcessing", label: "Received And Processing" },
-          { key: "waitingApproval", label: "Waiting For Approval" },
-          { key: "dueSoon", label: "Due Soon" },
-          { key: "overdue", label: "Overdue Payments" },
-          { key: "paidToday", label: "Paid Today" },
-          { key: "clerkPending", label: "Clerk Action Pending" },
-          { key: "clerkOverdue", label: "Clerk Action Overdue" },
-          { key: "completedMonth", label: "Completed This Month" },
+          { key: "awaitingReceipt", label: "Awaiting Accounts Receipt", onClick: () => setVoucherFilter("awaitingReceipt") },
+          { key: "receivedAndProcessing", label: "Received And Processing", onClick: () => setVoucherFilter("receivedAndProcessing") },
+          { key: "waitingApproval", label: "Waiting For Approval", onClick: () => setVoucherFilter("waitingApproval") },
+          { key: "dueSoon", label: "Due Soon", onClick: () => setVoucherFilter("dueSoon") },
+          { key: "overdue", label: "Overdue Payments", onClick: () => setVoucherFilter("overdue") },
+          { key: "paidToday", label: "Paid Today", onClick: () => setVoucherFilter("paidToday") },
+          { key: "clerkPending", label: "Clerk Action Pending", onClick: () => setLocation("/app/workbench?tab=my-work&pvActionFilter=active") },
+          { key: "clerkOverdue", label: "Clerk Action Overdue", onClick: () => setLocation("/app/workbench?tab=my-work&pvActionFilter=overdue") },
+          { key: "completedMonth", label: "Completed This Month", onClick: () => setVoucherFilter("completedMonth") },
         ].map((card) => (
-          <Card key={card.key} className="border-slate-200">
+          <Card key={card.key} className="border-slate-200 cursor-pointer hover:border-amber-300 hover:shadow-sm" onClick={card.onClick}>
             <CardContent className="pt-5">
               <div className="text-xs text-slate-500">{card.label}</div>
               <div className="mt-2 text-2xl font-bold text-slate-900">{Number(dashboard[card.key] ?? 0)}</div>
@@ -1595,14 +1645,25 @@ function PaymentVouchersTab() {
         ))}
       </div>
 
+      {activeVoucherFilter !== "all" && voucherFilterLabelMap[activeVoucherFilter] ? (
+        <div className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <div className="text-sm text-slate-700">
+            Filtered by <span className="font-semibold">{voucherFilterLabelMap[activeVoucherFilter]}</span>
+            {" · "}
+            {filteredVouchers.length} result(s)
+          </div>
+          <Button variant="outline" size="sm" onClick={() => setVoucherFilter("all")}>Clear Filter</Button>
+        </div>
+      ) : null}
+
       {vouchersQuery.isError ? (
         <QueryFallback title="Payment vouchers unavailable" error={vouchersQuery.error} onRetry={() => vouchersQuery.refetch()} isRetrying={vouchersQuery.isFetching} />
       ) : isLoading ? (
         <div className="text-center py-12 text-slate-400">Loading…</div>
-      ) : vouchers.length === 0 ? (
+      ) : filteredVouchers.length === 0 ? (
         <div className="text-center py-16 text-slate-400">
           <CreditCard className="w-10 h-10 mx-auto mb-3 opacity-30" />
-          <p>No payment vouchers yet</p>
+          <p>{activeVoucherFilter === "all" ? "No payment vouchers yet" : "No payment vouchers match this filter"}</p>
         </div>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
@@ -1621,7 +1682,7 @@ function PaymentVouchersTab() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {vouchers.map((pv: any) => {
+              {filteredVouchers.map((pv: any) => {
                 const actions: Array<{ key: string; label: string; onClick: () => void; show: boolean }> = [
                   {
                     key: "lawyer_approve",

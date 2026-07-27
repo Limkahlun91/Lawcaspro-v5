@@ -772,9 +772,17 @@ export default function CaseDetail() {
     retry: false,
     refetchInterval: 15000,
   });
+  const paymentVoucherCaseSummaryQuery = useQuery<{ activeCount: number; overdueCount: number }>({
+    queryKey: ["payment-voucher-actions", "case-summary", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/payment-voucher-actions/cases/${caseId}/summary`, { signal }),
+    enabled: !!caseId,
+    retry: false,
+    refetchInterval: 15000,
+  });
   const unreadClient = Number((caseMessagesUnreadQuery.data as any)?.unreadCountByChannel?.client ?? 0) || 0;
   const unreadDeveloper = Number((caseMessagesUnreadQuery.data as any)?.unreadCountByChannel?.developer ?? 0) || 0;
   const unreadTotal = Number((caseMessagesUnreadQuery.data as any)?.totalUnreadCount ?? (unreadClient + unreadDeveloper)) || 0;
+  const paymentVoucherCaseActiveCount = Number((paymentVoucherCaseSummaryQuery.data as any)?.activeCount ?? 0) || 0;
   const prevUnreadRef = useRef<{ client: number; developer: number } | null>(null);
 
   const markCaseMessagesReadMutation = useMutation({
@@ -2385,7 +2393,14 @@ export default function CaseDetail() {
           <TabsTrigger value="billing">Billing</TabsTrigger>
           <TabsTrigger value="ledger">Ledger</TabsTrigger>
           <TabsTrigger value="communications">Comms</TabsTrigger>
-          <TabsTrigger value="communication-timeline">Comms Timeline</TabsTrigger>
+          <TabsTrigger value="communication-timeline" className="gap-2">
+            <span>Case Timeline</span>
+            {paymentVoucherCaseActiveCount > 0 && (
+              <span className="inline-flex items-center rounded-full bg-red-500 text-white text-[11px] px-2 py-0.5">
+                {paymentVoucherCaseActiveCount}
+              </span>
+            )}
+          </TabsTrigger>
           {canAccessClientInteraction && (
             <TabsTrigger value="client-interaction" className="gap-2">
               <span>Client Interaction</span>

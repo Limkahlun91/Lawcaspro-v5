@@ -2,7 +2,7 @@ import express, { type Response, type Router as ExpressRouter } from "express";
 import { and, count, desc, eq, inArray, lte, or } from "drizzle-orm";
 import { casesTable, db, paymentVoucherActionsTable, paymentVouchersTable, permissionsTable, sql, userNotificationsTable } from "@workspace/db";
 import { z } from "zod";
-import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -28,6 +28,39 @@ async function roleHasPermission(req: AuthRequest, module: string, action: strin
     .limit(1);
   return Boolean(rows[0]);
 }
+
+router.get("/payment-voucher-actions/cases/:caseId/summary", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const caseId = Number.parseInt(one(req.params.caseId) ?? "", 10);
+  if (!Number.isFinite(caseId) || caseId <= 0) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+  const now = new Date();
+  const [activeRow] = await rdb(req)
+    .select({ count: count() })
+    .from(paymentVoucherActionsTable)
+    .where(and(
+      eq(paymentVoucherActionsTable.firmId, req.firmId!),
+      eq(paymentVoucherActionsTable.caseId, caseId),
+      inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]),
+    ));
+  const [overdueRow] = await rdb(req)
+    .select({ count: count() })
+    .from(paymentVoucherActionsTable)
+    .where(and(
+      eq(paymentVoucherActionsTable.firmId, req.firmId!),
+      eq(paymentVoucherActionsTable.caseId, caseId),
+      inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]),
+      or(
+        lte(paymentVoucherActionsTable.acknowledgeDueAt, now),
+        lte(paymentVoucherActionsTable.completionDueAt, now),
+      ),
+    ));
+  res.json({
+    activeCount: Number(activeRow?.count ?? 0),
+    overdueCount: Number(overdueRow?.count ?? 0),
+  });
+});
 
 router.get("/payment-voucher-actions/my-work", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const requestedUserId = one((req.query as any).userId);

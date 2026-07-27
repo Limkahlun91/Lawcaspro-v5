@@ -136,6 +136,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(newUser);
     setAuthStatus("authenticated");
     queryClient.setQueryData(ME_QUERY_KEY, newUser);
+    void meQuery.refetch();
+    void permissionsQuery.refetch();
   };
 
   const handleLogout = () => {
