@@ -3,6 +3,7 @@ import { and, count, desc, eq, inArray, lte, or } from "drizzle-orm";
 import { casesTable, db, paymentVoucherActionsTable, paymentVouchersTable, permissionsTable, sql, userNotificationsTable } from "@workspace/db";
 import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { logger } from "../lib/logger.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -107,6 +108,7 @@ router.get("/payment-voucher-actions/my-work", requireAuth, requireFirmUser, asy
 });
 
 router.get("/payment-vouchers/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const startedAt = Date.now();
   if (!await roleHasPermission(req, "accounting", "read")) {
     res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" });
     return;
@@ -114,38 +116,51 @@ router.get("/payment-vouchers/dashboard", requireAuth, requireFirmUser, async (r
   const r = rdb(req);
   const now = new Date();
   const firmId = req.firmId!;
-  const [
-    awaitingReceipt,
-    receivedAndProcessing,
-    waitingApproval,
-    dueSoon,
-    overdue,
-    paidToday,
-    clerkPending,
-    clerkOverdue,
-    completedMonth,
-  ] = await Promise.all([
-    r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), sql`${paymentVouchersTable.receivedAt} IS NULL` as any)),
-    r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), sql`${paymentVouchersTable.receivedAt} IS NOT NULL` as any)),
-    r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.approvalStatus, "pending_approval"))),
-    r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), lte(paymentVouchersTable.paymentDueAt, new Date(now.getTime() + 2 * 60 * 60 * 1000)))),
-    r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), lte(paymentVouchersTable.paymentDueAt, now))),
-    r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "paid_pending_collection"), sql`date(${paymentVouchersTable.paidAt}) = current_date` as any)),
-    r.select({ c: count() }).from(paymentVoucherActionsTable).where(and(eq(paymentVoucherActionsTable.firmId, firmId), inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]))),
-    r.select({ c: count() }).from(paymentVoucherActionsTable).where(and(eq(paymentVoucherActionsTable.firmId, firmId), inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]), or(lte(paymentVoucherActionsTable.acknowledgeDueAt, now), lte(paymentVoucherActionsTable.completionDueAt, now)))),
-    r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "completed"), sql`date_trunc('month', ${paymentVouchersTable.updatedAt}) = date_trunc('month', now())` as any)),
-  ]);
-  res.json({
-    awaitingReceipt: Number(awaitingReceipt[0]?.c ?? 0),
-    receivedAndProcessing: Number(receivedAndProcessing[0]?.c ?? 0),
-    waitingApproval: Number(waitingApproval[0]?.c ?? 0),
-    dueSoon: Number(dueSoon[0]?.c ?? 0),
-    overdue: Number(overdue[0]?.c ?? 0),
-    paidToday: Number(paidToday[0]?.c ?? 0),
-    clerkPending: Number(clerkPending[0]?.c ?? 0),
-    clerkOverdue: Number(clerkOverdue[0]?.c ?? 0),
-    completedMonth: Number(completedMonth[0]?.c ?? 0),
-  });
+  try {
+    const [
+      awaitingReceipt,
+      receivedAndProcessing,
+      waitingApproval,
+      dueSoon,
+      overdue,
+      paidToday,
+      clerkPending,
+      clerkOverdue,
+      completedMonth,
+    ] = await Promise.all([
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), sql`${paymentVouchersTable.receivedAt} IS NULL` as any)),
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), sql`${paymentVouchersTable.receivedAt} IS NOT NULL` as any)),
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.approvalStatus, "pending_approval"))),
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), lte(paymentVouchersTable.paymentDueAt, new Date(now.getTime() + 2 * 60 * 60 * 1000)))),
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), lte(paymentVouchersTable.paymentDueAt, now))),
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "paid_pending_collection"), sql`date(${paymentVouchersTable.paidAt}) = current_date` as any)),
+      r.select({ c: count() }).from(paymentVoucherActionsTable).where(and(eq(paymentVoucherActionsTable.firmId, firmId), inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]))),
+      r.select({ c: count() }).from(paymentVoucherActionsTable).where(and(eq(paymentVoucherActionsTable.firmId, firmId), inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]), or(lte(paymentVoucherActionsTable.acknowledgeDueAt, now), lte(paymentVoucherActionsTable.completionDueAt, now)))),
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "completed"), sql`date_trunc('month', ${paymentVouchersTable.updatedAt}) = date_trunc('month', now())` as any)),
+    ]);
+    res.json({
+      awaitingReceipt: Number(awaitingReceipt[0]?.c ?? 0),
+      receivedAndProcessing: Number(receivedAndProcessing[0]?.c ?? 0),
+      waitingApproval: Number(waitingApproval[0]?.c ?? 0),
+      dueSoon: Number(dueSoon[0]?.c ?? 0),
+      overdue: Number(overdue[0]?.c ?? 0),
+      paidToday: Number(paidToday[0]?.c ?? 0),
+      clerkPending: Number(clerkPending[0]?.c ?? 0),
+      clerkOverdue: Number(clerkOverdue[0]?.c ?? 0),
+      completedMonth: Number(completedMonth[0]?.c ?? 0),
+    });
+    const durationMs = Date.now() - startedAt;
+    if (durationMs >= 2000) {
+      logger.warn({ durationMs, firmId: req.firmId, userId: req.userId }, "payment_voucher.dashboard_slow");
+    }
+  } catch (err) {
+    const code = err && typeof err === "object" && "code" in (err as any) ? String((err as any).code) : null;
+    if (code === "42703" || code === "42P01") {
+      res.status(500).json({ error: "Database migration missing for Payment Voucher dashboard fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql", code: "MIGRATION_MISSING" });
+      return;
+    }
+    throw err;
+  }
 });
 
 router.post("/payment-voucher-actions/:id/acknowledge", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {

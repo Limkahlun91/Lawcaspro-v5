@@ -24,6 +24,10 @@ interface LineItem {
   taxRate: number;
   taxAmount: number;
   amountInclTax: number;
+  quantity?: number;
+  unitAmount?: number;
+  remarks?: string;
+  isCustom?: boolean;
 }
 
 type ClientDetailRow = { id: string; name: string; tin: string };
@@ -43,42 +47,26 @@ function calcTax(amount: number, taxCode: string, rate: number) {
   return { taxRate: effectiveRate, taxAmount, amountInclTax: amount + taxAmount };
 }
 
+type CategoryMeta = {
+  quantity?: number;
+  unitAmount?: number;
+  remarks?: string;
+};
+
+function encodeCategory(base: string, meta: CategoryMeta): string {
+  const b = String(base ?? "").trim();
+  if (!b) return "";
+  const parts: string[] = [b];
+  if (typeof meta.quantity === "number" && Number.isFinite(meta.quantity)) parts.push(`q=${Math.trunc(meta.quantity)}`);
+  if (typeof meta.unitAmount === "number" && Number.isFinite(meta.unitAmount)) parts.push(`u=${meta.unitAmount}`);
+  if (meta.remarks && meta.remarks.trim()) parts.push(`r=${encodeURIComponent(meta.remarks.trim())}`);
+  return parts.length === 1 ? b : parts.join("|");
+}
+
 const DEFAULT_DISBURSEMENT_ITEMS: Omit<LineItem, "id" | "itemCategory">[] = [
   { section: "disbursement", category: "search", itemNo: "1", subItemNo: "", description: "SEARCH", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "a", description: "Land Search", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "b", description: "CTC Title", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "c", description: "Bankruptcy Search", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "d", description: "Bankruptcy Search Service Charge", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "search", itemNo: "1", subItemNo: "e", description: "CCM Search", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "", description: "STAMP DUTY", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "a", description: "SPA", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "b", description: "Deed of Mutual Covenants", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "c", description: "Transfer/Deed of Assignment (by way of Transfer)", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "d", description: "Discharge Form 16N/Deed of Receipt & Reassignment", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "e", description: "Loan Agreement/LACA/Facilities Agreement", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "f", description: "Charge 16A (Annexure)", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "g", description: "Personal Guarantee", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "h", description: "Corporate Guarantee", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "i", description: "Letter of Offer and SD", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "j", description: "Property Purchase Agreement", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "k", description: "Deed of Assignment", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "l", description: "Deed of Revocation", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "m", description: "Power of Attorney/Revocation of Power of Attorney", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "n", description: "Supplemental Letter Offer", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "o", description: "Memorandum of Deposit", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "p", description: "Letter of Set-Off", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "q", description: "Assignment of Rental Proceed", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "r", description: "Tenancy Agreement", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "s", description: "Islamic Banking", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "stamp_duty", itemNo: "2", subItemNo: "t", description: "Others-Refer Attachment I", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "", description: "REGISTRATION/ENTRY/WITHDRAWAL", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "a", description: "Entry PC/LHC", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "b", description: "Withdrawal PC/LHC", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "c", description: "Discharge/Charge", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "d", description: "Consent to Charge/Transfer", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "e", description: "Letter of Consent for Registration", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "f", description: "Application consent to Charge/Transfer", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "disbursement", category: "registration", itemNo: "3", subItemNo: "g", description: "MOT Form14A/Form16F/Form16I NLC", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
 ];
 
 const DEFAULT_FEES_ITEMS: Omit<LineItem, "id" | "itemCategory">[] = [
@@ -108,8 +96,6 @@ const DEFAULT_FEES_ITEMS: Omit<LineItem, "id" | "itemCategory">[] = [
   { section: "fees", category: "fees", itemNo: "24", subItemNo: "", description: "Withdrawal of Caveat", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "25", subItemNo: "", description: "Form I", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
   { section: "fees", category: "fees", itemNo: "26", subItemNo: "", description: "Statutory Declaration", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "27", subItemNo: "", description: "Other Agreement", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
-  { section: "fees", category: "fees", itemNo: "28", subItemNo: "", description: "Others-Refer Attachment I", taxCode: "T", amountExclTax: 0, taxRate: TAX_RATE, taxAmount: 0, amountInclTax: 0 },
 ];
 
 const DEFAULT_REIMBURSEMENT_ITEMS: Omit<LineItem, "id" | "itemCategory">[] = [
@@ -131,6 +117,10 @@ function initItems(defaults: Array<Omit<LineItem, "id"> | Omit<LineItem, "id" | 
       : d.section === "fees"
         ? "fee"
         : "disbursement",
+    quantity: typeof d.quantity === "number" ? d.quantity : undefined,
+    unitAmount: typeof d.unitAmount === "number" ? d.unitAmount : undefined,
+    remarks: typeof d.remarks === "string" ? d.remarks : undefined,
+    isCustom: Boolean(d.isCustom),
   }));
 }
 
@@ -211,6 +201,7 @@ export default function NewQuotation() {
 
   const [activeSection, setActiveSection] = useState<string>("fees");
   const exclInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
+  const descInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   useEffect(() => {
     const recalc = (items: LineItem[]): LineItem[] =>
@@ -246,6 +237,107 @@ export default function NewQuotation() {
       const nextTax = calcTax(item.amountExclTax, taxCode, taxRate);
       return { ...item, taxCode, taxRate: nextTax.taxRate, taxAmount: nextTax.taxAmount, amountInclTax: nextTax.amountInclTax };
     }));
+  }, [taxRate]);
+
+  const updateItemDescription = useCallback((
+    setItems: React.Dispatch<React.SetStateAction<LineItem[]>>,
+    itemId: string,
+    description: string
+  ) => {
+    setItems((prev) => prev.map((item) => item.id === itemId ? { ...item, description } : item));
+  }, []);
+
+  const updateItemRemarks = useCallback((itemId: string, remarks: string) => {
+    setDisbursementItems((prev) => prev.map((item) => item.id === itemId ? { ...item, remarks } : item));
+  }, []);
+
+  const updateSearchMeta = useCallback((itemId: string, patch: { quantity?: number; unitAmount?: number }) => {
+    setDisbursementItems((prev) => prev.map((item) => {
+      if (item.id !== itemId) return item;
+      const nextQty = typeof patch.quantity === "number" && Number.isFinite(patch.quantity) ? Math.max(1, Math.trunc(patch.quantity)) : (item.quantity ?? 1);
+      const nextUnit = typeof patch.unitAmount === "number" && Number.isFinite(patch.unitAmount) ? Math.max(0, patch.unitAmount) : (item.unitAmount ?? 0);
+      const amount = nextQty * nextUnit;
+      const nextTax = calcTax(amount, item.taxCode, taxRate);
+      return { ...item, quantity: nextQty, unitAmount: nextUnit, amountExclTax: amount, taxRate: nextTax.taxRate, taxAmount: nextTax.taxAmount, amountInclTax: nextTax.amountInclTax };
+    }));
+  }, [taxRate]);
+
+  const removeLineItem = useCallback((setItems: React.Dispatch<React.SetStateAction<LineItem[]>>, itemId: string) => {
+    setItems((prev) => prev.filter((item) => item.id !== itemId));
+  }, []);
+
+  const addFeesCustomLine = useCallback(() => {
+    setActiveSection("fees");
+    const id = generateId();
+    setFeesItems((prev) => {
+      const fixed = prev.filter((i) => {
+        const n = Number.parseInt(String(i.itemNo ?? ""), 10);
+        return Number.isFinite(n) && n > 0 && n <= 26;
+      });
+      const custom = prev.filter((i) => !fixed.includes(i) && i.subItemNo === "");
+      const nextNo = String(26 + custom.length + 1);
+      const nextTax = calcTax(0, "T", taxRate);
+      return [
+        ...prev,
+        {
+          id,
+          section: "fees",
+          category: "fees",
+          itemNo: nextNo,
+          subItemNo: "",
+          description: "",
+          taxCode: "T",
+          itemCategory: "fee",
+          amountExclTax: 0,
+          taxRate: nextTax.taxRate,
+          taxAmount: nextTax.taxAmount,
+          amountInclTax: nextTax.amountInclTax,
+          isCustom: true,
+        },
+      ];
+    });
+    window.setTimeout(() => descInputRefs.current[id]?.focus(), 0);
+  }, [taxRate]);
+
+  const addDisbursementLine = useCallback((category: "search" | "stamp_duty" | "registration") => {
+    setActiveSection("disbursement");
+    const id = generateId();
+    setDisbursementItems((prev) => {
+      const header = prev.find((i) => i.category === category && !i.subItemNo);
+      const itemNo = header?.itemNo ?? (category === "search" ? "1" : category === "stamp_duty" ? "2" : "3");
+      const existing = prev.filter((i) => i.category === category && i.subItemNo);
+      const idx = existing.length;
+      const nextSub = idx < 26 ? String.fromCharCode(97 + idx) : String(idx + 1);
+      const nextTax = calcTax(0, "Z", taxRate);
+      const base: LineItem = {
+        id,
+        section: "disbursement",
+        category,
+        itemNo,
+        subItemNo: nextSub,
+        description: "",
+        taxCode: "Z",
+        itemCategory: "disbursement",
+        amountExclTax: 0,
+        taxRate: nextTax.taxRate,
+        taxAmount: nextTax.taxAmount,
+        amountInclTax: nextTax.amountInclTax,
+        isCustom: true,
+      };
+      const nextItem: LineItem = category === "search"
+        ? { ...base, quantity: 1, unitAmount: 0 }
+        : { ...base, remarks: "" };
+      const order: Record<string, number> = { search: 1, stamp_duty: 2, registration: 3 };
+      return [...prev, nextItem].sort((a, b) => {
+        const ao = order[a.category] ?? 9;
+        const bo = order[b.category] ?? 9;
+        if (ao !== bo) return ao - bo;
+        if (!a.subItemNo && b.subItemNo) return -1;
+        if (a.subItemNo && !b.subItemNo) return 1;
+        return String(a.subItemNo).localeCompare(String(b.subItemNo));
+      });
+    });
+    window.setTimeout(() => descInputRefs.current[id]?.focus(), 0);
   }, [taxRate]);
 
   const addAttachmentItem = () => {
@@ -301,14 +393,37 @@ export default function NewQuotation() {
       return;
     }
 
-    const allItems = [
+    const sourceItems = [
       ...disbursementItems,
       ...feesItems,
       ...reimbursementItems,
       ...attachmentItems,
-    ].filter(i => i.amountExclTax > 0).map((item, idx) => ({
+    ];
+
+    const isHeaderRow = (item: LineItem) => !item.subItemNo && item.description === item.description.toUpperCase();
+    const bad = sourceItems.find((item) => !isHeaderRow(item) && item.amountExclTax > 0 && !item.description.trim());
+    if (bad) {
+      toast({ title: "Description is required for all non-empty lines", variant: "destructive" });
+      return;
+    }
+
+    const itemsToSave = sourceItems.filter((item) => {
+      if (isHeaderRow(item)) return true;
+      if (!item.description.trim()) return false;
+      if (item.section === "attachment") return true;
+      if (item.isCustom) return true;
+      return item.amountExclTax > 0;
+    });
+
+    const allItems = itemsToSave.map((item, idx) => ({
       section: item.section,
-      category: item.category,
+      category: encodeCategory(item.category, {
+        quantity: item.section === "disbursement" && item.category === "search" && item.subItemNo ? (item.quantity ?? 1) : undefined,
+        unitAmount: item.section === "disbursement" && item.category === "search" && item.subItemNo ? (item.unitAmount ?? 0) : undefined,
+        remarks: item.section === "disbursement" && (item.category === "stamp_duty" || item.category === "registration") && item.subItemNo
+          ? (item.remarks ?? "")
+          : undefined,
+      }),
       itemNo: item.itemNo,
       subItemNo: item.subItemNo,
       description: item.description,
@@ -591,8 +706,29 @@ export default function NewQuotation() {
               )}
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm min-w-[900px]">
+            <div>
+              {activeSection === "fees" ? (
+                <div className="flex justify-end mb-3">
+                  <Button size="sm" variant="outline" onClick={addFeesCustomLine}>
+                    <Plus className="w-4 h-4 mr-1" /> Add Line
+                  </Button>
+                </div>
+              ) : null}
+              {activeSection === "disbursement" ? (
+                <div className="flex flex-wrap justify-end gap-2 mb-3">
+                  <Button size="sm" variant="outline" onClick={() => addDisbursementLine("search")}>
+                    <Plus className="w-4 h-4 mr-1" /> Add Search Line
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => addDisbursementLine("stamp_duty")}>
+                    <Plus className="w-4 h-4 mr-1" /> Add Stamp Duty Line
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => addDisbursementLine("registration")}>
+                    <Plus className="w-4 h-4 mr-1" /> Add Registration Line
+                  </Button>
+                </div>
+              ) : null}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[900px]">
                 <thead>
                   <tr className="border-b border-slate-200 bg-slate-50">
                     <th className="text-left px-3 py-2 font-medium text-slate-600 w-10">No.</th>
@@ -601,18 +737,70 @@ export default function NewQuotation() {
                     <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Excl. ST (RM)</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-600 w-28">ST @ {taxRate}% (RM)</th>
                     <th className="text-right px-3 py-2 font-medium text-slate-600 w-32">Total Incl. ST (RM)</th>
+                    <th className="w-10"></th>
                   </tr>
                 </thead>
                 <tbody>
                   {currentSection.items.map((item) => {
                     const isHeader = !item.subItemNo && item.description === item.description.toUpperCase();
+                    const isSearchLine = !isHeader && activeSection === "disbursement" && item.category === "search" && Boolean(item.subItemNo);
+                    const showDelete =
+                      !isHeader
+                      && (activeSection === "disbursement"
+                        || (activeSection === "fees" && Boolean(item.isCustom)));
+                    const canEditDescription =
+                      !isHeader
+                      && (activeSection === "disbursement"
+                        || (activeSection === "fees" && Boolean(item.isCustom)));
                     return (
                       <tr key={item.id} className={`border-b border-slate-100 ${isHeader ? "bg-slate-50/50" : ""}`}>
                         <td className="px-3 py-1.5 text-slate-500 text-xs">
                           {item.subItemNo || item.itemNo}
                         </td>
                         <td className={`px-3 py-1.5 ${isHeader ? "font-semibold text-slate-800" : "text-slate-600"}`}>
-                          {item.description}
+                          {isHeader ? (
+                            item.description
+                          ) : canEditDescription ? (
+                            <div className="space-y-2">
+                              <Input
+                                value={item.description}
+                                onChange={(e) => updateItemDescription(currentSection.setter, item.id, e.target.value)}
+                                placeholder="Description"
+                                className="h-7 text-xs"
+                                ref={(el) => { descInputRefs.current[item.id] = el; }}
+                              />
+                              {activeSection === "disbursement" && item.category === "search" ? (
+                                <div className="flex flex-wrap gap-2">
+                                  <Input
+                                    type="number"
+                                    value={item.quantity ?? 1}
+                                    onChange={(e) => updateSearchMeta(item.id, { quantity: Number.parseInt(e.target.value || "1", 10) })}
+                                    className="h-7 text-xs w-24"
+                                    min={1}
+                                    placeholder="Qty"
+                                  />
+                                  <Input
+                                    type="number"
+                                    value={item.unitAmount ?? 0}
+                                    onChange={(e) => updateSearchMeta(item.id, { unitAmount: parseFloat(e.target.value) || 0 })}
+                                    className="h-7 text-xs w-32"
+                                    min={0}
+                                    placeholder="Unit (RM)"
+                                  />
+                                </div>
+                              ) : null}
+                              {activeSection === "disbursement" && (item.category === "stamp_duty" || item.category === "registration") ? (
+                                <Input
+                                  value={item.remarks ?? ""}
+                                  onChange={(e) => updateItemRemarks(item.id, e.target.value)}
+                                  placeholder="Remarks (optional)"
+                                  className="h-7 text-xs"
+                                />
+                              ) : null}
+                            </div>
+                          ) : (
+                            item.description
+                          )}
                         </td>
                         <td className="px-3 py-1.5 text-center">
                           {!isHeader ? (
@@ -635,6 +823,8 @@ export default function NewQuotation() {
                               className="h-7 text-right text-xs w-28 ml-auto"
                               placeholder="0.00"
                               ref={(el) => { exclInputRefs.current[item.id] = el; }}
+                              readOnly={isSearchLine}
+                              disabled={isSearchLine}
                               onKeyDown={(e) => {
                                 if (e.key !== "Tab" || e.shiftKey) return;
                                 e.preventDefault();
@@ -655,6 +845,18 @@ export default function NewQuotation() {
                             <Input readOnly tabIndex={-1} value={item.amountInclTax.toFixed(2)} className="h-7 text-right text-xs font-medium border-0 bg-transparent shadow-none focus-visible:ring-0 w-24 ml-auto" />
                           ) : ""}
                         </td>
+                        <td className="px-3 py-1.5">
+                          {showDelete ? (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => removeLineItem(currentSection.setter, item.id)}
+                              className="text-red-500"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </Button>
+                          ) : null}
+                        </td>
                       </tr>
                     );
                   })}
@@ -667,7 +869,8 @@ export default function NewQuotation() {
                     <td className="px-3 py-2 text-right">{formatRM(currentSection.totals.totalInclTax)}</td>
                   </tr>
                 </tfoot>
-              </table>
+                </table>
+              </div>
             </div>
           )}
         </CardContent>

@@ -13,6 +13,7 @@ import { toastError } from "@/lib/toast-error";
 import { apiFetchJson } from "@/lib/api-client";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth-context";
+import { hasPermission } from "@/lib/permissions";
 import { getListCasesQueryKey } from "@workspace/api-client-react";
 
 type ApprovalStatus = "pending_approval" | "rejected" | "approved";
@@ -88,6 +89,7 @@ export default function AccountingFileListing() {
   const qc = useQueryClient();
   const { toast } = useToast();
   const { user } = useAuth();
+  const canAccountingCreate = hasPermission(user, "accounting", "create");
 
   const roleLower = String((user as any)?.roleName ?? "").trim().toLowerCase();
   const canApproveCases =
@@ -156,6 +158,15 @@ export default function AccountingFileListing() {
   const [reviewChangeReason, setReviewChangeReason] = useState("");
 
   const isPendingTab = status === "pending_approval";
+
+  const [caseInfoOpen, setCaseInfoOpen] = useState(false);
+  const [caseInfoCaseId, setCaseInfoCaseId] = useState<number | null>(null);
+  const caseInfoQuery = useQuery<any>({
+    queryKey: ["accounting", "case-summary", caseInfoCaseId],
+    enabled: caseInfoOpen && caseInfoCaseId != null,
+    queryFn: ({ signal }) => apiFetchJson(`/accounting/cases/${encodeURIComponent(String(caseInfoCaseId))}/summary`, { signal }),
+    retry: false,
+  });
 
   const notificationCountsQuery = useQuery<{
     totalUnreadCount: number;
@@ -404,7 +415,7 @@ export default function AccountingFileListing() {
                           <td className="py-3 pr-4 text-xs">{fmtIsoToYmd(r.openFileDate)}</td>
                           <td className="py-3 pr-4 text-xs text-slate-700">{showCell(r.status)}</td>
                           <td className="py-3 pr-4">
-                            <Button size="sm" variant="outline" onClick={() => setLocation(`/app/cases/${r.id}`)}>
+                            <Button size="sm" variant="outline" onClick={() => { setCaseInfoCaseId(r.id); setCaseInfoOpen(true); }}>
                               View
                             </Button>
                           </td>
@@ -591,6 +602,149 @@ export default function AccountingFileListing() {
             >
               Approve Open File
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={caseInfoOpen} onOpenChange={(o) => {
+        setCaseInfoOpen(o);
+        if (!o) setCaseInfoCaseId(null);
+      }}>
+        <DialogContent className="max-w-[900px] w-[95vw]">
+          <DialogHeader>
+            <DialogTitle>Case Information</DialogTitle>
+            <DialogDescription>Read-only case summary for accounting.</DialogDescription>
+          </DialogHeader>
+          {caseInfoQuery.isError ? (
+            <QueryFallback title="Case summary unavailable" error={caseInfoQuery.error} onRetry={() => caseInfoQuery.refetch()} isRetrying={caseInfoQuery.isFetching} />
+          ) : caseInfoQuery.isLoading ? (
+            <div className="text-sm text-slate-500">Loading…</div>
+          ) : (
+            (() => {
+              const payload = (caseInfoQuery.data ?? {}) as any;
+              const c = payload.case ?? {};
+              const parties = payload.parties ?? {};
+              const acc = payload.accounting ?? {};
+              const purchasers = Array.isArray(parties.purchasers) ? parties.purchasers : [];
+              const borrowers = Array.isArray(parties.borrowers) ? parties.borrowers : [];
+              const openDate = c.openDate ? fmtIsoToYmd(String(c.openDate)) : "—";
+              return (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="rounded-md border border-slate-200 p-3">
+                      <div className="text-xs text-slate-500">File Reference</div>
+                      <div className="font-medium text-slate-900">{showCell(c.referenceNo)}</div>
+                    </div>
+                    <div className="rounded-md border border-slate-200 p-3">
+                      <div className="text-xs text-slate-500">Case Type</div>
+                      <div className="font-medium text-slate-900">{caseTypeLabel(c.caseType)}</div>
+                    </div>
+                    <div className="rounded-md border border-slate-200 p-3">
+                      <div className="text-xs text-slate-500">Open Date</div>
+                      <div className="font-medium text-slate-900">{openDate}</div>
+                    </div>
+                    <div className="rounded-md border border-slate-200 p-3">
+                      <div className="text-xs text-slate-500">Current Status</div>
+                      <div className="font-medium text-slate-900">{showCell(c.status)}</div>
+                    </div>
+                    <div className="rounded-md border border-slate-200 p-3">
+                      <div className="text-xs text-slate-500">Responsible Lawyer</div>
+                      <div className="font-medium text-slate-900">{showCell(c.responsibleLawyer)}</div>
+                    </div>
+                    <div className="rounded-md border border-slate-200 p-3">
+                      <div className="text-xs text-slate-500">Assigned Clerk</div>
+                      <div className="font-medium text-slate-900">{showCell(c.assignedClerk)}</div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="rounded-md border border-slate-200 p-3">
+                      <div className="text-xs text-slate-500">Client / Purchaser</div>
+                      <div className="text-sm text-slate-900">{purchasers.length > 0 ? purchasers.join(", ") : "—"}</div>
+                    </div>
+                    <div className="rounded-md border border-slate-200 p-3">
+                      <div className="text-xs text-slate-500">Borrower</div>
+                      <div className="text-sm text-slate-900">{borrowers.length > 0 ? borrowers.join(", ") : "—"}</div>
+                    </div>
+                    <div className="rounded-md border border-slate-200 p-3">
+                      <div className="text-xs text-slate-500">Project</div>
+                      <div className="text-sm text-slate-900">{showCell(c.projectName)}</div>
+                    </div>
+                    <div className="rounded-md border border-slate-200 p-3">
+                      <div className="text-xs text-slate-500">Developer</div>
+                      <div className="text-sm text-slate-900">{showCell(c.developerName)}</div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-md border border-slate-200 p-3">
+                    <div className="text-xs text-slate-500">Accounting Summary</div>
+                    <div className="mt-2 grid grid-cols-1 md:grid-cols-3 gap-2 text-sm">
+                      <div>Outstanding: <span className="font-medium">{showCell(c.outstandingBalance)}</span></div>
+                      <div>Payment Vouchers: <span className="font-medium">{showCell(acc.paymentVoucherCount)}</span></div>
+                      <div>Latest Invoice Due: <span className="font-medium">{showCell(acc.latestInvoiceAmountDue)}</span></div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()
+          )}
+          <DialogFooter className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
+            <Button variant="outline" onClick={() => setCaseInfoOpen(false)}>Close</Button>
+            <div className="flex flex-wrap gap-2 justify-end">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  const payload = (caseInfoQuery.data ?? {}) as any;
+                  const caseId = payload?.case?.id;
+                  if (caseId) setLocation(`/app/quotations/new?caseId=${encodeURIComponent(String(caseId))}`);
+                }}
+                disabled={!canAccountingCreate}
+              >
+                Create Quotation
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  const payload = (caseInfoQuery.data ?? {}) as any;
+                  const qid = payload?.accounting?.latestQuotationId;
+                  const sp = new URLSearchParams();
+                  sp.set("tab", "invoices");
+                  sp.set("openCreate", "1");
+                  if (qid) sp.set("quotationId", String(qid));
+                  setLocation(`/app/accounting?${sp.toString()}`);
+                }}
+                disabled={!canAccountingCreate}
+              >
+                Create Invoice
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  const payload = (caseInfoQuery.data ?? {}) as any;
+                  const invoiceId = payload?.accounting?.latestInvoiceId;
+                  const suffix = invoiceId ? `?tab=receipts&openCreate=1&invoiceId=${encodeURIComponent(String(invoiceId))}` : "?tab=receipts&openCreate=1";
+                  setLocation(`/app/accounting${suffix}`);
+                }}
+                disabled={!canAccountingCreate}
+              >
+                Create Receipt
+              </Button>
+              <Button
+                onClick={() => {
+                  const payload = (caseInfoQuery.data ?? {}) as any;
+                  const caseId = payload?.case?.id;
+                  const referenceNo = payload?.case?.referenceNo;
+                  const suffix = caseId
+                    ? `?tab=payment-vouchers&openCreate=1&caseId=${encodeURIComponent(String(caseId))}&caseTitle=${encodeURIComponent(String(referenceNo ?? ""))}`
+                    : "?tab=payment-vouchers&openCreate=1";
+                  setLocation(`/app/accounting${suffix}`);
+                }}
+                className="bg-amber-500 hover:bg-amber-600 text-white"
+                disabled={!canAccountingCreate}
+              >
+                Create Payment Voucher
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>

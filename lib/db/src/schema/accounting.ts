@@ -104,6 +104,7 @@ export const paymentVouchersTable = pgTable("payment_vouchers", {
   isAdvance:          boolean("is_advance").notNull().default(false),
   approvedBy:         integer("approved_by"),
   voucherNo:          text("voucher_no").notNull(),
+  clientRequestId:    text("client_request_id"),
   status:             text("status").notNull().default("pending_lawyer"),
   fundStatus:         text("fund_status").default("client_paid"),
   payeeName:          text("payee_name").notNull(),

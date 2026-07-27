@@ -15,6 +15,7 @@ import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { RequestTimeoutError } from "@/lib/fetch-with-timeout";
 import { hasPermission } from "@/lib/permissions";
 import { useListQuotations } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
@@ -451,6 +452,7 @@ function FileListingTab() {
 
 function InvoicesTab() {
   const [, setLocation] = useLocation();
+  const searchString = useSearch();
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const { toast } = useToast();
@@ -471,6 +473,31 @@ function InvoicesTab() {
       .map((v: any) => String(v))
   );
   const selectableQuotations = quotations.filter((q: any) => !invoicedQuotationIds.has(String(q?.id)));
+
+  const invoiceCreateParams = useMemo(() => {
+    const sp = new URLSearchParams(searchString);
+    return {
+      openCreate: sp.get("openCreate") === "1",
+      quotationId: sp.get("quotationId"),
+    };
+  }, [searchString]);
+  const didPrefillRef = useRef(false);
+  useEffect(() => {
+    if (didPrefillRef.current) return;
+    if (!invoiceCreateParams.openCreate) return;
+    didPrefillRef.current = true;
+    setShowCreate(true);
+    if (invoiceCreateParams.quotationId) {
+      const qid = String(invoiceCreateParams.quotationId);
+      if (selectableQuotations.some((q: any) => String(q?.id ?? "") === qid)) {
+        setSelectedQuotationId(qid);
+      }
+    }
+    const next = new URLSearchParams(searchString);
+    next.delete("openCreate");
+    next.delete("quotationId");
+    setLocation(`/app/accounting?${next.toString()}`);
+  }, [invoiceCreateParams.openCreate, invoiceCreateParams.quotationId, searchString, selectableQuotations]);
 
   const createMut = useMutation({
     mutationFn: () => apiFetchJson(`/invoices/from-quotation/${selectedQuotationId}`, {
@@ -600,6 +627,7 @@ function InvoicesTab() {
 
 function ReceiptsTab() {
   const [, setLocation] = useLocation();
+  const searchString = useSearch();
   const [showCreate, setShowCreate] = useState(false);
   const { toast } = useToast();
   const qc = useQueryClient();
@@ -613,6 +641,31 @@ function ReceiptsTab() {
   const receipts = (data ?? []) as any[];
   const invoicesQuery = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetchJson("/invoices"), retry: false });
   const openInvoices = (((invoicesQuery.data ?? []) as any[]).filter((i: any) => i.status !== "void" && i.status !== "paid"));
+
+  const receiptCreateParams = useMemo(() => {
+    const sp = new URLSearchParams(searchString);
+    return {
+      openCreate: sp.get("openCreate") === "1",
+      invoiceId: sp.get("invoiceId"),
+    };
+  }, [searchString]);
+  const didPrefillRef = useRef(false);
+  useEffect(() => {
+    if (didPrefillRef.current) return;
+    if (!receiptCreateParams.openCreate) return;
+    didPrefillRef.current = true;
+    setShowCreate(true);
+    if (receiptCreateParams.invoiceId) {
+      const id = String(receiptCreateParams.invoiceId);
+      if (openInvoices.some((i: any) => String(i?.id ?? "") === id)) {
+        setForm((f) => ({ ...f, invoiceId: id }));
+      }
+    }
+    const next = new URLSearchParams(searchString);
+    next.delete("openCreate");
+    next.delete("invoiceId");
+    setLocation(`/app/accounting?${next.toString()}`);
+  }, [openInvoices, receiptCreateParams.invoiceId, receiptCreateParams.openCreate, searchString]);
 
   const createMut = useMutation({
     mutationFn: () => apiFetchJson("/receipts", {
@@ -859,7 +912,16 @@ function PaymentVouchersTab() {
   const searchString = useSearch();
   const printVoucherIdParam = useMemo(() => new URLSearchParams(searchString).get("printVoucherId"), [searchString]);
   const paymentVoucherFilterParam = useMemo(() => new URLSearchParams(searchString).get("pvFilter") ?? "all", [searchString]);
+  const createParams = useMemo(() => {
+    const sp = new URLSearchParams(searchString);
+    return {
+      openCreate: sp.get("openCreate") === "1",
+      caseId: sp.get("caseId"),
+      caseTitle: sp.get("caseTitle"),
+    };
+  }, [searchString]);
   const didAutoPrintRef = useRef(false);
+  const didPrefillRef = useRef(false);
   const [showCreate, setShowCreate] = useState(false);
   const { toast } = useToast();
   const qc = useQueryClient();
@@ -956,7 +1018,29 @@ function PaymentVouchersTab() {
   });
   const targetCaseResults = Array.isArray(targetCaseSearchQuery.data?.data) ? (targetCaseSearchQuery.data?.data ?? []) : [];
 
-  const vouchersQuery = useQuery({ queryKey: ["payment-vouchers"], queryFn: () => apiFetchJson("/payment-vouchers"), retry: false });
+  useEffect(() => {
+    if (didPrefillRef.current) return;
+    if (!createParams.openCreate) return;
+    didPrefillRef.current = true;
+    if (canAccountingCreate) setShowCreate(true);
+    const cid = createParams.caseId ? Number.parseInt(createParams.caseId, 10) : NaN;
+    if (Number.isFinite(cid) && cid > 0 && selectedCases.length === 0) {
+      const title = String(createParams.caseTitle ?? "").trim() || `Case #${cid}`;
+      setSelectedCases([{ case_id: cid, title }]);
+    }
+    const next = new URLSearchParams(searchString);
+    next.delete("openCreate");
+    next.delete("caseId");
+    next.delete("caseTitle");
+    setLocation(`/app/accounting?${next.toString()}`);
+  }, [canAccountingCreate, createParams.caseId, createParams.caseTitle, createParams.openCreate, searchString, selectedCases.length]);
+
+  const vouchersQuery = useQuery({
+    queryKey: ["payment-vouchers"],
+    queryFn: () => apiFetchJson("/payment-vouchers?page=1&limit=200", { timeoutMs: 20000 }),
+    retry: false,
+    enabled: canAccountingRead,
+  });
   const dashboardQuery = useQuery({
     queryKey: ["payment-vouchers", "dashboard"],
     queryFn: () => apiFetchJson("/payment-vouchers/dashboard"),
@@ -1061,16 +1145,33 @@ function PaymentVouchersTab() {
 
       const casesToCreate = voucherType === "file_to_file_transfer" ? (sourceCase ? [sourceCase] : []) : selectedCases;
       const calls = casesToCreate.map((c) => {
+        const clientRequestId = newLineItemId();
         const payload = voucherType === "file_to_file_transfer"
-          ? { ...bodyBase, caseId: c.case_id, targetCaseId: target?.case_id ?? null }
-          : { ...bodyBase, caseId: c.case_id };
+          ? { ...bodyBase, clientRequestId, caseId: c.case_id, targetCaseId: target?.case_id ?? null }
+          : { ...bodyBase, clientRequestId, caseId: c.case_id };
         const parsed = CreatePaymentVoucherBody.safeParse(payload);
         if (!parsed.success) throw new Error(parsed.error.message);
-        return apiFetchJson("/payment-vouchers", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(parsed.data),
-        });
+        return (async () => {
+          try {
+            return await apiFetchJson("/payment-vouchers", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(parsed.data),
+              timeoutMs: 20000,
+            });
+          } catch (err) {
+            const isTimeout =
+              err instanceof RequestTimeoutError ||
+              (err && typeof err === "object" && (err as any).name === "RequestTimeoutError");
+            if (!isTimeout) throw err;
+            const pv = await apiFetchJson(
+              `/payment-vouchers/by-client-request/${encodeURIComponent(clientRequestId)}`,
+              { timeoutMs: 12000 },
+            ).catch(() => null);
+            if (pv) return pv;
+            throw err;
+          }
+        })();
       });
       return await Promise.all(calls);
     },

@@ -1,5 +1,6 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
-import { db, sql } from "@workspace/db";
+import { and, desc, eq, sql } from "drizzle-orm";
+import { caseAssignmentsTable, casePurchasersTable, casesTable, clientsTable, db, developersTable, invoicesTable, paymentVouchersTable, projectsTable, quotationsTable, receiptsTable, usersTable } from "@workspace/db";
 import multer from "multer";
 import { PDFParse } from "pdf-parse";
 import OpenAI from "openai";
@@ -156,6 +157,135 @@ router.get("/accounting", requireAuth, requireFirmUser, requirePermission("accou
     LIMIT 100
   `);
   res.json(rows);
+});
+
+router.get("/accounting/cases/:caseId/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const caseId = Number(req.params.caseId);
+  if (!Number.isFinite(caseId) || caseId <= 0) {
+    res.status(400).json({ error: "Invalid caseId" });
+    return;
+  }
+
+  const r = (req.rlsDb ?? db) as unknown as Pick<typeof db, "select">;
+  const firmId = req.firmId!;
+  const [row] = await r
+    .select({
+      id: casesTable.id,
+      referenceNo: casesTable.referenceNo,
+      caseType: casesTable.caseType,
+      status: casesTable.status,
+      createdAt: casesTable.createdAt,
+      projectName: projectsTable.name,
+      developerName: developersTable.name,
+      parcelNo: casesTable.parcelNo,
+      spaPrice: casesTable.spaPrice,
+      loanAmountNum: sql<string | null>`${casesTable.loanDetails}->>'loanAmountNum'`,
+      borrowers: casesTable.borrowers,
+      outstandingBalance: casesTable.outstandingBalance,
+    })
+    .from(casesTable)
+    .leftJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
+    .leftJoin(developersTable, eq(developersTable.id, casesTable.developerId))
+    .where(and(eq(casesTable.firmId, firmId), eq(casesTable.id, caseId)))
+    .limit(1);
+
+  if (!row) {
+    res.status(404).json({ error: "Case not found" });
+    return;
+  }
+
+  const purchasers = await r
+    .select({ name: clientsTable.name })
+    .from(casePurchasersTable)
+    .innerJoin(clientsTable, eq(clientsTable.id, casePurchasersTable.clientId))
+    .where(eq(casePurchasersTable.caseId, caseId))
+    .orderBy(casePurchasersTable.orderNo);
+
+  const assignments = await r
+    .select({
+      roleInCase: caseAssignmentsTable.roleInCase,
+      userId: usersTable.id,
+      userName: usersTable.name,
+    })
+    .from(caseAssignmentsTable)
+    .innerJoin(usersTable, eq(usersTable.id, caseAssignmentsTable.userId))
+    .where(and(eq(caseAssignmentsTable.caseId, caseId), sql`${caseAssignmentsTable.unassignedAt} IS NULL` as any));
+
+  const lawyerName =
+    assignments.find((a) => String(a.roleInCase ?? "") === "lawyer")?.userName
+    ?? null;
+  const clerkName =
+    assignments.find((a) => String(a.roleInCase ?? "") === "clerk")?.userName
+    ?? null;
+
+  const [latestQuotation] = await r
+    .select({ id: quotationsTable.id, status: quotationsTable.status })
+    .from(quotationsTable)
+    .where(and(eq(quotationsTable.firmId, firmId), eq(quotationsTable.caseId, caseId), sql`${quotationsTable.deletedAt} IS NULL` as any))
+    .orderBy(desc(quotationsTable.createdAt))
+    .limit(1);
+
+  const [latestInvoice] = await r
+    .select({ id: invoicesTable.id, status: invoicesTable.status, invoiceNo: invoicesTable.invoiceNo, amountDue: invoicesTable.amountDue })
+    .from(invoicesTable)
+    .where(and(eq(invoicesTable.firmId, firmId), eq(invoicesTable.caseId, caseId), sql`${invoicesTable.deletedAt} IS NULL` as any))
+    .orderBy(desc(invoicesTable.createdAt))
+    .limit(1);
+
+  const [latestReceipt] = await r
+    .select({ id: receiptsTable.id, receiptNo: receiptsTable.receiptNo, amount: receiptsTable.amount, receivedDate: receiptsTable.receivedDate })
+    .from(receiptsTable)
+    .where(and(eq(receiptsTable.firmId, firmId), eq(receiptsTable.caseId, caseId), eq(receiptsTable.isReversed, false)))
+    .orderBy(desc(receiptsTable.createdAt))
+    .limit(1);
+
+  const [pvCountRow] = await r
+    .select({ c: sql<string>`COUNT(*)` })
+    .from(paymentVouchersTable)
+    .where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.caseId, caseId)));
+
+  const purchaserNames = purchasers.map((p) => String(p.name ?? "").trim()).filter(Boolean);
+  const borrowerNames =
+    Array.isArray(row.borrowers)
+      ? (row.borrowers as any[])
+        .map((b) => (b && typeof b === "object" ? String((b as any).name ?? "").trim() : ""))
+        .filter(Boolean)
+      : [];
+
+  res.json({
+    case: {
+      id: row.id,
+      referenceNo: row.referenceNo,
+      caseType: row.caseType,
+      status: row.status,
+      openDate: row.createdAt,
+      projectName: row.projectName,
+      developerName: row.developerName,
+      parcelNo: row.parcelNo,
+      spaPrice: row.spaPrice,
+      loanAmountNum: row.loanAmountNum,
+      outstandingBalance: row.outstandingBalance,
+      responsibleLawyer: lawyerName,
+      assignedClerk: clerkName,
+    },
+    parties: {
+      purchasers: purchaserNames,
+      borrowers: borrowerNames,
+    },
+    accounting: {
+      latestQuotationId: latestQuotation?.id ?? null,
+      latestQuotationStatus: latestQuotation?.status ?? null,
+      latestInvoiceId: latestInvoice?.id ?? null,
+      latestInvoiceNo: latestInvoice?.invoiceNo ?? null,
+      latestInvoiceStatus: latestInvoice?.status ?? null,
+      latestInvoiceAmountDue: latestInvoice?.amountDue ?? null,
+      latestReceiptId: latestReceipt?.id ?? null,
+      latestReceiptNo: latestReceipt?.receiptNo ?? null,
+      latestReceiptAmount: latestReceipt?.amount ?? null,
+      latestReceiptDate: latestReceipt?.receivedDate ?? null,
+      paymentVoucherCount: Number(pvCountRow?.c ?? 0),
+    },
+  });
 });
 
 router.get("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {

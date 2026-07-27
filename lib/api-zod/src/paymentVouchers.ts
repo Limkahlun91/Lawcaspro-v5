@@ -60,6 +60,7 @@ export const PaymentVoucherLineItem = z.object({
 export type PaymentVoucherLineItem = z.infer<typeof PaymentVoucherLineItem>;
 
 export const CreatePaymentVoucherBody = z.object({
+  clientRequestId: z.string().trim().min(8).max(80).optional(),
   caseId: z.number().int().positive().nullable().optional(),
   voucherType: PaymentVoucherType.optional().default("external_payment"),
   targetCaseId: z.number().int().positive().nullable().optional(),

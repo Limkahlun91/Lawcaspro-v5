@@ -1,4 +1,5 @@
 import express, { type NextFunction, type Response, type Router as ExpressRouter } from "express";
+import crypto from "crypto";
 import { eq, and, desc, asc, inArray, ne } from "drizzle-orm";
 import {
   accountingSettingsTable,
@@ -21,6 +22,7 @@ import {
 import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody } from "@workspace/api-zod";
 import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
+import { logger } from "../lib/logger.js";
 import {
   addBusinessHours,
   normalizeAccountingSettings,
@@ -79,11 +81,16 @@ async function getAccountingSettings(req: AuthRequest) {
   return normalizeAccountingSettings(req.firmId!, row as Record<string, unknown> | undefined);
 }
 
-async function nextVoucherNo(r: DbConn, firmId: number): Promise<string> {
-  const [row] = await r.select({ c: sql<number>`COUNT(*)` }).from(paymentVouchersTable).where(eq(paymentVouchersTable.firmId, firmId));
-  const seq = (Number(row?.c ?? 0) + 1).toString().padStart(4, "0");
-  const yr = new Date().getFullYear();
-  return `PV-${yr}-${seq}`;
+function generateVoucherNo(now: Date): string {
+  const yr = now.getFullYear();
+  const suffix = crypto.randomBytes(3).toString("hex").toUpperCase();
+  return `PV-${yr}-${suffix}`;
+}
+
+function isMissingSchemaError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  return code === "42703" || code === "42P01";
 }
 
 async function createUserNotification(args: {
@@ -175,8 +182,16 @@ async function postLedgerTx(tx: DbTxConn, args: {
 
 // List
 router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const startedAt = Date.now();
   const caseId = one((req.query as any).caseId);
   const status = one((req.query as any).status);
+  const pageRaw = one((req.query as any).page);
+  const limitRaw = one((req.query as any).limit);
+  const page = pageRaw ? parseInt(pageRaw, 10) : 1;
+  const limit = limitRaw ? parseInt(limitRaw, 10) : 200;
+  const safePage = Number.isFinite(page) && page > 0 ? page : 1;
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(200, limit) : 200;
+  const offset = (safePage - 1) * safeLimit;
   const conds = [eq(paymentVouchersTable.firmId, req.firmId!)];
   if (caseId) {
     const n = Number(caseId);
@@ -185,8 +200,54 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission(
   }
   if (status) conds.push(eq(paymentVouchersTable.status, status));
   const r = rdb(req);
-  const rows = await r.select().from(paymentVouchersTable).where(and(...conds)).orderBy(desc(paymentVouchersTable.createdAt));
-  res.json(rows);
+  try {
+    const rows = await r
+      .select({
+        id: paymentVouchersTable.id,
+        firmId: paymentVouchersTable.firmId,
+        caseId: paymentVouchersTable.caseId,
+        voucherType: paymentVouchersTable.voucherType,
+        targetCaseId: paymentVouchersTable.targetCaseId,
+        targetAccountId: paymentVouchersTable.targetAccountId,
+        approvalStatus: paymentVouchersTable.approvalStatus,
+        isAdvance: paymentVouchersTable.isAdvance,
+        approvedBy: paymentVouchersTable.approvedBy,
+        voucherNo: paymentVouchersTable.voucherNo,
+        status: paymentVouchersTable.status,
+        fundStatus: paymentVouchersTable.fundStatus,
+        payeeName: paymentVouchersTable.payeeName,
+        paymentMethod: paymentVouchersTable.paymentMethod,
+        bankAccountId: paymentVouchersTable.bankAccountId,
+        accountType: paymentVouchersTable.accountType,
+        bankChequeRefNo: paymentVouchersTable.bankChequeRefNo,
+        amount: paymentVouchersTable.amount,
+        purpose: paymentVouchersTable.purpose,
+        receivedAt: paymentVouchersTable.receivedAt,
+        paymentDueAt: paymentVouchersTable.paymentDueAt,
+        assignedAccountUserId: paymentVouchersTable.assignedAccountUserId,
+        assignedClerkUserId: paymentVouchersTable.assignedClerkUserId,
+        paidAt: paymentVouchersTable.paidAt,
+        paidBy: paymentVouchersTable.paidBy,
+        updatedAt: paymentVouchersTable.updatedAt,
+        createdAt: paymentVouchersTable.createdAt,
+      })
+      .from(paymentVouchersTable)
+      .where(and(...conds))
+      .orderBy(desc(paymentVouchersTable.createdAt))
+      .limit(safeLimit)
+      .offset(offset);
+    res.json(rows);
+    const durationMs = Date.now() - startedAt;
+    if (durationMs >= 2000) {
+      logger.warn({ durationMs, firmId: req.firmId, userId: req.userId, safePage, safeLimit }, "payment_voucher.list_slow");
+    }
+  } catch (err) {
+    if (isMissingSchemaError(err)) {
+      res.status(500).json({ error: "Database migration missing for Payment Voucher SLA fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql", code: "MIGRATION_MISSING" });
+      return;
+    }
+    throw err;
+  }
 });
 
 // Detail
@@ -266,9 +327,11 @@ router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requirePermiss
 
 // Create
 router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const startedAt = Date.now();
   const parsed = CreatePaymentVoucherBody.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
   const {
+    clientRequestId,
     caseId,
     voucherType,
     targetCaseId,
@@ -365,7 +428,30 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   })();
 
   const r = rdb(req);
-  const voucherNo = await nextVoucherNo(r, req.firmId!);
+  const now = new Date();
+  const normalizedClientRequestId = typeof clientRequestId === "string" && clientRequestId.trim() ? clientRequestId.trim() : null;
+  if (normalizedClientRequestId) {
+    try {
+      const [existing] = await r
+        .select()
+        .from(paymentVouchersTable)
+        .where(and(
+          eq(paymentVouchersTable.firmId, req.firmId!),
+          eq(paymentVouchersTable.clientRequestId, normalizedClientRequestId),
+        ))
+        .limit(1);
+      if (existing) {
+        res.status(200).json(existing);
+        return;
+      }
+    } catch (err) {
+      if (!isMissingSchemaError(err)) throw err;
+      res.status(500).json({ error: "Database migration missing for idempotency. Apply migration 0123_payment_voucher_idempotency_and_perf.sql", code: "MIGRATION_MISSING" });
+      return;
+    }
+  }
+
+  const voucherNo = generateVoucherNo(now);
   if (voucherType === "account_transfer") {
     const rows = await r
       .select({ id: firmBankAccountsTable.id })
@@ -382,7 +468,6 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   }
 
   const normalizedAccountType = accountType ? normalizeLedgerAccountType(accountType) : null;
-  const now = new Date();
   const effectivePayeeName = (voucherType === "internal_transfer" && typeof payeeName === "string" && !payeeName.trim())
     ? "Client Account → Office Account Transfer"
     : payeeName;
@@ -409,6 +494,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     isAdvance: effectiveIsAdvance,
     approvedBy: null,
     voucherNo,
+    clientRequestId: normalizedClientRequestId,
     status: initialStatus,
     fundStatus: effectiveFundStatus,
     payeeName: effectivePayeeName,
@@ -438,6 +524,44 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "payment_voucher.created", entityType: "payment_voucher", entityId: pv.id, detail: `voucherNo=${pv.voucherNo} status=${initialStatus} approvalStatus=${approvalStatus}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "payment_voucher.submitted", entityType: "payment_voucher", entityId: pv.id, detail: `voucherNo=${pv.voucherNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(pv);
+  const durationMs = Date.now() - startedAt;
+  if (durationMs >= 2000) {
+    logger.warn({ durationMs, firmId: req.firmId, userId: req.userId, voucherType }, "payment_voucher.create_slow");
+  }
+});
+
+router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const raw = one(req.params.clientRequestId);
+  const clientRequestId = typeof raw === "string" ? raw.trim() : "";
+  if (!clientRequestId || clientRequestId.length > 80) {
+    res.status(400).json({ error: "Invalid clientRequestId" });
+    return;
+  }
+  const r = rdb(req);
+  try {
+    const [pv] = await r
+      .select()
+      .from(paymentVouchersTable)
+      .where(and(eq(paymentVouchersTable.firmId, req.firmId!), eq(paymentVouchersTable.clientRequestId, clientRequestId)))
+      .limit(1);
+    if (!pv) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    const canReadAccounting = await roleHasPermission(req, "accounting", "read");
+    const isOwner = pv.createdBy && Number(pv.createdBy) === Number(req.userId);
+    if (!canReadAccounting && !isOwner) {
+      res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" });
+      return;
+    }
+    res.json(pv);
+  } catch (err) {
+    if (isMissingSchemaError(err)) {
+      res.status(500).json({ error: "Database migration missing for idempotency. Apply migration 0123_payment_voucher_idempotency_and_perf.sql", code: "MIGRATION_MISSING" });
+      return;
+    }
+    throw err;
+  }
 });
 
 // Status transition

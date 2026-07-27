@@ -25,6 +25,49 @@ function calcTax(amount: number, taxCode: string, rate: number) {
   return { taxRate: effectiveRate, taxAmount, amountInclTax: amount + taxAmount };
 }
 
+type CategoryMeta = {
+  quantity?: number;
+  unitAmount?: number;
+  remarks?: string;
+};
+
+function decodeCategory(raw: unknown): { base: string; meta: CategoryMeta } {
+  const s = typeof raw === "string" ? raw.trim() : "";
+  if (!s) return { base: "", meta: {} };
+  const [base, ...parts] = s.split("|");
+  const meta: CategoryMeta = {};
+  for (const part of parts) {
+    const [k, v] = part.split("=");
+    if (!k) continue;
+    const key = k.trim().toLowerCase();
+    if (key === "q") {
+      const n = Number.parseInt(String(v ?? ""), 10);
+      if (Number.isFinite(n) && n > 0) meta.quantity = n;
+      continue;
+    }
+    if (key === "u") {
+      const n = Number(String(v ?? ""));
+      if (Number.isFinite(n) && n >= 0) meta.unitAmount = n;
+      continue;
+    }
+    if (key === "r") {
+      const decoded = typeof v === "string" ? decodeURIComponent(v) : "";
+      if (decoded.trim()) meta.remarks = decoded.trim();
+    }
+  }
+  return { base: base.trim(), meta };
+}
+
+function encodeCategory(base: string, meta: CategoryMeta): string {
+  const b = String(base ?? "").trim();
+  if (!b) return "";
+  const parts: string[] = [b];
+  if (typeof meta.quantity === "number" && Number.isFinite(meta.quantity)) parts.push(`q=${Math.trunc(meta.quantity)}`);
+  if (typeof meta.unitAmount === "number" && Number.isFinite(meta.unitAmount)) parts.push(`u=${meta.unitAmount}`);
+  if (meta.remarks && meta.remarks.trim()) parts.push(`r=${encodeURIComponent(meta.remarks.trim())}`);
+  return parts.length === 1 ? b : parts.join("|");
+}
+
 interface LocalItem {
   id: string;
   section: string;
@@ -38,6 +81,10 @@ interface LocalItem {
   taxRate: number;
   taxAmount: number;
   amountInclTax: number;
+  quantity?: number;
+  unitAmount?: number;
+  remarks?: string;
+  isCustom?: boolean;
 }
 
 type FirmSettings = {
@@ -156,18 +203,34 @@ export default function QuotationDetail() {
     });
     setEditItems(
       (quotation.items || []).map((item: any, idx: number) => ({
+        ...((): Partial<LocalItem> => {
+          const decoded = decodeCategory(item.category || "");
+          const itemNoNum = Number.parseInt(String(item.itemNo ?? ""), 10);
+          const isCustom =
+            String(item.section ?? "") === "disbursement"
+              ? Boolean(item.subItemNo)
+              : String(item.section ?? "") === "fees"
+                ? (Number.isFinite(itemNoNum) && itemNoNum >= 27)
+                : false;
+          return {
+            category: decoded.base || "",
+            quantity: decoded.meta.quantity,
+            unitAmount: decoded.meta.unitAmount,
+            remarks: decoded.meta.remarks,
+            isCustom,
+          };
+        })(),
         id: String(item.id || idx),
         section: item.section,
-        category: item.category || "",
         itemNo: item.itemNo || "",
         subItemNo: item.subItemNo || "",
         description: item.description,
         taxCode: item.taxCode,
         itemCategory: item.itemCategory === "disbursement" ? "disbursement" : (item.section === "fees" ? "fee" : "disbursement"),
-        amountExclTax: item.amountExclTax,
+        amountExclTax: Number(item.amountExclTax) || 0,
         taxRate: currentTaxRate,
-        taxAmount: item.taxAmount,
-        amountInclTax: item.amountInclTax,
+        taxAmount: Number(item.taxAmount) || 0,
+        amountInclTax: Number(item.amountInclTax) || 0,
       }))
     );
     setIsEditing(true);
@@ -208,6 +271,105 @@ export default function QuotationDetail() {
     }));
   };
 
+  const updateItemDescription = (itemId: string, description: string) => {
+    setEditItems((prev) => prev.map((item) => item.id === itemId ? { ...item, description } : item));
+  };
+
+  const updateItemRemarks = (itemId: string, remarks: string) => {
+    setEditItems((prev) => prev.map((item) => item.id === itemId ? { ...item, remarks } : item));
+  };
+
+  const updateSearchMeta = (itemId: string, patch: { quantity?: number; unitAmount?: number }) => {
+    setEditItems((prev) => prev.map((item) => {
+      if (item.id !== itemId) return item;
+      const nextQty = typeof patch.quantity === "number" && Number.isFinite(patch.quantity) ? Math.max(1, Math.trunc(patch.quantity)) : (item.quantity ?? 1);
+      const nextUnit = typeof patch.unitAmount === "number" && Number.isFinite(patch.unitAmount) ? Math.max(0, patch.unitAmount) : (item.unitAmount ?? 0);
+      const rate = Number((editData as any)?.taxRate) || DEFAULT_TAX_RATE;
+      const amount = nextQty * nextUnit;
+      const nextTax = calcTax(amount, item.taxCode, rate);
+      return { ...item, quantity: nextQty, unitAmount: nextUnit, amountExclTax: amount, taxRate: nextTax.taxRate, taxAmount: nextTax.taxAmount, amountInclTax: nextTax.amountInclTax };
+    }));
+  };
+
+  const addFeesCustomLine = () => {
+    const rate = Number((editData as any)?.taxRate) || DEFAULT_TAX_RATE;
+    const id = `new-${genId()}`;
+    setEditItems((prev) => {
+      const maxNo = prev
+        .filter((i) => i.section === "fees")
+        .map((i) => Number.parseInt(String(i.itemNo ?? ""), 10))
+        .filter((n) => Number.isFinite(n))
+        .reduce((m, n) => Math.max(m, n), 26);
+      const nextNo = String(maxNo + 1);
+      const nextTax = calcTax(0, "T", rate);
+      return [
+        ...prev,
+        {
+          id,
+          section: "fees",
+          category: "fees",
+          itemNo: nextNo,
+          subItemNo: "",
+          description: "",
+          taxCode: "T",
+          itemCategory: "fee",
+          amountExclTax: 0,
+          taxRate: nextTax.taxRate,
+          taxAmount: nextTax.taxAmount,
+          amountInclTax: nextTax.amountInclTax,
+          isCustom: true,
+        },
+      ];
+    });
+  };
+
+  const addDisbursementLine = (category: "search" | "stamp_duty" | "registration") => {
+    const rate = Number((editData as any)?.taxRate) || DEFAULT_TAX_RATE;
+    const id = `new-${genId()}`;
+    setEditItems((prev) => {
+      const sectionItems = prev.filter((i) => i.section === "disbursement");
+      const hasHeader = sectionItems.some((i) => i.category === category && !i.subItemNo);
+      const headerItemNo = category === "search" ? "1" : category === "stamp_duty" ? "2" : "3";
+      const header: LocalItem | null = hasHeader ? null : {
+        id: `hdr-${category}-${genId()}`,
+        section: "disbursement",
+        category,
+        itemNo: headerItemNo,
+        subItemNo: "",
+        description: category === "search" ? "SEARCH" : category === "stamp_duty" ? "STAMP DUTY" : "REGISTRATION/ENTRY/WITHDRAWAL",
+        taxCode: "Z",
+        itemCategory: "disbursement",
+        amountExclTax: 0,
+        taxRate: 0,
+        taxAmount: 0,
+        amountInclTax: 0,
+      };
+      const existing = sectionItems.filter((i) => i.category === category && i.subItemNo);
+      const idx = existing.length;
+      const nextSub = idx < 26 ? String.fromCharCode(97 + idx) : String(idx + 1);
+      const nextTax = calcTax(0, "Z", rate);
+      const base: LocalItem = {
+        id,
+        section: "disbursement",
+        category,
+        itemNo: headerItemNo,
+        subItemNo: nextSub,
+        description: "",
+        taxCode: "Z",
+        itemCategory: "disbursement",
+        amountExclTax: 0,
+        taxRate: nextTax.taxRate,
+        taxAmount: nextTax.taxAmount,
+        amountInclTax: nextTax.amountInclTax,
+        isCustom: true,
+      };
+      const nextItem: LocalItem = category === "search"
+        ? { ...base, quantity: 1, unitAmount: 0 }
+        : { ...base, remarks: "" };
+      return header ? [...prev, header, nextItem] : [...prev, nextItem];
+    });
+  };
+
   const addAttachmentItem = () => {
     const attItems = editItems.filter(i => i.section === "attachment");
     const rate = Number((editData as any)?.taxRate) || DEFAULT_TAX_RATE;
@@ -219,6 +381,7 @@ export default function QuotationDetail() {
       subItemNo: "",
       description: "",
       taxCode: "T",
+      itemCategory: "disbursement",
       amountExclTax: 0,
       taxRate: rate,
       taxAmount: 0,
@@ -231,9 +394,29 @@ export default function QuotationDetail() {
   };
 
   const saveEdits = () => {
-    const items = editItems.filter((i) => i.amountExclTax > 0).map((item, idx) => ({
+    const isHeaderRow = (item: LocalItem) =>
+      !item.subItemNo && item.description === item.description.toUpperCase() && item.section !== "attachment";
+    const bad = editItems.find((item) => !isHeaderRow(item) && item.amountExclTax > 0 && !item.description.trim());
+    if (bad) {
+      toast({ title: "Description is required for all non-empty lines", variant: "destructive" });
+      return;
+    }
+    const itemsToSave = editItems.filter((item) => {
+      if (isHeaderRow(item)) return true;
+      if (!item.description.trim()) return false;
+      if (item.section === "attachment") return true;
+      if (item.isCustom) return true;
+      return item.amountExclTax > 0;
+    });
+    const items = itemsToSave.map((item, idx) => ({
       section: item.section,
-      category: item.category,
+      category: encodeCategory(item.category, {
+        quantity: item.section === "disbursement" && item.category === "search" && item.subItemNo ? (item.quantity ?? 1) : undefined,
+        unitAmount: item.section === "disbursement" && item.category === "search" && item.subItemNo ? (item.unitAmount ?? 0) : undefined,
+        remarks: item.section === "disbursement" && (item.category === "stamp_duty" || item.category === "registration") && item.subItemNo
+          ? (item.remarks ?? "")
+          : undefined,
+      }),
       itemNo: item.itemNo,
       subItemNo: item.subItemNo,
       description: item.description,
@@ -391,22 +574,59 @@ export default function QuotationDetail() {
               <th className="text-right px-3 py-2 font-medium text-slate-600 w-32 print:px-2 print:py-1">Excl. ST (RM)</th>
               <th className="text-right px-3 py-2 font-medium text-slate-600 w-28 print:px-2 print:py-1">ST @ {effectiveTaxRate}%</th>
               <th className="text-right px-3 py-2 font-medium text-slate-600 w-32 print:px-2 print:py-1">Incl. ST (RM)</th>
-              {isEditing && sectionLabel === "ATTACHMENT I" && <th className="w-10"></th>}
+              {isEditing && (sectionLabel === "ATTACHMENT I" || sectionLabel === "DISBURSEMENTS" || sectionLabel === "PROFESSIONAL FEES") && <th className="w-10"></th>}
             </tr>
           </thead>
           <tbody>
             {visibleRows.map((item) => {
               const isHeader = isHeaderRow(item);
+              const isSearchLine = !isHeader && item.section === "disbursement" && item.category === "search" && Boolean(item.subItemNo);
+              const showDelete = isEditing && !isHeader && (
+                sectionLabel === "ATTACHMENT I"
+                || sectionLabel === "DISBURSEMENTS"
+                || (sectionLabel === "PROFESSIONAL FEES" && Boolean(item.isCustom))
+              );
               return (
                 <tr key={item.id} className={`border-b border-slate-100 print:border-black print:break-inside-avoid ${isHeader ? "bg-slate-50/50 print:bg-transparent" : ""}`}>
                   <td className="px-3 py-1.5 text-slate-500 text-xs print:px-2 print:py-1">{item.subItemNo || item.itemNo}</td>
                   <td className={`px-3 py-1.5 print:px-2 print:py-1 ${isHeader ? "font-semibold text-slate-800" : "text-slate-600"}`}>
-                    {isEditing && sectionLabel === "ATTACHMENT I" ? (
-                      <Input
-                        value={item.description}
-                        onChange={e => setEditItems(prev => prev.map(i => i.id === item.id ? { ...i, description: e.target.value } : i))}
-                        className="h-7 text-xs"
-                      />
+                    {isEditing && !isHeader ? (
+                      <div className="space-y-2">
+                        <Input
+                          value={item.description}
+                          onChange={e => updateItemDescription(item.id, e.target.value)}
+                          className="h-7 text-xs"
+                          placeholder="Description"
+                        />
+                        {sectionLabel === "DISBURSEMENTS" && item.category === "search" ? (
+                          <div className="flex flex-wrap gap-2 print:hidden">
+                            <Input
+                              type="number"
+                              value={item.quantity ?? 1}
+                              onChange={(e) => updateSearchMeta(item.id, { quantity: Number.parseInt(e.target.value || "1", 10) })}
+                              className="h-7 text-xs w-24"
+                              min={1}
+                              placeholder="Qty"
+                            />
+                            <Input
+                              type="number"
+                              value={item.unitAmount ?? 0}
+                              onChange={(e) => updateSearchMeta(item.id, { unitAmount: parseFloat(e.target.value) || 0 })}
+                              className="h-7 text-xs w-32"
+                              min={0}
+                              placeholder="Unit (RM)"
+                            />
+                          </div>
+                        ) : null}
+                        {sectionLabel === "DISBURSEMENTS" && (item.category === "stamp_duty" || item.category === "registration") ? (
+                          <Input
+                            value={item.remarks ?? ""}
+                            onChange={(e) => updateItemRemarks(item.id, e.target.value)}
+                            className="h-7 text-xs print:hidden"
+                            placeholder="Remarks (optional)"
+                          />
+                        ) : null}
+                      </div>
                     ) : item.description}
                   </td>
                   <td className="px-3 py-1.5 text-center text-xs print:px-2 print:py-1">
@@ -433,6 +653,8 @@ export default function QuotationDetail() {
                         onChange={e => updateItemAmount(item.id, parseFloat(e.target.value) || 0)}
                         className="h-7 text-right text-xs w-28 ml-auto"
                         placeholder="0.00"
+                        disabled={isSearchLine}
+                        readOnly={isSearchLine}
                       />
                     ) : !isHeader ? item.amountExclTax.toFixed(2) : ""}
                   </td>
@@ -442,11 +664,13 @@ export default function QuotationDetail() {
                   <td className="px-3 py-1.5 text-right text-xs font-medium print:px-2 print:py-1">
                     {!isHeader ? item.amountInclTax.toFixed(2) : ""}
                   </td>
-                  {isEditing && sectionLabel === "ATTACHMENT I" && (
+                  {isEditing && (sectionLabel === "ATTACHMENT I" || sectionLabel === "DISBURSEMENTS" || sectionLabel === "PROFESSIONAL FEES") && (
                     <td className="px-1 py-1.5">
-                      <Button variant="ghost" size="sm" onClick={() => removeItem(item.id)} className="text-red-500 h-6 w-6 p-0">
-                        <Trash2 className="w-3 h-3" />
-                      </Button>
+                      {showDelete ? (
+                        <Button variant="ghost" size="sm" onClick={() => removeItem(item.id)} className="text-red-500 h-6 w-6 p-0">
+                          <Trash2 className="w-3 h-3" />
+                        </Button>
+                      ) : null}
                     </td>
                   )}
                 </tr>
@@ -459,7 +683,7 @@ export default function QuotationDetail() {
               <td className="px-3 py-2 text-right print:px-2 print:py-1">{formatRM(totals.totalExclTax)}</td>
               <td className="px-3 py-2 text-right print:px-2 print:py-1">{formatRM(totals.totalTax)}</td>
               <td className="px-3 py-2 text-right print:px-2 print:py-1">{formatRM(totals.totalInclTax)}</td>
-              {isEditing && sectionLabel === "ATTACHMENT I" && <td></td>}
+              {isEditing && (sectionLabel === "ATTACHMENT I" || sectionLabel === "DISBURSEMENTS" || sectionLabel === "PROFESSIONAL FEES") && <td></td>}
             </tr>
           </tfoot>
           </table>
@@ -468,6 +692,26 @@ export default function QuotationDetail() {
           <div className="mt-2">
             <Button size="sm" variant="outline" onClick={addAttachmentItem}>
               <Plus className="w-3 h-3 mr-1" /> Add Item
+            </Button>
+          </div>
+        )}
+        {isEditing && sectionLabel === "PROFESSIONAL FEES" && (
+          <div className="mt-2">
+            <Button size="sm" variant="outline" onClick={addFeesCustomLine}>
+              <Plus className="w-3 h-3 mr-1" /> Add Line
+            </Button>
+          </div>
+        )}
+        {isEditing && sectionLabel === "DISBURSEMENTS" && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={() => addDisbursementLine("search")}>
+              <Plus className="w-3 h-3 mr-1" /> Add Search Line
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => addDisbursementLine("stamp_duty")}>
+              <Plus className="w-3 h-3 mr-1" /> Add Stamp Duty Line
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => addDisbursementLine("registration")}>
+              <Plus className="w-3 h-3 mr-1" /> Add Registration Line
             </Button>
           </div>
         )}

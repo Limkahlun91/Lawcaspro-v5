@@ -13,6 +13,7 @@ import { QueryFallback } from "@/components/query-fallback";
 import { MilestonesTable } from "@/components/milestones-table";
 import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
+import { useAuth } from "@/lib/auth-context";
 
 type WorkbenchCard = { key: string; label: string; count: number; query: Record<string, string> };
 type WorkbenchResponse = {
@@ -51,6 +52,20 @@ type PaymentVoucherAction = {
   referenceNo: string | null;
 };
 
+function fmtDateTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return "—";
+  return dt.toLocaleString("en-MY");
+}
+
+function fmtDate(value: string | null | undefined): string {
+  if (!value) return "—";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return "—";
+  return dt.toLocaleDateString("en-MY");
+}
+
 function buildCasesHref(query: Record<string, string>) {
   const sp = new URLSearchParams(query);
   if (!sp.has("page")) sp.set("page", "1");
@@ -64,6 +79,7 @@ export default function Workbench() {
   const [location, setLocation] = useLocation();
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const { user: authUser } = useAuth();
   const sp = useMemo(() => new URLSearchParams(location.split("?")[1] ?? ""), [location]);
 
   const tab = sp.get("tab") === "missing" || sp.get("tab") === "overdue" ? sp.get("tab")! : "my-work";
@@ -113,9 +129,38 @@ export default function Workbench() {
     return q.toString();
   }, [userId, projectId, purchaseMode, assignedLawyerId, assignedClerkId]);
 
+  const logSectionError = (args: { section: string; queryKey: unknown; endpoint?: string; err: unknown }) => {
+    try {
+      const status = args.err && typeof args.err === "object" && "status" in (args.err as any) ? (args.err as any).status : null;
+      const code = args.err && typeof args.err === "object" && "code" in (args.err as any) ? (args.err as any).code : null;
+      console.error("workbench.section_error", {
+        route: typeof window !== "undefined" ? window.location.href : "unknown",
+        section: args.section,
+        userId: (authUser as any)?.id ?? null,
+        firmId: (authUser as any)?.firmId ?? null,
+        queryKey: args.queryKey,
+        endpoint: args.endpoint ?? null,
+        status,
+        code,
+        message: args.err instanceof Error ? args.err.message : String(args.err ?? ""),
+        stack: args.err instanceof Error ? args.err.stack : null,
+        ts: new Date().toISOString(),
+      });
+    } catch {
+    }
+  };
+
   const { data, isLoading, error, refetch, isFetching } = useQuery<WorkbenchResponse>({
     queryKey: ["cases", "workbench", workbenchQuery],
-    queryFn: ({ signal }) => apiFetchJson(`/cases/workbench${workbenchQuery ? `?${workbenchQuery}` : ""}`, { signal }),
+    queryFn: async ({ signal }) => {
+      const endpoint = `/cases/workbench${workbenchQuery ? `?${workbenchQuery}` : ""}`;
+      try {
+        return await apiFetchJson(endpoint, { signal });
+      } catch (err) {
+        logSectionError({ section: "workbench", queryKey: ["cases", "workbench", workbenchQuery], endpoint, err });
+        throw err;
+      }
+    },
     retry: 1,
     retryDelay: 400,
   });
@@ -128,8 +173,15 @@ export default function Workbench() {
   })();
   const milestonesQuery = useQuery({
     queryKey: ["cases", "milestones-summary", milestonesTargetUserId],
-    queryFn: ({ signal }) =>
-      apiFetchJson(`/cases/milestones-summary?assignedToUserId=${encodeURIComponent(String(milestonesTargetUserId))}`, { signal, timeoutMs: 30000 }) as Promise<Record<string, unknown>>,
+    queryFn: async ({ signal }) => {
+      const endpoint = `/cases/milestones-summary?assignedToUserId=${encodeURIComponent(String(milestonesTargetUserId))}`;
+      try {
+        return await apiFetchJson(endpoint, { signal, timeoutMs: 30000 }) as Promise<Record<string, unknown>>;
+      } catch (err) {
+        logSectionError({ section: "milestones-summary", queryKey: ["cases", "milestones-summary", milestonesTargetUserId], endpoint, err });
+        throw err;
+      }
+    },
     retry: 1,
     enabled: tab === "my-work" && milestonesTargetUserId != null,
     staleTime: 30_000,
@@ -138,8 +190,16 @@ export default function Workbench() {
   });
   const paymentVoucherActionsQuery = useQuery<PaymentVoucherAction[]>({
     queryKey: ["payment-voucher-actions", "my-work", milestonesTargetUserId],
-    queryFn: ({ signal }) =>
-      apiFetchJson(`/payment-voucher-actions/my-work${milestonesTargetUserId ? `?userId=${encodeURIComponent(String(milestonesTargetUserId))}` : ""}`, { signal }),
+    queryFn: async ({ signal }) => {
+      const endpoint = `/payment-voucher-actions/my-work${milestonesTargetUserId ? `?userId=${encodeURIComponent(String(milestonesTargetUserId))}` : ""}`;
+      try {
+        const rows = await apiFetchJson(endpoint, { signal });
+        return Array.isArray(rows) ? (rows as PaymentVoucherAction[]) : [];
+      } catch (err) {
+        logSectionError({ section: "payment-voucher-actions", queryKey: ["payment-voucher-actions", "my-work", milestonesTargetUserId], endpoint, err });
+        throw err;
+      }
+    },
     retry: false,
     enabled: tab === "my-work" && milestonesTargetUserId != null,
   });
@@ -174,12 +234,13 @@ export default function Workbench() {
     onError: (err) => toastError(toast, err, "Failed to complete action"),
   });
 
+  const staffOptions = Array.isArray((data as any)?.staffOptions) ? ((data as any).staffOptions as any[]) : [];
   useEffect(() => {
     if (!data) return;
     if (userId === "me") return;
-    const exists = data.staffOptions.some((u) => String(u.id) === userId);
+    const exists = staffOptions.some((u) => String((u as any)?.id ?? "") === userId);
     if (!exists) setParam("userId", "me");
-  }, [data, userId]);
+  }, [data, staffOptions, userId]);
 
   if (isLoading) {
     return <div className="text-slate-500">Loading…</div>;
@@ -192,7 +253,10 @@ export default function Workbench() {
     );
   }
 
-  const staffOptions = data.staffOptions ?? [];
+  const myWorkCards = Array.isArray((data as any)?.myWork?.cards) ? ((data as any).myWork.cards as WorkbenchCard[]) : [];
+  const myWorkRecent = Array.isArray((data as any)?.myWork?.recent) ? ((data as any).myWork.recent as any[]) : [];
+  const missingCards = Array.isArray((data as any)?.missingDates?.cards) ? ((data as any).missingDates.cards as WorkbenchCard[]) : [];
+  const overdueCards = Array.isArray((data as any)?.overdue?.cards) ? ((data as any).overdue.cards as WorkbenchCard[]) : [];
   const filteredPaymentVoucherActions = useMemo(() => {
     const rows = paymentVoucherActionsQuery.data ?? [];
     const now = Date.now();
@@ -244,7 +308,7 @@ export default function Workbench() {
 
         <TabsContent value="my-work">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
-            {data.myWork.cards.map((card) => (
+            {myWorkCards.map((card) => (
               <div
                 key={card.key}
                 className="border rounded-lg bg-white p-4 cursor-pointer hover:shadow-sm transition-shadow"
@@ -272,7 +336,7 @@ export default function Workbench() {
                 const staffLabel = (() => {
                   if (!data?.staffUser?.name) return "My Milestones";
                   if (userId === "me") return "My Milestones";
-                  const match = data.staffOptions.find((u) => String(u.id) === userId);
+                  const match = staffOptions.find((u) => String((u as any)?.id ?? "") === userId);
                   return match?.name ? `${match.name}'s Milestones` : "Milestones";
                 })();
                 return (
@@ -333,13 +397,13 @@ export default function Workbench() {
                             <div className="text-xs text-slate-500">{action.nextActionRemarks}</div>
                           ) : null}
                           <div className="text-xs text-slate-500">
-                            Assigned: {new Date(action.assignedAt).toLocaleString("en-MY")}
+                            Assigned: {fmtDateTime(action.assignedAt)}
                           </div>
                           <div className="text-xs text-slate-500">
-                            Acknowledge Due: {action.acknowledgeDueAt ? new Date(action.acknowledgeDueAt).toLocaleString("en-MY") : "—"}
+                            Acknowledge Due: {fmtDateTime(action.acknowledgeDueAt)}
                           </div>
                           <div className="text-xs text-slate-500">
-                            Completion Due: {action.completionDueAt ? new Date(action.completionDueAt).toLocaleString("en-MY") : "—"}
+                            Completion Due: {fmtDateTime(action.completionDueAt)}
                           </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-2">
@@ -380,11 +444,11 @@ export default function Workbench() {
               <CardTitle>Recently updated</CardTitle>
             </CardHeader>
             <CardContent>
-              {data.myWork.recent.length === 0 ? (
+              {myWorkRecent.length === 0 ? (
                 <div className="text-sm text-slate-500">No recent cases.</div>
               ) : (
                 <div className="divide-y">
-                  {data.myWork.recent.map((c) => (
+                  {myWorkRecent.map((c: any) => (
                     <div
                       key={c.id}
                       className="py-3 flex items-start justify-between gap-2 cursor-pointer hover:bg-slate-50 -mx-2 px-2 rounded"
@@ -394,7 +458,7 @@ export default function Workbench() {
                         <div className="text-sm font-medium text-slate-900">{c.referenceNo}</div>
                         <div className="text-xs text-slate-500">{c.projectName}</div>
                       </div>
-                      <div className="text-xs text-slate-400">{new Date(c.updatedAt).toLocaleDateString()}</div>
+                      <div className="text-xs text-slate-400">{fmtDate(c.updatedAt)}</div>
                     </div>
                   ))}
                 </div>
@@ -473,7 +537,7 @@ export default function Workbench() {
           </Card>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
-            {data.missingDates.cards.map((card) => (
+            {missingCards.map((card) => (
               <div
                 key={card.key}
                 className="border rounded-lg bg-white p-4 cursor-pointer hover:shadow-sm transition-shadow"
@@ -557,7 +621,7 @@ export default function Workbench() {
           </Card>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
-            {data.overdue.cards.map((card) => (
+            {overdueCards.map((card) => (
               <div
                 key={card.key}
                 className="border rounded-lg bg-white p-4 cursor-pointer hover:shadow-sm transition-shadow"

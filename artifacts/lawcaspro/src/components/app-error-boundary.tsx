@@ -17,7 +17,19 @@ export class AppErrorBoundary extends Component<Props, State> {
     return { hasError: true };
   }
 
-  componentDidCatch() {
+  componentDidCatch(error: unknown, info: unknown) {
+    try {
+      const componentStack =
+        info && typeof info === "object" && "componentStack" in (info as any) ? String((info as any).componentStack ?? "") : "";
+      console.error("app.error_boundary", {
+        route: typeof window !== "undefined" ? window.location.href : "unknown",
+        message: error instanceof Error ? error.message : String(error ?? ""),
+        stack: error instanceof Error ? error.stack : null,
+        componentStack,
+        ts: new Date().toISOString(),
+      });
+    } catch {
+    }
   }
 
   private reset = () => {
