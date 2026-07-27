@@ -43,7 +43,7 @@ const PERMISSION_CATALOG: Array<{ module: string; actions: string[] }> = [
   { module: "developers", actions: ["read", "create", "update", "delete"] },
   { module: "documents", actions: ["read", "create", "update", "delete", "generate", "export"] },
   { module: "communications", actions: ["read", "create", "update", "delete"] },
-  { module: "accounting", actions: ["read", "write"] },
+  { module: "accounting", actions: ["read", "write", "create", "edit", "review", "approve", "mark_received", "mark_paid", "cancel", "reopen", "export", "view_audit", "manage_settings", "override_sla"] },
   { module: "reports", actions: ["read", "export"] },
   { module: "audit", actions: ["read"] },
   { module: "settings", actions: ["read", "update"] },

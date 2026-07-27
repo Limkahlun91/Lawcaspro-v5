@@ -1,6 +1,6 @@
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
-import { hasPermission, isAccountingRoleAllowed } from "@/lib/permissions";
+import { hasPermission } from "@/lib/permissions";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import { 
@@ -47,6 +47,14 @@ export function AppLayout({ children }: { children: ReactNode }) {
     retry: false,
   });
   const caseUnreadCount = caseUnreadData?.totalUnreadCount ?? 0;
+  const { data: accountingUnreadData } = useQuery({
+    queryKey: ["user-notifications", "unread-count"],
+    queryFn: () => apiFetchJson<{ count: number }>("/user-notifications/unread-count").catch(() => ({ count: 0 })),
+    refetchInterval: 30000,
+    enabled: !!user && user.userType === "firm_user",
+    retry: false,
+  });
+  const accountingUnreadCount = accountingUnreadData?.count ?? 0;
 
   if (!user || user.userType !== "firm_user") {
     return null;
@@ -95,6 +103,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
       label: "SETTINGS / SYSTEM",
       items: [
         { label: "Settings", href: "/app/settings", icon: Settings, perm: ["settings", "read"] as const },
+        { label: "Accounting Settings", href: "/app/settings/accounting", icon: Settings, perm: ["accounting", "read"] as const },
         { label: "Email Settings", href: "/app/settings/email", icon: Settings, perm: ["communications", "read"] as const },
         { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText, perm: ["audit", "read"] as const },
         { label: "Doc Gen Logs", href: "/app/documents/generation-logs", icon: ScrollText, perm: ["audit", "read"] as const },
@@ -108,7 +117,6 @@ export function AppLayout({ children }: { children: ReactNode }) {
       label: g.label,
       items: g.items.filter((i) => {
         if (!hasPermission(user, i.perm[0], i.perm[1])) return false;
-        if (i.href === "/app/accounting") return isAccountingRoleAllowed(user.roleName);
         return true;
       }),
     }))
@@ -240,6 +248,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
     state.timer = null;
   }, []);
 
+  const globalUnreadCount = caseUnreadCount + accountingUnreadCount;
+  const notificationHref = accountingUnreadCount > 0
+    ? (hasPermission(user, "accounting", "read") ? "/app/accounting?tab=payment-vouchers" : "/app/workbench")
+    : "/app/cases";
+
   return (
     <div className="flex min-h-screen w-full bg-slate-50 overflow-x-hidden">
       <div className="w-64 bg-slate-900 text-slate-100 flex flex-col shrink-0 sticky top-0 h-screen overflow-y-auto">
@@ -253,12 +266,12 @@ export function AppLayout({ children }: { children: ReactNode }) {
             <div className="text-xs text-slate-400 mt-1">{user.roleName || "User"}</div>
             <div className="mt-3 flex items-center justify-between">
               <div className="text-xs text-slate-500">Notifications</div>
-              <Link href="/app/cases">
+              <Link href={notificationHref}>
                 <div className="relative inline-flex items-center justify-center w-8 h-8 rounded-md hover:bg-slate-800">
                   <Bell className="w-4 h-4 text-slate-200" />
-                  {caseUnreadCount > 0 ? (
+                  {globalUnreadCount > 0 ? (
                     <span className="absolute -top-1 -right-1 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
-                      {caseUnreadCount}
+                      {globalUnreadCount}
                     </span>
                   ) : null}
                 </div>
@@ -302,6 +315,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
                       >
                         <item.icon className="w-4 h-4 shrink-0" />
                         <span className="truncate flex-1">{item.label}</span>
+                        {item.href === "/app/accounting" && accountingUnreadCount > 0 && (
+                          <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
+                            {accountingUnreadCount}
+                          </span>
+                        )}
                         {item.label === "Communications" && unreadCount > 0 && (
                           <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-blue-500 rounded-full">
                             {unreadCount}

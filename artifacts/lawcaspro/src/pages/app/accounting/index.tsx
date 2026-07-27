@@ -15,6 +15,7 @@ import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { hasPermission } from "@/lib/permissions";
 import { useListQuotations } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { useReAuth } from "@/components/re-auth-dialog";
@@ -125,6 +126,32 @@ function ApprovalBadge({ status }: { status: string }) {
       {label}
     </span>
   );
+}
+
+const PAYMENT_VOUCHER_NEXT_ACTIONS = [
+  "Collect Physical File",
+  "Retrieve File from Accounts",
+  "Proceed with Registration",
+  "Proceed with Stamping",
+  "Release Document",
+  "Send Document to Bank",
+  "Send Document to Client",
+  "Update Case Milestone",
+  "Prepare Next Submission",
+  "Follow Up with Relevant Party",
+  "Custom Action",
+] as const;
+
+function toDateTimeLocalValue(value: string | null | undefined): string {
+  if (!value) return "";
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) return "";
+  const year = dt.getFullYear();
+  const month = String(dt.getMonth() + 1).padStart(2, "0");
+  const day = String(dt.getDate()).padStart(2, "0");
+  const hour = String(dt.getHours()).padStart(2, "0");
+  const minute = String(dt.getMinutes()).padStart(2, "0");
+  return `${year}-${month}-${day}T${hour}:${minute}`;
 }
 
 // ── OVERVIEW TAB ─────────────────────────────────────────────────────────────
@@ -843,13 +870,42 @@ function PaymentVouchersTab() {
       ? "partner"
       : (roleName === "Manager" || roleName === "Senior Lawyer" || roleName === "Lawyer")
         ? "lawyer"
-        : (roleName === "Account" || roleName === "Accounts" || roleName === "Finance" || roleName === "Accountant")
-          ? "account"
-          : "clerk";
+        : "staff";
+  const canAccountingRead = hasPermission(user, "accounting", "read");
+  const canAccountingCreate = hasPermission(user, "accounting", "create");
+  const canAccountingReview = hasPermission(user, "accounting", "review");
+  const canAccountingApprove = hasPermission(user, "accounting", "approve");
+  const canAccountingMarkReceived = hasPermission(user, "accounting", "mark_received");
+  const canAccountingMarkPaid = hasPermission(user, "accounting", "mark_paid");
+  const canAccountingOverrideSla = hasPermission(user, "accounting", "override_sla");
+
+  const [receiveOpen, setReceiveOpen] = useState(false);
+  const [receiveVoucherId, setReceiveVoucherId] = useState<number | null>(null);
+  const [receiveForm, setReceiveForm] = useState({ assignedAccountUserId: "", isUrgent: false });
+
+  const [reassignOpen, setReassignOpen] = useState(false);
+  const [reassignVoucherId, setReassignVoucherId] = useState<number | null>(null);
+  const [reassignAssignedAccountUserId, setReassignAssignedAccountUserId] = useState("");
+
+  const [overrideDeadlineOpen, setOverrideDeadlineOpen] = useState(false);
+  const [overrideDeadlineVoucherId, setOverrideDeadlineVoucherId] = useState<number | null>(null);
+  const [overrideDeadlineForm, setOverrideDeadlineForm] = useState({ paymentDueAt: "", reason: "" });
 
   const [markPaidOpen, setMarkPaidOpen] = useState(false);
   const [markPaidVoucherId, setMarkPaidVoucherId] = useState<number | null>(null);
-  const [markPaidForm, setMarkPaidForm] = useState({ accountType: "office", paymentMethod: "bank_transfer", bankChequeRefNo: "" });
+  const [markPaidForm, setMarkPaidForm] = useState({
+    accountType: "office",
+    paymentMethod: "bank_transfer",
+    bankChequeRefNo: "",
+    paidAmount: "",
+    proofDocumentPath: "",
+    nextActionType: "Collect Physical File",
+    nextActionCustom: "",
+    nextActionRemarks: "",
+    assignedClerkUserId: "",
+    clerkActionExemptReason: "",
+    lateCompletionReason: "",
+  });
 
   const todayLabel = new Date().toLocaleDateString("en-MY", { year: "numeric", month: "short", day: "2-digit" });
 
@@ -899,8 +955,15 @@ function PaymentVouchersTab() {
   const targetCaseResults = Array.isArray(targetCaseSearchQuery.data?.data) ? (targetCaseSearchQuery.data?.data ?? []) : [];
 
   const vouchersQuery = useQuery({ queryKey: ["payment-vouchers"], queryFn: () => apiFetchJson("/payment-vouchers"), retry: false });
+  const dashboardQuery = useQuery({
+    queryKey: ["payment-vouchers", "dashboard"],
+    queryFn: () => apiFetchJson("/payment-vouchers/dashboard"),
+    retry: false,
+    enabled: canAccountingRead,
+  });
   const { data, isLoading } = vouchersQuery;
   const vouchers = (data ?? []) as any[];
+  const dashboard = (dashboardQuery.data ?? {}) as Record<string, number>;
   const markPaidVoucher = markPaidVoucherId ? (vouchers.find((v: any) => Number(v.id) === Number(markPaidVoucherId)) ?? null) : null;
 
   const createBatchMut = useMutation({
@@ -909,7 +972,7 @@ function PaymentVouchersTab() {
       const voucherType = simpleForm.voucherType;
       const sourceCase = selectedCases[0] ?? null;
       const target = targetCase;
-      if ((voucherType === "internal_transfer" || voucherType === "file_to_file_transfer") && !(roleKind === "partner" || roleKind === "account")) {
+      if ((voucherType === "internal_transfer" || voucherType === "file_to_file_transfer") && !canAccountingCreate) {
         throw new Error("Forbidden");
       }
       if (simpleForm.isAdvance && voucherType !== "external_payment") throw new Error("Client Advance is only applicable to Payment Voucher");
@@ -1108,6 +1171,61 @@ function PaymentVouchersTab() {
     printVoucher(id).catch(() => void 0);
   }, [printVoucherIdParam, searchString]);
 
+  async function submitReceivedByAccounts(): Promise<void> {
+    if (!receiveVoucherId) return;
+    const assignedAccountUserId = receiveForm.assignedAccountUserId.trim()
+      ? Number(receiveForm.assignedAccountUserId)
+      : undefined;
+    const body = {
+      action: "received_by_accounts" as const,
+      assignedAccountUserId,
+      isUrgent: receiveForm.isUrgent,
+    };
+    const parsed = PaymentVoucherTransitionBody.safeParse(body);
+    if (!parsed.success) {
+      toast({ title: "Invalid input", description: parsed.error.message, variant: "destructive" });
+      return;
+    }
+    transitionMut.mutate({ id: receiveVoucherId, body: parsed.data });
+    setReceiveOpen(false);
+    setReceiveVoucherId(null);
+    setReceiveForm({ assignedAccountUserId: "", isUrgent: false });
+  }
+
+  async function submitReassign(): Promise<void> {
+    if (!reassignVoucherId) return;
+    const assignedAccountUserId = Number(reassignAssignedAccountUserId);
+    const body = { action: "reassign_account_user" as const, assignedAccountUserId };
+    const parsed = PaymentVoucherTransitionBody.safeParse(body);
+    if (!parsed.success) {
+      toast({ title: "Invalid input", description: parsed.error.message, variant: "destructive" });
+      return;
+    }
+    transitionMut.mutate({ id: reassignVoucherId, body: parsed.data });
+    setReassignOpen(false);
+    setReassignVoucherId(null);
+    setReassignAssignedAccountUserId("");
+  }
+
+  async function submitOverrideDeadline(): Promise<void> {
+    if (!overrideDeadlineVoucherId) return;
+    const iso = overrideDeadlineForm.paymentDueAt ? new Date(overrideDeadlineForm.paymentDueAt).toISOString() : "";
+    const body = {
+      action: "override_deadline" as const,
+      paymentDueAt: iso,
+      reason: overrideDeadlineForm.reason,
+    };
+    const parsed = PaymentVoucherTransitionBody.safeParse(body);
+    if (!parsed.success) {
+      toast({ title: "Invalid input", description: parsed.error.message, variant: "destructive" });
+      return;
+    }
+    transitionMut.mutate({ id: overrideDeadlineVoucherId, body: parsed.data });
+    setOverrideDeadlineOpen(false);
+    setOverrideDeadlineVoucherId(null);
+    setOverrideDeadlineForm({ paymentDueAt: "", reason: "" });
+  }
+
   async function submitMarkPaid(): Promise<void> {
     if (!markPaidVoucherId) return;
     const vt = markPaidVoucher ? String(markPaidVoucher.voucherType ?? "") : "";
@@ -1117,6 +1235,14 @@ function PaymentVouchersTab() {
       accountType: (vt === "internal_transfer" || vt === "file_to_file_transfer") ? "client" : isAdvance ? "office" : markPaidForm.accountType,
       paymentMethod: markPaidForm.paymentMethod,
       bankChequeRefNo: markPaidForm.bankChequeRefNo,
+      paidAmount: markPaidForm.paidAmount.trim() ? Number(markPaidForm.paidAmount) : undefined,
+      proofDocumentPath: markPaidForm.proofDocumentPath.trim() || undefined,
+      nextActionType: markPaidForm.nextActionType,
+      nextActionCustom: markPaidForm.nextActionType === "Custom Action" ? (markPaidForm.nextActionCustom.trim() || undefined) : undefined,
+      nextActionRemarks: markPaidForm.nextActionRemarks.trim() || undefined,
+      assignedClerkUserId: markPaidVoucher?.caseId && markPaidForm.assignedClerkUserId.trim() ? Number(markPaidForm.assignedClerkUserId) : undefined,
+      clerkActionExemptReason: !markPaidVoucher?.caseId ? (markPaidForm.clerkActionExemptReason.trim() || undefined) : undefined,
+      lateCompletionReason: markPaidForm.lateCompletionReason.trim() || undefined,
     };
     const parsed = PaymentVoucherTransitionBody.safeParse(body);
     if (!parsed.success) {
@@ -1126,7 +1252,19 @@ function PaymentVouchersTab() {
     transitionMut.mutate({ id: markPaidVoucherId, body: parsed.data });
     setMarkPaidOpen(false);
     setMarkPaidVoucherId(null);
-    setMarkPaidForm({ accountType: "office", paymentMethod: "bank_transfer", bankChequeRefNo: "" });
+    setMarkPaidForm({
+      accountType: "office",
+      paymentMethod: "bank_transfer",
+      bankChequeRefNo: "",
+      paidAmount: "",
+      proofDocumentPath: "",
+      nextActionType: "Collect Physical File",
+      nextActionCustom: "",
+      nextActionRemarks: "",
+      assignedClerkUserId: "",
+      clerkActionExemptReason: "",
+      lateCompletionReason: "",
+    });
   }
 
   return (
@@ -1235,10 +1373,10 @@ function PaymentVouchersTab() {
                     }}
                   >
                     <option value="external_payment">Payment Voucher</option>
-                    {(roleKind === "partner" || roleKind === "account") ? (
+                    {canAccountingCreate ? (
                       <option value="internal_transfer">Internal Payment Voucher</option>
                     ) : null}
-                    {(roleKind === "partner" || roleKind === "account") ? (
+                    {canAccountingCreate ? (
                       <option value="file_to_file_transfer">File-to-File Transfer</option>
                     ) : null}
                   </select>
@@ -1436,6 +1574,27 @@ function PaymentVouchersTab() {
         </Card>
       )}
 
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3 xl:grid-cols-5">
+        {[
+          { key: "awaitingReceipt", label: "Awaiting Accounts Receipt" },
+          { key: "receivedAndProcessing", label: "Received And Processing" },
+          { key: "waitingApproval", label: "Waiting For Approval" },
+          { key: "dueSoon", label: "Due Soon" },
+          { key: "overdue", label: "Overdue Payments" },
+          { key: "paidToday", label: "Paid Today" },
+          { key: "clerkPending", label: "Clerk Action Pending" },
+          { key: "clerkOverdue", label: "Clerk Action Overdue" },
+          { key: "completedMonth", label: "Completed This Month" },
+        ].map((card) => (
+          <Card key={card.key} className="border-slate-200">
+            <CardContent className="pt-5">
+              <div className="text-xs text-slate-500">{card.label}</div>
+              <div className="mt-2 text-2xl font-bold text-slate-900">{Number(dashboard[card.key] ?? 0)}</div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
       {vouchersQuery.isError ? (
         <QueryFallback title="Payment vouchers unavailable" error={vouchersQuery.error} onRetry={() => vouchersQuery.refetch()} isRetrying={vouchersQuery.isFetching} />
       ) : isLoading ? (
@@ -1455,7 +1614,7 @@ function PaymentVouchersTab() {
                 <th className="px-4 py-3 text-left font-medium">Payee</th>
                 <th className="px-4 py-3 text-left font-medium">Purpose</th>
                 <th className="px-4 py-3 text-left font-medium">Approval</th>
-                <th className="px-4 py-3 text-left font-medium">Account / Fund</th>
+                <th className="px-4 py-3 text-left font-medium">Accounts Processing</th>
                 <th className="px-4 py-3 text-left font-medium">Status</th>
                 <th className="px-4 py-3 text-right font-medium">Amount</th>
                 <th className="px-4 py-3 text-right font-medium">Actions</th>
@@ -1480,7 +1639,7 @@ function PaymentVouchersTab() {
                     key: "approve",
                     label: "Approve",
                     onClick: () => transitionMut.mutate({ id: pv.id, body: { action: "approve", decision: "approved" } }),
-                    show: pv.approvalStatus === "pending_approval" && roleKind === "partner",
+                    show: pv.approvalStatus === "pending_approval" && canAccountingApprove,
                   },
                   {
                     key: "print",
@@ -1489,27 +1648,66 @@ function PaymentVouchersTab() {
                     show: pv.status === "pending_account" && pv.approvalStatus !== "pending_approval" && pv.approvalStatus !== "rejected",
                   },
                   {
+                    key: "receive_accounts",
+                    label: "Received by Accounts",
+                    onClick: () => {
+                      setReceiveVoucherId(pv.id);
+                      setReceiveForm({
+                        assignedAccountUserId: pv.assignedAccountUserId ? String(pv.assignedAccountUserId) : "",
+                        isUrgent: false,
+                      });
+                      setReceiveOpen(true);
+                    },
+                    show: pv.status === "pending_account" && !pv.receivedAt && (canAccountingMarkReceived || canAccountingReview),
+                  },
+                  {
+                    key: "reassign_account_user",
+                    label: "Reassign Account User",
+                    onClick: () => {
+                      setReassignVoucherId(pv.id);
+                      setReassignAssignedAccountUserId(pv.assignedAccountUserId ? String(pv.assignedAccountUserId) : "");
+                      setReassignOpen(true);
+                    },
+                    show: pv.status === "pending_account" && Boolean(pv.receivedAt) && (canAccountingMarkReceived || canAccountingReview),
+                  },
+                  {
+                    key: "override_deadline",
+                    label: "Override Deadline",
+                    onClick: () => {
+                      setOverrideDeadlineVoucherId(pv.id);
+                      setOverrideDeadlineForm({
+                        paymentDueAt: toDateTimeLocalValue(String(pv.paymentDueAt ?? "")),
+                        reason: String(pv.deadlineOverrideReason ?? ""),
+                      });
+                      setOverrideDeadlineOpen(true);
+                    },
+                    show: pv.status === "pending_account" && Boolean(pv.receivedAt) && canAccountingOverrideSla,
+                  },
+                  {
                     key: "mark_paid",
                     label: "Mark as Paid",
                     onClick: () => {
                       setMarkPaidVoucherId(pv.id);
-                      setMarkPaidForm((f) => ({
-                        ...f,
+                      setMarkPaidForm({
                         accountType: (String(pv.voucherType ?? "") === "internal_transfer" || String(pv.voucherType ?? "") === "file_to_file_transfer")
                           ? "client"
                           : pv.isAdvance
                             ? "office"
-                            : f.accountType,
-                      }));
+                            : String(pv.accountType ?? "office"),
+                        paymentMethod: String(pv.paymentMethod ?? "bank_transfer"),
+                        bankChequeRefNo: String(pv.bankChequeRefNo ?? ""),
+                        paidAmount: pv.amount ? String(pv.amount) : "",
+                        proofDocumentPath: String(pv.proofDocumentPath ?? ""),
+                        nextActionType: String(pv.nextActionType ?? "Collect Physical File"),
+                        nextActionCustom: String(pv.nextActionCustom ?? ""),
+                        nextActionRemarks: String(pv.nextActionRemarks ?? ""),
+                        assignedClerkUserId: pv.assignedClerkUserId ? String(pv.assignedClerkUserId) : "",
+                        clerkActionExemptReason: String(pv.clerkActionExemptReason ?? ""),
+                        lateCompletionReason: String(pv.lateCompletionReason ?? ""),
+                      });
                       setMarkPaidOpen(true);
                     },
-                    show: pv.status === "pending_account" && (roleKind === "partner" || roleKind === "account") && pv.approvalStatus !== "pending_approval" && pv.approvalStatus !== "rejected",
-                  },
-                  {
-                    key: "ack_file",
-                    label: "Acknowledge File Return",
-                    onClick: () => transitionMut.mutate({ id: pv.id, body: { action: "acknowledge_file_return" } }),
-                    show: pv.status === "paid_pending_collection" && roleKind === "clerk",
+                    show: pv.status === "pending_account" && Boolean(pv.receivedAt) && canAccountingMarkPaid && pv.approvalStatus !== "pending_approval" && pv.approvalStatus !== "rejected",
                   },
                 ];
                 return (
@@ -1520,10 +1718,17 @@ function PaymentVouchersTab() {
                     <td className="px-4 py-3 text-slate-500 max-w-xs truncate">{pv.purpose}</td>
                     <td className="px-4 py-3"><ApprovalBadge status={String(pv.approvalStatus ?? "approved")} /></td>
                     <td className="px-4 py-3">
-                      {pv.accountType
-                        ? <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600 capitalize">{String(pv.accountType)}</span>
-                        : <span className="text-xs text-slate-500">{fundStatusLabel(String(pv.fundStatus ?? ""))}</span>
-                      }
+                      <div className="space-y-1 text-xs text-slate-600">
+                        <div>
+                          {pv.accountType
+                            ? <span className="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 capitalize">{String(pv.accountType)}</span>
+                            : <span>{fundStatusLabel(String(pv.fundStatus ?? ""))}</span>
+                          }
+                        </div>
+                        <div>Received: {pv.receivedAt ? new Date(String(pv.receivedAt)).toLocaleString("en-MY") : "Pending"}</div>
+                        <div>Due: {pv.paymentDueAt ? new Date(String(pv.paymentDueAt)).toLocaleString("en-MY") : "Not started"}</div>
+                        <div>Account User: {pv.assignedAccountUserId ? `#${String(pv.assignedAccountUserId)}` : "Unassigned"}</div>
+                      </div>
                     </td>
                     <td className="px-4 py-3"><StatusBadge status={pv.status} /></td>
                     <td className="px-4 py-3 text-right font-semibold text-slate-800">{fmt(pv.amount)}</td>
@@ -1546,6 +1751,93 @@ function PaymentVouchersTab() {
           </table>
         </div>
       )}
+
+      <Dialog open={receiveOpen} onOpenChange={(open) => { if (!open) setReceiveVoucherId(null); setReceiveOpen(open); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Received by Accounts</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-1">Assigned Account User ID</label>
+              <Input
+                type="number"
+                placeholder={`Leave blank to use current user`}
+                value={receiveForm.assignedAccountUserId}
+                onChange={(e) => setReceiveForm((f) => ({ ...f, assignedAccountUserId: e.target.value }))}
+              />
+            </div>
+            <div className="flex items-center gap-2 rounded-md border border-slate-200 p-3">
+              <Checkbox
+                checked={receiveForm.isUrgent}
+                onCheckedChange={(checked) => setReceiveForm((f) => ({ ...f, isUrgent: Boolean(checked) }))}
+              />
+              <div className="text-sm text-slate-700">Use urgent SLA for this voucher</div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReceiveOpen(false)}>Cancel</Button>
+            <Button className="bg-amber-500 hover:bg-amber-600 text-white" onClick={() => submitReceivedByAccounts()} disabled={!receiveVoucherId || transitionMut.isPending}>
+              Confirm Received
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={reassignOpen} onOpenChange={(open) => { if (!open) setReassignVoucherId(null); setReassignOpen(open); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Reassign Account User</DialogTitle>
+          </DialogHeader>
+          <div>
+            <label className="text-sm font-medium text-slate-700 block mb-1">New Account User ID</label>
+            <Input
+              type="number"
+              placeholder="Enter firm user ID"
+              value={reassignAssignedAccountUserId}
+              onChange={(e) => setReassignAssignedAccountUserId(e.target.value)}
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setReassignOpen(false)}>Cancel</Button>
+            <Button className="bg-amber-500 hover:bg-amber-600 text-white" onClick={() => submitReassign()} disabled={!reassignVoucherId || !reassignAssignedAccountUserId.trim() || transitionMut.isPending}>
+              Save Reassignment
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={overrideDeadlineOpen} onOpenChange={(open) => { if (!open) setOverrideDeadlineVoucherId(null); setOverrideDeadlineOpen(open); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Override Deadline</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-1">New Due Time</label>
+              <Input
+                type="datetime-local"
+                value={overrideDeadlineForm.paymentDueAt}
+                onChange={(e) => setOverrideDeadlineForm((f) => ({ ...f, paymentDueAt: e.target.value }))}
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-1">Reason</label>
+              <Input
+                placeholder="Required audit reason"
+                value={overrideDeadlineForm.reason}
+                onChange={(e) => setOverrideDeadlineForm((f) => ({ ...f, reason: e.target.value }))}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOverrideDeadlineOpen(false)}>Cancel</Button>
+            <Button className="bg-amber-500 hover:bg-amber-600 text-white" onClick={() => submitOverrideDeadline()} disabled={!overrideDeadlineVoucherId || !overrideDeadlineForm.paymentDueAt || !overrideDeadlineForm.reason.trim() || transitionMut.isPending}>
+              Apply Deadline
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={markPaidOpen} onOpenChange={(v) => { if (!v) setMarkPaidVoucherId(null); setMarkPaidOpen(v); }}>
         <DialogContent>
@@ -1603,10 +1895,99 @@ function PaymentVouchersTab() {
                 onChange={(e) => setMarkPaidForm((f) => ({ ...f, bankChequeRefNo: e.target.value }))}
               />
             </div>
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-1">Paid Amount</label>
+              <Input
+                type="number"
+                step="0.01"
+                placeholder="0.00"
+                value={markPaidForm.paidAmount}
+                onChange={(e) => setMarkPaidForm((f) => ({ ...f, paidAmount: e.target.value }))}
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-1">Proof Of Payment Path</label>
+              <Input
+                placeholder="/objects/... proof file path"
+                value={markPaidForm.proofDocumentPath}
+                onChange={(e) => setMarkPaidForm((f) => ({ ...f, proofDocumentPath: e.target.value }))}
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-1">Next Action Required</label>
+              <select
+                className="w-full border border-slate-200 rounded-md px-3 py-2 text-sm bg-white"
+                value={markPaidForm.nextActionType}
+                onChange={(e) => setMarkPaidForm((f) => ({ ...f, nextActionType: e.target.value }))}
+              >
+                {PAYMENT_VOUCHER_NEXT_ACTIONS.map((action) => (
+                  <option key={action} value={action}>{action}</option>
+                ))}
+              </select>
+            </div>
+            {markPaidForm.nextActionType === "Custom Action" ? (
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Custom Action</label>
+                <Input
+                  placeholder="Describe the exact next action"
+                  value={markPaidForm.nextActionCustom}
+                  onChange={(e) => setMarkPaidForm((f) => ({ ...f, nextActionCustom: e.target.value }))}
+                />
+              </div>
+            ) : null}
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-1">Next Action Remarks</label>
+              <Input
+                placeholder="Optional remarks for the assigned clerk"
+                value={markPaidForm.nextActionRemarks}
+                onChange={(e) => setMarkPaidForm((f) => ({ ...f, nextActionRemarks: e.target.value }))}
+              />
+            </div>
+            {markPaidVoucher?.caseId ? (
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Assigned Clerk User ID</label>
+                <Input
+                  type="number"
+                  placeholder="Required for case-linked vouchers"
+                  value={markPaidForm.assignedClerkUserId}
+                  onChange={(e) => setMarkPaidForm((f) => ({ ...f, assignedClerkUserId: e.target.value }))}
+                />
+              </div>
+            ) : (
+              <div>
+                <label className="text-sm font-medium text-slate-700 block mb-1">Clerk Action Exemption Reason</label>
+                <Input
+                  placeholder="Required for vouchers without case-linked clerk action"
+                  value={markPaidForm.clerkActionExemptReason}
+                  onChange={(e) => setMarkPaidForm((f) => ({ ...f, clerkActionExemptReason: e.target.value }))}
+                />
+              </div>
+            )}
+            <div>
+              <label className="text-sm font-medium text-slate-700 block mb-1">Late Completion Reason</label>
+              <Input
+                placeholder="Required when completing overdue payment"
+                value={markPaidForm.lateCompletionReason}
+                onChange={(e) => setMarkPaidForm((f) => ({ ...f, lateCompletionReason: e.target.value }))}
+              />
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setMarkPaidOpen(false)}>Cancel</Button>
-            <Button className="bg-amber-500 hover:bg-amber-600 text-white" onClick={() => submitMarkPaid()} disabled={!markPaidVoucherId || !markPaidForm.bankChequeRefNo.trim() || transitionMut.isPending}>
+            <Button
+              className="bg-amber-500 hover:bg-amber-600 text-white"
+              onClick={() => submitMarkPaid()}
+              disabled={
+                !markPaidVoucherId ||
+                !markPaidForm.bankChequeRefNo.trim() ||
+                !markPaidForm.paidAmount.trim() ||
+                !markPaidForm.proofDocumentPath.trim() ||
+                !markPaidForm.nextActionType.trim() ||
+                (markPaidForm.nextActionType === "Custom Action" && !markPaidForm.nextActionCustom.trim()) ||
+                (markPaidVoucher?.caseId ? !markPaidForm.assignedClerkUserId.trim() : !markPaidForm.clerkActionExemptReason.trim()) ||
+                transitionMut.isPending
+              }
+            >
               Confirm
             </Button>
           </DialogFooter>

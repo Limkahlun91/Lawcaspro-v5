@@ -91,12 +91,33 @@ export const PaymentVoucherTransitionBody = z.discriminatedUnion("action", [
     decision: PaymentVoucherApprovalStatus.optional().default("approved"),
   }),
   z.object({
+    action: z.literal("received_by_accounts"),
+    assignedAccountUserId: z.number().int().positive().optional(),
+    isUrgent: z.boolean().optional().default(false),
+  }),
+  z.object({
+    action: z.literal("reassign_account_user"),
+    assignedAccountUserId: z.number().int().positive(),
+  }),
+  z.object({
+    action: z.literal("override_deadline"),
+    paymentDueAt: z.string().datetime(),
+    reason: z.string().trim().min(3).max(1000),
+  }),
+  z.object({
     action: z.literal("mark_paid"),
     accountType: PaymentVoucherDeductFromAccount,
     paymentMethod: PaymentVoucherPaymentMethod,
     bankChequeRefNo: z.string().trim().min(1).max(255),
+    paidAmount: z.number().finite().positive().optional(),
+    proofDocumentPath: z.string().trim().min(1).max(1000).optional(),
+    nextActionType: z.string().trim().min(1).max(120),
+    nextActionCustom: z.string().trim().min(1).max(500).optional(),
+    nextActionRemarks: z.string().trim().max(2000).optional(),
+    assignedClerkUserId: z.number().int().positive().optional(),
+    clerkActionExemptReason: z.string().trim().min(3).max(1000).optional(),
+    lateCompletionReason: z.string().trim().max(2000).optional(),
   }),
-  z.object({ action: z.literal("acknowledge_file_return") }),
 ]);
 export type PaymentVoucherTransitionBody = z.infer<typeof PaymentVoucherTransitionBody>;
 

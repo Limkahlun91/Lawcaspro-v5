@@ -29,6 +29,7 @@ export default defineConfig({
         "src/__tests__/documentReadiness.unit.test.ts",
         "src/__tests__/documentNaming.unit.test.ts",
         "src/__tests__/fileReferenceSequence.unit.test.ts",
+        "src/__tests__/accounting-settings.unit.test.ts",
         "src/__tests__/reference-suggestions.test.ts",
         "src/__tests__/dashboard.milestone-drilldown.test.ts",
         "src/__tests__/caseListLogic.milestone.unit.test.ts",

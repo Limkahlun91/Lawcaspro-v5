@@ -70,6 +70,7 @@ import ClientDetail from "@/pages/app/clients/detail";
 import AuditLogs from "@/pages/app/audit-logs";
 import FirmTemplatesSettingsPage from "@/pages/app/settings/templates";
 import ClausesSettingsPage from "@/pages/app/settings/clauses";
+import AccountingSettingsPage from "@/pages/app/settings/accounting";
 import EmailSettingsPage from "@/pages/app/settings/email";
 import Settings from "@/pages/app/settings";
 import DocumentsPage from "@/pages/app/documents";
@@ -370,6 +371,11 @@ function AppRoutes() {
           <Route path="/app/settings/clauses" component={() => (
             <PermissionGuard module="documents" action="read">
               <ClausesSettingsPage />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/settings/accounting" component={() => (
+            <PermissionGuard module="accounting" action="read">
+              <AccountingSettingsPage />
             </PermissionGuard>
           )} />
           <Route path="/app/settings/email" component={() => (

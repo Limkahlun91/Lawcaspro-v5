@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, numeric, boolean, date, timestamp, index, uuid } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, numeric, boolean, date, timestamp, index, uuid, jsonb } from "drizzle-orm/pg-core";
 
 export const caseBillingEntriesTable = pgTable("case_billing_entries", {
   id:          serial("id").primaryKey(),
@@ -123,6 +123,25 @@ export const paymentVouchersTable = pgTable("payment_vouchers", {
   lawyerApprovedAt:   timestamp("lawyer_approved_at", { withTimezone: true }),
   partnerApprovedBy:  integer("partner_approved_by"),
   partnerApprovedAt:  timestamp("partner_approved_at", { withTimezone: true }),
+  receivedBy:         integer("received_by"),
+  receivedAt:         timestamp("received_at", { withTimezone: true }),
+  assignedAccountUserId: integer("assigned_account_user_id"),
+  paymentDueAt:       timestamp("payment_due_at", { withTimezone: true }),
+  slaPolicySnapshot:  jsonb("sla_policy_snapshot").$type<Record<string, unknown> | null>(),
+  dueSoonNotifiedAt:  timestamp("due_soon_notified_at", { withTimezone: true }),
+  overdueNotifiedAt:  timestamp("overdue_notified_at", { withTimezone: true }),
+  breachedAt:         timestamp("breached_at", { withTimezone: true }),
+  deadlineOverrideReason: text("deadline_override_reason"),
+  deadlineOverriddenBy: integer("deadline_overridden_by"),
+  deadlineOverriddenAt: timestamp("deadline_overridden_at", { withTimezone: true }),
+  paidAmount:         numeric("paid_amount", { precision: 18, scale: 2 }),
+  proofDocumentPath:  text("proof_document_path"),
+  nextActionType:     text("next_action_type"),
+  nextActionCustom:   text("next_action_custom"),
+  nextActionRemarks:  text("next_action_remarks"),
+  assignedClerkUserId: integer("assigned_clerk_user_id"),
+  clerkActionExemptReason: text("clerk_action_exempt_reason"),
+  lateCompletionReason: text("late_completion_reason"),
   paidAt:             timestamp("paid_at", { withTimezone: true }),
   paidBy:             integer("paid_by"),
   notes:              text("notes"),
@@ -133,6 +152,86 @@ export const paymentVouchersTable = pgTable("payment_vouchers", {
   updatedAt:          timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
   firmStatusIdx: index("idx_pvouchers_firm_status").on(t.firmId, t.status),
+  firmAssignedAccountIdx: index("idx_pvouchers_firm_assigned_account").on(t.firmId, t.assignedAccountUserId, t.status),
+  firmDueAtIdx: index("idx_pvouchers_firm_due_at").on(t.firmId, t.paymentDueAt),
+  firmReceivedAtIdx: index("idx_pvouchers_firm_received_at").on(t.firmId, t.receivedAt),
+  firmAssignedClerkIdx: index("idx_pvouchers_firm_assigned_clerk").on(t.firmId, t.assignedClerkUserId, t.status),
+}));
+
+export const accountingSettingsTable = pgTable("accounting_settings", {
+  firmId: integer("firm_id").primaryKey(),
+  accountManagerRoleIds: jsonb("account_manager_role_ids").$type<number[]>().notNull().default([]),
+  accountAdminRoleIds: jsonb("account_admin_role_ids").$type<number[]>().notNull().default([]),
+  timezone: text("timezone").notNull().default("Asia/Kuala_Lumpur"),
+  workingHoursStart: text("working_hours_start").notNull().default("09:00"),
+  workingHoursEnd: text("working_hours_end").notNull().default("18:00"),
+  excludeSaturday: boolean("exclude_saturday").notNull().default(true),
+  excludeSunday: boolean("exclude_sunday").notNull().default(true),
+  firmHolidays: jsonb("firm_holidays").$type<Array<{ date: string; label?: string }>>().notNull().default([]),
+  approvalRules: jsonb("approval_rules").$type<Record<string, unknown>>().notNull().default({}),
+  paymentVoucherSla: jsonb("payment_voucher_sla").$type<Record<string, unknown>>().notNull().default({}),
+  clerkActionSla: jsonb("clerk_action_sla").$type<Record<string, unknown>>().notNull().default({}),
+  paymentProofRequired: boolean("payment_proof_required").notNull().default(true),
+  createdBy: integer("created_by"),
+  updatedBy: integer("updated_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  timezoneIdx: index("idx_accounting_settings_timezone").on(t.timezone),
+}));
+
+export const paymentVoucherActionsTable = pgTable("payment_voucher_actions", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  paymentVoucherId: integer("payment_voucher_id").notNull(),
+  caseId: integer("case_id"),
+  assignedUserId: integer("assigned_user_id").notNull(),
+  actionType: text("action_type").notNull(),
+  customAction: text("custom_action"),
+  status: text("status").notNull().default("assigned"),
+  priority: text("priority").notNull().default("normal"),
+  assignedAt: timestamp("assigned_at", { withTimezone: true }).notNull().defaultNow(),
+  acknowledgeDueAt: timestamp("acknowledge_due_at", { withTimezone: true }),
+  acknowledgedBy: integer("acknowledged_by"),
+  acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+  completionDueAt: timestamp("completion_due_at", { withTimezone: true }),
+  completedBy: integer("completed_by"),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  completionNotes: text("completion_notes"),
+  completionAttachmentPath: text("completion_attachment_path"),
+  updatedMilestone: text("updated_milestone"),
+  breachedAt: timestamp("breached_at", { withTimezone: true }),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+  cancelledBy: integer("cancelled_by"),
+  createdBy: integer("created_by"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+}, (t) => ({
+  firmVoucherIdx: index("idx_payment_voucher_actions_firm_voucher").on(t.firmId, t.paymentVoucherId, t.status),
+  firmAssignedIdx: index("idx_payment_voucher_actions_firm_assigned").on(t.firmId, t.assignedUserId, t.status),
+  firmCaseIdx: index("idx_payment_voucher_actions_firm_case").on(t.firmId, t.caseId),
+  firmCompletionDueIdx: index("idx_payment_voucher_actions_firm_completion_due").on(t.firmId, t.completionDueAt),
+  firmAcknowledgeDueIdx: index("idx_payment_voucher_actions_firm_ack_due").on(t.firmId, t.acknowledgeDueAt),
+}));
+
+export const userNotificationsTable = pgTable("user_notifications", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  userId: integer("user_id").notNull(),
+  sourceType: text("source_type").notNull(),
+  sourceId: integer("source_id").notNull(),
+  caseId: integer("case_id"),
+  notificationType: text("notification_type").notNull(),
+  title: text("title").notNull(),
+  message: text("message"),
+  meta: jsonb("meta").$type<Record<string, unknown> | null>(),
+  isRead: boolean("is_read").notNull().default(false),
+  readAt: timestamp("read_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  firmUserUnreadIdx: index("idx_user_notifications_firm_user_unread").on(t.firmId, t.userId, t.isRead, t.createdAt),
+  firmUserTypeIdx: index("idx_user_notifications_firm_user_type").on(t.firmId, t.userId, t.notificationType, t.isRead),
+  firmCaseIdx: index("idx_user_notifications_firm_case").on(t.firmId, t.caseId),
 }));
 
 export const paymentVoucherItemsTable = pgTable("payment_voucher_items", {

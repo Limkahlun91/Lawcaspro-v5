@@ -97,7 +97,8 @@ export async function writeAuditLog(params: {
   try {
     const firmId = params.firmId ?? null;
     const actorId = params.actorId ?? null;
-    if (firmId === null || actorId === null) {
+    const isSystemActor = (params.actorType ?? "firm_user") === "system";
+    if (firmId === null || (actorId === null && !isSystemActor)) {
       logger.warn(
         {
           action: params.action,
@@ -1008,7 +1009,11 @@ export function requirePermission(moduleName: string, action: string) {
   };
 }
 
-async function ensureBaselinePermissions(rlsDb: RlsDb | typeof db, roleId: number, baseline: "Partner" | "Staff" | "Developer_User"): Promise<void> {
+async function ensureBaselinePermissions(
+  rlsDb: RlsDb | typeof db,
+  roleId: number,
+  baseline: "Partner" | "Staff" | "Developer_User",
+): Promise<void> {
   if (baseline === "Partner") {
     await rlsDb.execute(sql`
       INSERT INTO permissions (role_id, module, action, allowed)
@@ -1022,7 +1027,10 @@ async function ensureBaselinePermissions(rlsDb: RlsDb | typeof db, roleId: numbe
           ('developers','read'),('developers','create'),('developers','update'),('developers','delete'),
           ('documents','read'),('documents','create'),('documents','update'),('documents','delete'),('documents','generate'),('documents','export'),
           ('communications','read'),('communications','create'),('communications','update'),('communications','delete'),
-          ('accounting','read'),('accounting','write'),
+          ('accounting','read'),('accounting','write'),('accounting','create'),('accounting','edit'),
+          ('accounting','review'),('accounting','approve'),('accounting','mark_received'),('accounting','mark_paid'),
+          ('accounting','cancel'),('accounting','reopen'),('accounting','export'),('accounting','view_audit'),
+          ('accounting','manage_settings'),('accounting','override_sla'),
           ('reports','read'),('reports','export'),
           ('audit','read'),
           ('settings','read'),('settings','update'),
@@ -1068,7 +1076,6 @@ async function ensureBaselinePermissions(rlsDb: RlsDb | typeof db, roleId: numbe
         ('developers','read'),('developers','create'),('developers','update'),
         ('documents','read'),('documents','export'),
         ('communications','read'),('communications','create'),
-        ('accounting','read'),('accounting','write'),
         ('reports','read'),
         ('settings','read'),
         ('users','read')
@@ -1120,10 +1127,11 @@ export async function ensureRolePermissionsInitialized(
   }
 
   let insertedBaseline = false;
-  const baseline: "Partner" | "Staff" | "Developer_User" =
-    roleLower.includes("partner") ? "Partner"
-    : roleName === "Developer_User" || roleLower.includes("developer") ? "Developer_User"
-    : "Staff";
+  const baseline: "Partner" | "Staff" | "Developer_User" = (() => {
+    if (roleLower.includes("partner")) return "Partner";
+    if (roleName === "Developer_User" || roleLower.includes("developer")) return "Developer_User";
+    return "Staff";
+  })();
   await ensureBaselinePermissions(rlsDb, roleId, baseline);
 
   const countRows2 = await rlsDb.execute(sql`SELECT COUNT(*)::int AS c FROM permissions WHERE role_id = ${roleId} AND allowed = true`);
@@ -1147,38 +1155,62 @@ export async function requirePartner(
 
 const normalizeRoleNameForGuard = (v: unknown): string => (typeof v === "string" ? v.trim().toLowerCase() : "");
 
-const isPartnerOrAccountRoleName = (roleName: string): boolean => {
-  const n = normalizeRoleNameForGuard(roleName);
-  if (!n) return false;
-  if (n.includes("partner")) return true;
-  return n === "account" || n === "accounts" || n === "accountant" || n === "finance";
-};
+async function hasExplicitPermission(req: AuthRequest, moduleName: string, action: string): Promise<boolean> {
+  if (!req.roleId || !req.firmId) return false;
+  const r = req.rlsDb ?? db;
+  let [perm] = await r
+    .select()
+    .from(permissionsTable)
+    .where(and(
+      eq(permissionsTable.roleId, req.roleId),
+      eq(permissionsTable.module, moduleName),
+      eq(permissionsTable.action, action),
+      eq(permissionsTable.allowed, true),
+    ));
+
+  if (perm) return true;
+
+  try {
+    await ensureRolePermissionsInitialized(r as any, req.firmId, req.roleId);
+  } catch (err) {
+    logger.error({ err, firmId: req.firmId, roleId: req.roleId, moduleName, action }, "auth.explicit_permission_seed_failed");
+  }
+
+  [perm] = await r
+    .select()
+    .from(permissionsTable)
+    .where(and(
+      eq(permissionsTable.roleId, req.roleId),
+      eq(permissionsTable.module, moduleName),
+      eq(permissionsTable.action, action),
+      eq(permissionsTable.allowed, true),
+    ));
+  return Boolean(perm);
+}
 
 export async function requirePartnerOrAccountForInvoices(
   req: AuthRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  const firmId = req.firmId;
-  const roleId = req.roleId;
-  if (!firmId || !roleId) {
+  if (!req.firmId || !req.roleId) {
     res.status(403).json({ error: "Forbidden" });
     return;
   }
-  const r = req.rlsDb ?? db;
-  const [role] = await r.select({ name: rolesTable.name }).from(rolesTable).where(and(eq(rolesTable.firmId, firmId), eq(rolesTable.id, roleId)));
-  const roleName = role?.name ?? "";
-  if (!isPartnerOrAccountRoleName(roleName)) {
+  const allowed = await hasExplicitPermission(req, "accounting", "write")
+    || await hasExplicitPermission(req, "accounting", "create")
+    || await hasExplicitPermission(req, "accounting", "edit");
+  if (!allowed) {
     await writeAuditLog({
       actorId: req.userId,
       firmId: req.firmId,
       actorType: req.userType ?? "firm_user",
       action: "auth.forbidden.invoice_create",
-      detail: `role=${roleName}`,
+      detail: `roleId=${req.roleId}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
     });
-    res.status(403).json({ error: "Only Partner/Account can create invoices" });
+    res.status(403).json({ error: "Explicit accounting permission required" });
     return;
   }
   next();

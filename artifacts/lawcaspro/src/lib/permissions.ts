@@ -2,12 +2,29 @@ import type { AuthUser } from "@workspace/api-client-react";
 
 export type Permission = { module: string; action: string };
 
+const ACCOUNTING_ACTIONS = new Set([
+  "read",
+  "write",
+  "create",
+  "edit",
+  "review",
+  "approve",
+  "mark_received",
+  "mark_paid",
+  "cancel",
+  "reopen",
+  "export",
+  "view_audit",
+  "manage_settings",
+  "override_sla",
+]);
+
 export function isAccountingRoleAllowed(roleName: string | null | undefined): boolean {
   const rn = String(roleName ?? "").trim();
   const rnl = rn.toLowerCase();
   if (rnl === "partner") return true;
-  if (rnl === "account" || rnl === "accounts" || rnl === "finance" || rnl === "accountant") return true;
-  if (rnl.startsWith("manager") && rnl.includes("account")) return true;
+  if (rnl === "account admin") return true;
+  if (rnl === "account manager") return true;
   return false;
 }
 
@@ -28,6 +45,9 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
   }
 
   if (!user || user.userType !== "firm_user") return false;
+  if (module === "accounting" && ACCOUNTING_ACTIONS.has(action)) {
+    return false;
+  }
   const roleName = String((user as unknown as { roleName?: unknown }).roleName ?? "");
   const roleLower = roleName.trim().toLowerCase();
   const isPartner = roleLower.includes("partner");
@@ -60,7 +80,10 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
     "developers:read", "developers:create", "developers:update", "developers:delete",
     "documents:read", "documents:create", "documents:update", "documents:delete", "documents:generate", "documents:export",
     "communications:read", "communications:create", "communications:update", "communications:delete",
-    "accounting:read", "accounting:write",
+    "accounting:read", "accounting:write", "accounting:create", "accounting:edit",
+    "accounting:review", "accounting:approve", "accounting:mark_received", "accounting:mark_paid",
+    "accounting:cancel", "accounting:reopen", "accounting:export", "accounting:view_audit",
+    "accounting:manage_settings", "accounting:override_sla",
     "reports:read", "reports:export",
     "audit:read",
     "settings:read", "settings:update",
@@ -93,14 +116,14 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
     "developers:read", "developers:create", "developers:update",
     "documents:read", "documents:export",
     "communications:read", "communications:create",
-    "accounting:read", "accounting:write",
     "reports:read",
     "settings:read",
     "users:read",
   ]);
 
   if (isPartner) return partner.has(key);
-  if (isAccountAdmin || isAccountManager || isStaff) return staff.has(key);
+  if (isAccountAdmin || isAccountManager) return staff.has(key);
+  if (isStaff) return staff.has(key);
   if (isClerk) return staff.has(key) || clerk.has(key);
   if (isLawyer) return staff.has(key);
   if (isDeveloperUser) return developerUser.has(key);

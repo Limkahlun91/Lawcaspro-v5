@@ -1,14 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "wouter";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import { apiFetchJson } from "@/lib/api-client";
 import { useListProjects } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { MilestonesTable } from "@/components/milestones-table";
+import { useToast } from "@/hooks/use-toast";
+import { toastError } from "@/lib/toast-error";
 
 type WorkbenchCard = { key: string; label: string; count: number; query: Record<string, string> };
 type WorkbenchResponse = {
@@ -28,6 +32,24 @@ type MilestoneCard = {
   filter: { milestone?: string; milestonePresence?: string; purchaseMode?: string; titleType?: string };
 };
 type MilestoneSection = { key: string; label: string; total: number; cards: MilestoneCard[] };
+type PaymentVoucherAction = {
+  id: number;
+  paymentVoucherId: number;
+  caseId: number | null;
+  actionType: string;
+  customAction: string | null;
+  status: string;
+  priority: string;
+  assignedAt: string;
+  acknowledgeDueAt: string | null;
+  acknowledgedAt: string | null;
+  completionDueAt: string | null;
+  completedAt: string | null;
+  voucherNo: string;
+  payeeName: string;
+  nextActionRemarks: string | null;
+  referenceNo: string | null;
+};
 
 function buildCasesHref(query: Record<string, string>) {
   const sp = new URLSearchParams(query);
@@ -40,6 +62,8 @@ function buildCasesHref(query: Record<string, string>) {
 
 export default function Workbench() {
   const [location, setLocation] = useLocation();
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
   const sp = useMemo(() => new URLSearchParams(location.split("?")[1] ?? ""), [location]);
 
   const tab = sp.get("tab") === "missing" || sp.get("tab") === "overdue" ? sp.get("tab")! : "my-work";
@@ -48,6 +72,13 @@ export default function Workbench() {
   const purchaseMode = sp.get("purchaseMode") ?? "all";
   const assignedLawyerId = sp.get("assignedLawyerId") ?? "all";
   const assignedClerkId = sp.get("assignedClerkId") ?? "all";
+  const [completeActionId, setCompleteActionId] = useState<number | null>(null);
+  const [completeForm, setCompleteForm] = useState({
+    actionTaken: "",
+    completionNotes: "",
+    completionAttachmentPath: "",
+    updatedMilestone: "",
+  });
 
   const setParam = (k: string, v: string) => {
     const next = new URLSearchParams(sp.toString());
@@ -100,6 +131,43 @@ export default function Workbench() {
     staleTime: 30_000,
     gcTime: 5 * 60_000,
     refetchOnWindowFocus: false,
+  });
+  const paymentVoucherActionsQuery = useQuery<PaymentVoucherAction[]>({
+    queryKey: ["payment-voucher-actions", "my-work", milestonesTargetUserId],
+    queryFn: ({ signal }) =>
+      apiFetchJson(`/payment-voucher-actions/my-work${milestonesTargetUserId ? `?userId=${encodeURIComponent(String(milestonesTargetUserId))}` : ""}`, { signal }),
+    retry: false,
+    enabled: tab === "my-work" && milestonesTargetUserId != null,
+  });
+
+  const acknowledgeMutation = useMutation({
+    mutationFn: (id: number) => apiFetchJson(`/payment-voucher-actions/${id}/acknowledge`, { method: "POST" }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["payment-voucher-actions", "my-work"] });
+      toast({ title: "Action acknowledged" });
+    },
+    onError: (err) => toastError(toast, err, "Failed to acknowledge action"),
+  });
+
+  const completeMutation = useMutation({
+    mutationFn: (payload: { id: number; body: Record<string, unknown> }) =>
+      apiFetchJson(`/payment-voucher-actions/${payload.id}/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload.body),
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["payment-voucher-actions", "my-work"] });
+      setCompleteActionId(null);
+      setCompleteForm({
+        actionTaken: "",
+        completionNotes: "",
+        completionAttachmentPath: "",
+        updatedMilestone: "",
+      });
+      toast({ title: "Action completed" });
+    },
+    onError: (err) => toastError(toast, err, "Failed to complete action"),
   });
 
   useEffect(() => {
@@ -198,6 +266,81 @@ export default function Workbench() {
               })()
             )}
           </div>
+
+          <Card className="mt-4">
+            <CardHeader className="pb-3">
+              <CardTitle>Payment Voucher Actions</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {paymentVoucherActionsQuery.isError ? (
+                <QueryFallback
+                  title="Payment voucher actions unavailable"
+                  error={paymentVoucherActionsQuery.error}
+                  onRetry={() => paymentVoucherActionsQuery.refetch()}
+                  isRetrying={paymentVoucherActionsQuery.isFetching}
+                />
+              ) : paymentVoucherActionsQuery.isLoading ? (
+                <div className="text-sm text-slate-500">Loading payment voucher actions...</div>
+              ) : (paymentVoucherActionsQuery.data?.length ?? 0) === 0 ? (
+                <div className="text-sm text-slate-500">No assigned payment voucher actions.</div>
+              ) : (
+                <div className="space-y-3">
+                  {(paymentVoucherActionsQuery.data ?? []).map((action) => (
+                    <div key={action.id} className="rounded-lg border border-slate-200 p-4">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                        <div className="space-y-1">
+                          <div className="text-sm font-semibold text-slate-900">{action.voucherNo}</div>
+                          <div className="text-xs text-slate-500">
+                            {action.referenceNo ? `${action.referenceNo} · ` : ""}{action.payeeName}
+                          </div>
+                          <div className="text-sm text-slate-700">
+                            {action.customAction || action.actionType}
+                          </div>
+                          {action.nextActionRemarks ? (
+                            <div className="text-xs text-slate-500">{action.nextActionRemarks}</div>
+                          ) : null}
+                          <div className="text-xs text-slate-500">
+                            Assigned: {new Date(action.assignedAt).toLocaleString("en-MY")}
+                          </div>
+                          <div className="text-xs text-slate-500">
+                            Acknowledge Due: {action.acknowledgeDueAt ? new Date(action.acknowledgeDueAt).toLocaleString("en-MY") : "—"}
+                          </div>
+                          <div className="text-xs text-slate-500">
+                            Completion Due: {action.completionDueAt ? new Date(action.completionDueAt).toLocaleString("en-MY") : "—"}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">
+                            {action.status.replace(/_/g, " ")}
+                          </span>
+                          {action.caseId ? (
+                            <Button variant="outline" size="sm" onClick={() => setLocation(`/app/cases/${action.caseId}`)}>
+                              Open Case
+                            </Button>
+                          ) : null}
+                          {action.status === "assigned" ? (
+                            <Button size="sm" onClick={() => acknowledgeMutation.mutate(action.id)} disabled={acknowledgeMutation.isPending}>
+                              Acknowledge
+                            </Button>
+                          ) : null}
+                          {action.status === "acknowledged" ? (
+                            <Button
+                              size="sm"
+                              className="bg-amber-500 hover:bg-amber-600 text-white"
+                              onClick={() => setCompleteActionId(action.id)}
+                              disabled={completeMutation.isPending}
+                            >
+                              Complete Action
+                            </Button>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
           <Card className="mt-4">
             <CardHeader className="pb-3">
@@ -395,6 +538,79 @@ export default function Workbench() {
           </div>
         </TabsContent>
       </Tabs>
+
+      <Dialog open={completeActionId != null} onOpenChange={(open) => {
+        if (!open) {
+          setCompleteActionId(null);
+          setCompleteForm({
+            actionTaken: "",
+            completionNotes: "",
+            completionAttachmentPath: "",
+            updatedMilestone: "",
+          });
+        }
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Complete Payment Voucher Action</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700">Action Taken</label>
+              <Input
+                placeholder="Describe what was done"
+                value={completeForm.actionTaken}
+                onChange={(e) => setCompleteForm((f) => ({ ...f, actionTaken: e.target.value }))}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700">Remarks</label>
+              <Input
+                placeholder="Optional remarks"
+                value={completeForm.completionNotes}
+                onChange={(e) => setCompleteForm((f) => ({ ...f, completionNotes: e.target.value }))}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700">Attachment Path</label>
+              <Input
+                placeholder="/objects/... optional attachment"
+                value={completeForm.completionAttachmentPath}
+                onChange={(e) => setCompleteForm((f) => ({ ...f, completionAttachmentPath: e.target.value }))}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-slate-700">Updated Milestone</label>
+              <Input
+                placeholder="Optional milestone update"
+                value={completeForm.updatedMilestone}
+                onChange={(e) => setCompleteForm((f) => ({ ...f, updatedMilestone: e.target.value }))}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCompleteActionId(null)}>Cancel</Button>
+            <Button
+              className="bg-amber-500 hover:bg-amber-600 text-white"
+              onClick={() => {
+                if (!completeActionId) return;
+                completeMutation.mutate({
+                  id: completeActionId,
+                  body: {
+                    actionTaken: completeForm.actionTaken,
+                    completionNotes: completeForm.completionNotes || undefined,
+                    completionAttachmentPath: completeForm.completionAttachmentPath || undefined,
+                    updatedMilestone: completeForm.updatedMilestone || undefined,
+                  },
+                });
+              }}
+              disabled={!completeActionId || !completeForm.actionTaken.trim() || completeMutation.isPending}
+            >
+              Complete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
