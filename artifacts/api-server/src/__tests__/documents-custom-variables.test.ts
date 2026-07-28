@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
 import app from "../app";
-import { db, documentCustomVariablesTable, documentCustomVariableVersionsTable, firmsTable } from "@workspace/db";
-import { desc, inArray, ne } from "drizzle-orm";
+import { casesTable, db, documentCustomVariablesTable, documentCustomVariableVersionsTable, documentTemplatesTable, firmsTable } from "@workspace/db";
+import { and, desc, eq, inArray, ne } from "drizzle-orm";
 
 const PARTNER_EMAIL = "partner@tan-associates.my";
 const PARTNER_PWD = "lawyer123";
@@ -12,16 +12,27 @@ const suite = skipDb ? describe.skip : describe;
 suite("Documents Custom Variables", () => {
   let token: string;
   let firmId: number;
+  let partnerCaseId: number | null = null;
   const cleanupIds: number[] = [];
+  const cleanupTemplateIds: number[] = [];
 
   beforeAll(async () => {
     const loginRes = await request(app).post("/api/auth/login").send({ email: PARTNER_EMAIL, password: PARTNER_PWD });
     expect(loginRes.status).toBe(200);
     token = loginRes.body.data.token;
     firmId = loginRes.body.data.firmId;
+    const [caseRow] = await db
+      .select({ id: casesTable.id })
+      .from(casesTable)
+      .where(eq(casesTable.firmId, firmId))
+      .limit(1);
+    partnerCaseId = caseRow?.id ?? null;
   });
 
   afterAll(async () => {
+    if (cleanupTemplateIds.length) {
+      await db.delete(documentTemplatesTable).where(inArray(documentTemplatesTable.id, cleanupTemplateIds));
+    }
     if (cleanupIds.length) {
       await db.delete(documentCustomVariableVersionsTable).where(inArray(documentCustomVariableVersionsTable.customVariableId, cleanupIds));
       await db.delete(documentCustomVariablesTable).where(inArray(documentCustomVariablesTable.id, cleanupIds));
@@ -203,5 +214,224 @@ suite("Documents Custom Variables", () => {
     const issues = res.body.error?.details?.issues;
     expect(Array.isArray(issues)).toBe(true);
     expect(issues.some((x: any) => Array.isArray(x.path) && x.path[0] === "bodyTemplate")).toBe(true);
+  });
+
+  it("permits one concurrent create and rejects the duplicate with field-specific 409", async () => {
+    const payload = {
+      key: "race_duplicate_key",
+      displayName: "Race duplicate key",
+      groupKey: "custom_variables",
+      status: "active",
+      bodyTemplate: "Hello {{parcel_no}}",
+    };
+
+    const [resA, resB] = await Promise.all([
+      request(app).post("/api/documents/custom-variables").set("Authorization", `Bearer ${token}`).send(payload),
+      request(app).post("/api/documents/custom-variables").set("Authorization", `Bearer ${token}`).send(payload),
+    ]);
+
+    const statuses = [resA.status, resB.status].sort((a, b) => a - b);
+    expect(statuses).toEqual([201, 409]);
+    const success = [resA, resB].find((x) => x.status === 201);
+    const duplicate = [resA, resB].find((x) => x.status === 409);
+    if (success?.body?.id) cleanupIds.push(Number(success.body.id));
+    expect(duplicate?.body.ok).toBe(false);
+    expect(duplicate?.body.error?.code).toBe("CUSTOM_VARIABLE_KEY_EXISTS");
+    expect(duplicate?.body.error?.details?.field).toBe("key");
+  });
+
+  it("does not list another firm's private variable", async () => {
+    const otherFirm = await db
+      .select({ id: firmsTable.id })
+      .from(firmsTable)
+      .where(ne(firmsTable.id, firmId))
+      .orderBy(desc(firmsTable.id))
+      .limit(1);
+    if (!otherFirm[0]?.id) return;
+
+    const [inserted] = await db
+      .insert(documentCustomVariablesTable)
+      .values({
+        scope: "firm",
+        firmId: otherFirm[0].id,
+        templateId: null,
+        key: "other_firm_private_key",
+        displayName: "Other firm private key",
+        groupKey: "custom_variables",
+        status: "active",
+        isPublished: false,
+        deprecatedAt: null,
+        currentVersionNo: 1,
+        createdBy: null,
+        updatedBy: null,
+      })
+      .returning();
+    cleanupIds.push(inserted.id);
+    await db.insert(documentCustomVariableVersionsTable).values({
+      customVariableId: inserted.id,
+      versionNo: 1,
+      bodyTemplate: "Other {{parcel_no}}",
+      createdBy: null,
+    });
+
+    const listRes = await request(app)
+      .get("/api/documents/custom-variables?q=other_firm_private_key")
+      .set("Authorization", `Bearer ${token}`);
+    expect(listRes.status).toBe(200);
+    const rows = Array.isArray(listRes.body.data) ? listRes.body.data : [];
+    expect(rows.some((row: any) => row.id === inserted.id || row.key === "other_firm_private_key")).toBe(false);
+  });
+
+  it("returns generic not found when previewing another firm's private variable", async () => {
+    if (!partnerCaseId) return;
+    const otherFirm = await db
+      .select({ id: firmsTable.id })
+      .from(firmsTable)
+      .where(ne(firmsTable.id, firmId))
+      .orderBy(desc(firmsTable.id))
+      .limit(1);
+    if (!otherFirm[0]?.id) return;
+
+    const [inserted] = await db
+      .insert(documentCustomVariablesTable)
+      .values({
+        scope: "firm",
+        firmId: otherFirm[0].id,
+        templateId: null,
+        key: "other_firm_preview_only",
+        displayName: "Other firm preview only",
+        groupKey: "custom_variables",
+        status: "active",
+        isPublished: false,
+        deprecatedAt: null,
+        currentVersionNo: 1,
+        createdBy: null,
+        updatedBy: null,
+      })
+      .returning();
+    cleanupIds.push(inserted.id);
+    await db.insert(documentCustomVariableVersionsTable).values({
+      customVariableId: inserted.id,
+      versionNo: 1,
+      bodyTemplate: "Other {{parcel_no}}",
+      createdBy: null,
+    });
+
+    const previewRes = await request(app)
+      .get(`/api/documents/custom-variables/${inserted.id}/preview?caseId=${partnerCaseId}`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(previewRes.status).toBe(404);
+    expect(previewRes.body.ok).toBe(false);
+    expect(previewRes.body.error?.code).toBe("NOT_FOUND");
+    expect(String(previewRes.body.error?.message ?? "")).not.toContain("firm");
+  });
+
+  it("returns generic not found when updating another firm's variable", async () => {
+    const otherFirm = await db
+      .select({ id: firmsTable.id })
+      .from(firmsTable)
+      .where(ne(firmsTable.id, firmId))
+      .orderBy(desc(firmsTable.id))
+      .limit(1);
+    if (!otherFirm[0]?.id) return;
+
+    const [inserted] = await db
+      .insert(documentCustomVariablesTable)
+      .values({
+        scope: "firm",
+        firmId: otherFirm[0].id,
+        templateId: null,
+        key: "other_firm_update_only",
+        displayName: "Other firm update only",
+        groupKey: "custom_variables",
+        status: "active",
+        isPublished: false,
+        deprecatedAt: null,
+        currentVersionNo: 1,
+        createdBy: null,
+        updatedBy: null,
+      })
+      .returning();
+    cleanupIds.push(inserted.id);
+    await db.insert(documentCustomVariableVersionsTable).values({
+      customVariableId: inserted.id,
+      versionNo: 1,
+      bodyTemplate: "Other {{parcel_no}}",
+      createdBy: null,
+    });
+
+    const updateRes = await request(app)
+      .put(`/api/documents/custom-variables/${inserted.id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ bodyTemplate: "Changed {{parcel_no}}" });
+    expect(updateRes.status).toBe(404);
+    expect(updateRes.body.ok).toBe(false);
+    expect(updateRes.body.error?.code).toBe("NOT_FOUND");
+    expect(String(updateRes.body.error?.message ?? "")).not.toContain("firm");
+  });
+
+  it("rejects template_specific create when template belongs to another firm", async () => {
+    const otherFirm = await db
+      .select({ id: firmsTable.id })
+      .from(firmsTable)
+      .where(ne(firmsTable.id, firmId))
+      .orderBy(desc(firmsTable.id))
+      .limit(1);
+    if (!otherFirm[0]?.id) return;
+
+    const [template] = await db
+      .insert(documentTemplatesTable)
+      .values({
+        firmId: otherFirm[0].id,
+        name: `Other Firm Template ${Date.now()}`,
+        kind: "template",
+        documentType: "other",
+        isActive: true,
+        printMode: "double",
+        documentGroup: "Others",
+        sortOrder: 0,
+        objectPath: `/objects/templates/${otherFirm[0].id}/cross-firm-${Date.now()}.docx`,
+        fileName: `cross-firm-${Date.now()}.docx`,
+        isTemplateCapable: true,
+      })
+      .returning();
+    cleanupTemplateIds.push(template.id);
+
+    const createRes = await request(app)
+      .post("/api/documents/custom-variables")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        key: "cross_firm_template_key",
+        displayName: "Cross firm template key",
+        groupKey: "custom_variables",
+        status: "active",
+        scope: "template_specific",
+        templateId: template.id,
+        bodyTemplate: "Hello {{parcel_no}}",
+      });
+    expect(createRes.status).toBe(404);
+    expect(createRes.body.ok).toBe(false);
+    expect(createRes.body.error?.code).toBe("NOT_FOUND");
+  });
+
+  it("returns 401 without revealing existence when unauthenticated caller requests preview", async () => {
+    if (!partnerCaseId) return;
+    const createRes = await request(app)
+      .post("/api/documents/custom-variables")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        key: "unauth_probe_key",
+        displayName: "Unauth probe key",
+        groupKey: "custom_variables",
+        status: "active",
+        bodyTemplate: "Hello {{parcel_no}}",
+      });
+    expect(createRes.status).toBe(201);
+    const id = Number(createRes.body.id);
+    cleanupIds.push(id);
+
+    const previewRes = await request(app).get(`/api/documents/custom-variables/${id}/preview?caseId=${partnerCaseId}`);
+    expect(previewRes.status).toBe(401);
+    expect(String(previewRes.body?.error?.message ?? previewRes.body?.error ?? "")).not.toContain(String(id));
   });
 });

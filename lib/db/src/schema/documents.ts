@@ -375,6 +375,12 @@ export const documentCustomVariablesTable = pgTable("document_custom_variables",
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
+  scopedKeyUq: uniqueIndex("uq_document_custom_variables_scoped_key").on(
+    t.scope,
+    sql`COALESCE(${t.firmId}, 0)`,
+    sql`COALESCE(${t.templateId}, 0)`,
+    t.key,
+  ),
   lookupIdx: index("idx_document_custom_variables_lookup").on(t.scope, t.firmId, t.templateId, t.key),
   visibleIdx: index("idx_document_custom_variables_visible").on(t.scope, t.firmId, t.templateId, t.isPublished, t.status, t.groupKey),
 }));

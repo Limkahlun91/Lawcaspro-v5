@@ -73,6 +73,11 @@ function validateKey(key: string): string | null {
   return null;
 }
 
+function normalizeKeyForSave(input: unknown): { value: string; error: string | null } {
+  const value = canonicalizeKey(input);
+  return { value, error: validateKey(value) };
+}
+
 function findTokenSyntaxError(body: unknown): string | null {
   const text = String(body ?? "");
   const firstOpen = text.indexOf("{{");
@@ -140,7 +145,8 @@ export default function CustomVariablesPage() {
 
   function validateForm(next: typeof form): boolean {
     const nextErrors: typeof fieldErrors = {};
-    const key = canonicalizeKey(next.key);
+    const normalized = normalizeKeyForSave(next.key);
+    const key = normalized.value;
     const keyErr = editId ? null : validateKey(key);
     if (!editId && keyErr) nextErrors.key = keyErr;
     if (!String(next.displayName ?? "").trim()) nextErrors.displayName = "Display Name is required.";
@@ -206,7 +212,12 @@ export default function CustomVariablesPage() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      const ok = validateForm(form);
+      const normalized = editId ? null : normalizeKeyForSave(form.key);
+      const nextForm = normalized ? { ...form, key: normalized.value } : form;
+      if (normalized && normalized.value !== form.key) {
+        setForm((p) => ({ ...p, key: normalized.value }));
+      }
+      const ok = validateForm(nextForm);
       if (!ok) throw new Error("Validation failed");
       if (editId) {
         return await apiFetchJson(`/documents/custom-variables/${editId}`, {
@@ -222,11 +233,11 @@ export default function CustomVariablesPage() {
       return await apiFetchJson(`/documents/custom-variables`, {
         method: "POST",
         body: JSON.stringify({
-          key: canonicalizeKey(form.key),
-          displayName: form.displayName,
-          groupKey: form.groupKey,
-          status: form.status,
-          bodyTemplate: form.bodyTemplate,
+          key: nextForm.key,
+          displayName: nextForm.displayName,
+          groupKey: nextForm.groupKey,
+          status: nextForm.status,
+          bodyTemplate: nextForm.bodyTemplate,
         }),
       });
     },
@@ -475,6 +486,10 @@ export default function CustomVariablesPage() {
   }
 
   const livePreview = useMemo(() => renderTemplate(form.bodyTemplate), [form.bodyTemplate, templateValueByKey]);
+  const keyTokenPreview = useMemo(() => {
+    const normalized = normalizeKeyForSave(form.key);
+    return normalized.value ? `{{${normalized.value}}}` : "—";
+  }, [form.key]);
 
   return (
     <div className="space-y-6">
@@ -739,17 +754,23 @@ export default function CustomVariablesPage() {
                     onChange={(e) => {
                       if (editId) return;
                       setKeyTouched(true);
-                      const key = canonicalizeKey(e.target.value);
+                      const key = e.target.value;
                       setForm((p) => ({ ...p, key }));
-                      const err = validateKey(key);
+                      const err = validateKey(canonicalizeKey(key));
                       setFieldErrors((p) => ({ ...p, key: err ?? undefined }));
+                    }}
+                    onBlur={() => {
+                      if (editId) return;
+                      const normalized = normalizeKeyForSave(form.key);
+                      setForm((p) => ({ ...p, key: normalized.value }));
+                      setFieldErrors((p) => ({ ...p, key: normalized.error ?? undefined }));
                     }}
                     disabled={!!editId}
                     placeholder="e.g. property_full_description"
                   />
                   <div className="flex items-center justify-between gap-2 text-xs text-slate-500">
-                    <span className="font-mono">{form.key ? `{{${form.key}}}` : "—"}</span>
-                    <Button size="sm" variant="outline" onClick={() => copyText(form.key ? `{{${form.key}}}` : "")} disabled={!form.key}>
+                    <span className="font-mono">{keyTokenPreview}</span>
+                    <Button size="sm" variant="outline" onClick={() => copyText(keyTokenPreview === "—" ? "" : keyTokenPreview)} disabled={keyTokenPreview === "—"}>
                       <Copy className="w-4 h-4" />
                     </Button>
                   </div>

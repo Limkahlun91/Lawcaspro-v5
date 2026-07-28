@@ -134,4 +134,29 @@ describe("Custom Dictionary modal variable picker", () => {
     expect(previewHeading.parentElement).toHaveTextContent("05.12.2026");
     expect(previewHeading.parentElement).toHaveTextContent("—");
   });
+
+  it("auto-generates key from display name until manual edit, then preserves manual key", async () => {
+    renderWithQueryClient();
+
+    fireEvent.click(await screen.findByRole("button", { name: "New" }));
+    const dialog = await screen.findByRole("dialog");
+    const ui = within(dialog);
+
+    const displayNameInput = ui.getByPlaceholderText("e.g. Property Full Description");
+    const keyInput = ui.getByPlaceholderText("e.g. property_full_description") as HTMLInputElement;
+
+    fireEvent.change(displayNameInput, { target: { value: "M LEGASI PROPERTY DETAILS" } });
+    await waitFor(() => expect(keyInput.value).toBe("m_legasi_property_details"));
+    expect(ui.getByText("{{m_legasi_property_details}}")).toBeInTheDocument();
+
+    fireEvent.change(keyInput, { target: { value: "Manual Key 99" } });
+    expect(keyInput.value).toBe("Manual Key 99");
+
+    fireEvent.blur(keyInput);
+    await waitFor(() => expect(keyInput.value).toBe("manual_key_99"));
+    expect(ui.getByText("{{manual_key_99}}")).toBeInTheDocument();
+
+    fireEvent.change(displayNameInput, { target: { value: "Changed Name" } });
+    expect(keyInput.value).toBe("manual_key_99");
+  });
 });
