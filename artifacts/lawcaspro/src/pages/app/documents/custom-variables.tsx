@@ -56,6 +56,42 @@ function norm(s: unknown): string {
   return String(s ?? "").trim().toLowerCase();
 }
 
+const KEY_REGEX = /^[a-z][a-z0-9_]*$/;
+
+function canonicalizeKey(input: unknown): string {
+  const raw = String(input ?? "").trim().toLowerCase();
+  const replaced = raw.replace(/[\s-]+/g, "_");
+  const cleaned = replaced.replace(/[^a-z0-9_]/g, "");
+  const collapsed = cleaned.replace(/_+/g, "_");
+  return collapsed.replace(/^_+|_+$/g, "");
+}
+
+function validateKey(key: string): string | null {
+  const k = String(key ?? "");
+  if (!k.trim()) return "Key is required.";
+  if (!KEY_REGEX.test(k)) return "Key may contain only lowercase letters, numbers and underscores, and must start with a letter.";
+  return null;
+}
+
+function findTokenSyntaxError(body: unknown): string | null {
+  const text = String(body ?? "");
+  const firstOpen = text.indexOf("{{");
+  const firstClose = text.indexOf("}}");
+  if (firstClose !== -1 && (firstOpen === -1 || firstClose < firstOpen)) return "Invalid token syntax near {{...}}.";
+  const tokenRe = /^[a-zA-Z][a-zA-Z0-9_]*$/;
+  let i = 0;
+  while (true) {
+    const open = text.indexOf("{{", i);
+    if (open === -1) break;
+    const close = text.indexOf("}}", open + 2);
+    if (close === -1) return "Invalid token syntax near {{...}}.";
+    const token = text.slice(open + 2, close).trim();
+    if (!token || token.includes("{") || token.includes("}") || /\s/.test(token) || !tokenRe.test(token)) return "Invalid token syntax near {{...}}.";
+    i = close + 2;
+  }
+  return null;
+}
+
 function formatValue(v: unknown): string {
   if (v === null || v === undefined) return "—";
   if (typeof v === "string") return v.trim() ? v : "—";
@@ -87,6 +123,8 @@ export default function CustomVariablesPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [editId, setEditId] = useState<number | null>(null);
   const [form, setForm] = useState({ key: "", displayName: "", groupKey: "custom_variables", status: "active", bodyTemplate: "" });
+  const [keyTouched, setKeyTouched] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<{ key?: string; displayName?: string; groupKey?: string; bodyTemplate?: string }>({});
 
   const listQuery = useQuery({
     queryKey: ["documents", "custom-variables", q, statusFilter],
@@ -100,8 +138,76 @@ export default function CustomVariablesPage() {
     retry: false,
   });
 
+  function validateForm(next: typeof form): boolean {
+    const nextErrors: typeof fieldErrors = {};
+    const key = canonicalizeKey(next.key);
+    const keyErr = editId ? null : validateKey(key);
+    if (!editId && keyErr) nextErrors.key = keyErr;
+    if (!String(next.displayName ?? "").trim()) nextErrors.displayName = "Display Name is required.";
+    if (!String(next.bodyTemplate ?? "").trim()) nextErrors.bodyTemplate = "Body Template is required.";
+    const tokenErr = findTokenSyntaxError(next.bodyTemplate);
+    if (tokenErr) nextErrors.bodyTemplate = tokenErr;
+    setFieldErrors(nextErrors);
+    return Object.keys(nextErrors).length === 0;
+  }
+
+  function extractFieldErrorsFromApiError(err: unknown): { next: typeof fieldErrors; toastMessage: string } | null {
+    const status = typeof (err as any)?.status === "number" ? (err as any).status : null;
+    const data = (err as any)?.data;
+    const requestIdFromError = typeof (err as any)?.requestId === "string" ? String((err as any).requestId) : null;
+    const requestIdFromBody = typeof (data as any)?.meta?.request_id === "string" ? String((data as any).meta.request_id) : null;
+    const requestId = requestIdFromError ?? requestIdFromBody;
+
+    const isApiFailure =
+      !!data && typeof data === "object" && (data as any).ok === false && typeof (data as any).error === "object" && (data as any).error;
+    const apiDetails = isApiFailure ? ((data as any).error as any).details : null;
+    const apiMessage = isApiFailure && typeof (data as any).error?.message === "string" ? String((data as any).error.message) : null;
+
+    if (status === 400) {
+      const issuesRaw =
+        Array.isArray((data as any)?.issues) ? ((data as any).issues as any[])
+        : Array.isArray(apiDetails?.issues) ? (apiDetails.issues as any[])
+        : null;
+      if (!issuesRaw) return null;
+      const next: typeof fieldErrors = {};
+      for (const issue of issuesRaw) {
+        const path0 = Array.isArray(issue?.path) ? String(issue.path[0] ?? "") : "";
+        const msg = typeof issue?.message === "string" ? issue.message : "Invalid input.";
+        if (path0 === "key") next.key = msg;
+        if (path0 === "displayName") next.displayName = msg;
+        if (path0 === "groupKey") next.groupKey = msg;
+        if (path0 === "bodyTemplate") next.bodyTemplate = msg;
+      }
+      const toastMessage = requestId ? `Request invalid. Ref: ${requestId}` : "Request invalid.";
+      return { next, toastMessage };
+    }
+
+    if (status === 409) {
+      const field =
+        typeof (data as any)?.field === "string" ? String((data as any).field)
+        : typeof apiDetails?.field === "string" ? String(apiDetails.field)
+        : null;
+      if (!field) return null;
+      const msgRaw =
+        apiMessage ? apiMessage
+        : typeof (data as any)?.error === "string" ? String((data as any).error)
+        : "Conflict.";
+      const next: typeof fieldErrors = {};
+      if (field === "key") next.key = msgRaw;
+      const toastMessage = requestId ? `${msgRaw} Ref: ${requestId}` : msgRaw;
+      return { next, toastMessage };
+    }
+
+    if (requestId) {
+      return { next: {}, toastMessage: `Unable to save the custom variable. Error reference: ${requestId}.` };
+    }
+    return null;
+  }
+
   const saveMutation = useMutation({
     mutationFn: async () => {
+      const ok = validateForm(form);
+      if (!ok) throw new Error("Validation failed");
       if (editId) {
         return await apiFetchJson(`/documents/custom-variables/${editId}`, {
           method: "PUT",
@@ -116,7 +222,7 @@ export default function CustomVariablesPage() {
       return await apiFetchJson(`/documents/custom-variables`, {
         method: "POST",
         body: JSON.stringify({
-          key: form.key,
+          key: canonicalizeKey(form.key),
           displayName: form.displayName,
           groupKey: form.groupKey,
           status: form.status,
@@ -129,7 +235,16 @@ export default function CustomVariablesPage() {
       await qc.invalidateQueries({ queryKey: ["documents", "custom-variables"] });
       toast({ title: "Saved" });
     },
-    onError: (e) => toastError(toast, e, "Save failed"),
+    onError: (e) => {
+      if (e instanceof Error && e.message === "Validation failed") return;
+      const parsed = extractFieldErrorsFromApiError(e);
+      if (parsed) {
+        setFieldErrors(parsed.next);
+        toast({ title: "Save failed", description: parsed.toastMessage, variant: "destructive" });
+        return;
+      }
+      toastError(toast, e, "Save failed");
+    },
   });
 
   const deprecateMutation = useMutation({
@@ -373,6 +488,8 @@ export default function CustomVariablesPage() {
           onClick={() => {
             setEditId(null);
             setForm({ key: "", displayName: "", groupKey: "custom_variables", status: "active", bodyTemplate: "" });
+            setKeyTouched(false);
+            setFieldErrors({});
             setEditOpen(true);
           }}
         >
@@ -449,6 +566,8 @@ export default function CustomVariablesPage() {
                                 status: v.status,
                                 bodyTemplate: v.body_template,
                               });
+                              setKeyTouched(true);
+                              setFieldErrors({});
                               setEditOpen(true);
                             }}
                           >
@@ -615,15 +734,54 @@ export default function CustomVariablesPage() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="space-y-1.5">
                   <Label>Key</Label>
-                  <Input value={form.key} onChange={(e) => setForm((p) => ({ ...p, key: e.target.value }))} disabled={!!editId} placeholder="e.g. property_full_description" />
+                  <Input
+                    value={form.key}
+                    onChange={(e) => {
+                      if (editId) return;
+                      setKeyTouched(true);
+                      const key = canonicalizeKey(e.target.value);
+                      setForm((p) => ({ ...p, key }));
+                      const err = validateKey(key);
+                      setFieldErrors((p) => ({ ...p, key: err ?? undefined }));
+                    }}
+                    disabled={!!editId}
+                    placeholder="e.g. property_full_description"
+                  />
+                  <div className="flex items-center justify-between gap-2 text-xs text-slate-500">
+                    <span className="font-mono">{form.key ? `{{${form.key}}}` : "—"}</span>
+                    <Button size="sm" variant="outline" onClick={() => copyText(form.key ? `{{${form.key}}}` : "")} disabled={!form.key}>
+                      <Copy className="w-4 h-4" />
+                    </Button>
+                  </div>
+                  {fieldErrors.key ? <div className="text-xs text-red-600">{fieldErrors.key}</div> : null}
                 </div>
                 <div className="space-y-1.5">
                   <Label>Display Name</Label>
-                  <Input value={form.displayName} onChange={(e) => setForm((p) => ({ ...p, displayName: e.target.value }))} placeholder="e.g. Property Full Description" />
+                  <Input
+                    value={form.displayName}
+                    onChange={(e) => {
+                      const displayName = e.target.value;
+                      setForm((p) => {
+                        if (editId || keyTouched) return { ...p, displayName };
+                        const key = canonicalizeKey(displayName);
+                        return { ...p, displayName, key };
+                      });
+                      setFieldErrors((p) => {
+                        const displayNameErr = displayName.trim() ? undefined : "Display Name is required.";
+                        if (editId || keyTouched) return { ...p, displayName: displayNameErr };
+                        const key = canonicalizeKey(displayName);
+                        const keyErr = validateKey(key) ?? undefined;
+                        return { ...p, displayName: displayNameErr, key: keyErr };
+                      });
+                    }}
+                    placeholder="e.g. Property Full Description"
+                  />
+                  {fieldErrors.displayName ? <div className="text-xs text-red-600">{fieldErrors.displayName}</div> : null}
                 </div>
                 <div className="space-y-1.5">
                   <Label>Group</Label>
                   <Input value={form.groupKey} onChange={(e) => setForm((p) => ({ ...p, groupKey: e.target.value }))} placeholder="custom_variables" />
+                  {fieldErrors.groupKey ? <div className="text-xs text-red-600">{fieldErrors.groupKey}</div> : null}
                 </div>
                 <div className="space-y-1.5">
                   <Label>Status</Label>
@@ -643,10 +801,16 @@ export default function CustomVariablesPage() {
                 <Textarea
                   ref={bodyRef}
                   value={form.bodyTemplate}
-                  onChange={(e) => setForm((p) => ({ ...p, bodyTemplate: e.target.value }))}
+                  onChange={(e) => {
+                    const bodyTemplate = e.target.value;
+                    setForm((p) => ({ ...p, bodyTemplate }));
+                    const err = findTokenSyntaxError(bodyTemplate);
+                    setFieldErrors((p) => ({ ...p, bodyTemplate: err ?? undefined }));
+                  }}
                   rows={12}
                   placeholder="Use {{variable_tokens}} inside."
                 />
+                {fieldErrors.bodyTemplate ? <div className="text-xs text-red-600">{fieldErrors.bodyTemplate}</div> : null}
               </div>
 
               <div className="space-y-1.5">

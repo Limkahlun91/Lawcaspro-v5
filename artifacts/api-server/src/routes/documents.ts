@@ -27,7 +27,7 @@ import {
 } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 import { withAuthSafeDb } from "../lib/auth-safe-db.js";
-import { sendOk } from "../lib/api-response.js";
+import { ApiError, sendError, sendOk } from "../lib/api-response.js";
 import {
   getSupabaseStorageConfigError,
   ObjectNotFoundError,
@@ -45,6 +45,7 @@ import * as yazl from "yazl";
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import { z } from "zod";
+import { canonicalizeCustomVariableKey, findTokenSyntaxError, validateCustomVariableKey } from "../lib/customVariableKey.js";
 import {
   convertDocxToPdf as convertDocxToPdfService,
   getDocxToPdfHealth,
@@ -4789,11 +4790,27 @@ async function withFounderFirmRlsDb<T>(req: AuthRequest, firmId: number, fn: (r:
   }
 }
 
+const customVariableKeySchema = z.preprocess(
+  (v) => (typeof v === "string" ? canonicalizeCustomVariableKey(v) : v),
+  z.string().min(1).max(120),
+).superRefine((v, ctx) => {
+  const r = validateCustomVariableKey(v);
+  if (!r.ok) {
+    const message = "message" in r ? r.message : "Invalid key.";
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+  }
+});
+
+const bodyTemplateSchema = z.string().min(1).max(20000).superRefine((v, ctx) => {
+  const err = findTokenSyntaxError(v);
+  if (err) ctx.addIssue({ code: z.ZodIssueCode.custom, message: err.message });
+});
+
 const platformCreateCustomVariableBodySchema = z.object({
-  key: z.string().trim().min(1).max(120).regex(/^[a-z0-9_]+$/i),
+  key: customVariableKeySchema,
   displayName: z.string().trim().min(1).max(200),
   groupKey: z.string().trim().max(80).optional(),
-  bodyTemplate: z.string().min(1).max(20000),
+  bodyTemplate: bodyTemplateSchema,
   status: z.enum(["active", "disabled", "deprecated"]).optional(),
   isPublished: z.boolean().optional(),
 });
@@ -4841,14 +4858,27 @@ router.post(
   async (req: AuthRequest, res): Promise<void> => {
     const parsed = platformCreateCustomVariableBodySchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: "Invalid request" });
+      logger.warn({ route: req.path, userId: req.userId ?? null, requestId: (res.locals as any)?.requestId ?? null, issues: parsed.error.issues }, "platform_custom_variables.validation_failed");
+      sendError(
+        res as any,
+        new ApiError({
+          status: 400,
+          code: "VALIDATION_FAILED",
+          message: "Validation failed",
+          retryable: false,
+          details: { issues: parsed.error.issues },
+          stage: "platform_custom_variables.validation",
+        }),
+      );
       return;
     }
     const v = parsed.data;
 
     const created = await withAuthSafeDb(async (authDb) => {
       const sysVar = await queryRows(authDb, sql`SELECT id FROM document_variable_definitions WHERE key = ${v.key} LIMIT 1`);
-      if (sysVar[0]) return { status: 409 as const, body: { error: "Key conflicts with system variable", code: "KEY_CONFLICT_SYSTEM" } };
+      if (sysVar[0]) {
+        return { ok: false as const, status: 409, code: "KEY_CONFLICT_SYSTEM", message: "Key conflicts with system variable", details: { field: "key" } };
+      }
 
       const rows = await queryRows(
         authDb,
@@ -4871,7 +4901,9 @@ router.post(
         `,
       );
       const id = typeof rows[0]?.id === "number" ? Number(rows[0]?.id) : Number(rows[0]?.id ?? 0);
-      if (!Number.isFinite(id) || id <= 0) return { status: 500 as const, body: { error: "Failed to create" } };
+      if (!Number.isFinite(id) || id <= 0) {
+        return { ok: false as const, status: 500, code: "CREATE_FAILED", message: "Failed to create custom variable" };
+      }
       await queryRows(
         authDb,
         sql`
@@ -4893,17 +4925,31 @@ router.post(
         },
         { db: authDb },
       );
-      return { status: 201 as const, body: { ok: true, id } };
+      return { ok: true as const, id };
     }, { retry: true, ctx: { route: req.path, stage: "platform_custom_variables.create", firmId: null, userId: req.userId ?? null } });
 
-    res.status(created.status).json(created.body);
+    if (!created.ok) {
+      sendError(
+        res as any,
+        new ApiError({
+          status: created.status,
+          code: created.code,
+          message: created.message,
+          retryable: created.status >= 500,
+          details: created.details,
+          stage: "platform_custom_variables.create",
+        }),
+      );
+      return;
+    }
+    res.status(201).json({ ok: true, id: created.id });
   },
 );
 
 const platformUpdateCustomVariableBodySchema = z.object({
   displayName: z.string().trim().min(1).max(200).optional(),
   groupKey: z.string().trim().max(80).optional(),
-  bodyTemplate: z.string().min(1).max(20000).optional(),
+  bodyTemplate: bodyTemplateSchema.optional(),
   status: z.enum(["active", "disabled", "deprecated"]).optional(),
   isPublished: z.boolean().optional(),
 });
@@ -4917,12 +4963,23 @@ router.put(
     const idStr = one((req.params as any).id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (Number.isNaN(id)) {
-      res.status(400).json({ error: "Invalid ID" });
+      sendError(res as any, new ApiError({ status: 400, code: "INVALID_INPUT", message: "Invalid ID", retryable: false, stage: "platform_custom_variables.update" }));
       return;
     }
     const parsed = platformUpdateCustomVariableBodySchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: "Invalid request" });
+      logger.warn({ route: req.path, userId: req.userId ?? null, requestId: (res.locals as any)?.requestId ?? null, issues: parsed.error.issues }, "platform_custom_variables.validation_failed");
+      sendError(
+        res as any,
+        new ApiError({
+          status: 400,
+          code: "VALIDATION_FAILED",
+          message: "Validation failed",
+          retryable: false,
+          details: { issues: parsed.error.issues },
+          stage: "platform_custom_variables.update.validation",
+        }),
+      );
       return;
     }
     const patch = parsed.data;
@@ -5045,10 +5102,10 @@ const customVariableScopeSchema = z.enum(["firm", "template_specific"]);
 const customVariableStatusSchema = z.enum(["active", "disabled", "deprecated"]);
 
 const createCustomVariableBodySchema = z.object({
-  key: z.string().trim().min(1).max(120).regex(/^[a-z0-9_]+$/i),
+  key: customVariableKeySchema,
   displayName: z.string().trim().min(1).max(200),
   groupKey: z.string().trim().max(80).optional(),
-  bodyTemplate: z.string().min(1).max(20000),
+  bodyTemplate: bodyTemplateSchema,
   scope: customVariableScopeSchema.optional(),
   templateId: z.number().int().positive().optional(),
   status: customVariableStatusSchema.optional(),
@@ -5107,7 +5164,18 @@ router.post(
 
     const parsed = createCustomVariableBodySchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: "Invalid request" });
+      logger.warn({ route: req.path, firmId: req.firmId ?? null, userId: req.userId ?? null, requestId: (res.locals as any)?.requestId ?? null, issues: parsed.error.issues }, "documents_custom_variables.validation_failed");
+      sendError(
+        res as any,
+        new ApiError({
+          status: 400,
+          code: "VALIDATION_FAILED",
+          message: "Validation failed",
+          retryable: false,
+          details: { issues: parsed.error.issues },
+          stage: "documents_custom_variables.create.validation",
+        }),
+      );
       return;
     }
     const v = parsed.data;
@@ -5116,7 +5184,10 @@ router.post(
 
     const sysVar = await queryRows(r, sql`SELECT id FROM document_variable_definitions WHERE key = ${v.key} LIMIT 1`);
     if (sysVar[0]) {
-      res.status(409).json({ error: "Key conflicts with system variable", code: "KEY_CONFLICT_SYSTEM" });
+      sendError(
+        res as any,
+        new ApiError({ status: 409, code: "KEY_CONFLICT_SYSTEM", message: "Key conflicts with system variable", retryable: false, details: { field: "key" }, stage: "documents_custom_variables.create" }),
+      );
       return;
     }
 
@@ -5130,13 +5201,36 @@ router.post(
       `,
     );
     if (founderConflict[0] && !v.allowOverrideFounder) {
-      res.status(409).json({ error: "Key conflicts with founder master custom variable", code: "FOUNDER_TOKEN_CONFLICT" });
+      sendError(
+        res as any,
+        new ApiError({ status: 409, code: "FOUNDER_TOKEN_CONFLICT", message: "Key conflicts with founder master custom variable", retryable: false, details: { field: "key" }, stage: "documents_custom_variables.create" }),
+      );
+      return;
+    }
+
+    const dup = await queryRows(
+      r,
+      sql`
+        SELECT id
+        FROM document_custom_variables
+        WHERE scope = ${scope} AND firm_id = ${req.firmId!} AND template_id IS NOT DISTINCT FROM ${templateId} AND key = ${v.key}
+        LIMIT 1
+      `,
+    );
+    if (dup[0]) {
+      sendError(
+        res as any,
+        new ApiError({ status: 409, code: "CUSTOM_VARIABLE_KEY_EXISTS", message: `A custom variable with the key '${v.key}' already exists.`, retryable: false, details: { field: "key", key: v.key }, stage: "documents_custom_variables.create" }),
+      );
       return;
     }
 
     if (scope === "template_specific") {
       if (!templateId) {
-        res.status(400).json({ error: "templateId required for template_specific scope" });
+        sendError(
+          res as any,
+          new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "templateId is required for template_specific scope", retryable: false, details: { field: "templateId" }, stage: "documents_custom_variables.create" }),
+        );
         return;
       }
       const tpl = await queryRows(
@@ -5144,37 +5238,50 @@ router.post(
         sql`SELECT id FROM document_templates WHERE id = ${templateId} AND firm_id = ${req.firmId!} LIMIT 1`,
       );
       if (!tpl[0]) {
-        res.status(404).json({ error: "Template not found" });
+        sendError(res as any, new ApiError({ status: 404, code: "NOT_FOUND", message: "Template not found", retryable: false, stage: "documents_custom_variables.create" }));
         return;
       }
     }
 
-    const created = await queryRows(
-      r,
-      sql`
-        INSERT INTO document_custom_variables (
-          scope, firm_id, template_id, key,
-          display_name, group_key,
-          status, is_published,
-          deprecated_at, current_version_no,
-          created_by, updated_by
-        ) VALUES (
-          ${scope}, ${req.firmId!}, ${templateId},
-          ${v.key},
-          ${v.displayName},
-          ${v.groupKey ?? "custom_variables"},
-          ${v.status ?? "active"},
-          ${false},
-          ${v.status === "deprecated" ? new Date() : null},
-          1,
-          ${req.userId ?? null}, ${req.userId ?? null}
-        )
-        RETURNING id
-      `,
-    );
+    let created: Record<string, unknown>[];
+    try {
+      created = await queryRows(
+        r,
+        sql`
+          INSERT INTO document_custom_variables (
+            scope, firm_id, template_id, key,
+            display_name, group_key,
+            status, is_published,
+            deprecated_at, current_version_no,
+            created_by, updated_by
+          ) VALUES (
+            ${scope}, ${req.firmId!}, ${templateId},
+            ${v.key},
+            ${v.displayName},
+            ${v.groupKey ?? "custom_variables"},
+            ${v.status ?? "active"},
+            ${false},
+            ${v.status === "deprecated" ? new Date() : null},
+            1,
+            ${req.userId ?? null}, ${req.userId ?? null}
+          )
+          RETURNING id
+        `,
+      );
+    } catch (err: any) {
+      if (err?.code === "23505") {
+        sendError(
+          res as any,
+          new ApiError({ status: 409, code: "CUSTOM_VARIABLE_KEY_EXISTS", message: `A custom variable with the key '${v.key}' already exists.`, retryable: false, details: { field: "key", key: v.key }, stage: "documents_custom_variables.create" }),
+        );
+        return;
+      }
+      logger.error({ err, route: req.path, firmId: req.firmId ?? null, userId: req.userId ?? null, requestId: (res.locals as any)?.requestId ?? null }, "documents_custom_variables.create_failed");
+      throw err;
+    }
     const id = typeof created[0]?.id === "number" ? Number(created[0]?.id) : Number(created[0]?.id ?? 0);
     if (!Number.isFinite(id) || id <= 0) {
-      res.status(500).json({ error: "Failed to create custom variable" });
+      sendError(res as any, new ApiError({ status: 500, code: "CREATE_FAILED", message: "Failed to create custom variable", stage: "documents_custom_variables.create" }));
       return;
     }
     await queryRows(
@@ -5202,7 +5309,7 @@ router.post(
 const updateCustomVariableBodySchema = z.object({
   displayName: z.string().trim().min(1).max(200).optional(),
   groupKey: z.string().trim().max(80).optional(),
-  bodyTemplate: z.string().min(1).max(20000).optional(),
+  bodyTemplate: bodyTemplateSchema.optional(),
   status: customVariableStatusSchema.optional(),
 });
 
@@ -5217,12 +5324,23 @@ router.put(
     const idStr = one((req.params as any).id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (Number.isNaN(id)) {
-      res.status(400).json({ error: "Invalid ID" });
+      sendError(res as any, new ApiError({ status: 400, code: "INVALID_INPUT", message: "Invalid ID", retryable: false, stage: "documents_custom_variables.update" }));
       return;
     }
     const parsed = updateCustomVariableBodySchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: "Invalid request" });
+      logger.warn({ route: req.path, firmId: req.firmId ?? null, userId: req.userId ?? null, requestId: (res.locals as any)?.requestId ?? null, issues: parsed.error.issues }, "documents_custom_variables.validation_failed");
+      sendError(
+        res as any,
+        new ApiError({
+          status: 400,
+          code: "VALIDATION_FAILED",
+          message: "Validation failed",
+          retryable: false,
+          details: { issues: parsed.error.issues },
+          stage: "documents_custom_variables.update.validation",
+        }),
+      );
       return;
     }
     const patch = parsed.data;
