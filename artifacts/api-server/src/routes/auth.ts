@@ -98,8 +98,15 @@ const optionalNumber = (value: unknown): number | undefined => {
 };
 
 const getReqId = (req: unknown): string | undefined => {
-  const id = (req as { id?: unknown } | null)?.id;
-  return typeof id === "string" ? id : undefined;
+  const r = req as { id?: unknown; requestId?: unknown; headers?: Record<string, unknown> } | null;
+  const id = r?.id;
+  if (typeof id === "string" && id.length > 0) return id;
+  const requestId = r?.requestId;
+  if (typeof requestId === "string" && requestId.length > 0) return requestId;
+  const header = r?.headers?.["x-request-id"];
+  if (typeof header === "string" && header.length > 0) return header;
+  if (Array.isArray(header) && typeof header[0] === "string" && header[0].length > 0) return header[0];
+  return undefined;
 };
 
 const getCookieToken = (req: unknown): string | undefined => {

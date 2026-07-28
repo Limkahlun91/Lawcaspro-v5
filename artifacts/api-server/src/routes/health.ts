@@ -41,6 +41,94 @@ type HealthCheckResponseBody = { status: string };
 
 const startedAtIso = new Date().toISOString();
 
+const listTableColumns = async (table: string) => {
+  const r = await pool.query<{
+    column_name: string;
+    data_type: string;
+    udt_name: string;
+    is_nullable: "YES" | "NO";
+  }>(
+    `
+      select column_name, data_type, udt_name, is_nullable
+      from information_schema.columns
+      where table_schema = 'public' and table_name = $1
+      order by ordinal_position
+    `,
+    [table],
+  );
+  return r.rows.map((row) => ({
+    name: row.column_name,
+    dataType: row.data_type,
+    udtName: row.udt_name,
+    nullable: row.is_nullable === "YES",
+  }));
+};
+
+const listTableIndexes = async (table: string) => {
+  const r = await pool.query<{ indexname: string; indexdef: string }>(
+    `
+      select indexname, indexdef
+      from pg_indexes
+      where schemaname = 'public' and tablename = $1
+      order by indexname
+    `,
+    [table],
+  );
+  return r.rows;
+};
+
+const listTableForeignKeys = async (table: string) => {
+  const r = await pool.query<{
+    constraint_name: string;
+    definition: string;
+  }>(
+    `
+      select con.conname as constraint_name, pg_get_constraintdef(con.oid, true) as definition
+      from pg_constraint con
+      join pg_class rel on rel.oid = con.conrelid
+      join pg_namespace nsp on nsp.oid = rel.relnamespace
+      where nsp.nspname = 'public' and rel.relname = $1 and con.contype = 'f'
+      order by con.conname
+    `,
+    [table],
+  );
+  return r.rows;
+};
+
+const getRlsInfo = async (table: string) => {
+  const rel = await pool.query<{ relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+    `
+      select c.relrowsecurity, c.relforcerowsecurity
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public' and c.relname = $1
+      limit 1
+    `,
+    [table],
+  );
+  const policies = await pool.query<{
+    policyname: string;
+    permissive: string;
+    roles: string[];
+    cmd: string;
+    qual: string | null;
+    with_check: string | null;
+  }>(
+    `
+      select policyname, permissive, roles, cmd, qual, with_check
+      from pg_policies
+      where schemaname = 'public' and tablename = $1
+      order by policyname
+    `,
+    [table],
+  );
+  return {
+    enabled: Boolean(rel.rows[0]?.relrowsecurity),
+    forced: Boolean(rel.rows[0]?.relforcerowsecurity),
+    policies: policies.rows,
+  };
+};
+
 routerInternal.get("/healthz", (_req: ReqLike, res: ResLike) => {
   const data: HealthCheckResponseBody = { status: "ok" };
   res.json(data);
@@ -356,6 +444,121 @@ routerInternal.get("/healthz/schema", async (_req: ReqLike, res: ResLike) => {
     } catch {
     }
     client.release();
+  }
+});
+
+routerInternal.get("/healthz/auth-schema", async (_req: ReqLike, res: ResLike) => {
+  try {
+    const basics = await pool.query<{ db: string; schema: string; usr: string }>(
+      "select current_database() as db, current_schema() as schema, current_user as usr",
+    );
+    const tables = ["users", "sessions", "roles", "firms"] as const;
+    const exists = await pool.query<{
+      users_regclass: string | null;
+      sessions_regclass: string | null;
+      roles_regclass: string | null;
+      firms_regclass: string | null;
+    }>(
+      `
+        select
+          to_regclass('public.users')::text as users_regclass,
+          to_regclass('public.sessions')::text as sessions_regclass,
+          to_regclass('public.roles')::text as roles_regclass,
+          to_regclass('public.firms')::text as firms_regclass
+      `,
+    );
+
+    const out: Record<string, unknown> = {};
+    for (const table of tables) {
+      out[table] = {
+        regclass: (exists.rows[0] as Record<string, string | null> | undefined)?.[`${table}_regclass`] ?? null,
+        columns: await listTableColumns(table),
+        foreignKeys: await listTableForeignKeys(table),
+        indexes: await listTableIndexes(table),
+      };
+    }
+
+    res.json({
+      status: "ok",
+      database: basics.rows[0]?.db ?? null,
+      schema: basics.rows[0]?.schema ?? null,
+      currentUser: basics.rows[0]?.usr ?? null,
+      tables: out,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Auth schema inspection failed";
+    const code = err && typeof err === "object" && "code" in (err as Record<string, unknown>) ? String((err as Record<string, unknown>).code ?? "") : null;
+    res.status(500).json({ status: "error", error: message, code });
+  }
+});
+
+routerInternal.get("/healthz/custom-variable-schema", async (_req: ReqLike, res: ResLike) => {
+  try {
+    const basics = await pool.query<{ db: string; schema: string; usr: string }>(
+      "select current_database() as db, current_schema() as schema, current_user as usr",
+    );
+    const existence = await pool.query<{
+      custom_variables: string | null;
+      custom_variable_versions: string | null;
+    }>(
+      `
+        select
+          to_regclass('public.document_custom_variables')::text as custom_variables,
+          to_regclass('public.document_custom_variable_versions')::text as custom_variable_versions
+      `,
+    );
+    const drizzleHistory = await pool.query<Record<string, unknown>>(
+      `
+        select *
+        from information_schema.tables
+        where table_schema = 'public' and table_name = '__drizzle_migrations'
+      `,
+    );
+    const manualHistory = await pool.query<Record<string, unknown>>(
+      `
+        select *
+        from information_schema.tables
+        where table_schema = 'public' and table_name = 'lawcaspro_manual_migrations'
+      `,
+    );
+    const migrationRows: Record<string, unknown> = {};
+    if (drizzleHistory.rowCount > 0) {
+      const r = await pool.query("select * from __drizzle_migrations order by 1 desc limit 50");
+      migrationRows.__drizzle_migrations = r.rows;
+    } else {
+      migrationRows.__drizzle_migrations = [];
+    }
+    if (manualHistory.rowCount > 0) {
+      const r = await pool.query("select * from lawcaspro_manual_migrations order by applied_at desc nulls last limit 100");
+      migrationRows.lawcaspro_manual_migrations = r.rows;
+    } else {
+      migrationRows.lawcaspro_manual_migrations = [];
+    }
+
+    const tableNames = ["document_custom_variables", "document_custom_variable_versions"] as const;
+    const tables: Record<string, unknown> = {};
+    for (const table of tableNames) {
+      tables[table] = {
+        columns: await listTableColumns(table),
+        foreignKeys: await listTableForeignKeys(table),
+        indexes: await listTableIndexes(table),
+        rls: await getRlsInfo(table),
+      };
+    }
+
+    res.json({
+      status: "ok",
+      database: basics.rows[0]?.db ?? null,
+      schema: basics.rows[0]?.schema ?? null,
+      currentUser: basics.rows[0]?.usr ?? null,
+      existence: existence.rows[0] ?? null,
+      migrations: migrationRows,
+      tables,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Custom variable schema inspection failed";
+    const code = err && typeof err === "object" && "code" in (err as Record<string, unknown>) ? String((err as Record<string, unknown>).code ?? "") : null;
+    res.status(500).json({ status: "error", error: message, code });
   }
 });
 
