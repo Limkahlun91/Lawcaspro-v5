@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, numeric, boolean, date, timestamp, index, uuid, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, numeric, boolean, date, timestamp, index, uniqueIndex, uuid, jsonb } from "drizzle-orm/pg-core";
 
 export const caseBillingEntriesTable = pgTable("case_billing_entries", {
   id:          serial("id").primaryKey(),
@@ -153,6 +153,7 @@ export const paymentVouchersTable = pgTable("payment_vouchers", {
   updatedAt:          timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
   firmStatusIdx: index("idx_pvouchers_firm_status").on(t.firmId, t.status),
+  firmClientRequestUniqueIdx: uniqueIndex("uq_payment_vouchers_client_request").on(t.firmId, t.clientRequestId),
   firmAssignedAccountIdx: index("idx_pvouchers_firm_assigned_account").on(t.firmId, t.assignedAccountUserId, t.status),
   firmDueAtIdx: index("idx_pvouchers_firm_due_at").on(t.firmId, t.paymentDueAt),
   firmReceivedAtIdx: index("idx_pvouchers_firm_received_at").on(t.firmId, t.receivedAt),
@@ -244,6 +245,24 @@ export const paymentVoucherItemsTable = pgTable("payment_voucher_items", {
   sortOrder:   integer("sort_order").notNull().default(0),
 }, (t) => ({
   voucherIdx: index("idx_pv_items_voucher").on(t.voucherId),
+}));
+
+export const paymentVoucherCreateRequestsTable = pgTable("payment_voucher_create_requests", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  createdByUserId: integer("created_by_user_id").notNull(),
+  clientRequestId: text("client_request_id").notNull(),
+  requestPayloadHash: text("request_payload_hash"),
+  status: text("status").notNull().default("processing"),
+  paymentVoucherId: integer("payment_voucher_id"),
+  lastError: text("last_error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, (t) => ({
+  firmUserKeyIdx: uniqueIndex("uq_payment_voucher_create_requests_firm_user_key").on(t.firmId, t.createdByUserId, t.clientRequestId),
+  firmStatusIdx: index("idx_payment_voucher_create_requests_firm_status").on(t.firmId, t.status, t.createdAt),
+  firmVoucherIdx: index("idx_payment_voucher_create_requests_firm_voucher").on(t.firmId, t.paymentVoucherId),
 }));
 
 export const ledgerEntriesTable = pgTable("ledger_entries", {

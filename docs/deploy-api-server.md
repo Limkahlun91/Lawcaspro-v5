@@ -63,7 +63,7 @@ Provision a Postgres database, then apply schema + migrations using the workspac
 
 ```bash
 pnpm install
-pnpm -C lib/db migrate
+pnpm -C lib/db migrate-safe
 pnpm -C lib/db apply-rls
 ```
 

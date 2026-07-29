@@ -7,6 +7,7 @@ import {
   casesTable,
   db,
   ledgerEntriesTable,
+  paymentVoucherCreateRequestsTable,
   paymentVoucherActionsTable,
   paymentVouchersTable,
   userNotificationsTable,
@@ -60,6 +61,7 @@ describe("payment voucher accounting workflow", () => {
   let caseId = 0;
   let voucherId = 0;
   let actionId = 0;
+  const extraVoucherIds: number[] = [];
   let clerkUnreadBaseline = 0;
 
   beforeAll(async () => {
@@ -95,7 +97,33 @@ describe("payment voucher accounting workflow", () => {
       ));
       await db.delete(paymentVoucherActionsTable).where(eq(paymentVoucherActionsTable.id, actionId));
     }
+    if (extraVoucherIds.length > 0) {
+      await db.delete(paymentVoucherCreateRequestsTable).where(and(
+        eq(paymentVoucherCreateRequestsTable.firmId, firmId),
+        inArray(paymentVoucherCreateRequestsTable.paymentVoucherId, extraVoucherIds),
+      ));
+      await db.delete(userNotificationsTable).where(and(
+        eq(userNotificationsTable.firmId, firmId),
+        eq(userNotificationsTable.sourceType, "payment_voucher"),
+        inArray(userNotificationsTable.sourceId, extraVoucherIds),
+      ));
+      await db.delete(caseLedgersTable).where(and(
+        eq(caseLedgersTable.firmId, firmId),
+        inArray(caseLedgersTable.sourceId, extraVoucherIds),
+        inArray(caseLedgersTable.sourceType, ["payment_voucher", "payment_voucher_advance"]),
+      ));
+      await db.delete(ledgerEntriesTable).where(and(
+        eq(ledgerEntriesTable.firmId, firmId),
+        eq(ledgerEntriesTable.sourceType, "payment_voucher"),
+        inArray(ledgerEntriesTable.sourceId, extraVoucherIds),
+      ));
+      await db.delete(paymentVouchersTable).where(inArray(paymentVouchersTable.id, extraVoucherIds));
+    }
     if (voucherId) {
+      await db.delete(paymentVoucherCreateRequestsTable).where(and(
+        eq(paymentVoucherCreateRequestsTable.firmId, firmId),
+        eq(paymentVoucherCreateRequestsTable.paymentVoucherId, voucherId),
+      ));
       await db.delete(userNotificationsTable).where(and(
         eq(userNotificationsTable.firmId, firmId),
         eq(userNotificationsTable.sourceType, "payment_voucher"),
@@ -237,6 +265,44 @@ describe("payment voucher accounting workflow", () => {
         eq(ledgerEntriesTable.sourceId, voucherId),
       ));
     expect(Number(ledgerCountRow?.c ?? 0)).toBe(1);
+  });
+
+  it("returns the existing voucher for an idempotent retry with the same clientRequestId", async () => {
+    const clientRequestId = `pv-idem-${Date.now()}`;
+    const payload = {
+      clientRequestId,
+      caseId,
+      voucherType: "external_payment",
+      payeeName: "LHDN",
+      amount: 40,
+      purpose: "STAMPING DOA",
+      isAdvance: true,
+    };
+
+    const firstRes = await request(app)
+      .post("/api/payment-vouchers")
+      .set("Authorization", `Bearer ${partnerToken}`)
+      .send(payload);
+
+    expect(firstRes.status).toBe(201);
+    const firstVoucherId = Number(pick<number>(firstRes.body, "id", "data.id"));
+    extraVoucherIds.push(firstVoucherId);
+
+    const secondRes = await request(app)
+      .post("/api/payment-vouchers")
+      .set("Authorization", `Bearer ${partnerToken}`)
+      .send(payload);
+
+    expect(secondRes.status).toBe(200);
+    expect(Number(pick<number>(secondRes.body, "id", "data.id"))).toBe(firstVoucherId);
+
+    const statusRes = await request(app)
+      .get(`/api/payment-vouchers/by-client-request/${encodeURIComponent(clientRequestId)}`)
+      .set("Authorization", `Bearer ${partnerToken}`);
+
+    expect(statusRes.status).toBe(200);
+    expect(String(pick<string>(statusRes.body, "status", "data.status"))).toBe("completed");
+    expect(Number(pick<number>(statusRes.body, "voucher.id", "data.voucher.id"))).toBe(firstVoucherId);
   });
 
   it("surfaces clerk action in my work and marks notification unread count", async () => {

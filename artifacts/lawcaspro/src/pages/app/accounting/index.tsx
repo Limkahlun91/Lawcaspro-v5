@@ -11,11 +11,11 @@ import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { DateOnlyInput } from "@/components/date-only-input";
 import { Input } from "@/components/ui/input";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
-import { RequestTimeoutError } from "@/lib/fetch-with-timeout";
 import { hasPermission } from "@/lib/permissions";
 import { useListQuotations } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
@@ -26,6 +26,18 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody, type PaymentVoucherFundStatus } from "@workspace/api-zod";
 import BankAccountsTab from "./bank-accounts";
 import BankReconciliationPage from "./bank-reconciliation";
+import {
+  clearPendingPaymentVoucherCreateSessionState,
+  derivePaymentVoucherSubmitUiState,
+  getPaymentVoucherCreateStatus,
+  PaymentVoucherConfirmationPendingError,
+  PaymentVoucherConfirmationStaleError,
+  PaymentVoucherConfirmationUnknownError,
+  type PaymentVoucherPendingCreatePhase,
+  restorePendingPaymentVoucherCreateFromSessionStorage,
+  savePendingPaymentVoucherCreateSessionState,
+  submitPaymentVoucherWithRecovery,
+} from "./payment-voucher-submit";
 
 function fmt(val: unknown) {
   return `RM ${Number(val ?? 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -999,6 +1011,14 @@ function PaymentVouchersTab() {
   const [targetCaseQueryText, setTargetCaseQueryText] = useState("");
   const [targetCasePickerOpen, setTargetCasePickerOpen] = useState(false);
   const [targetCase, setTargetCase] = useState<{ case_id: number; title: string } | null>(null);
+  const [pendingCreateRequestIds, setPendingCreateRequestIds] = useState<string[]>([]);
+  const [pendingCreatePhase, setPendingCreatePhase] = useState<PaymentVoucherPendingCreatePhase | null>(null);
+  const didRestorePendingRef = useRef(false);
+  const pendingCreateStartedAtRef = useRef<string | null>(null);
+  const lastCreateAttemptRef = useRef<Array<{ clientRequestId: string; payload: unknown }>>([]);
+  const [failedCreateRequestIds, setFailedCreateRequestIds] = useState<string[]>([]);
+  const firmId = user?.userType === "firm_user" ? Number((user as any).firmId ?? (user as any).firm_id ?? 0) : 0;
+  const userId = user?.userType === "firm_user" ? Number((user as any).id ?? (user as any).userId ?? 0) : 0;
 
   const caseSearchQuery = useQuery({
     queryKey: ["accounting", "cases-search", "multi", caseQueryText],
@@ -1100,6 +1120,129 @@ function PaymentVouchersTab() {
     });
   }, [activeVoucherFilter, vouchers]);
 
+  const resetCreateForm = () => {
+    setPendingCreateRequestIds([]);
+    setPendingCreatePhase(null);
+    setFailedCreateRequestIds([]);
+    lastCreateAttemptRef.current = [];
+    setShowCreate(false);
+    setSimpleForm({ voucherType: "external_payment", payeeName: "", beneficiaryBank: "", beneficiaryAccountNo: "", isAdvance: false });
+    setLineItems([{ id: newLineItemId(), purpose: "", amount: "" }]);
+    setCaseQueryText("");
+    setSelectedCases([]);
+    setTargetCaseQueryText("");
+    setTargetCase(null);
+  };
+
+  const checkPendingCreateStatusMut = useMutation({
+    mutationFn: async (clientRequestIds: string[]) => {
+      const statuses = await Promise.all(
+        clientRequestIds.map(async (clientRequestId) => ({
+          clientRequestId,
+          result: await getPaymentVoucherCreateStatus(clientRequestId),
+        })),
+      );
+      return {
+        completed: statuses.filter((item) => item.result.status === "completed"),
+        processing: statuses.filter((item) => item.result.status === "processing"),
+        unknown: statuses.filter((item) => item.result.status === "not_found"),
+        stale: statuses.filter((item) => item.result.status === "stale"),
+        failed: statuses.filter((item) => item.result.status === "failed"),
+      };
+    },
+    onSuccess: async ({ completed, processing, unknown, stale, failed }) => {
+      if (completed.length > 0) {
+        await qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
+      }
+
+      if (failed.length > 0) {
+        setFailedCreateRequestIds(failed.map((item) => item.clientRequestId));
+        setPendingCreateRequestIds([...processing, ...unknown, ...stale].map((item) => item.clientRequestId));
+        setPendingCreatePhase(
+          stale.length > 0 ? "stale" : unknown.length > 0 ? "unknown" : processing.length > 0 ? "processing" : null,
+        );
+        toast({
+          title: "Submission failed",
+          description: failed[0]?.result.status === "failed"
+            ? (failed[0].result.error || "Payment Voucher submission failed.")
+            : "Payment Voucher submission failed.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      if (stale.length > 0 || unknown.length > 0 || processing.length > 0) {
+        const unresolvedIds = [...stale, ...unknown, ...processing].map((item) => item.clientRequestId);
+        setPendingCreateRequestIds(unresolvedIds);
+        setPendingCreatePhase(stale.length > 0 ? "stale" : unknown.length > 0 ? "unknown" : "processing");
+        const confirmedCount = completed.length;
+        toast({
+          title: stale.length > 0 ? "Status stale" : unknown.length > 0 ? "Confirmation pending" : "Still confirming",
+          description: stale.length > 0
+            ? "Payment Voucher submission confirmation is stale. Please check status again before submitting again."
+            : unknown.length > 0
+              ? "Payment Voucher submission is still being confirmed. Please do not submit again."
+              : confirmedCount > 0
+                ? `${confirmedCount} voucher(s) confirmed. Remaining submission is still being confirmed. Please do not submit again.`
+                : "Payment Voucher submission is still being confirmed. Please do not submit again.",
+        });
+        return;
+      }
+
+      const rows = completed.map((item) => item.result.status === "completed" ? item.result.voucher : null).filter(Boolean);
+      resetCreateForm();
+      toast({
+        title: "Payment Voucher created",
+        description: rows.length > 1
+          ? `${rows.length} voucher(s) confirmed`
+          : `Confirmed ${String(rows[0]?.voucherNo ?? "voucher")} successfully`,
+      });
+    },
+    onError: (e) => toastError(toast, e, "Status check failed"),
+  });
+
+  useEffect(() => {
+    if (didRestorePendingRef.current) return;
+    didRestorePendingRef.current = true;
+
+    if (!firmId || !userId) {
+      clearPendingPaymentVoucherCreateSessionState();
+      return;
+    }
+
+    restorePendingPaymentVoucherCreateFromSessionStorage({
+      firmId,
+      userId,
+      onRestore: (state) => {
+        pendingCreateStartedAtRef.current = state.createdAt;
+        setPendingCreateRequestIds(state.clientRequestIds);
+        setPendingCreatePhase(state.phase);
+        checkPendingCreateStatusMut.mutate([...state.clientRequestIds]);
+      },
+    });
+  }, [firmId, userId, checkPendingCreateStatusMut]);
+
+  useEffect(() => {
+    if (!firmId || !userId) {
+      clearPendingPaymentVoucherCreateSessionState();
+      return;
+    }
+    if (pendingCreateRequestIds.length > 0 && pendingCreatePhase) {
+      if (!pendingCreateStartedAtRef.current) pendingCreateStartedAtRef.current = new Date().toISOString();
+      savePendingPaymentVoucherCreateSessionState({
+        v: 1,
+        firmId,
+        userId,
+        createdAt: pendingCreateStartedAtRef.current,
+        clientRequestIds: pendingCreateRequestIds,
+        phase: pendingCreatePhase,
+      });
+      return;
+    }
+    pendingCreateStartedAtRef.current = null;
+    clearPendingPaymentVoucherCreateSessionState();
+  }, [firmId, pendingCreatePhase, pendingCreateRequestIds, userId]);
+
   const createBatchMut = useMutation({
     mutationFn: async () => {
       if (selectedCases.length === 0) throw new Error("Please select at least one case");
@@ -1144,49 +1287,86 @@ function PaymentVouchersTab() {
       };
 
       const casesToCreate = voucherType === "file_to_file_transfer" ? (sourceCase ? [sourceCase] : []) : selectedCases;
-      const calls = casesToCreate.map((c) => {
+      setFailedCreateRequestIds([]);
+      const attempts = casesToCreate.map((c) => {
         const clientRequestId = newLineItemId();
         const payload = voucherType === "file_to_file_transfer"
           ? { ...bodyBase, clientRequestId, caseId: c.case_id, targetCaseId: target?.case_id ?? null }
           : { ...bodyBase, clientRequestId, caseId: c.case_id };
         const parsed = CreatePaymentVoucherBody.safeParse(payload);
         if (!parsed.success) throw new Error(parsed.error.message);
-        return (async () => {
-          try {
-            return await apiFetchJson("/payment-vouchers", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(parsed.data),
-              timeoutMs: 20000,
-            });
-          } catch (err) {
-            const isTimeout =
-              err instanceof RequestTimeoutError ||
-              (err && typeof err === "object" && (err as any).name === "RequestTimeoutError");
-            if (!isTimeout) throw err;
-            const pv = await apiFetchJson(
-              `/payment-vouchers/by-client-request/${encodeURIComponent(clientRequestId)}`,
-              { timeoutMs: 12000 },
-            ).catch(() => null);
-            if (pv) return pv;
-            throw err;
-          }
-        })();
+        return { clientRequestId, payload: parsed.data as unknown };
       });
-      return await Promise.all(calls);
+      lastCreateAttemptRef.current = attempts;
+      return await Promise.all(attempts.map((a) => submitPaymentVoucherWithRecovery(a.payload, a.clientRequestId)));
     },
     onSuccess: async (rows: any[]) => {
       await qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
-      setShowCreate(false);
-      setSimpleForm({ voucherType: "external_payment", payeeName: "", beneficiaryBank: "", beneficiaryAccountNo: "", isAdvance: false });
-      setLineItems([{ id: newLineItemId(), purpose: "", amount: "" }]);
-      setCaseQueryText("");
-      setSelectedCases([]);
-      setTargetCaseQueryText("");
-      setTargetCase(null);
+      resetCreateForm();
       toast({ title: "Payment Vouchers created", description: `${rows.length} voucher(s) created` });
     },
-    onError: (e) => toastError(toast, e, "Create failed"),
+    onError: async (e) => {
+      if (e instanceof PaymentVoucherConfirmationPendingError) {
+        setPendingCreateRequestIds(e.clientRequestIds);
+        setPendingCreatePhase("processing");
+        if (e.completedVouchers.length > 0) {
+          await qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
+        }
+        toast({
+          title: "Submission is being confirmed",
+          description: e.message,
+        });
+        return;
+      }
+      if (e instanceof PaymentVoucherConfirmationUnknownError) {
+        setPendingCreateRequestIds(e.clientRequestIds);
+        setPendingCreatePhase("unknown");
+        toast({
+          title: "Confirmation pending",
+          description: e.message,
+        });
+        return;
+      }
+      if (e instanceof PaymentVoucherConfirmationStaleError) {
+        setPendingCreateRequestIds(e.clientRequestIds);
+        setPendingCreatePhase("stale");
+        toast({
+          title: "Status stale",
+          description: e.message,
+        });
+        return;
+      }
+      if (lastCreateAttemptRef.current.length > 0) {
+        setFailedCreateRequestIds(lastCreateAttemptRef.current.map((x) => x.clientRequestId));
+      }
+      toastError(toast, e, "Create failed");
+    },
+  });
+
+  const retryFailedCreateMut = useMutation({
+    mutationFn: async () => {
+      const ids = failedCreateRequestIds;
+      if (ids.length === 0) throw new Error("No failed requests to retry");
+      const attempts = lastCreateAttemptRef.current.filter((a) => ids.includes(a.clientRequestId));
+      if (attempts.length === 0) throw new Error("Retry payload not available");
+      return await Promise.all(attempts.map((a) => submitPaymentVoucherWithRecovery(a.payload, a.clientRequestId)));
+    },
+    onSuccess: async (rows: any[]) => {
+      await qc.invalidateQueries({ queryKey: ["payment-vouchers"] });
+      resetCreateForm();
+      toast({
+        title: "Payment Voucher retried",
+        description: rows.length > 1 ? `${rows.length} voucher(s) confirmed` : `Confirmed ${String(rows[0]?.voucherNo ?? "voucher")} successfully`,
+      });
+    },
+    onError: (e) => toastError(toast, e, "Retry failed"),
+  });
+
+  const createSubmitUi = derivePaymentVoucherSubmitUiState({
+    isSubmitting: createBatchMut.isPending,
+    isCheckingStatus: checkPendingCreateStatusMut.isPending,
+    pendingClientRequestIds: pendingCreateRequestIds,
+    unresolvedPhase: pendingCreatePhase,
   });
 
   const transitionMut = useMutation({
@@ -1710,15 +1890,71 @@ function PaymentVouchersTab() {
                 </div>
               </div>
 
+              {pendingCreateRequestIds.length > 0 ? (
+                <Alert className="md:col-span-2 border-amber-200 bg-amber-50 text-amber-900">
+                  <Clock className="h-4 w-4 text-amber-700" />
+                  <AlertTitle>
+                    {pendingCreatePhase === "stale"
+                      ? "Submission status is stale"
+                      : pendingCreatePhase === "unknown"
+                        ? "Submission still being confirmed"
+                        : "Submission still being confirmed"}
+                  </AlertTitle>
+                  <AlertDescription>
+                    {pendingCreatePhase === "stale"
+                      ? "Payment Voucher submission confirmation is stale. Please check status again before submitting again."
+                      : "Payment Voucher submission is still being confirmed. Please do not submit again."}
+                    {pendingCreateRequestIds.length > 1 ? ` ${pendingCreateRequestIds.length} submissions are being checked.` : ""}
+                  </AlertDescription>
+                  <div className="mt-3 flex gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => checkPendingCreateStatusMut.mutate([...pendingCreateRequestIds])}
+                      disabled={checkPendingCreateStatusMut.isPending}
+                    >
+                      {checkPendingCreateStatusMut.isPending ? "Checking…" : "Check Status"}
+                    </Button>
+                  </div>
+                </Alert>
+              ) : null}
+
+              {failedCreateRequestIds.length > 0 ? (
+                <Alert className="md:col-span-2 border-red-200 bg-red-50 text-red-900">
+                  <AlertTitle>Submission failed</AlertTitle>
+                  <AlertDescription>
+                    The submission failed and can be retried deliberately using the same request key(s) to avoid duplicates.
+                  </AlertDescription>
+                  <div className="mt-3 flex gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => retryFailedCreateMut.mutate()}
+                      disabled={retryFailedCreateMut.isPending || pendingCreateRequestIds.length > 0}
+                    >
+                      {retryFailedCreateMut.isPending ? "Retrying…" : "Retry Submission"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={() => setFailedCreateRequestIds([])}
+                      disabled={retryFailedCreateMut.isPending}
+                    >
+                      Dismiss
+                    </Button>
+                  </div>
+                </Alert>
+              ) : null}
+
               <div className="flex gap-2">
                 <Button
                   onClick={() => createBatchMut.mutate()}
-                  disabled={createBatchMut.isPending}
+                  disabled={createSubmitUi.submitDisabled}
                   className="bg-amber-500 hover:bg-amber-600 text-white"
                 >
-                  {createBatchMut.isPending ? "Creating…" : "Submit"}
+                  {createSubmitUi.submitLabel}
                 </Button>
-                <Button variant="outline" onClick={() => setShowCreate(false)} disabled={createBatchMut.isPending}>Cancel</Button>
+                <Button variant="outline" onClick={() => setShowCreate(false)} disabled={createBatchMut.isPending || checkPendingCreateStatusMut.isPending}>Cancel</Button>
               </div>
             </>
           </CardContent>

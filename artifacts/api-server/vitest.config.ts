@@ -35,6 +35,8 @@ export default defineConfig({
         "src/__tests__/caseListLogic.milestone.unit.test.ts",
         "src/__tests__/create-case.test.ts",
         "src/__tests__/communication-hub.test.ts",
+        "src/__tests__/payment-voucher-create-status.unit.test.ts",
+        "src/__tests__/payment-voucher-create-request.unit.test.ts",
       ],
     pool: "forks",
     poolOptions: {
