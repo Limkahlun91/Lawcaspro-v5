@@ -7,7 +7,7 @@ import {
 } from "@workspace/db";
 import {
   requireAuth, requireFirmUser, requirePartner, requireReAuth,
-  type AuthRequest, writeAuditLog,
+  requireRlsDb, type AuthRequest, writeAuditLog,
 } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { queryOne } from "../lib/http.js";
@@ -20,7 +20,7 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
-function rdb(req: AuthRequest) { return req.rlsDb ?? db; }
+function rdb(req: AuthRequest) { return requireRlsDb(req); }
 
 // ---------------------------------------------------------------------------
 // Name similarity engine
@@ -89,7 +89,7 @@ type ConflictPartyInput = PartyInput & {
 type ConflictMatchInput = typeof conflictMatchesTable.$inferInsert;
 
 async function runConflictEngine(
-  rlsDb: ReturnType<typeof rdb>,
+  rlsDb: Pick<ReturnType<typeof rdb>, "select">,
   firmId: number,
   checkId: number,
   caseIdToExclude: number,
@@ -252,11 +252,12 @@ router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUse
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
   // Verify case belongs to firm
-  const [c] = await rdb(req).select().from(casesTable)
+  const r = rdb(req);
+  const [c] = await r.select().from(casesTable)
     .where(and(eq(casesTable.id, parsed.data.caseId), eq(casesTable.firmId, req.firmId!)));
   if (!c) { res.status(404).json({ error: "Case not found" }); return; }
 
-  const [check] = await rdb(req).insert(conflictChecksTable).values({
+  const [check] = await r.insert(conflictChecksTable).values({
     firmId: req.firmId!,
     caseId: parsed.data.caseId,
     status: "running",
@@ -272,58 +273,62 @@ router.post("/conflict/check", sensitiveRateLimiter, requireAuth, requireFirmUse
       identifierType: p.identifierType,
       role: p.role,
     }));
-    const rawMatches = await runConflictEngine(
-      rdb(req),
-      req.firmId!, check.id, parsed.data.caseId, partiesInput,
-    );
+    const result = await r.transaction(async (tx) => {
+      const rawMatches = await runConflictEngine(
+        tx,
+        req.firmId!, check.id, parsed.data.caseId, partiesInput,
+      );
 
-    // Deduplicate: one match per (partyName, matchedCaseId) pair.
-    // Prefer identifier-based matches (nric/passport/company_reg) over name matches.
-    // Within the same type, keep highest score.
-    const TYPE_PRIORITY: Record<string, number> = { nric: 5, passport: 5, company_reg: 5, name_exact: 3, name_fuzzy: 1 };
-    const seen = new Map<string, ConflictMatchInput>();
-    for (const m of rawMatches) {
-      const key = `${m.partyName}|${m.matchedCaseId}`;
-      const existing = seen.get(key);
-      if (!existing) { seen.set(key, m); continue; }
-      const mType = m.matchType ?? "name_fuzzy";
-      const eType = existing.matchType ?? "name_fuzzy";
-      const mPri = TYPE_PRIORITY[mType] ?? 0;
-      const ePri = TYPE_PRIORITY[eType] ?? 0;
-      const mScore = m.matchScore ?? 0;
-      const eScore = existing.matchScore ?? 0;
-      if (mPri > ePri || (mPri === ePri && mScore > eScore)) seen.set(key, m);
-    }
-    const deduped = Array.from(seen.values());
+      const TYPE_PRIORITY: Record<string, number> = { nric: 5, passport: 5, company_reg: 5, name_exact: 3, name_fuzzy: 1 };
+      const seen = new Map<string, ConflictMatchInput>();
+      for (const m of rawMatches) {
+        const key = `${m.partyName}|${m.matchedCaseId}`;
+        const existing = seen.get(key);
+        if (!existing) { seen.set(key, m); continue; }
+        const mType = m.matchType ?? "name_fuzzy";
+        const eType = existing.matchType ?? "name_fuzzy";
+        const mPri = TYPE_PRIORITY[mType] ?? 0;
+        const ePri = TYPE_PRIORITY[eType] ?? 0;
+        const mScore = m.matchScore ?? 0;
+        const eScore = existing.matchScore ?? 0;
+        if (mPri > ePri || (mPri === ePri && mScore > eScore)) seen.set(key, m);
+      }
+      const deduped = Array.from(seen.values());
 
-    let insertedMatches: (typeof conflictMatchesTable.$inferSelect)[] = [];
-    if (deduped.length > 0) {
-      insertedMatches = await rdb(req).insert(conflictMatchesTable).values(deduped).returning();
-    }
+      let insertedMatches: (typeof conflictMatchesTable.$inferSelect)[] = [];
+      if (deduped.length > 0) {
+        insertedMatches = await tx.insert(conflictMatchesTable).values(deduped).returning();
+      }
 
-    const overallResult = insertedMatches.length === 0
-      ? "no_match"
-      : insertedMatches.some(m => m.result === "blocked")
-        ? "blocked_pending_partner_override"
-        : "warning";
+      const overallResult = insertedMatches.length === 0
+        ? "no_match"
+        : insertedMatches.some(m => m.result === "blocked")
+          ? "blocked_pending_partner_override"
+          : "warning";
 
-    const [updated] = await rdb(req).update(conflictChecksTable).set({
-      status: "completed",
-      completedAt: new Date(),
-      overallResult,
-    }).where(eq(conflictChecksTable.id, check.id)).returning();
+      const [updated] = await tx.update(conflictChecksTable).set({
+        status: "completed",
+        completedAt: new Date(),
+        overallResult,
+      }).where(eq(conflictChecksTable.id, check.id)).returning();
 
-    await writeAuditLog({
-      actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-      action: `compliance.conflict_check_run.${overallResult}`,
-      entityType: "case", entityId: parsed.data.caseId,
-      detail: `${insertedMatches.length} matches; result=${overallResult}`,
-      ipAddress: req.ip, userAgent: req.headers["user-agent"],
+      await writeAuditLog(
+        {
+          actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+          action: `compliance.conflict_check_run.${overallResult}`,
+          entityType: "case", entityId: parsed.data.caseId,
+          detail: `${insertedMatches.length} matches; result=${overallResult}`,
+          ipAddress: req.ip, userAgent: req.headers["user-agent"],
+        },
+        { db: tx, strict: true },
+      );
+
+      return { check: updated, matches: insertedMatches };
     });
 
-    res.status(201).json({ check: updated, matches: insertedMatches });
+    res.status(201).json(result);
   } catch (err) {
-    await rdb(req).update(conflictChecksTable).set({ status: "failed" }).where(eq(conflictChecksTable.id, check.id));
+    await r.update(conflictChecksTable).set({ status: "failed" }).where(eq(conflictChecksTable.id, check.id));
     throw err;
   }
 });
@@ -385,60 +390,69 @@ router.post(
     }).safeParse(req.body);
     if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-    const [check] = await rdb(req).select().from(conflictChecksTable)
-      .where(and(eq(conflictChecksTable.id, checkId), eq(conflictChecksTable.firmId, req.firmId!)));
-    if (!check) { res.status(404).json({ error: "Conflict check not found" }); return; }
+    const r = rdb(req);
+    const out = await r.transaction(async (tx) => {
+      const [check] = await tx.select().from(conflictChecksTable)
+        .where(and(eq(conflictChecksTable.id, checkId), eq(conflictChecksTable.firmId, req.firmId!)));
+      if (!check) return { kind: "check_not_found" as const };
 
-    const [match] = await rdb(req).select().from(conflictMatchesTable)
-      .where(and(
-        eq(conflictMatchesTable.id, parsed.data.conflictMatchId),
-        eq(conflictMatchesTable.conflictCheckId, checkId),
-        eq(conflictMatchesTable.firmId, req.firmId!),
-      ));
-    if (!match) { res.status(404).json({ error: "Conflict match not found" }); return; }
-    if (match.result !== "blocked") {
-      res.status(400).json({ error: "Only blocked matches can be overridden" }); return;
-    }
+      const [match] = await tx.select().from(conflictMatchesTable)
+        .where(and(
+          eq(conflictMatchesTable.id, parsed.data.conflictMatchId),
+          eq(conflictMatchesTable.conflictCheckId, checkId),
+          eq(conflictMatchesTable.firmId, req.firmId!),
+        ));
+      if (!match) return { kind: "match_not_found" as const };
+      if (match.result !== "blocked") return { kind: "not_blocked" as const };
 
-    // Check for duplicate override
-    const [existing] = await rdb(req).select().from(conflictOverridesTable)
-      .where(and(
-        eq(conflictOverridesTable.conflictMatchId, parsed.data.conflictMatchId),
-        eq(conflictOverridesTable.firmId, req.firmId!),
-      ));
-    if (existing) { res.status(409).json({ error: "This match has already been overridden" }); return; }
+      const [existing] = await tx.select().from(conflictOverridesTable)
+        .where(and(
+          eq(conflictOverridesTable.conflictMatchId, parsed.data.conflictMatchId),
+          eq(conflictOverridesTable.firmId, req.firmId!),
+        ));
+      if (existing) return { kind: "duplicate" as const };
 
-    const [override] = await rdb(req).insert(conflictOverridesTable).values({
-      firmId: req.firmId!,
-      conflictCheckId: checkId,
-      conflictMatchId: parsed.data.conflictMatchId,
-      overriddenBy: req.userId!,
-      overrideReason: parsed.data.overrideReason,
-    }).returning();
+      const [override] = await tx.insert(conflictOverridesTable).values({
+        firmId: req.firmId!,
+        conflictCheckId: checkId,
+        conflictMatchId: parsed.data.conflictMatchId,
+        overriddenBy: req.userId!,
+        overrideReason: parsed.data.overrideReason,
+      }).returning();
 
-    // Check if all blocked matches are now overridden; if so, update check result
-    const allMatches = await rdb(req).select().from(conflictMatchesTable)
-      .where(and(eq(conflictMatchesTable.conflictCheckId, checkId), eq(conflictMatchesTable.firmId, req.firmId!)));
-    const allOverrides = await rdb(req).select().from(conflictOverridesTable)
-      .where(and(eq(conflictOverridesTable.conflictCheckId, checkId), eq(conflictOverridesTable.firmId, req.firmId!)));
-    const blockedMatchIds = new Set(allMatches.filter(m => m.result === "blocked").map(m => m.id));
-    const overriddenIds = new Set(allOverrides.map(o => o.conflictMatchId));
-    const allBlockedOverridden = [...blockedMatchIds].every(id => overriddenIds.has(id));
+      const allMatches = await tx.select().from(conflictMatchesTable)
+        .where(and(eq(conflictMatchesTable.conflictCheckId, checkId), eq(conflictMatchesTable.firmId, req.firmId!)));
+      const allOverrides = await tx.select().from(conflictOverridesTable)
+        .where(and(eq(conflictOverridesTable.conflictCheckId, checkId), eq(conflictOverridesTable.firmId, req.firmId!)));
+      const blockedMatchIds = new Set(allMatches.filter(m => m.result === "blocked").map(m => m.id));
+      const overriddenIds = new Set(allOverrides.map(o => o.conflictMatchId));
+      const allBlockedOverridden = [...blockedMatchIds].every(id => overriddenIds.has(id));
 
-    if (allBlockedOverridden) {
-      const newResult = allMatches.some(m => m.result === "warning") ? "warning" : "no_match";
-      await rdb(req).update(conflictChecksTable).set({ overallResult: newResult }).where(eq(conflictChecksTable.id, checkId));
-    }
+      if (allBlockedOverridden) {
+        const newResult = allMatches.some(m => m.result === "warning") ? "warning" : "no_match";
+        await tx.update(conflictChecksTable).set({ overallResult: newResult }).where(eq(conflictChecksTable.id, checkId));
+      }
 
-    await writeAuditLog({
-      actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-      action: "compliance.conflict_override_applied",
-      entityType: "conflict_check", entityId: checkId,
-      detail: `matchId=${parsed.data.conflictMatchId} reason="${parsed.data.overrideReason}"`,
-      ipAddress: req.ip, userAgent: req.headers["user-agent"],
+      await writeAuditLog(
+        {
+          actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+          action: "compliance.conflict_override_applied",
+          entityType: "conflict_check", entityId: checkId,
+          detail: `matchId=${parsed.data.conflictMatchId} reason="${parsed.data.overrideReason}"`,
+          ipAddress: req.ip, userAgent: req.headers["user-agent"],
+        },
+        { db: tx, strict: true },
+      );
+
+      return { kind: "ok" as const, override };
     });
 
-    res.status(201).json(override);
+    if (out.kind === "check_not_found") { res.status(404).json({ error: "Conflict check not found" }); return; }
+    if (out.kind === "match_not_found") { res.status(404).json({ error: "Conflict match not found" }); return; }
+    if (out.kind === "not_blocked") { res.status(400).json({ error: "Only blocked matches can be overridden" }); return; }
+    if (out.kind === "duplicate") { res.status(409).json({ error: "This match has already been overridden" }); return; }
+
+    res.status(201).json(out.override);
   }
 );
 

@@ -40,6 +40,10 @@ testem.log
 # local build logs
 .tmp-*.log
 
+# local debug artifacts
+.dbg/
+debug-*.md
+
 # System Files
 .DS_Store
 Thumbs.db

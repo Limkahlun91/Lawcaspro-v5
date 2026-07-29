@@ -235,14 +235,6 @@ vi.mock("../lib/auth", async (orig) => {
       req.rlsDb = sharedDb;
       next();
     },
-    requireFirmUserSession: (req: any, _res: any, next: any) => {
-      req.userId = 10;
-      req.userType = "firm_user";
-      req.firmId = 1;
-      req.roleId = 7;
-      req.rlsDb = sharedDb;
-      next();
-    },
     requirePermission: () => (_req: any, _res: any, next: any) => next(),
     writeAuditLog: async () => undefined,
   };

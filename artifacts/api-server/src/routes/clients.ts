@@ -10,7 +10,7 @@ import {
   UpdateClientParams,
   DeleteClientParams,
 } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requireRlsDb, type AuthRequest } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 
 type ReqLike = IncomingMessage & {
@@ -50,7 +50,7 @@ const routerInternal = expressRouter as unknown as RouterInternalLike;
 type AuthRequestLike = AuthRequest & ReqLike;
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequestLike): DbConn => req.rlsDb ?? db;
+const rdb = (req: AuthRequestLike): DbConn => requireRlsDb(req as AuthRequest);
 
 type ClientRow = typeof clientsTable.$inferSelect;
 

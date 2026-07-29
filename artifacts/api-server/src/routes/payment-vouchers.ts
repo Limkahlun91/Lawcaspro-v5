@@ -21,7 +21,7 @@ import {
   usersTable,
 } from "@workspace/db";
 import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, requireReAuth, requireRlsDb, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { logger } from "../lib/logger.js";
 import {
@@ -53,7 +53,7 @@ const router = expressRouter as unknown as RouterInternalLike;
 
 type DbConn = Pick<typeof db, "select" | "insert" | "update" | "delete" | "transaction">;
 type DbTxConn = Pick<typeof db, "select" | "insert" | "update" | "delete">;
-const rdb = (req: AuthRequest): DbConn => (req.rlsDb ?? db) as unknown as DbConn;
+const rdb = (req: AuthRequest): DbConn => requireRlsDb(req) as unknown as DbConn;
 
 async function getRoleName(req: AuthRequest): Promise<string> {
   return String((req as { roleName?: unknown }).roleName ?? "").trim();
@@ -1380,70 +1380,97 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
 
   if (!toStatus) { res.status(400).json({ error: "Invalid transition", code: "INVALID_TRANSITION" }); return; }
 
-  const [updated] = updatedPv?.voucher ? [updatedPv.voucher] : await r
-    .update(paymentVouchersTable)
-    .set(updateFields)
-    .where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)))
-    .returning();
-  const auditAction = parsed.data.action === "lawyer_approve"
-    ? "payment_voucher.lawyer_approved"
-    : parsed.data.action === "partner_approve"
-      ? "payment_voucher.partner_approved"
-      : parsed.data.action === "approve"
-        ? (parsed.data.decision === "approved" ? "payment_voucher.approved" : "payment_voucher.rejected")
-        : parsed.data.action === "received_by_accounts"
-          ? "payment_voucher.account_received"
-          : parsed.data.action === "reassign_account_user"
-            ? "payment_voucher.reassigned"
-            : parsed.data.action === "override_deadline"
-              ? "payment_voucher.deadline_overridden"
-              : parsed.data.action === "mark_paid"
-                ? "payment_voucher.payment_completed"
-                : "payment_voucher.transition";
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: auditAction, entityType: "payment_voucher", entityId: id, detail: `action=${parsed.data.action} from=${fromStatus} to=${toStatus}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  if (parsed.data.action === "received_by_accounts" && updated?.assignedAccountUserId) {
-    await createUserNotification({
-      tx: r,
-      firmId: req.firmId!,
-      userId: Number(updated.assignedAccountUserId),
-      sourceType: "payment_voucher",
-      sourceId: id,
-      caseId: updated.caseId ? Number(updated.caseId) : null,
-      notificationType: "payment_voucher.account_received",
-      title: `Voucher received: ${updated.voucherNo}`,
-      message: `Payment processing deadline starts now${updated.paymentDueAt ? ` and is due by ${new Date(updated.paymentDueAt).toLocaleString("en-MY")}` : ""}.`,
-      actorUserId: req.userId!,
-      meta: { paymentVoucherId: id, voucherNo: updated.voucherNo },
-    });
-  }
-  if (parsed.data.action === "reassign_account_user" && updated?.assignedAccountUserId) {
-    await createUserNotification({
-      tx: r,
-      firmId: req.firmId!,
-      userId: Number(updated.assignedAccountUserId),
-      sourceType: "payment_voucher",
-      sourceId: id,
-      caseId: updated.caseId ? Number(updated.caseId) : null,
-      notificationType: "payment_voucher.reassigned",
-      title: `Voucher reassigned: ${updated.voucherNo}`,
-      message: "You have been assigned to process this payment voucher.",
-      actorUserId: req.userId!,
-      meta: { paymentVoucherId: id, voucherNo: updated.voucherNo },
-    });
-  }
-  if (parsed.data.action === "mark_paid" && updatedPv?.createdActionId) {
-    await writeAuditLog({
-      firmId: req.firmId,
-      actorId: req.userId,
-      actorType: req.userType,
-      action: "payment_voucher.action_created",
-      entityType: "payment_voucher_action",
-      entityId: updatedPv.createdActionId,
-      detail: `paymentVoucherId=${id}`,
-      ipAddress: req.ip,
-      userAgent: req.headers["user-agent"],
-    });
-  }
+  const updated = await r.transaction(async (tx) => {
+    const [row] = updatedPv?.voucher
+      ? [updatedPv.voucher]
+      : await tx
+          .update(paymentVouchersTable)
+          .set(updateFields)
+          .where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)))
+          .returning();
+    if (!row) return null;
+
+    const auditAction = parsed.data.action === "lawyer_approve"
+      ? "payment_voucher.lawyer_approved"
+      : parsed.data.action === "partner_approve"
+        ? "payment_voucher.partner_approved"
+        : parsed.data.action === "approve"
+          ? (parsed.data.decision === "approved" ? "payment_voucher.approved" : "payment_voucher.rejected")
+          : parsed.data.action === "received_by_accounts"
+            ? "payment_voucher.account_received"
+            : parsed.data.action === "reassign_account_user"
+              ? "payment_voucher.reassigned"
+              : parsed.data.action === "override_deadline"
+                ? "payment_voucher.deadline_overridden"
+                : parsed.data.action === "mark_paid"
+                  ? "payment_voucher.payment_completed"
+                  : "payment_voucher.transition";
+
+    await writeAuditLog(
+      {
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: auditAction,
+        entityType: "payment_voucher",
+        entityId: id,
+        detail: `action=${parsed.data.action} from=${fromStatus} to=${toStatus}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      { db: tx, strict: true },
+    );
+
+    if (parsed.data.action === "received_by_accounts" && row.assignedAccountUserId) {
+      await createUserNotification({
+        tx,
+        firmId: req.firmId!,
+        userId: Number(row.assignedAccountUserId),
+        sourceType: "payment_voucher",
+        sourceId: id,
+        caseId: row.caseId ? Number(row.caseId) : null,
+        notificationType: "payment_voucher.account_received",
+        title: `Voucher received: ${row.voucherNo}`,
+        message: `Payment processing deadline starts now${row.paymentDueAt ? ` and is due by ${new Date(row.paymentDueAt).toLocaleString("en-MY")}` : ""}.`,
+        actorUserId: req.userId!,
+        meta: { paymentVoucherId: id, voucherNo: row.voucherNo },
+      });
+    }
+    if (parsed.data.action === "reassign_account_user" && row.assignedAccountUserId) {
+      await createUserNotification({
+        tx,
+        firmId: req.firmId!,
+        userId: Number(row.assignedAccountUserId),
+        sourceType: "payment_voucher",
+        sourceId: id,
+        caseId: row.caseId ? Number(row.caseId) : null,
+        notificationType: "payment_voucher.reassigned",
+        title: `Voucher reassigned: ${row.voucherNo}`,
+        message: "You have been assigned to process this payment voucher.",
+        actorUserId: req.userId!,
+        meta: { paymentVoucherId: id, voucherNo: row.voucherNo },
+      });
+    }
+    if (parsed.data.action === "mark_paid" && updatedPv?.createdActionId) {
+      await writeAuditLog(
+        {
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "payment_voucher.action_created",
+          entityType: "payment_voucher_action",
+          entityId: updatedPv.createdActionId,
+          detail: `paymentVoucherId=${id}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: tx, strict: true },
+      );
+    }
+
+    return row;
+  });
+
   res.json(updated);
 });
 

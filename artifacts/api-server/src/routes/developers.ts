@@ -5,7 +5,7 @@ import multer from "multer";
 import { randomUUID } from "crypto";
 import { z } from "zod/v4";
 import { db, developersTable, developerDocumentsTable, projectsTable, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, requireRlsDb, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 import { ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage.js";
 
@@ -102,7 +102,7 @@ const ListDevelopersQuerySchema = z.object({
 });
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequestLike): DbConn => req.rlsDb ?? db;
+const rdb = (req: AuthRequestLike): DbConn => requireRlsDb(req as AuthRequest);
 
 type DeveloperInsert = typeof developersTable.$inferInsert;
 type DeveloperInsertPayload = Pick<DeveloperInsert, "firmId" | "name"> & Partial<Omit<
@@ -279,7 +279,8 @@ routerInternal.post("/developers", requireAuth, requireFirmUser, requirePermissi
       ctxIsFounder,
     }, "create route tenant context");
 
-    let dev: DeveloperRow;
+    const dev = await r.transaction(async (tx) => {
+      let dev: DeveloperRow;
     const getErrorMessage = (e: unknown): string => {
       const err = e as { message?: unknown; cause?: unknown };
       const msg =
@@ -307,7 +308,7 @@ routerInternal.post("/developers", requireAuth, requireFirmUser, requirePermissi
     let insertValues: DeveloperInsertPayload = { ...insertBase };
     for (;;) {
       try {
-        [dev] = await r
+        [dev] = await tx
           .insert(developersTable)
           .values(insertValues)
           .returning();
@@ -323,14 +324,20 @@ routerInternal.post("/developers", requireAuth, requireFirmUser, requirePermissi
 
     try {
       const createdByUpdate = { createdBy: req.userId } satisfies Partial<typeof developersTable.$inferInsert>;
-      await r
+      await tx
         .update(developersTable)
         .set(createdByUpdate)
         .where(and(eq(developersTable.id, dev.id), eq(developersTable.firmId, req.firmId!)));
     } catch {
     }
 
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.create", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
+      await writeAuditLog(
+        { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.create", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") },
+        { db: tx as any },
+      );
+      return dev;
+    });
+
     res.status(201).json(await enrichDeveloper(r, dev));
     return;
   } catch (e) {
@@ -399,18 +406,26 @@ routerInternal.patch("/developers/:developerId", requireAuth, requireFirmUser, r
   if (phone !== undefined) updateData.phone = phone;
   if (email !== undefined) updateData.email = email;
 
-  const [dev] = await r
-    .update(developersTable)
-    .set(updateData)
-    .where(eq(developersTable.id, params.data.developerId))
-    .returning();
+  const dev = await r.transaction(async (tx) => {
+    const [dev] = await tx
+      .update(developersTable)
+      .set(updateData)
+      .where(eq(developersTable.id, params.data.developerId))
+      .returning();
+
+    if (!dev || dev.firmId !== req.firmId) return null;
+
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.update", entityType: "developer", entityId: dev.id, detail: `fields=${Object.keys(updateData).join(",")}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") },
+      { db: tx as any },
+    );
+    return dev;
+  });
 
   if (!dev || dev.firmId !== req.firmId) {
     res.status(404).json({ error: "Developer not found" });
     return;
   }
-
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.update", entityType: "developer", entityId: dev.id, detail: `fields=${Object.keys(updateData).join(",")}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.json(await enrichDeveloper(r, dev));
 });
 
@@ -428,16 +443,24 @@ routerInternal.delete("/developers/:developerId", requireAuth, requireFirmUser, 
     return;
   }
 
-  const [dev] = await r
-    .delete(developersTable)
-    .where(and(eq(developersTable.id, params.data.developerId), eq(developersTable.firmId, req.firmId!)))
-    .returning();
-  if (!dev || dev.firmId !== req.firmId) {
+  const dev = await r.transaction(async (tx) => {
+    const [dev] = await tx
+      .delete(developersTable)
+      .where(and(eq(developersTable.id, params.data.developerId), eq(developersTable.firmId, req.firmId!)))
+      .returning();
+    if (!dev) return null;
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.delete", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") },
+      { db: tx as any },
+    );
+    return dev;
+  });
+
+  if (!dev) {
     res.status(404).json({ error: "Developer not found" });
     return;
   }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "developers.delete", entityType: "developer", entityId: dev.id, detail: `name=${dev.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.sendStatus(204);
 });
 
@@ -561,38 +584,42 @@ routerInternal.post(
       warnings.push("Storage service is currently unavailable. File metadata saved but file content was not uploaded.");
     }
 
-    const [created] = await r
-      .insert(developerDocumentsTable)
-      .values({
-        firmId: req.firmId!,
-        developerId,
-        documentName,
-        objectPath,
-        fileName,
-        mimeType: typeof f.mimetype === "string" ? f.mimetype : null,
-        fileSize: Math.floor(f.buffer.length),
-        hasExpiry,
-        validFrom: validFrom as any,
-        validTo: validTo as any,
-      })
-      .returning();
+    const created = await r.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(developerDocumentsTable)
+        .values({
+          firmId: req.firmId!,
+          developerId,
+          documentName,
+          objectPath,
+          fileName,
+          mimeType: typeof f.mimetype === "string" ? f.mimetype : null,
+          fileSize: Math.floor(f.buffer.length),
+          hasExpiry,
+          validFrom: validFrom as any,
+          validTo: validTo as any,
+        })
+        .returning();
 
-    try {
-      await writeAuditLog({
-        firmId: req.firmId,
-        actorId: req.userId,
-        actorType: req.userType,
-        action: "developers.documents.upload",
-        entityType: "developer_document",
-        entityId: created.id,
-        detail: `developerId=${developerId} name=${documentName}`,
-        ipAddress: req.ip,
-        userAgent: getHeader(req, "user-agent"),
-      });
-    } catch (err) {
-      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[developers.documents.upload] audit log failed");
-      warnings.push("Audit logging is temporarily unavailable. Upload succeeded, but audit trail may be incomplete.");
-    }
+      try {
+        await writeAuditLog({
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "developers.documents.upload",
+          entityType: "developer_document",
+          entityId: created.id,
+          detail: `developerId=${developerId} name=${documentName}`,
+          ipAddress: req.ip,
+          userAgent: getHeader(req, "user-agent"),
+        }, { db: tx as any });
+      } catch (err) {
+        logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[developers.documents.upload] audit log failed");
+        warnings.push("Audit logging is temporarily unavailable. Upload succeeded, but audit trail may be incomplete.");
+      }
+
+      return created;
+    });
 
     res.status(warnings.length ? 200 : 201).json({
       id: created.id,
@@ -670,14 +697,29 @@ routerInternal.delete("/developers/:developerId/documents/:docId", requireAuth, 
     return;
   }
 
-  const [deleted] = await r
-    .delete(developerDocumentsTable)
-    .where(and(
-      eq(developerDocumentsTable.id, params.data.docId),
-      eq(developerDocumentsTable.developerId, params.data.developerId),
-      eq(developerDocumentsTable.firmId, req.firmId!),
-    ))
-    .returning();
+  const deleted = await r.transaction(async (tx) => {
+    const [deleted] = await tx
+      .delete(developerDocumentsTable)
+      .where(and(
+        eq(developerDocumentsTable.id, params.data.docId),
+        eq(developerDocumentsTable.developerId, params.data.developerId),
+        eq(developerDocumentsTable.firmId, req.firmId!),
+      ))
+      .returning();
+    if (!deleted) return null;
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "developers.documents.delete",
+      entityType: "developer_document",
+      entityId: deleted.id,
+      detail: `developerId=${params.data.developerId} name=${deleted.documentName}`,
+      ipAddress: req.ip,
+      userAgent: getHeader(req, "user-agent"),
+    }, { db: tx as any });
+    return deleted;
+  });
   if (!deleted) {
     res.status(404).json({ error: "Document not found" });
     return;
@@ -693,17 +735,6 @@ routerInternal.delete("/developers/:developerId/documents/:docId", requireAuth, 
     }
   }
 
-  await writeAuditLog({
-    firmId: req.firmId,
-    actorId: req.userId,
-    actorType: req.userType,
-    action: "developers.documents.delete",
-    entityType: "developer_document",
-    entityId: deleted.id,
-    detail: `developerId=${params.data.developerId} name=${deleted.documentName}`,
-    ipAddress: req.ip,
-    userAgent: getHeader(req, "user-agent"),
-  });
   res.sendStatus(204);
 });
 

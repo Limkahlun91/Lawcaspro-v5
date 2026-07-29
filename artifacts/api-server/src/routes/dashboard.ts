@@ -1,11 +1,11 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { db, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, requireRlsDb, type AuthRequest } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 import { computeDashboardStats } from "../services/dashboard-stats.js";
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+const rdb = (req: AuthRequest): DbConn => requireRlsDb(req);
 type TransactionCapable = { transaction: <T>(fn: (tx: DbConn) => Promise<T>) => Promise<T> };
 const asTransactionCapable = (conn: DbConn): TransactionCapable => conn as unknown as TransactionCapable;
 

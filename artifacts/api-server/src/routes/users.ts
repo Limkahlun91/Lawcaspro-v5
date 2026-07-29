@@ -7,7 +7,7 @@ import {
   CreateUserBody, UpdateUserBody, ListUsersQueryParams,
   GetUserParams, UpdateUserParams
 } from "@workspace/api-zod";
-import { ensureRolePermissionsInitialized, requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ensureRolePermissionsInitialized, requireAuth, requireFirmUser, requirePermission, requireRlsDb, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { ApiError } from "../lib/api-response.js";
 import { checkFirmQuota } from "../lib/quota.js";
 import { logger } from "../lib/logger.js";
@@ -52,7 +52,7 @@ const getHeader = (req: AuthRequestLike, key: string): string | undefined => {
 };
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequestLike): DbConn => req.rlsDb ?? db;
+const rdb = (req: AuthRequestLike): DbConn => requireRlsDb(req as AuthRequest);
 
 async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
   const result = await r.execute(query);
@@ -286,6 +286,10 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
 
       const [user] = await tx.insert(usersTable).values(values).returning();
       await ensureRolePermissionsInitialized(tx as any, req.firmId!, roleId);
+      await writeAuditLog(
+        { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create", entityType: "user", entityId: user.id, detail: `email=${user.email}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") },
+        { db: tx, strict: true },
+      );
       return { kind: "ok" as const, user };
     });
 
@@ -309,8 +313,6 @@ routerInternal.post("/users", requireAuth, requireFirmUser, requirePermission("u
       res.status(400).json({ error: "Bar Council No. is required for legal roles" });
       return;
     }
-
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.create", entityType: "user", entityId: created.user.id, detail: `email=${created.user.email}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
     res.status(201).json(await enrichUser(r, req.firmId!, created.user));
   } catch (err) {
     const code = (err as any)?.code;
@@ -438,6 +440,10 @@ routerInternal.patch("/users/:userId", requireAuth, requireFirmUser, requirePerm
     if (typeof updates.roleId === "number") {
       await ensureRolePermissionsInitialized(tx as any, req.firmId!, updates.roleId);
     }
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.update", entityType: "user", entityId: user.id, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") },
+      { db: tx, strict: true },
+    );
     return { kind: "ok" as const, user };
   });
 
@@ -453,8 +459,6 @@ routerInternal.patch("/users/:userId", requireAuth, requireFirmUser, requirePerm
     res.status(404).json({ error: "User not found" });
     return;
   }
-
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.update", entityType: "user", entityId: result.user.id, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.json(await enrichUser(r, req.firmId!, result.user));
 });
 
@@ -466,16 +470,22 @@ routerInternal.delete("/users/:userId", requireAuth, requireFirmUser, requirePer
     return;
   }
 
-  const [user] = await r.delete(usersTable)
-    .where(eq(usersTable.id, params.data.userId))
-    .returning();
+  const user = await (r as any).transaction(async (tx: DbConn) => {
+    const [user] = await tx.delete(usersTable)
+      .where(eq(usersTable.id, params.data.userId))
+      .returning();
+    if (!user || user.firmId !== req.firmId) return null;
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.delete", entityType: "user", entityId: user.id, detail: `email=${user.email}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") },
+      { db: tx, strict: true },
+    );
+    return user;
+  });
 
-  if (!user || user.firmId !== req.firmId) {
+  if (!user) {
     res.status(404).json({ error: "User not found" });
     return;
   }
-
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "users.delete", entityType: "user", entityId: user.id, detail: `email=${user.email}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.sendStatus(204);
 });
 

@@ -1,7 +1,7 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { and, count, eq } from "drizzle-orm";
 import { db, userNotificationsTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requireRlsDb, type AuthRequest } from "../lib/auth.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -9,7 +9,7 @@ type RouterInternalLike = {
 
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
-const rdb = (req: AuthRequest) => req.rlsDb ?? db;
+const rdb = (req: AuthRequest) => requireRlsDb(req);
 
 router.get("/user-notifications/unread-count", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const [row] = await rdb(req)

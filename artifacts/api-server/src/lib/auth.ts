@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from "express";
 import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContext, setTenantContextSession, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable, type PoolClient } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import crypto from "crypto";
+import { ApiError } from "./api-response";
 import { logger } from "./logger";
 import { isTransientDbConnectionError, withAuthSafeDb } from "./auth-safe-db";
 
@@ -23,6 +24,14 @@ export interface AuthRequest extends Request {
    * Phase 2+ route handlers must use this instead of the global db.
    */
   rlsDb?: RlsDb;
+}
+
+export function requireRlsDb(req: AuthRequest): RlsDb {
+  const r = req.rlsDb;
+  if (!r) {
+    throw new ApiError({ status: 500, code: "RLS_CONTEXT_MISSING", message: "Internal Server Error" });
+  }
+  return r;
 }
 
 const getReqId = (req: unknown): string | undefined => {
@@ -91,7 +100,7 @@ export async function writeAuditLog(params: {
   detail?: string;
   ipAddress?: string;
   userAgent?: string;
-}, options?: { db?: RlsDb; strict?: boolean }) {
+}, options?: { db?: Pick<RlsDb, "insert">; strict?: boolean }) {
   const targetDb = options?.db;
   const strict = options?.strict ?? false;
   try {
@@ -526,21 +535,6 @@ export function requireFounderPermission(permissionCode: string) {
   };
 }
 
-/**
- * requireFirmUser — verifies the caller is an active firm user, then opens a
- * per-request Postgres transaction as app_user with app.current_firm_id set.
- *
- * This is what actually enforces DB-level RLS:
- *   1. A PoolClient is checked out from the pool.
- *   2. BEGIN is issued.
- *   3. SET LOCAL ROLE app_user — switches away from postgres (BYPASSRLS).
- *   4. SET LOCAL app.current_firm_id = req.firmId — drives tenant_isolation policies.
- *   5. req.rlsDb is set to a Drizzle instance bound to this client.
- *   6. On res.finish (or close), the transaction is COMMITTED (or ROLLBACKed).
- *
- * Phase 2+ route handlers MUST use req.rlsDb (not global db) for any query
- * that should be tenant-isolated at the DB layer.
- */
 export async function requireFirmUser(
   req: AuthRequest,
   res: Response,
@@ -554,6 +548,9 @@ export async function requireFirmUser(
 
   let released = false;
   let client: PoolClient | null = null;
+  let awaitPendingQueries: (() => Promise<void>) | null = null;
+  let originalClientQuery: ((...args: any[]) => any) | null = null;
+  let blockFurtherQueries = false;
   const dbConnectStartedAt = Date.now();
   try {
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -618,37 +615,79 @@ export async function requireFirmUser(
   const releaseClient = async (ok: boolean) => {
     if (released) return;
     released = true;
+    let destroyClient = !ok;
     try {
-      if (ok) {
-        await client.query("COMMIT");
-      } else {
-        await client.query("ROLLBACK");
-      }
+      if (awaitPendingQueries) await awaitPendingQueries();
     } catch {
+      destroyClient = true;
     }
     try {
-      await clearTenantContext(client);
+      if (originalClientQuery) {
+        await clearTenantContext({ query: originalClientQuery } as any);
+      } else {
+        await clearTenantContext(client);
+      }
     } catch {
+      destroyClient = true;
     } finally {
-      client.release(!ok);
+      client.release(destroyClient);
     }
   };
 
   try {
     const tenantContextStartedAt = Date.now();
     const originalQuery = client.query.bind(client);
-    let chain = Promise.resolve();
-    (client as any).query = (...args: unknown[]) => {
-      const run = () => (originalQuery as any)(...args);
-      const p = chain.then(run, run);
-      chain = p.then(
-        () => undefined,
-        () => undefined,
-      );
-      return p;
+    const pending = new Set<Promise<unknown>>();
+    originalClientQuery = originalQuery;
+    const trackPromise = (p: Promise<unknown>) => {
+      let tracked: Promise<void>;
+      tracked = p
+        .then(() => undefined, () => undefined)
+        .finally(() => {
+          pending.delete(tracked as unknown as Promise<unknown>);
+        });
+      pending.add(tracked as unknown as Promise<unknown>);
     };
-    await client.query("BEGIN");
-    await setTenantContext(client, req.firmId, req.userId ?? undefined);
+
+    (client as any).query = (...args: unknown[]) => {
+      if (blockFurtherQueries) throw new Error("tenant_context_closed");
+      const maybeCb = args.length > 0 ? (args as any[])[args.length - 1] : undefined;
+      if (typeof maybeCb === "function") {
+        const cb = maybeCb as (...cbArgs: unknown[]) => unknown;
+        let resolveDone: (() => void) | null = null;
+        const done = new Promise<void>((resolve) => {
+          resolveDone = resolve;
+        });
+        trackPromise(done);
+        const wrappedCb = (...cbArgs: unknown[]) => {
+          try {
+            return cb(...cbArgs);
+          } finally {
+            try {
+              resolveDone?.();
+            } catch {
+            }
+          }
+        };
+        const copied = [...(args as unknown[])];
+        copied[copied.length - 1] = wrappedCb;
+        return (originalQuery as any)(...copied);
+      }
+      const ret = (originalQuery as any)(...args);
+      if (ret && typeof ret === "object" && typeof (ret as any).then === "function") {
+        trackPromise(ret as Promise<unknown>);
+      }
+      return ret;
+    };
+
+    awaitPendingQueries = async () => {
+      blockFurtherQueries = true;
+      while (pending.size > 0) {
+        const batch = Array.from(pending);
+        await Promise.allSettled(batch);
+      }
+    };
+    await setTenantContextSession(client, req.firmId, req.userId ?? undefined);
     req.rlsDb = makeRlsDb(client);
     if (req.timing) req.timing.sections.tenantContextMs = Date.now() - tenantContextStartedAt;
   } catch (err) {
@@ -702,133 +741,9 @@ export async function requireFirmUser(
     return;
   }
 
-  res.on("finish", () => { releaseClient(true); });
-  res.on("close", () => { releaseClient(false); });
+  res.once("finish", () => { releaseClient(true); });
+  res.once("close", () => { releaseClient(false); });
 
-  next();
-}
-
-export async function requireFirmUserSession(
-  req: AuthRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  if (req.userType !== "firm_user" || !req.firmId) {
-    writeAuditLog({ actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "unknown", action: "auth.forbidden.firm_user_required", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-    res.status(403).json({ error: "Firm user access required" });
-    return;
-  }
-
-  let released = false;
-  let client: PoolClient | null = null;
-  try {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        client = await pool.connect();
-        break;
-      } catch (err) {
-        const transient = isTransientDbConnectionError(err);
-        if (!transient || attempt >= 2) throw err;
-        await new Promise<void>((r) => setTimeout(r, 50 * attempt));
-      }
-    }
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err, message, userId: req.userId ?? null, firmId: req.firmId ?? null }, "auth.firm_user.connect_failed");
-    res.status(503).json({
-      error: "Tenant context temporarily unavailable",
-      code: "DB_CONNECT",
-      meta: {
-        request_id: getReqId(req) ?? null,
-        route: req.path,
-        method: req.method,
-        phase: "db_connect",
-        jobId: getJobId(req) ?? null,
-        firmUserLookupStatus: req.userType === "firm_user" ? "ok" : "not_firm_user",
-        userId: req.userId ?? null,
-        firmId: req.firmId ?? null,
-        authTokenPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
-        authHeaderPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
-        cookiePresent: typeof req.headers.cookie === "string" && req.headers.cookie.length > 0,
-      },
-    });
-    return;
-  }
-  if (!client) {
-    res.status(503).json({
-      error: "Tenant context temporarily unavailable",
-      code: "DB_CONNECT",
-      meta: {
-        request_id: getReqId(req) ?? null,
-        route: req.path,
-        method: req.method,
-        phase: "db_connect",
-        jobId: getJobId(req) ?? null,
-        firmUserLookupStatus: req.userType === "firm_user" ? "ok" : "not_firm_user",
-        userId: req.userId ?? null,
-        firmId: req.firmId ?? null,
-        authTokenPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
-        authHeaderPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
-        cookiePresent: typeof req.headers.cookie === "string" && req.headers.cookie.length > 0,
-      },
-    });
-    return;
-  }
-
-  const releaseClient = async (ok: boolean) => {
-    if (released) return;
-    released = true;
-    try {
-      await clearTenantContext(client);
-    } catch {
-    } finally {
-      client.release(!ok);
-    }
-  };
-
-  try {
-    const originalQuery = client.query.bind(client);
-    let chain = Promise.resolve();
-    (client as any).query = (...args: unknown[]) => {
-      const run = () => (originalQuery as any)(...args);
-      const p = chain.then(run, run);
-      chain = p.then(
-        () => undefined,
-        () => undefined,
-      );
-      return p;
-    };
-    await setTenantContextSession(client, req.firmId, req.userId ?? undefined);
-    req.rlsDb = makeRlsDb(client);
-  } catch (err) {
-    try {
-      await releaseClient(false);
-    } catch {
-    }
-    const message = err instanceof Error ? err.message : String(err);
-    logger.error({ err, message, userId: req.userId, firmId: req.firmId }, "auth.firm_context_error");
-    res.status(503).json({
-      error: "Tenant context temporarily unavailable",
-      code: "RLS_CONTEXT",
-      meta: {
-        request_id: getReqId(req) ?? null,
-        route: req.path,
-        method: req.method,
-        phase: "set_tenant_context",
-        jobId: getJobId(req) ?? null,
-        firmUserLookupStatus: req.userType === "firm_user" ? "ok" : "not_firm_user",
-        userId: req.userId ?? null,
-        firmId: req.firmId ?? null,
-        authTokenPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
-        authHeaderPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
-        cookiePresent: typeof req.headers.cookie === "string" && req.headers.cookie.length > 0,
-      },
-    });
-    return;
-  }
-
-  res.on("finish", () => { releaseClient(true); });
-  res.on("close", () => { releaseClient(false); });
   next();
 }
 

@@ -71,17 +71,24 @@ router.post("/cases/:caseId/threads", requireAuth, requireFirmUser, requirePermi
     return;
   }
 
-  const rows = await queryRows(r, sql`
-    INSERT INTO communication_threads (case_id, firm_id, subject, created_by)
-    VALUES (${caseId}, ${req.firmId!}, ${subject.trim()}, ${req.userId!})
-    RETURNING *
-  `);
-  const created = rows[0];
-  const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
-    ? (created as { id: number }).id
-    : undefined;
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "communications.thread.create", entityType: "communication_thread", entityId: createdId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.status(201).json(rows[0]);
+  const created = await (r as any).transaction(async (tx: DbConn) => {
+    const rows = await queryRows(tx, sql`
+      INSERT INTO communication_threads (case_id, firm_id, subject, created_by)
+      VALUES (${caseId}, ${req.firmId!}, ${subject.trim()}, ${req.userId!})
+      RETURNING *
+    `);
+    const row = rows[0];
+    const createdId = row && typeof row === "object" && "id" in row && typeof (row as { id?: unknown }).id === "number"
+      ? (row as { id: number }).id
+      : undefined;
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "communications.thread.create", entityType: "communication_thread", entityId: createdId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+      { db: tx, strict: true },
+    );
+    return row;
+  });
+
+  res.status(201).json(created);
 });
 
 router.delete("/cases/:caseId/threads/:threadId", requireAuth, requireFirmUser, requirePermission("communications", "delete"), async (req: AuthRequest, res: Response): Promise<void> => {
@@ -92,19 +99,24 @@ router.delete("/cases/:caseId/threads/:threadId", requireAuth, requireFirmUser, 
   if (Number.isNaN(threadId)) { res.status(400).json({ error: "Invalid thread ID" }); return; }
   const firmId = req.firmId!;
 
-  const check = await queryRows(r, sql`
-    SELECT id FROM communication_threads WHERE id = ${threadId} AND firm_id = ${firmId}
-  `);
-  if (!check[0]) {
-    res.status(404).json({ error: "Thread not found" });
-    return;
-  }
+  const ok = await (r as any).transaction(async (tx: DbConn) => {
+    const check = await queryRows(tx, sql`
+      SELECT id FROM communication_threads WHERE id = ${threadId} AND firm_id = ${firmId}
+    `);
+    if (!check[0]) return false;
 
-  await queryRows(r, sql`DELETE FROM case_communications WHERE thread_id = ${threadId} AND firm_id = ${firmId}`);
-  await queryRows(r, sql`DELETE FROM communication_read_status WHERE thread_id = ${threadId}`);
-  await queryRows(r, sql`DELETE FROM communication_threads WHERE id = ${threadId} AND firm_id = ${firmId}`);
+    await queryRows(tx, sql`DELETE FROM case_communications WHERE thread_id = ${threadId} AND firm_id = ${firmId}`);
+    await queryRows(tx, sql`DELETE FROM communication_read_status WHERE thread_id = ${threadId}`);
+    await queryRows(tx, sql`DELETE FROM communication_threads WHERE id = ${threadId} AND firm_id = ${firmId}`);
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "communications.thread.delete", entityType: "communication_thread", entityId: threadId, detail: `caseId=${req.params.caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "communications.thread.delete", entityType: "communication_thread", entityId: threadId, detail: `caseId=${req.params.caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+      { db: tx, strict: true },
+    );
+    return true;
+  });
+
+  if (!ok) { res.status(404).json({ error: "Thread not found" }); return; }
   res.sendStatus(204);
 });
 
@@ -139,24 +151,32 @@ router.post("/cases/:caseId/threads/:threadId/messages", requireAuth, requireFir
     return;
   }
 
-  const rows = await queryRows(r, sql`
-    INSERT INTO case_communications (case_id, firm_id, thread_id, type, direction, notes, logged_by)
-    VALUES (${caseId}, ${req.firmId!}, ${threadId}, 'message', 'internal', ${notes.trim()}, ${req.userId!})
-    RETURNING *
-  `);
+  const row = await (r as any).transaction(async (tx: DbConn) => {
+    const rows = await queryRows(tx, sql`
+      INSERT INTO case_communications (case_id, firm_id, thread_id, type, direction, notes, logged_by)
+      VALUES (${caseId}, ${req.firmId!}, ${threadId}, 'message', 'internal', ${notes.trim()}, ${req.userId!})
+      RETURNING *
+    `);
 
-  await queryRows(r, sql`
-    UPDATE communication_threads SET updated_at = NOW() WHERE id = ${threadId}
-  `);
+    await queryRows(tx, sql`
+      UPDATE communication_threads SET updated_at = NOW() WHERE id = ${threadId}
+    `);
 
-  await queryRows(r, sql`
-    INSERT INTO communication_read_status (thread_id, user_id, last_read_at)
-    VALUES (${threadId}, ${req.userId!}, NOW())
-    ON CONFLICT (thread_id, user_id) DO UPDATE SET last_read_at = NOW()
-  `);
+    await queryRows(tx, sql`
+      INSERT INTO communication_read_status (thread_id, user_id, last_read_at)
+      VALUES (${threadId}, ${req.userId!}, NOW())
+      ON CONFLICT (thread_id, user_id) DO UPDATE SET last_read_at = NOW()
+    `);
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "communications.message.create", entityType: "communication_thread", entityId: threadId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.status(201).json(rows[0]);
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "communications.message.create", entityType: "communication_thread", entityId: threadId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+      { db: tx, strict: true },
+    );
+
+    return rows[0];
+  });
+
+  res.status(201).json(row);
 });
 
 router.post("/cases/:caseId/threads/:threadId/read", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response): Promise<void> => {

@@ -5,7 +5,7 @@ import multer from "multer";
 import { randomUUID } from "crypto";
 import { z } from "zod/v4";
 import { casesTable, db, developersTable, projectDocumentsTable, projectsTable, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, requireRlsDb, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 import { ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage.js";
 
@@ -141,7 +141,7 @@ const UpdateProjectBodySchema = z.object({
 });
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequestLike): DbConn => req.rlsDb ?? db;
+const rdb = (req: AuthRequestLike): DbConn => requireRlsDb(req as AuthRequest);
 
 type ProjectInsert = typeof projectsTable.$inferInsert;
 type ProjectRow = typeof projectsTable.$inferSelect;
@@ -322,22 +322,30 @@ routerInternal.post("/projects", requireAuth, requireFirmUser, requirePermission
       ctxIsFounder,
     }, "create route tenant context");
 
-    let proj: ProjectRow;
-    [proj] = await r
-      .insert(projectsTable)
-      .values(insertBase)
-      .returning();
+    const proj = await r.transaction(async (tx) => {
+      let proj: ProjectRow;
+      [proj] = await tx
+        .insert(projectsTable)
+        .values(insertBase)
+        .returning();
 
-    try {
-      const createdByUpdate = { createdBy: req.userId } satisfies Partial<typeof projectsTable.$inferInsert>;
-      await r
-        .update(projectsTable)
-        .set(createdByUpdate)
-        .where(and(eq(projectsTable.id, proj.id), eq(projectsTable.firmId, req.firmId!)));
-    } catch {
-    }
+      try {
+        const createdByUpdate = { createdBy: req.userId } satisfies Partial<typeof projectsTable.$inferInsert>;
+        await tx
+          .update(projectsTable)
+          .set(createdByUpdate)
+          .where(and(eq(projectsTable.id, proj.id), eq(projectsTable.firmId, req.firmId!)));
+      } catch {
+      }
 
-    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.create", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
+      await writeAuditLog(
+        { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.create", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") },
+        { db: tx as any },
+      );
+
+      return proj;
+    });
+
     res.status(201).json(await enrichProject(r, proj));
     return;
   } catch (e) {
@@ -465,13 +473,20 @@ routerInternal.patch("/projects/:projectId", requireAuth, requireFirmUser, requi
   if (extraFields !== undefined) updateData.extraFields = extraFields;
   updateData.updatedAt = new Date();
 
-  const [proj] = await r
-    .update(projectsTable)
-    .set(updateData)
-    .where(and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!)))
-    .returning();
+  const proj = await r.transaction(async (tx) => {
+    const [proj] = await tx
+      .update(projectsTable)
+      .set(updateData)
+      .where(and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!)))
+      .returning();
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.update", entityType: "project", entityId: proj.id, detail: `fields=${Object.keys(updateData).join(",")}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.update", entityType: "project", entityId: proj.id, detail: `fields=${Object.keys(updateData).join(",")}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") },
+      { db: tx as any },
+    );
+    return proj;
+  });
+
   res.json(await enrichProject(r, proj));
 });
 
@@ -499,17 +514,25 @@ routerInternal.delete("/projects/:projectId", requireAuth, requireFirmUser, requ
     return;
   }
 
-  const [proj] = await r
-    .update(projectsTable)
-    .set({ archivedAt: new Date(), archivedBy: req.userId ?? null, archivedReason: "user_delete" })
-    .where(and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!), isNull(projectsTable.archivedAt)))
-    .returning();
+  const proj = await r.transaction(async (tx) => {
+    const [proj] = await tx
+      .update(projectsTable)
+      .set({ archivedAt: new Date(), archivedBy: req.userId ?? null, archivedReason: "user_delete" })
+      .where(and(eq(projectsTable.id, params.data.projectId), eq(projectsTable.firmId, req.firmId!), isNull(projectsTable.archivedAt)))
+      .returning();
+    if (!proj) return null;
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.archive", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") },
+      { db: tx as any },
+    );
+    return proj;
+  });
+
   if (!proj || proj.firmId !== req.firmId) {
     res.status(404).json({ error: "Project not found" });
     return;
   }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "projects.archive", entityType: "project", entityId: proj.id, detail: `name=${proj.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.sendStatus(204);
 });
 
@@ -640,43 +663,47 @@ routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUs
       warnings.push("Storage service is currently unavailable. File metadata saved but file content was not uploaded.");
     }
 
-    const [created] = await r
-      .insert(projectDocumentsTable)
-      .values({
-        firmId: req.firmId!,
-        projectId,
-        category,
-        documentName,
-        licenseNumber,
-        bankName,
-        documentDate: documentDate as any,
-        objectPath,
-        fileName,
-        mimeType: typeof f.mimetype === "string" ? f.mimetype : null,
-        fileSize: Math.floor(f.buffer.length),
-        hasExpiry,
-        validFrom: validFrom as any,
-        validTo: validTo as any,
-        createdBy: req.userId ?? null,
-      })
-      .returning();
+    const created = await r.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(projectDocumentsTable)
+        .values({
+          firmId: req.firmId!,
+          projectId,
+          category,
+          documentName,
+          licenseNumber,
+          bankName,
+          documentDate: documentDate as any,
+          objectPath,
+          fileName,
+          mimeType: typeof f.mimetype === "string" ? f.mimetype : null,
+          fileSize: Math.floor(f.buffer.length),
+          hasExpiry,
+          validFrom: validFrom as any,
+          validTo: validTo as any,
+          createdBy: req.userId ?? null,
+        })
+        .returning();
 
-    try {
-      await writeAuditLog({
-        firmId: req.firmId,
-        actorId: req.userId,
-        actorType: req.userType,
-        action: "projects.documents.upload",
-        entityType: "project_document",
-        entityId: created.id,
-        detail: `projectId=${projectId} category=${category} name=${documentName}`,
-        ipAddress: req.ip,
-        userAgent: getHeader(req, "user-agent"),
-      });
-    } catch (err) {
-      logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[projects.documents.upload] audit log failed");
-      warnings.push("Audit logging is temporarily unavailable. Upload succeeded, but audit trail may be incomplete.");
-    }
+      try {
+        await writeAuditLog({
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "projects.documents.upload",
+          entityType: "project_document",
+          entityId: created.id,
+          detail: `projectId=${projectId} category=${category} name=${documentName}`,
+          ipAddress: req.ip,
+          userAgent: getHeader(req, "user-agent"),
+        }, { db: tx as any });
+      } catch (err) {
+        logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[projects.documents.upload] audit log failed");
+        warnings.push("Audit logging is temporarily unavailable. Upload succeeded, but audit trail may be incomplete.");
+      }
+
+      return created;
+    });
 
     res.status(warnings.length ? 200 : 201).json({
       id: created.id,
@@ -758,18 +785,34 @@ routerInternal.delete("/projects/:projectId/documents/:docId", requireAuth, requ
     return;
   }
 
-  const [deleted] = await r
-    .delete(projectDocumentsTable)
-    .where(and(
-      eq(projectDocumentsTable.id, params.data.docId),
-      eq(projectDocumentsTable.projectId, params.data.projectId),
-      eq(projectDocumentsTable.firmId, req.firmId!),
-    ))
-    .returning();
+  const deleted = await r.transaction(async (tx) => {
+    const [deleted] = await tx
+      .delete(projectDocumentsTable)
+      .where(and(
+        eq(projectDocumentsTable.id, params.data.docId),
+        eq(projectDocumentsTable.projectId, params.data.projectId),
+        eq(projectDocumentsTable.firmId, req.firmId!),
+      ))
+      .returning();
+    if (!deleted) return null;
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "projects.documents.delete",
+      entityType: "project_document",
+      entityId: deleted.id,
+      detail: `projectId=${params.data.projectId} category=${deleted.category} name=${deleted.documentName}`,
+      ipAddress: req.ip,
+      userAgent: getHeader(req, "user-agent"),
+    }, { db: tx as any });
+    return deleted;
+  });
   if (!deleted) {
     res.status(404).json({ error: "Document not found" });
     return;
   }
+
 
   try {
     await supabaseStorage.deletePrivateObject(deleted.objectPath);
@@ -779,17 +822,6 @@ routerInternal.delete("/projects/:projectId/documents/:docId", requireAuth, requ
     }
   }
 
-  await writeAuditLog({
-    firmId: req.firmId,
-    actorId: req.userId,
-    actorType: req.userType,
-    action: "projects.documents.delete",
-    entityType: "project_document",
-    entityId: deleted.id,
-    detail: `projectId=${params.data.projectId} category=${deleted.category} name=${deleted.documentName}`,
-    ipAddress: req.ip,
-    userAgent: getHeader(req, "user-agent"),
-  });
   res.sendStatus(204);
 });
 

@@ -16,7 +16,7 @@ import {
   receiptsTable,
   usersTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, requireRlsDb, type AuthRequest } from "../lib/auth.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -553,7 +553,7 @@ router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, req
 
 // ── Client Account Statement ──────────────────────────────────────────────────
 router.get("/reports/client-account-statement", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const r = req.rlsDb ?? db;
+  const r = requireRlsDb(req);
   const caseId = one((req.query as any).caseId);
   let cond = and(eq(ledgerEntriesTable.firmId, req.firmId!), eq(ledgerEntriesTable.accountType, "client"));
   if (caseId) {
@@ -788,7 +788,7 @@ router.get("/reports/matter-aging", requireAuth, requireFirmUser, requirePermiss
 
 // ── Time Summary Report ────────────────────────────────────────────────────────
 router.get("/reports/time-summary", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const r = req.rlsDb ?? db;
+  const r = requireRlsDb(req);
   const from = one((req.query as any).from);
   const to = one((req.query as any).to);
   if (from && !isYmd(from)) { res.status(400).json({ error: "Invalid from date (YYYY-MM-DD)" }); return; }

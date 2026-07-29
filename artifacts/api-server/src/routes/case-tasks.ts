@@ -59,16 +59,22 @@ router.post("/case-tasks", requireAuth, requireFirmUser, requirePermission("case
     ? parseInt(String(assignedTo), 10)
     : null;
   if (assigned !== null && Number.isNaN(assigned)) { res.status(400).json({ error: "Invalid assignedTo" }); return; }
-  const [row] = await r.insert(caseTasksTable).values({
-    firmId: req.firmId!, caseId: cid, title,
-    description: description || null,
-    assignedTo: assigned,
-    dueDate: dueDate || null,
-    priority: priority || "normal",
-    status: "open",
-    createdBy: req.userId!,
-  }).returning();
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "cases.task.create", entityType: "case_task", entityId: row.id, detail: `caseId=${cid} title=${title}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  const row = await r.transaction(async (tx) => {
+    const [created] = await tx.insert(caseTasksTable).values({
+      firmId: req.firmId!, caseId: cid, title,
+      description: description || null,
+      assignedTo: assigned,
+      dueDate: dueDate || null,
+      priority: priority || "normal",
+      status: "open",
+      createdBy: req.userId!,
+    }).returning();
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "cases.task.create", entityType: "case_task", entityId: created.id, detail: `caseId=${cid} title=${title}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+      { db: tx, strict: true },
+    );
+    return created;
+  });
   res.status(201).json(row);
 });
 
@@ -95,10 +101,17 @@ router.put("/case-tasks/:id", requireAuth, requireFirmUser, requirePermission("c
     if (status === "done") { updates.completedAt = new Date(); updates.completedBy = req.userId!; }
     else { updates.completedAt = null; updates.completedBy = null; }
   }
-  const [row] = await r.update(caseTasksTable).set(updates)
-    .where(and(eq(caseTasksTable.id, id), eq(caseTasksTable.firmId, req.firmId!))).returning();
+  const row = await r.transaction(async (tx) => {
+    const [updated] = await tx.update(caseTasksTable).set(updates)
+      .where(and(eq(caseTasksTable.id, id), eq(caseTasksTable.firmId, req.firmId!))).returning();
+    if (!updated) return null;
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "cases.task.update", entityType: "case_task", entityId: id, detail: `fields=${Object.keys(updates).filter((k) => k !== "updatedAt").join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+      { db: tx, strict: true },
+    );
+    return updated;
+  });
   if (!row) { res.status(404).json({ error: "Task not found" }); return; }
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "cases.task.update", entityType: "case_task", entityId: id, detail: `fields=${Object.keys(updates).filter((k) => k !== "updatedAt").join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(row);
 });
 
@@ -109,9 +122,16 @@ router.delete("/case-tasks/:id", requireAuth, requireFirmUser, requirePermission
   if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid task ID" }); return; }
   const r = req.rlsDb;
   if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
-  const [deleted] = await r.delete(caseTasksTable).where(and(eq(caseTasksTable.id, id), eq(caseTasksTable.firmId, req.firmId!))).returning();
+  const deleted = await r.transaction(async (tx) => {
+    const [row] = await tx.delete(caseTasksTable).where(and(eq(caseTasksTable.id, id), eq(caseTasksTable.firmId, req.firmId!))).returning();
+    if (!row) return null;
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "cases.task.delete", entityType: "case_task", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+      { db: tx, strict: true },
+    );
+    return row;
+  });
   if (!deleted) { res.status(404).json({ error: "Task not found" }); return; }
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "cases.task.delete", entityType: "case_task", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json({ success: true });
 });
 

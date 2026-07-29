@@ -9,7 +9,7 @@ import {
   suspiciousReviewNotesTable, complianceRetentionRecordsTable,
   partiesTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requireRlsDb, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { queryOne } from "../lib/http.js";
 
@@ -23,7 +23,7 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
-function rdb(req: AuthRequest) { return req.rlsDb ?? db; }
+function rdb(req: AuthRequest) { return requireRlsDb(req); }
 
 // ---------------------------------------------------------------------------
 // Risk scoring helper
@@ -196,14 +196,20 @@ router.post("/compliance/profiles/:id/cdd-checks", requireAuth, requireFirmUser,
     performedAt: new Date(),
   } satisfies typeof cddChecksTable.$inferInsert;
 
-  const [check] = await rdb(req).insert(cddChecksTable).values(checkInsert).returning();
-
-  await writeAuditLog({
-    actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-    action: `compliance.cdd_check_added.${parsed.data.checkType}`,
-    entityType: "compliance_profile", entityId: profileId,
-    detail: `${parsed.data.checkType}: ${parsed.data.status}`,
-    ipAddress: req.ip, userAgent: req.headers["user-agent"],
+  const r = rdb(req);
+  const check = await r.transaction(async (tx) => {
+    const [created] = await tx.insert(cddChecksTable).values(checkInsert).returning();
+    await writeAuditLog(
+      {
+        actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+        action: `compliance.cdd_check_added.${parsed.data.checkType}`,
+        entityType: "compliance_profile", entityId: profileId,
+        detail: `${parsed.data.checkType}: ${parsed.data.status}`,
+        ipAddress: req.ip, userAgent: req.headers["user-agent"],
+      },
+      { db: tx, strict: true },
+    );
+    return created;
   });
 
   res.status(201).json(check);
@@ -257,27 +263,34 @@ router.post("/compliance/profiles/:id/risk-assessment", sensitiveRateLimiter, re
     notes: parsed.data.notes,
   } satisfies typeof riskAssessmentsTable.$inferInsert;
 
-  const [assessment] = await rdb(req).insert(riskAssessmentsTable).values(assessmentInsert).returning();
+  const r = rdb(req);
+  const out = await r.transaction(async (tx) => {
+    const [assessment] = await tx.insert(riskAssessmentsTable).values(assessmentInsert).returning();
 
-  // Sync back to compliance profile
-  const newStatus = scoring.eddTriggered ? "enhanced_due_diligence_required" : profile.cddStatus;
-  await rdb(req).update(complianceProfilesTable).set({
-    riskScore: scoring.riskScore,
-    riskLevel: scoring.riskLevel,
-    eddTriggered: scoring.eddTriggered,
-    eddReason: scoring.eddReason,
-    cddStatus: newStatus,
-  }).where(eq(complianceProfilesTable.id, profileId));
+    const newStatus = scoring.eddTriggered ? "enhanced_due_diligence_required" : profile.cddStatus;
+    await tx.update(complianceProfilesTable).set({
+      riskScore: scoring.riskScore,
+      riskLevel: scoring.riskLevel,
+      eddTriggered: scoring.eddTriggered,
+      eddReason: scoring.eddReason,
+      cddStatus: newStatus,
+    }).where(eq(complianceProfilesTable.id, profileId));
 
-  await writeAuditLog({
-    actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-    action: "compliance.risk_assessment_created",
-    entityType: "compliance_profile", entityId: profileId,
-    detail: `score=${scoring.riskScore} level=${scoring.riskLevel} edd=${scoring.eddTriggered}`,
-    ipAddress: req.ip, userAgent: req.headers["user-agent"],
+    await writeAuditLog(
+      {
+        actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+        action: "compliance.risk_assessment_created",
+        entityType: "compliance_profile", entityId: profileId,
+        detail: `score=${scoring.riskScore} level=${scoring.riskLevel} edd=${scoring.eddTriggered}`,
+        ipAddress: req.ip, userAgent: req.headers["user-agent"],
+      },
+      { db: tx, strict: true },
+    );
+
+    return { assessment, profile: { riskScore: scoring.riskScore, riskLevel: scoring.riskLevel, eddTriggered: scoring.eddTriggered, cddStatus: newStatus } };
   });
 
-  res.status(201).json({ assessment, profile: { riskScore: scoring.riskScore, riskLevel: scoring.riskLevel, eddTriggered: scoring.eddTriggered, cddStatus: newStatus } });
+  res.status(201).json(out);
 });
 
 // ---------------------------------------------------------------------------
@@ -297,23 +310,30 @@ router.post("/compliance/profiles/:id/sanctions-screening", sensitiveRateLimiter
     .where(and(eq(complianceProfilesTable.id, profileId), eq(complianceProfilesTable.firmId, req.firmId!)));
   if (!profile) { res.status(404).json({ error: "Compliance profile not found" }); return; }
 
-  const [screening] = await rdb(req).insert(sanctionsScreeningsTable).values({
-    firmId: req.firmId!,
-    partyId: profile.partyId,
-    complianceProfileId: profileId,
-    screenedBy: req.userId,
-    screeningSource: parsed.data.screeningSource,
-    result: parsed.data.result,
-    matchDetails: parsed.data.matchDetails ?? {},
-    notes: parsed.data.notes,
-  }).returning();
+  const r = rdb(req);
+  const screening = await r.transaction(async (tx) => {
+    const [created] = await tx.insert(sanctionsScreeningsTable).values({
+      firmId: req.firmId!,
+      partyId: profile.partyId,
+      complianceProfileId: profileId,
+      screenedBy: req.userId,
+      screeningSource: parsed.data.screeningSource,
+      result: parsed.data.result,
+      matchDetails: parsed.data.matchDetails ?? {},
+      notes: parsed.data.notes,
+    }).returning();
 
-  await writeAuditLog({
-    actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-    action: `compliance.sanctions_screening_run.${parsed.data.result}`,
-    entityType: "compliance_profile", entityId: profileId,
-    detail: `source=${parsed.data.screeningSource} result=${parsed.data.result}`,
-    ipAddress: req.ip, userAgent: req.headers["user-agent"],
+    await writeAuditLog(
+      {
+        actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+        action: `compliance.sanctions_screening_run.${parsed.data.result}`,
+        entityType: "compliance_profile", entityId: profileId,
+        detail: `source=${parsed.data.screeningSource} result=${parsed.data.result}`,
+        ipAddress: req.ip, userAgent: req.headers["user-agent"],
+      },
+      { db: tx, strict: true },
+    );
+    return created;
   });
 
   res.status(201).json(screening);
@@ -350,17 +370,21 @@ router.post("/compliance/profiles/:id/pep-flags", requireAuth, requireFirmUser, 
     notes: parsed.data.notes,
   } satisfies typeof pepFlagsTable.$inferInsert;
 
-  const [flag] = await rdb(req).insert(pepFlagsTable).values(pepFlagInsert).returning();
-
-  // Update party isPep flag
-  await rdb(req).update(partiesTable).set({ isPep: true, pepDetails: parsed.data.position }).where(eq(partiesTable.id, profile.partyId));
-
-  await writeAuditLog({
-    actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-    action: "compliance.pep_flag_added",
-    entityType: "compliance_profile", entityId: profileId,
-    detail: `${parsed.data.position} (${parsed.data.pepCategory})`,
-    ipAddress: req.ip, userAgent: req.headers["user-agent"],
+  const r = rdb(req);
+  const flag = await r.transaction(async (tx) => {
+    const [created] = await tx.insert(pepFlagsTable).values(pepFlagInsert).returning();
+    await tx.update(partiesTable).set({ isPep: true, pepDetails: parsed.data.position }).where(eq(partiesTable.id, profile.partyId));
+    await writeAuditLog(
+      {
+        actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+        action: "compliance.pep_flag_added",
+        entityType: "compliance_profile", entityId: profileId,
+        detail: `${parsed.data.position} (${parsed.data.pepCategory})`,
+        ipAddress: req.ip, userAgent: req.headers["user-agent"],
+      },
+      { db: tx, strict: true },
+    );
+    return created;
   });
 
   res.status(201).json(flag);
@@ -372,14 +396,20 @@ router.post("/compliance/profiles/:id/pep-flags", requireAuth, requireFirmUser, 
 router.delete("/compliance/profiles/:id/pep-flags/:flagId", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const flagId = Number(req.params.flagId);
   const profileId = Number(req.params.id);
-  await rdb(req).update(pepFlagsTable).set({ isActive: false }).where(
-    and(eq(pepFlagsTable.id, flagId), eq(pepFlagsTable.firmId, req.firmId!))
-  );
-  await writeAuditLog({
-    actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-    action: "compliance.pep_flag_removed",
-    entityType: "compliance_profile", entityId: profileId,
-    ipAddress: req.ip, userAgent: req.headers["user-agent"],
+  const r = rdb(req);
+  await r.transaction(async (tx) => {
+    await tx.update(pepFlagsTable).set({ isActive: false }).where(
+      and(eq(pepFlagsTable.id, flagId), eq(pepFlagsTable.firmId, req.firmId!))
+    );
+    await writeAuditLog(
+      {
+        actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+        action: "compliance.pep_flag_removed",
+        entityType: "compliance_profile", entityId: profileId,
+        ipAddress: req.ip, userAgent: req.headers["user-agent"],
+      },
+      { db: tx, strict: true },
+    );
   });
   res.json({ success: true });
 });

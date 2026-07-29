@@ -18,7 +18,7 @@ import {
   quotationItemsTable,
   invoicesTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requireRlsDb, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -34,7 +34,7 @@ const listQuerySchema = z.object({
 });
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+const rdb = (req: AuthRequest): DbConn => requireRlsDb(req);
 
 function parseJsonObject(s: unknown): Record<string, unknown> | null {
   if (!s) return null;

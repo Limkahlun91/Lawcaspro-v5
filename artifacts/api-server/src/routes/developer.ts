@@ -308,35 +308,41 @@ routerInternal.patch("/developer/cases/:caseId/status", requireAuth, requireFirm
   }
 
   const now = new Date();
-  const [updated] = await r
-    .update(casesTable)
-    .set({
-      developerStatus,
-      developerStatusUpdatedAt: now,
-    })
-    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, ctx.firmId), eq(casesTable.developerId, ctx.developerId)))
-    .returning({
-      id: casesTable.id,
-      developerStatus: casesTable.developerStatus,
-      developerStatusUpdatedAt: casesTable.developerStatusUpdatedAt,
-    });
+  const updated = await (r as any).transaction(async (tx: typeof r) => {
+    const [row] = await (tx as any)
+      .update(casesTable)
+      .set({
+        developerStatus,
+        developerStatusUpdatedAt: now,
+      })
+      .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, ctx.firmId), eq(casesTable.developerId, ctx.developerId)))
+      .returning({
+        id: casesTable.id,
+        developerStatus: casesTable.developerStatus,
+        developerStatusUpdatedAt: casesTable.developerStatusUpdatedAt,
+      });
+
+    if (!row) return null;
+
+    await writeAuditLog({
+      firmId: ctx.firmId,
+      actorId: ctx.userId,
+      actorType: "developer_user",
+      action: "developer_portal.case_status.update",
+      entityType: "case",
+      entityId: caseId,
+      detail: JSON.stringify({ developerStatus }),
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    }, { db: tx as RlsDb | undefined, strict: true });
+
+    return row;
+  });
 
   if (!updated) {
     res.status(404).json({ error: "Not found" });
     return;
   }
-
-  await writeAuditLog({
-    firmId: ctx.firmId,
-    actorId: ctx.userId,
-    actorType: "developer_user",
-    action: "developer_portal.case_status.update",
-    entityType: "case",
-    entityId: caseId,
-    detail: JSON.stringify({ developerStatus }),
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
-  }, { db: req.rlsDb as RlsDb | undefined });
 
   res.json({
     developerStatus: updated.developerStatus ?? null,
@@ -500,30 +506,34 @@ routerInternal.post("/developer/cases/:caseId/messages", requireAuth, requireFir
     return;
   }
 
-  const [created] = await r
-    .insert(caseMessagesTable)
-    .values({
-      firmId: ctx.firmId,
-      caseId,
-      channel: "developer",
-      senderType: "developer",
-      senderId: ctx.userId,
-      messageText,
-      attachments: [],
-    })
-    .returning({ id: caseMessagesTable.id, createdAt: caseMessagesTable.createdAt });
+  const created = await (r as any).transaction(async (tx: typeof r) => {
+    const [row] = await (tx as any)
+      .insert(caseMessagesTable)
+      .values({
+        firmId: ctx.firmId,
+        caseId,
+        channel: "developer",
+        senderType: "developer",
+        senderId: ctx.userId,
+        messageText,
+        attachments: [],
+      })
+      .returning({ id: caseMessagesTable.id, createdAt: caseMessagesTable.createdAt });
 
-  await writeAuditLog({
-    firmId: ctx.firmId,
-    actorId: ctx.userId,
-    actorType: "developer_user",
-    action: "developer_portal.message.create",
-    entityType: "case",
-    entityId: caseId,
-    detail: "developer_message",
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
-  }, { db: req.rlsDb as RlsDb | undefined });
+    await writeAuditLog({
+      firmId: ctx.firmId,
+      actorId: ctx.userId,
+      actorType: "developer_user",
+      action: "developer_portal.message.create",
+      entityType: "case",
+      entityId: caseId,
+      detail: "developer_message",
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    }, { db: tx as RlsDb | undefined, strict: true });
+
+    return row;
+  });
 
   res.status(201).json({ id: String(created?.id ?? ""), createdAt: toIsoStringSafe(created?.createdAt) });
 });

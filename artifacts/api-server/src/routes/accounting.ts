@@ -6,7 +6,7 @@ import { PDFParse } from "pdf-parse";
 import OpenAI from "openai";
 import * as XLSX from "xlsx";
 import { z } from "zod";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, requireRlsDb, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { computeInvoiceMetrics } from "../services/invoice-metrics.js";
 
 type SqlChunk = ReturnType<typeof sql>;
@@ -146,7 +146,8 @@ function parseIdInt(v: unknown): number | null {
 const CATEGORIES = ["legal_fee", "disbursement", "stamp_duty", "professional_fee", "other"] as const;
 
 router.get("/accounting", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const rows = await queryRows(sql`
+  const r = requireRlsDb(req);
+  const rows = await queryRowsFrom(r, sql`
     SELECT be.id, be.case_id, be.description, be.amount, be.quantity,
       be.is_paid as "isPaid", be.created_at as "billedAt",
       c.reference_no as "caseReferenceNo"
@@ -166,7 +167,7 @@ router.get("/accounting/cases/:caseId/summary", requireAuth, requireFirmUser, re
     return;
   }
 
-  const r = (req.rlsDb ?? db) as unknown as Pick<typeof db, "select">;
+  const r = requireRlsDb(req) as unknown as Pick<typeof db, "select">;
   const firmId = req.firmId!;
   const [row] = await r
     .select({
@@ -289,8 +290,9 @@ router.get("/accounting/cases/:caseId/summary", requireAuth, requireFirmUser, re
 });
 
 router.get("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = requireRlsDb(req);
   const caseId = Number(req.params.caseId);
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFrom(r, sql`
     SELECT be.*, u.name as created_by_name
     FROM case_billing_entries be
     LEFT JOIN users u ON be.created_by = u.id
@@ -315,18 +317,27 @@ router.post("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermi
     return;
   }
 
-  const rows = await queryRows(sql`
-    INSERT INTO case_billing_entries (case_id, firm_id, category, description, amount, quantity, is_paid, created_by)
-    VALUES (${caseId}, ${req.firmId!}, ${category ?? "disbursement"}, ${description}, ${amount}, ${quantity ?? 1}, ${isPaid ?? false}, ${req.userId!})
-    RETURNING *
-  `);
+  const r = req.rlsDb;
+  if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
 
-  const created = rows[0];
+  const created = await r.transaction(async (tx) => {
+    const rows = await queryRowsFrom(tx, sql`
+      INSERT INTO case_billing_entries (case_id, firm_id, category, description, amount, quantity, is_paid, created_by)
+      VALUES (${caseId}, ${req.firmId!}, ${category ?? "disbursement"}, ${description}, ${amount}, ${quantity ?? 1}, ${isPaid ?? false}, ${req.userId!})
+      RETURNING *
+    `);
+    const created = rows[0];
+    const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
+      ? (created as { id: number }).id
+      : undefined;
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.billing.create", entityType: "case_billing_entry", entityId: createdId, detail: `caseId=${caseId} amount=${amount}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+      { db: tx, strict: true },
+    );
+    return created;
+  });
+
   res.status(201).json(created);
-  const createdId = created && typeof created === "object" && "id" in created && typeof (created as { id?: unknown }).id === "number"
-    ? (created as { id: number }).id
-    : undefined;
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.billing.create", entityType: "case_billing_entry", entityId: createdId, detail: `caseId=${caseId} amount=${amount}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
 router.patch("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
@@ -359,43 +370,56 @@ router.patch("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, re
 
   const setClause = sql.join(parts, sql`, `);
 
-  const rows = await queryRows(sql`
-    UPDATE case_billing_entries SET ${setClause}
-    WHERE id = ${entryId} AND case_id = ${caseId} AND firm_id = ${req.firmId!}
-    RETURNING *
-  `);
+  const r = req.rlsDb;
+  if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
 
-  if (!rows[0]) {
-    res.status(404).json({ error: "Entry not found" });
-    return;
-  }
+  const updated = await r.transaction(async (tx) => {
+    const rows = await queryRowsFrom(tx, sql`
+      UPDATE case_billing_entries SET ${setClause}
+      WHERE id = ${entryId} AND case_id = ${caseId} AND firm_id = ${req.firmId!}
+      RETURNING *
+    `);
+    if (!rows[0]) return null;
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.billing.update", entityType: "case_billing_entry", entityId: entryId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+      { db: tx, strict: true },
+    );
+    return rows[0];
+  });
 
-  res.json(rows[0]);
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.billing.update", entityType: "case_billing_entry", entityId: entryId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  if (!updated) { res.status(404).json({ error: "Entry not found" }); return; }
+  res.json(updated);
 });
 
 router.delete("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const entryId = Number(req.params.entryId);
 
-  const rows = await queryRows(sql`
-    DELETE FROM case_billing_entries
-    WHERE id = ${entryId} AND case_id = ${caseId} AND firm_id = ${req.firmId!}
-    RETURNING *
-  `);
+  const r = req.rlsDb;
+  if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
 
-  if (!rows[0]) {
-    res.status(404).json({ error: "Entry not found" });
-    return;
-  }
+  const ok = await r.transaction(async (tx) => {
+    const rows = await queryRowsFrom(tx, sql`
+      DELETE FROM case_billing_entries
+      WHERE id = ${entryId} AND case_id = ${caseId} AND firm_id = ${req.firmId!}
+      RETURNING *
+    `);
+    if (!rows[0]) return false;
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.billing.delete", entityType: "case_billing_entry", entityId: entryId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+      { db: tx, strict: true },
+    );
+    return true;
+  });
 
+  if (!ok) { res.status(404).json({ error: "Entry not found" }); return; }
   res.sendStatus(204);
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.billing.delete", entityType: "case_billing_entry", entityId: entryId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
 router.get("/cases/:caseId/billing/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = requireRlsDb(req);
   const caseId = Number(req.params.caseId);
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFrom(r, sql`
     SELECT 
       category,
       COUNT(*) as entry_count,
@@ -408,7 +432,7 @@ router.get("/cases/:caseId/billing/summary", requireAuth, requireFirmUser, requi
     ORDER BY category
   `);
 
-  const overall = await queryRows(sql`
+  const overall = await queryRowsFrom(r, sql`
     SELECT 
       COUNT(*) as entry_count,
       SUM(amount * quantity) as total,
@@ -422,13 +446,14 @@ router.get("/cases/:caseId/billing/summary", requireAuth, requireFirmUser, requi
 });
 
 router.get("/accounting/invoice-metrics", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const r = (req.rlsDb ?? db) as unknown as typeof db;
-  const metrics = await computeInvoiceMetrics(r as any, { firmId: req.firmId! });
+  const r = requireRlsDb(req) as unknown as typeof db;
+  const metrics = await computeInvoiceMetrics(r, { firmId: req.firmId! });
   res.json(metrics);
 });
 
 router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const topCases = await queryRows(sql`
+  const r = requireRlsDb(req);
+  const topCases = await queryRowsFrom(r, sql`
     SELECT c.reference_no, c.id as case_id,
       SUM(be.amount * be.quantity) as total,
       SUM(CASE WHEN be.is_paid THEN be.amount * be.quantity ELSE 0 END) as paid,
@@ -442,7 +467,7 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
     LIMIT 10
   `);
 
-  const monthly = await queryRows(sql`
+  const monthly = await queryRowsFrom(r, sql`
     SELECT 
       TO_CHAR(created_at, 'YYYY-MM') as month,
       SUM(amount * quantity) as total,
@@ -454,7 +479,7 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
     LIMIT 12
   `);
 
-  const totals = await queryRows(sql`
+  const totals = await queryRowsFrom(r, sql`
     SELECT 
       SUM(amount * quantity) as total,
       SUM(CASE WHEN is_paid THEN amount * quantity ELSE 0 END) as paid,
@@ -464,7 +489,7 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
     WHERE firm_id = ${req.firmId!}
   `);
 
-  const byCategory = await queryRows(sql`
+  const byCategory = await queryRowsFrom(r, sql`
     SELECT category, SUM(amount * quantity) as total
     FROM case_billing_entries
     WHERE firm_id = ${req.firmId!}
@@ -481,7 +506,8 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
 });
 
 router.get("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const rows = await queryRows(sql`
+  const r = requireRlsDb(req);
+  const rows = await queryRowsFrom(r, sql`
     SELECT
       id,
       bank_name,
@@ -502,6 +528,9 @@ router.get("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePer
 });
 
 router.post("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = req.rlsDb;
+  if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
+
   const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
   const bankName = typeof body.bankName === "string" ? body.bankName.trim() : "";
   const accountName = typeof body.accountName === "string" ? body.accountName.trim() : "";
@@ -515,21 +544,29 @@ router.post("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePe
   if (!bankName || !accountNo) { res.status(422).json({ error: "bankName and accountNo are required" }); return; }
   if (openingBalanceDate === null) { res.status(422).json({ error: "openingBalanceDate is required (YYYY-MM-DD)" }); return; }
 
-  const rows = await queryRows(sql`
-    INSERT INTO firm_bank_accounts
-      (firm_id, bank_name, account_name, account_no, account_type, gl_code, opening_balance, opening_balance_date, is_default, created_at, updated_at)
-    VALUES
-      (${req.firmId!}, ${bankName}, ${accountName || null}, ${accountNo}, ${accountType}, ${glCode || null}, ${openingBalance}, ${openingBalanceDate}, ${isDefault}, now(), now())
-    RETURNING *
-  `);
-  const created = rows[0];
+  const created = await r.transaction(async (tx) => {
+    const rows = await queryRowsFrom(tx, sql`
+      INSERT INTO firm_bank_accounts
+        (firm_id, bank_name, account_name, account_no, account_type, gl_code, opening_balance, opening_balance_date, is_default, created_at, updated_at)
+      VALUES
+        (${req.firmId!}, ${bankName}, ${accountName || null}, ${accountNo}, ${accountType}, ${glCode || null}, ${openingBalance}, ${openingBalanceDate}, ${isDefault}, now(), now())
+      RETURNING *
+    `);
+    const created = rows[0];
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.bank_accounts.create", entityType: "firm_bank_account", detail: `bank=${bankName} accountNo=${accountNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+      { db: tx, strict: true },
+    );
+    return created;
+  });
   res.status(201).json(created);
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.bank_accounts.create", entityType: "firm_bank_account", detail: `bank=${bankName} accountNo=${accountNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
 router.patch("/accounting/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = parseIdInt((req.params as any).id);
   if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
+  const r = req.rlsDb;
+  if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
   const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
   const patch: SqlChunk[] = [];
 
@@ -572,29 +609,46 @@ router.patch("/accounting/bank-accounts/:id", requireAuth, requireFirmUser, requ
   if (patch.length === 0) { res.status(400).json({ error: "No changes" }); return; }
   patch.push(sql`updated_at = now()`);
 
-  const rows = await queryRows(sql`
-    UPDATE firm_bank_accounts
-    SET ${sql.join(patch, sql`, `)}
-    WHERE firm_id = ${req.firmId!} AND id = ${id}
-    RETURNING *
-  `);
-  const updated = rows[0];
+  const updated = await r.transaction(async (tx) => {
+    const rows = await queryRowsFrom(tx, sql`
+      UPDATE firm_bank_accounts
+      SET ${sql.join(patch, sql`, `)}
+      WHERE firm_id = ${req.firmId!} AND id = ${id}
+      RETURNING *
+    `);
+    const updated = rows[0];
+    if (!updated) return null;
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.bank_accounts.update", entityType: "firm_bank_account", detail: `id=${id}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+      { db: tx, strict: true },
+    );
+    return updated;
+  });
+
   if (!updated) { res.status(404).json({ error: "Not found" }); return; }
   res.json(updated);
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.bank_accounts.update", entityType: "firm_bank_account", detail: `id=${id}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
 router.delete("/accounting/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = parseIdInt((req.params as any).id);
   if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
-  const rows = await queryRows(sql`
-    DELETE FROM firm_bank_accounts
-    WHERE firm_id = ${req.firmId!} AND id = ${id}
-    RETURNING id
-  `);
-  if (!rows[0]) { res.status(404).json({ error: "Not found" }); return; }
+  const r = req.rlsDb;
+  if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
+  const ok = await r.transaction(async (tx) => {
+    const rows = await queryRowsFrom(tx, sql`
+      DELETE FROM firm_bank_accounts
+      WHERE firm_id = ${req.firmId!} AND id = ${id}
+      RETURNING id
+    `);
+    if (!rows[0]) return false;
+    await writeAuditLog(
+      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.bank_accounts.delete", entityType: "firm_bank_account", detail: `id=${id}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
+      { db: tx, strict: true },
+    );
+    return true;
+  });
+  if (!ok) { res.status(404).json({ error: "Not found" }); return; }
   res.sendStatus(204);
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.bank_accounts.delete", entityType: "firm_bank_account", detail: `id=${id}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
 router.post(
@@ -604,6 +658,7 @@ router.post(
   requirePermission("accounting", "write"),
   upload.single("file"),
   async (req: AuthRequest, res: Response): Promise<void> => {
+    const r = requireRlsDb(req);
     const file = (req as any).file as { buffer?: Buffer; originalname?: string; mimetype?: string } | undefined;
     if (!file?.buffer) {
       res.status(400).json({ error: "Missing file" });
@@ -611,7 +666,7 @@ router.post(
     }
     const bankAccountId = parseIdInt((req.body as any)?.bankAccountId);
     if (!bankAccountId) { res.status(422).json({ error: "bankAccountId is required" }); return; }
-    const acct = await queryRows(sql`SELECT id FROM firm_bank_accounts WHERE firm_id = ${req.firmId!} AND id = ${bankAccountId} LIMIT 1`);
+    const acct = await queryRowsFrom(r, sql`SELECT id FROM firm_bank_accounts WHERE firm_id = ${req.firmId!} AND id = ${bankAccountId} LIMIT 1`);
     if (!acct[0]) { res.status(404).json({ error: "Bank account not found" }); return; }
 
     let rawText = "";
@@ -701,41 +756,45 @@ router.post(
       return;
     }
 
-    let inserted = 0;
     try {
-      const rows = await queryRows(sql`
-        INSERT INTO bank_transactions (firm_id, bank_account_id, transaction_date, description, reference_no, withdrawal, deposit, balance, is_exported)
-        VALUES ${sql.join(values, sql`, `)}
-        RETURNING id
-      `);
-      inserted = rows.length;
+      const inserted = await r.transaction(async (tx) => {
+        const rows = await queryRowsFrom(tx, sql`
+          INSERT INTO bank_transactions (firm_id, bank_account_id, transaction_date, description, reference_no, withdrawal, deposit, balance, is_exported)
+          VALUES ${sql.join(values, sql`, `)}
+          RETURNING id
+        `);
+        await writeAuditLog(
+          {
+            firmId: req.firmId,
+            actorId: req.userId,
+            actorType: req.userType,
+            action: "accounting.bank_statements.parse.ai",
+            entityType: "bank_transaction",
+            detail: `file=${String(file.originalname ?? "")} inserted=${rows.length}`,
+            ipAddress: req.ip,
+            userAgent: req.headers["user-agent"],
+          },
+          { db: tx, strict: true },
+        );
+        return rows.length;
+      });
+      res.status(201).json({ inserted });
     } catch {
       res.status(500).json({ error: "Failed to save parsed transactions" });
       return;
     }
-
-    res.status(201).json({ inserted });
-    await writeAuditLog({
-      firmId: req.firmId,
-      actorId: req.userId,
-      actorType: req.userType,
-      action: "accounting.bank_statements.parse.ai",
-      entityType: "bank_transaction",
-      detail: `file=${String(file.originalname ?? "")} inserted=${inserted}`,
-      ipAddress: req.ip,
-      userAgent: req.headers["user-agent"],
-    });
   }
 );
 
 router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = requireRlsDb(req);
   const firmId = req.firmId!;
   const bankAccountId = parseIdInt((req.query as any)?.bankAccountId);
   if (!bankAccountId) { res.status(422).json({ error: "bankAccountId is required" }); return; }
-  const acct = await queryRows(sql`SELECT id FROM firm_bank_accounts WHERE firm_id = ${firmId} AND id = ${bankAccountId} LIMIT 1`);
+  const acct = await queryRowsFrom(r, sql`SELECT id FROM firm_bank_accounts WHERE firm_id = ${firmId} AND id = ${bankAccountId} LIMIT 1`);
   if (!acct[0]) { res.status(404).json({ error: "Bank account not found" }); return; }
 
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFrom(r, sql`
     SELECT
       id,
       bank_account_id,
@@ -764,7 +823,7 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
   ));
 
   const caseInfoRows = boundCaseIds.length
-    ? await queryRows(sql`
+    ? await queryRowsFrom(r, sql`
         SELECT
           c.id,
           c.reference_no,
@@ -793,7 +852,7 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
   let outstandingMap = new Map<number, number>();
 
   if (hasCandidates) {
-    const candidateRows = await queryRows(sql`
+    const candidateRows = await queryRowsFrom(r, sql`
       SELECT
         c.id,
         c.reference_no,
@@ -820,7 +879,7 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
 
     const candidateIds = candidates.map((c) => c.case_id);
     if (candidateIds.length) {
-      const outstandingRows = await queryRows(sql`
+      const outstandingRows = await queryRowsFrom(r, sql`
         SELECT
           case_id,
           SUM(CASE WHEN status = 'void' THEN 0 ELSE amount_due END) as outstanding
@@ -893,12 +952,13 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
 });
 
 router.get("/accounting/cases/search", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = requireRlsDb(req);
   const firmId = req.firmId!;
   const q = typeof (req.query as any)?.query === "string" ? String((req.query as any).query).trim() : "";
   if (!q) { res.json({ data: [] }); return; }
 
   const like = `%${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFrom(r, sql`
     SELECT
       c.id,
       c.reference_no,
@@ -929,6 +989,7 @@ router.get("/accounting/cases/search", requireAuth, requireFirmUser, requirePerm
 
 router.post("/accounting/bank-transactions/:id/bind-case", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const firmId = req.firmId!;
+  const rlsDb = requireRlsDb(req);
   const id = String(req.params.id ?? "").trim();
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
@@ -943,7 +1004,7 @@ router.post("/accounting/bank-transactions/:id/bind-case", requireAuth, requireF
   };
 
   try {
-    const result = await db.transaction(async (tx) => {
+    const result = await rlsDb.transaction(async (tx) => {
       const txRows = await queryRowsFrom(tx as any, sql`
         SELECT id, bank_account_id, case_id, transaction_date, description, deposit
         FROM bank_transactions
@@ -987,6 +1048,20 @@ router.post("/accounting/bank-transactions/:id/bind-case", requireAuth, requireF
         VALUES (${firmId}, ${caseId}, ${bt.transaction_date}, ${entryCategory}, ${entryType}, ${bt.description}, ${deposit}, NOW(), NOW())
       `);
 
+      await writeAuditLog(
+        {
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "accounting.bank_transactions.bind_case",
+          entityType: "bank_transaction",
+          detail: `id=${id} caseId=${caseId} entryType=${entryType}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: tx, strict: true },
+      );
+
       return {
         case_id: caseId,
         case_title: String(c.reference_no ?? ""),
@@ -996,16 +1071,6 @@ router.post("/accounting/bank-transactions/:id/bind-case", requireAuth, requireF
     });
 
     res.json({ ok: true, ...result });
-    await writeAuditLog({
-      firmId: req.firmId,
-      actorId: req.userId,
-      actorType: req.userType,
-      action: "accounting.bank_transactions.bind_case",
-      entityType: "bank_transaction",
-      detail: `id=${id} caseId=${result.case_id} entryType=${result.entry_type}`,
-      ipAddress: req.ip,
-      userAgent: req.headers["user-agent"],
-    });
   } catch (err: any) {
     const status = err?.status && Number.isInteger(err.status) ? Number(err.status) : 500;
     res.status(status).json({ error: status === 500 ? "Bind failed" : String(err?.message ?? "Bind failed") });
@@ -1013,6 +1078,7 @@ router.post("/accounting/bank-transactions/:id/bind-case", requireAuth, requireF
 });
 
 router.patch("/accounting/bank-transactions/:id", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = requireRlsDb(req);
   const id = String(req.params.id ?? "").trim();
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
@@ -1048,32 +1114,44 @@ router.patch("/accounting/bank-transactions/:id", requireAuth, requireFirmUser, 
   parts.push(sql`updated_at = NOW()`);
   const setClause = sql.join(parts, sql`, `);
 
-  const rows = await queryRows(sql`
-    UPDATE bank_transactions
-    SET ${setClause}
-    WHERE id = ${id}::uuid AND firm_id = ${req.firmId!}
-    RETURNING *
-  `);
-  const updated = rows[0];
-  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
-  res.json(updated);
-  await writeAuditLog({
-    firmId: req.firmId,
-    actorId: req.userId,
-    actorType: req.userType,
-    action: "accounting.bank_transactions.update",
-    entityType: "bank_transaction",
-    entityId: undefined,
-    detail: `id=${id}`,
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
-  });
+  try {
+    const updated = await r.transaction(async (tx) => {
+      const rows = await queryRowsFrom(tx, sql`
+        UPDATE bank_transactions
+        SET ${setClause}
+        WHERE id = ${id}::uuid AND firm_id = ${req.firmId!}
+        RETURNING *
+      `);
+      const row = rows[0];
+      if (!row) return null;
+      await writeAuditLog(
+        {
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "accounting.bank_transactions.update",
+          entityType: "bank_transaction",
+          detail: `id=${id}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        },
+        { db: tx, strict: true },
+      );
+      return row;
+    });
+    if (!updated) { res.status(404).json({ error: "Not found" }); return; }
+    res.json(updated);
+  } catch {
+    res.status(500).json({ error: "Update failed" });
+    return;
+  }
 });
 
 async function exportBankTransactionsXlsx(req: AuthRequest, res: Response): Promise<void> {
+  const r = requireRlsDb(req);
   const bankAccountId = parseIdInt((req.query as any)?.bankAccountId);
   if (!bankAccountId) { res.status(422).json({ error: "bankAccountId is required" }); return; }
-  const acctRows = await queryRows(sql`
+  const acctRows = await queryRowsFrom(r, sql`
     SELECT id, account_name, bank_name, gl_code
     FROM firm_bank_accounts
     WHERE firm_id = ${req.firmId!} AND id = ${bankAccountId}
@@ -1083,7 +1161,7 @@ async function exportBankTransactionsXlsx(req: AuthRequest, res: Response): Prom
   if (!acct) { res.status(404).json({ error: "Bank account not found" }); return; }
   const bankAccountName = String((acct as any).account_name ?? (acct as any).bank_name ?? "");
   const glCode = (acct as any).gl_code ? String((acct as any).gl_code) : "";
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFrom(r, sql`
     SELECT
       id,
       transaction_date,
@@ -1127,25 +1205,29 @@ async function exportBankTransactionsXlsx(req: AuthRequest, res: Response): Prom
   XLSX.utils.book_append_sheet(wb, ws, "Export");
   const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as unknown as Buffer;
 
-  if (rows.length > 0) {
-    const ids = rows.map((x: any) => String(x.id)).filter(Boolean);
-    await queryRows(sql`
-      UPDATE bank_transactions
-      SET is_exported = true, exported_at = COALESCE(exported_at, NOW()), updated_at = NOW()
-      WHERE firm_id = ${req.firmId!}
-        AND id = ANY(${ids}::uuid[])
-    `);
-  }
-
-  await writeAuditLog({
-    firmId: req.firmId,
-    actorId: req.userId,
-    actorType: req.userType,
-    action: "accounting.bank_transactions.export_excel",
-    entityType: "bank_transaction",
-    detail: `exported=${rows.length}`,
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
+  const ids = rows.map((x: any) => String(x.id)).filter(Boolean);
+  await r.transaction(async (tx) => {
+    if (ids.length > 0) {
+      await tx.execute(sql`
+        UPDATE bank_transactions
+        SET is_exported = true, exported_at = COALESCE(exported_at, NOW()), updated_at = NOW()
+        WHERE firm_id = ${req.firmId!}
+          AND id = ANY(${ids}::uuid[])
+      `);
+    }
+    await writeAuditLog(
+      {
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "accounting.bank_transactions.export_excel",
+        entityType: "bank_transaction",
+        detail: `exported=${rows.length}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      { db: tx, strict: true },
+    );
   });
 
   const fileName = safeFilenameAscii(`bank_transactions_export_${new Date().toISOString().slice(0, 10)}.xlsx`);

@@ -10,7 +10,7 @@ import {
   firmsTable,
   sql,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, requireRlsDb, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { Readable } from "stream";
 import { getSupabaseStorageConfigError, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage.js";
 import { logger } from "../lib/logger.js";
@@ -164,23 +164,26 @@ router.post("/hub/messages", requireAuth, requireFirmUser, requirePermission("co
     res.status(400).json({ error: "subject and body are required" });
     return;
   }
-  const [msg] = await r
-    .insert(platformMessagesTable)
-    .values({
-      subject,
-      body,
-      fromFirmId: firmId,
-      fromUserId: req.userId!,
-      toFirmId: null,
-      parentId: parentId ?? null,
-    })
-    .returning();
+  const msg = await r.transaction(async (tx) => {
+    const [created] = await tx
+      .insert(platformMessagesTable)
+      .values({
+        subject,
+        body,
+        fromFirmId: firmId,
+        fromUserId: req.userId!,
+        toFirmId: null,
+        parentId: parentId ?? null,
+      })
+      .returning();
 
-  if (attachments && attachments.length > 0) {
-    await r.insert(platformMessageAttachmentsTable).values(
-      attachments.map((a) => ({ messageId: msg.id, fileName: a.fileName, fileType: a.fileType, fileSize: a.fileSize ?? null, objectPath: a.objectPath }))
-    );
-  }
+    if (attachments && attachments.length > 0) {
+      await tx.insert(platformMessageAttachmentsTable).values(
+        attachments.map((a) => ({ messageId: created.id, fileName: a.fileName, fileType: a.fileType, fileSize: a.fileSize ?? null, objectPath: a.objectPath }))
+      );
+    }
+    return created;
+  });
 
   res.status(201).json(msg);
 });
@@ -269,8 +272,7 @@ router.get("/hub/messages/:msgId/attachments/:attachmentId/download", requireAut
 // ─── System Folders (visible to firm, read-only) ────────────────────────────
 
 router.get("/hub/folders", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const r = req.rlsDb ?? db;
-  if (!req.rlsDb) req.log.warn({ firmId: req.firmId, userId: req.userId }, "hub.folders rls fallback");
+  const r = requireRlsDb(req);
   const folders = await r
     .select()
     .from(systemFoldersTable)
@@ -283,8 +285,7 @@ router.get("/hub/folders", requireAuth, requireFirmUser, requirePermission("docu
 
 router.get("/hub/documents", requireAuth, requireFirmUser, requirePermission("documents", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();
-  const r = req.rlsDb ?? db;
-  if (!req.rlsDb) req.log.warn({ firmId: req.firmId, userId: req.userId }, "hub.documents rls fallback");
+  const r = requireRlsDb(req);
   const firmId = req.firmId!;
   const folderIdStr = one((req.query as Record<string, unknown>).folderId);
   const folderId = folderIdStr ? parseInt(folderIdStr, 10) : undefined;
