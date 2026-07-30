@@ -954,6 +954,12 @@ function PaymentVouchersTab() {
   const canAccountingMarkReceived = hasPermission(user, "accounting", "mark_received");
   const canAccountingMarkPaid = hasPermission(user, "accounting", "mark_paid");
   const canAccountingOverrideSla = hasPermission(user, "accounting", "override_sla");
+  const pageSize = 50;
+  const [page, setPage] = useState(1);
+
+  useEffect(() => {
+    setPage(1);
+  }, [paymentVoucherFilterParam]);
 
   const [receiveOpen, setReceiveOpen] = useState(false);
   const [receiveVoucherId, setReceiveVoucherId] = useState<number | null>(null);
@@ -1056,8 +1062,8 @@ function PaymentVouchersTab() {
   }, [canAccountingCreate, createParams.caseId, createParams.caseTitle, createParams.openCreate, searchString, selectedCases.length]);
 
   const vouchersQuery = useQuery({
-    queryKey: ["payment-vouchers"],
-    queryFn: () => apiFetchJson("/payment-vouchers?page=1&limit=200", { timeoutMs: 20000 }),
+    queryKey: ["payment-vouchers", page],
+    queryFn: () => apiFetchJson(`/payment-vouchers?page=${page}&limit=${pageSize}`, { timeoutMs: 20000 }),
     retry: false,
     enabled: canAccountingRead,
   });
@@ -1084,6 +1090,7 @@ function PaymentVouchersTab() {
   const setVoucherFilter = (filterKey: string) => {
     const next = new URLSearchParams(searchString);
     next.set("tab", "payment-vouchers");
+    setPage(1);
     if (!filterKey || filterKey === "all") next.delete("pvFilter");
     else next.set("pvFilter", filterKey);
     setLocation(`/app/accounting?${next.toString()}`);
@@ -1992,6 +1999,31 @@ function PaymentVouchersTab() {
           <Button variant="outline" size="sm" onClick={() => setVoucherFilter("all")}>Clear Filter</Button>
         </div>
       ) : null}
+
+      <div className="flex flex-col gap-2 rounded-lg border border-slate-200 bg-white px-4 py-3 md:flex-row md:items-center md:justify-between">
+        <div className="text-sm text-slate-600">
+          Page {page} · showing up to {pageSize} vouchers (server-paged)
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page <= 1 || vouchersQuery.isLoading || vouchersQuery.isFetching}
+          >
+            Previous
+          </Button>
+          <div className="text-sm text-slate-600">Page {page}</div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setPage((p) => p + 1)}
+            disabled={vouchers.length < pageSize || vouchersQuery.isLoading || vouchersQuery.isFetching}
+          >
+            Next
+          </Button>
+        </div>
+      </div>
 
       {vouchersQuery.isError ? (
         <QueryFallback title="Payment vouchers unavailable" error={vouchersQuery.error} onRetry={() => vouchersQuery.refetch()} isRetrying={vouchersQuery.isFetching} />

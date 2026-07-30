@@ -49,11 +49,51 @@ const app = expressApp as unknown as ExpressAppLike;
 const getApiMetaUnsafe = getApiMeta as unknown as (res: ResLike) => ReturnType<typeof getApiMeta>;
 const sendErrorUnsafe = sendError as unknown as (res: ResLike, err: unknown, fallback?: { status?: number; code?: string; message?: string }) => void;
 
+export const mergeVaryHeader = (existing: unknown): string => {
+  const existingStr = Array.isArray(existing)
+    ? existing.map(String).join(",")
+    : existing != null
+      ? String(existing)
+      : "";
+  const rawParts = existingStr
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const result: string[] = [];
+  const set = new Set<string>();
+  for (const part of rawParts) {
+    const key = part.toLowerCase();
+    if (set.has(key)) continue;
+    set.add(key);
+    result.push(part);
+  }
+
+  if (!set.has("cookie")) result.push("Cookie");
+  if (!set.has("authorization")) result.push("Authorization");
+  return result.join(", ");
+};
+
 app.set("trust proxy", 1);
 app.use(helmet());
 app.use(cors());
 app.use(cookieParser());
 app.use(requestMetaMiddleware() as unknown as MiddlewareLike);
+app.use(((req: ReqLike, res: ResLike, next: Next) => {
+  const path = String(req.url ?? "");
+  const authHeader = req.headers?.["authorization"];
+  const cookieHeader = req.headers?.["cookie"];
+  const hasAuth = typeof authHeader === "string" && authHeader.trim().length > 0;
+  const hasCookieAuth = typeof cookieHeader === "string" && cookieHeader.includes("auth_token=");
+  const isApi = path.startsWith("/api/");
+  const isHealth = path === "/api/health" || path.startsWith("/api/health?");
+  if (isApi && !isHealth && (hasAuth || hasCookieAuth)) {
+    res.setHeader("Cache-Control", "private, no-store");
+    const existing = (res as any).getHeader?.("Vary");
+    res.setHeader("Vary", mergeVaryHeader(existing));
+  }
+  next();
+}) as unknown as MiddlewareLike);
 app.use(((req: ReqLike, res: ResLike, next: Next) => {
   const token = process.env.API_DEBUG_TOKEN;
   if (!token) {

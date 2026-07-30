@@ -242,21 +242,6 @@ export default function Workbench() {
     if (!exists) setParam("userId", "me");
   }, [data, staffOptions, userId]);
 
-  if (isLoading) {
-    return <div className="text-slate-500">Loading…</div>;
-  }
-  if (error || !data) {
-    return (
-      <div className="p-6">
-        <QueryFallback title="Workbench unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
-      </div>
-    );
-  }
-
-  const myWorkCards = Array.isArray((data as any)?.myWork?.cards) ? ((data as any).myWork.cards as WorkbenchCard[]) : [];
-  const myWorkRecent = Array.isArray((data as any)?.myWork?.recent) ? ((data as any).myWork.recent as any[]) : [];
-  const missingCards = Array.isArray((data as any)?.missingDates?.cards) ? ((data as any).missingDates.cards as WorkbenchCard[]) : [];
-  const overdueCards = Array.isArray((data as any)?.overdue?.cards) ? ((data as any).overdue.cards as WorkbenchCard[]) : [];
   const filteredPaymentVoucherActions = useMemo(() => {
     const rows = paymentVoucherActionsQuery.data ?? [];
     const now = Date.now();
@@ -273,6 +258,22 @@ export default function Workbench() {
     }
     return rows;
   }, [paymentVoucherActionsQuery.data, pvActionFilter]);
+
+  if (isLoading) {
+    return <div className="text-slate-500">Loading…</div>;
+  }
+  if (error || !data) {
+    return (
+      <div className="p-6">
+        <QueryFallback title="Workbench unavailable" error={error} onRetry={() => refetch()} isRetrying={isFetching} />
+      </div>
+    );
+  }
+
+  const myWorkCards = Array.isArray((data as any)?.myWork?.cards) ? ((data as any).myWork.cards as WorkbenchCard[]) : [];
+  const myWorkRecent = Array.isArray((data as any)?.myWork?.recent) ? ((data as any).myWork.recent as any[]) : [];
+  const missingCards = Array.isArray((data as any)?.missingDates?.cards) ? ((data as any).missingDates.cards as WorkbenchCard[]) : [];
+  const overdueCards = Array.isArray((data as any)?.overdue?.cards) ? ((data as any).overdue.cards as WorkbenchCard[]) : [];
 
   return (
     <div className="space-y-6">
