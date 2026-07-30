@@ -1,6 +1,6 @@
 import express, { type NextFunction, type Response, type Router as ExpressRouter } from "express";
 import crypto from "crypto";
-import { eq, and, desc, asc, inArray, ne } from "drizzle-orm";
+import { eq, and, desc, asc, inArray, ne, count, lte, or } from "drizzle-orm";
 import {
   accountingSettingsTable,
   caseLedgersTable,
@@ -231,15 +231,17 @@ async function postLedgerTx(tx: DbTxConn, args: {
 
 // List
 router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const startedAt = Date.now();
+  const requestStartedAtMs = typeof (res.locals as any)?.startedAtMs === "number" ? Number((res.locals as any).startedAtMs) : Date.now();
+  const handlerStartedAtMs = Date.now();
+  const middlewareMs = Math.max(0, handlerStartedAtMs - requestStartedAtMs);
   const caseId = one((req.query as any).caseId);
   const status = one((req.query as any).status);
   const pageRaw = one((req.query as any).page);
   const limitRaw = one((req.query as any).limit);
   const page = pageRaw ? parseInt(pageRaw, 10) : 1;
-  const limit = limitRaw ? parseInt(limitRaw, 10) : 200;
+  const limit = limitRaw ? parseInt(limitRaw, 10) : 50;
   const safePage = Number.isFinite(page) && page > 0 ? page : 1;
-  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(200, limit) : 200;
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(100, limit) : 50;
   const offset = (safePage - 1) * safeLimit;
   const conds = [eq(paymentVouchersTable.firmId, req.firmId!)];
   if (caseId) {
@@ -248,35 +250,39 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission(
     conds.push(eq(paymentVouchersTable.caseId, n));
   }
   if (status) conds.push(eq(paymentVouchersTable.status, status));
-  const r = rdb(req);
   try {
+    const dbAcquireStart = Date.now();
+    const r = rdb(req);
+    const dbAcquireMs = Math.max(0, Date.now() - dbAcquireStart);
+    const tQueryStart = Date.now();
     const rows = await r
       .select({
         id: paymentVouchersTable.id,
-        firmId: paymentVouchersTable.firmId,
         caseId: paymentVouchersTable.caseId,
         voucherType: paymentVouchersTable.voucherType,
-        targetCaseId: paymentVouchersTable.targetCaseId,
-        targetAccountId: paymentVouchersTable.targetAccountId,
         approvalStatus: paymentVouchersTable.approvalStatus,
         isAdvance: paymentVouchersTable.isAdvance,
-        approvedBy: paymentVouchersTable.approvedBy,
         voucherNo: paymentVouchersTable.voucherNo,
         status: paymentVouchersTable.status,
         fundStatus: paymentVouchersTable.fundStatus,
         payeeName: paymentVouchersTable.payeeName,
         paymentMethod: paymentVouchersTable.paymentMethod,
-        bankAccountId: paymentVouchersTable.bankAccountId,
         accountType: paymentVouchersTable.accountType,
         bankChequeRefNo: paymentVouchersTable.bankChequeRefNo,
         amount: paymentVouchersTable.amount,
         purpose: paymentVouchersTable.purpose,
         receivedAt: paymentVouchersTable.receivedAt,
         paymentDueAt: paymentVouchersTable.paymentDueAt,
+        deadlineOverrideReason: paymentVouchersTable.deadlineOverrideReason,
         assignedAccountUserId: paymentVouchersTable.assignedAccountUserId,
         assignedClerkUserId: paymentVouchersTable.assignedClerkUserId,
         paidAt: paymentVouchersTable.paidAt,
-        paidBy: paymentVouchersTable.paidBy,
+        proofDocumentPath: paymentVouchersTable.proofDocumentPath,
+        nextActionType: paymentVouchersTable.nextActionType,
+        nextActionCustom: paymentVouchersTable.nextActionCustom,
+        nextActionRemarks: paymentVouchersTable.nextActionRemarks,
+        clerkActionExemptReason: paymentVouchersTable.clerkActionExemptReason,
+        lateCompletionReason: paymentVouchersTable.lateCompletionReason,
         updatedAt: paymentVouchersTable.updatedAt,
         createdAt: paymentVouchersTable.createdAt,
       })
@@ -285,14 +291,91 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission(
       .orderBy(desc(paymentVouchersTable.createdAt))
       .limit(safeLimit)
       .offset(offset);
+    const tQueryEnd = Date.now();
     res.json(rows);
-    const durationMs = Date.now() - startedAt;
+    const tSerializeEnd = Date.now();
+    const durationMs = Math.max(0, tSerializeEnd - requestStartedAtMs);
     if (durationMs >= 2000) {
-      logger.warn({ durationMs, firmId: req.firmId, userId: req.userId, safePage, safeLimit }, "payment_voucher.list_slow");
+      logger.warn({
+        durationMs,
+        middlewareMs,
+        dbAcquireMs,
+        queryMs: tQueryEnd - tQueryStart,
+        serializeMs: tSerializeEnd - tQueryEnd,
+        firmId: req.firmId,
+        userId: req.userId,
+        safePage,
+        safeLimit,
+        requestId: typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : null,
+      }, "payment_voucher.list_slow");
     }
   } catch (err) {
     if (isMissingSchemaError(err)) {
-      res.status(500).json({ error: "Database migration missing for Payment Voucher SLA fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql", code: "MIGRATION_MISSING" });
+      res.status(500).json({
+        error: "Database migration missing for Payment Voucher SLA fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql",
+        code: "MIGRATION_MISSING",
+        request_id: typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : undefined,
+      });
+      return;
+    }
+    throw err;
+  }
+});
+
+router.get("/payment-vouchers/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const startedAt = Date.now();
+  if (!await roleHasPermission(req, "accounting", "read")) {
+    res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" });
+    return;
+  }
+  const r = rdb(req);
+  const now = new Date();
+  const firmId = req.firmId!;
+  try {
+    const [
+      awaitingReceipt,
+      receivedAndProcessing,
+      waitingApproval,
+      dueSoon,
+      overdue,
+      paidToday,
+      clerkPending,
+      clerkOverdue,
+      completedMonth,
+    ] = await Promise.all([
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), sql`${paymentVouchersTable.receivedAt} IS NULL` as any)),
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), sql`${paymentVouchersTable.receivedAt} IS NOT NULL` as any)),
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.approvalStatus, "pending_approval"))),
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), lte(paymentVouchersTable.paymentDueAt, new Date(now.getTime() + 2 * 60 * 60 * 1000)))),
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), lte(paymentVouchersTable.paymentDueAt, now))),
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "paid_pending_collection"), sql`date(${paymentVouchersTable.paidAt}) = current_date` as any)),
+      r.select({ c: count() }).from(paymentVoucherActionsTable).where(and(eq(paymentVoucherActionsTable.firmId, firmId), inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]))),
+      r.select({ c: count() }).from(paymentVoucherActionsTable).where(and(eq(paymentVoucherActionsTable.firmId, firmId), inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]), or(lte(paymentVoucherActionsTable.acknowledgeDueAt, now), lte(paymentVoucherActionsTable.completionDueAt, now)))),
+      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "completed"), sql`date_trunc('month', ${paymentVouchersTable.updatedAt}) = date_trunc('month', now())` as any)),
+    ]);
+    res.json({
+      awaitingReceipt: Number(awaitingReceipt[0]?.c ?? 0),
+      receivedAndProcessing: Number(receivedAndProcessing[0]?.c ?? 0),
+      waitingApproval: Number(waitingApproval[0]?.c ?? 0),
+      dueSoon: Number(dueSoon[0]?.c ?? 0),
+      overdue: Number(overdue[0]?.c ?? 0),
+      paidToday: Number(paidToday[0]?.c ?? 0),
+      clerkPending: Number(clerkPending[0]?.c ?? 0),
+      clerkOverdue: Number(clerkOverdue[0]?.c ?? 0),
+      completedMonth: Number(completedMonth[0]?.c ?? 0),
+    });
+    const durationMs = Date.now() - startedAt;
+    if (durationMs >= 2000) {
+      logger.warn({ durationMs, firmId: req.firmId, userId: req.userId, requestId: typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : null }, "payment_voucher.dashboard_slow");
+    }
+  } catch (err) {
+    const code = err && typeof err === "object" && "code" in (err as any) ? String((err as any).code) : null;
+    if (code === "42703" || code === "42P01") {
+      res.status(500).json({
+        error: "Database migration missing for Payment Voucher dashboard fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql",
+        code: "MIGRATION_MISSING",
+        request_id: typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : undefined,
+      });
       return;
     }
     throw err;

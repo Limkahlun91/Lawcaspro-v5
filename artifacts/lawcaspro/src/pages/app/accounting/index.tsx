@@ -1057,7 +1057,7 @@ function PaymentVouchersTab() {
 
   const vouchersQuery = useQuery({
     queryKey: ["payment-vouchers"],
-    queryFn: () => apiFetchJson("/payment-vouchers?page=1&limit=200", { timeoutMs: 20000 }),
+    queryFn: () => apiFetchJson("/payment-vouchers?page=1&limit=50", { timeoutMs: 20000 }),
     retry: false,
     enabled: canAccountingRead,
   });
