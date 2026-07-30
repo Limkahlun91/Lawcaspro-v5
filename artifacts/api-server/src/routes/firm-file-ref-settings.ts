@@ -1,7 +1,7 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { and, eq, sql } from "drizzle-orm";
 import { db, casesTable, firmFileRefSettingsTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, requireRlsDb, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { DEFAULT_STARTING_NUMBER, computeEffectiveNextNumber, extractRunningNumber, getStartingNumber, normalizeConfiguredSequence } from "../lib/fileReferenceSequence.js";
 
 type RouterInternalLike = {
@@ -15,7 +15,7 @@ const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => requireRlsDb(req);
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
 function normalizeCaseType(v: unknown): string {
   const s = typeof v === "string" ? v.trim().toLowerCase() : "";

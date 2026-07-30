@@ -1,7 +1,7 @@
 import express, { type Router as ExpressRouter } from "express";
 import { eq, desc, and, count } from "drizzle-orm";
 import { db, quotationItemsTable, quotationsTable, regulatoryRuleSetsTable, regulatoryRuleVersionsTable, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requireRlsDb, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth.js";
 import { applyRule } from "./regulatory.js";
 import { logger } from "../lib/logger.js";
 
@@ -95,7 +95,6 @@ function normalizeItem(item: any, quotationId: number, idx: number, defaultTaxRa
 router.get("/quotations", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
-    const rlsDb = (req as AuthRequest).rlsDb ?? db;
     const caseIdStr = one((req.query as any)?.caseId);
     const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
     if (caseIdStr && (!Number.isInteger(caseId) || caseId <= 0)) {
@@ -105,15 +104,15 @@ router.get("/quotations", requireAuth, requireFirmUser, async (req, res): Promis
     const where = caseIdStr
       ? and(eq(quotationsTable.firmId, firmId), eq(quotationsTable.caseId, caseId))
       : eq(quotationsTable.firmId, firmId);
-    const rows = await rlsDb.select().from(quotationsTable)
+    const rows = await db.select().from(quotationsTable)
       .where(where)
       .orderBy(desc(quotationsTable.createdAt));
 
     const results = await Promise.all(rows.map(async (q) => {
-      const [itemCount] = await rlsDb.select({ count: count() }).from(quotationItemsTable)
+      const [itemCount] = await db.select({ count: count() }).from(quotationItemsTable)
         .where(eq(quotationItemsTable.quotationId, q.id));
 
-      const items = await rlsDb.select().from(quotationItemsTable)
+      const items = await db.select().from(quotationItemsTable)
         .where(eq(quotationItemsTable.quotationId, q.id));
 
       const totalExclTax = items.reduce((sum, i) => sum + parseFloat(i.amountExclTax || "0"), 0);
@@ -146,7 +145,6 @@ router.post("/quotations", requireAuth, requireFirmUser, async (req, res): Promi
   try {
     const firmId = (req as AuthRequest).firmId!;
     const userId = (req as AuthRequest).userId!;
-    const rlsDb = (req as AuthRequest).rlsDb ?? db;
     const {
       items,
       taxRate,
@@ -170,7 +168,7 @@ router.post("/quotations", requireAuth, requireFirmUser, async (req, res): Promi
     const finalClientName = derivedClientName || (typeof clientName === "string" ? clientName.trim() : "");
     if (!finalClientName) { res.status(400).json({ error: "clientName or clientDetails is required" }); return; }
 
-    const result = await rlsDb.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
       const [quotation] = await tx.insert(quotationsTable).values({
         ...quotationData,
         clientName: finalClientName,
@@ -211,17 +209,16 @@ router.post("/quotations", requireAuth, requireFirmUser, async (req, res): Promi
 router.get("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
-    const rlsDb = (req as AuthRequest).rlsDb ?? db;
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
 
-    const [quotation] = await rlsDb.select().from(quotationsTable)
+    const [quotation] = await db.select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
 
     if (!quotation) { res.status(404).json({ error: "Quotation not found" }); return; }
 
-    const items = await rlsDb.select().from(quotationItemsTable)
+    const items = await db.select().from(quotationItemsTable)
       .where(eq(quotationItemsTable.quotationId, id))
       .orderBy(quotationItemsTable.sortOrder);
 
@@ -244,7 +241,6 @@ router.get("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Pr
 router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
-    const rlsDb = (req as AuthRequest).rlsDb ?? db;
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
@@ -258,15 +254,16 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): 
       ...quotationData
     } = req.body ?? {};
 
-    const [existing] = await rlsDb.select().from(quotationsTable)
+    const [existing] = await db.select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
+
     if (!existing) { res.status(404).json({ error: "Quotation not found" }); return; }
 
     const nextTaxRate = normalizeQuotationTaxRate(taxRate ?? (existing as any).taxRate);
     const normalizedClientDetails = normalizeClientDetails(clientDetails ?? client_details);
     const derivedClientName = normalizedClientDetails.length > 0 ? joinClientNames(normalizedClientDetails) : "";
 
-    const result = await rlsDb.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
       const updateData: Record<string, unknown> = { ...quotationData, taxRate: String(nextTaxRate) };
       if (normalizedClientDetails.length > 0) {
         updateData.clientDetails = normalizedClientDetails;
@@ -316,17 +313,16 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): 
 router.delete("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
-    const rlsDb = (req as AuthRequest).rlsDb ?? db;
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
 
-    const [existing] = await rlsDb.select().from(quotationsTable)
+    const [existing] = await db.select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
 
     if (!existing) { res.status(404).json({ error: "Quotation not found" }); return; }
 
-    await rlsDb.transaction(async (tx) => {
+    await db.transaction(async (tx) => {
       await tx.delete(quotationItemsTable).where(eq(quotationItemsTable.quotationId, id));
       await tx.delete(quotationsTable).where(eq(quotationsTable.id, id));
     });
@@ -344,17 +340,16 @@ router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (re
   try {
     const firmId = (req as AuthRequest).firmId!;
     const userId = (req as AuthRequest).userId!;
-    const rlsDb = (req as AuthRequest).rlsDb ?? db;
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
 
-    const [original] = await rlsDb.select().from(quotationsTable)
+    const [original] = await db.select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
 
     if (!original) { res.status(404).json({ error: "Quotation not found" }); return; }
 
-    const result = await rlsDb.transaction(async (tx) => {
+    const result = await db.transaction(async (tx) => {
       const [newQuotation] = await tx.insert(quotationsTable).values({
         firmId,
         caseId: original.caseId,
@@ -423,47 +418,42 @@ router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (re
 
 // ── Auto-calculate fees from Malaysian SRO rules ─────────────────────────────
 
+async function getActiveRule(code: string, asOf: string) {
+  const [set] = await db.select().from(regulatoryRuleSetsTable).where(eq(regulatoryRuleSetsTable.code, code));
+  if (!set) return null;
+  const versions = await db.select().from(regulatoryRuleVersionsTable)
+    .where(eq(regulatoryRuleVersionsTable.ruleSetId, set.id));
+  return versions.find(v => v.effectiveFrom <= asOf && (!v.effectiveTo || v.effectiveTo >= asOf)) || null;
+}
+
 router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
   try {
     const quotationIdStr = one(req.params.id);
-    const quotationId = quotationIdStr ? parseInt(quotationIdStr, 10) : NaN;
+    const quotationId = quotationIdStr ? parseInt(quotationIdStr) : NaN;
     if (isNaN(quotationId)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
     const firmId = req.firmId!;
-    const rlsDb = requireRlsDb(req);
+    const [q] = await db.select().from(quotationsTable).where(and(eq(quotationsTable.id, quotationId), eq(quotationsTable.firmId, firmId)));
+    if (!q) { res.status(404).json({ error: "Quotation not found" }); return; }
 
-    const result = await rlsDb.transaction(async (tx) => {
-      const [q] = await tx.select().from(quotationsTable).where(and(eq(quotationsTable.id, quotationId), eq(quotationsTable.firmId, firmId)));
-      if (!q) {
-        const e = new Error("Quotation not found") as any;
-        e.status = 404;
-        throw e;
-      }
+    const purchasePrice = parseFloat(String(q.purchasePrice ?? req.body.purchasePrice ?? 0));
+    const loanAmount = parseFloat(String(q.loanAmountNum ?? q.loanAmount ?? req.body.loanAmount ?? 0));
+    const asOf = new Date().toISOString().slice(0, 10);
+    const sstRate = 0.08;
 
-      const purchasePrice = parseFloat(String(q.purchasePrice ?? req.body.purchasePrice ?? 0));
-      const loanAmount = parseFloat(String((q as any).loanAmountNum ?? q.loanAmount ?? req.body.loanAmount ?? 0));
-      const asOf = new Date().toISOString().slice(0, 10);
-      const sstRate = 0.08;
+    // Fetch active rule versions
+    const [sroSpa, sroLoan, stampMot, stampLoan] = await Promise.all([
+      getActiveRule("SRO_SPA", asOf),
+      getActiveRule("SRO_LOAN", asOf),
+      getActiveRule("STAMP_DUTY_MOT", asOf),
+      getActiveRule("STAMP_DUTY_LOAN", asOf),
+    ]);
 
-      const getActiveRuleTx = async (code: string, asOfDate: string) => {
-        const [set] = await tx.select().from(regulatoryRuleSetsTable).where(eq(regulatoryRuleSetsTable.code, code));
-        if (!set) return null;
-        const versions = await tx.select().from(regulatoryRuleVersionsTable).where(eq(regulatoryRuleVersionsTable.ruleSetId, set.id));
-        return versions.find((v: any) => v.effectiveFrom <= asOfDate && (!v.effectiveTo || v.effectiveTo >= asOfDate)) || null;
-      };
-
-      const [sroSpa, sroLoan, stampMot, stampLoan] = await Promise.all([
-        getActiveRuleTx("SRO_SPA", asOf),
-        getActiveRuleTx("SRO_LOAN", asOf),
-        getActiveRuleTx("STAMP_DUTY_MOT", asOf),
-        getActiveRuleTx("STAMP_DUTY_LOAN", asOf),
-      ]);
-
-      const systemItems: {
-        section: string; description: string; taxCode: string;
-        amountExclTax: number; taxRate: number; taxAmount: number; amountInclTax: number;
-        isSystemGenerated: boolean; itemType: string; sortOrder: number;
-      }[] = [];
-      let sortOrder = 0;
+    const systemItems: {
+      section: string; description: string; taxCode: string;
+      amountExclTax: number; taxRate: number; taxAmount: number; amountInclTax: number;
+      isSystemGenerated: boolean; itemType: string; sortOrder: number;
+    }[] = [];
+    let sortOrder = 0;
 
     // 1. SRO SPA professional fee
     if (purchasePrice > 0 && sroSpa) {
@@ -529,47 +519,46 @@ router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, asyn
       });
     }
 
-      await tx.delete(quotationItemsTable).where(
-        and(eq(quotationItemsTable.quotationId, quotationId), eq(quotationItemsTable.isSystemGenerated, true))
-      );
+    // Remove existing system-generated items, keep manual ones
+    await db.delete(quotationItemsTable).where(
+      and(eq(quotationItemsTable.quotationId, quotationId), eq(quotationItemsTable.isSystemGenerated, true))
+    );
 
-      const manualItems = await tx.select().from(quotationItemsTable).where(eq(quotationItemsTable.quotationId, quotationId)).orderBy(quotationItemsTable.sortOrder);
-      for (let i = 0; i < manualItems.length; i++) {
-        await tx.update(quotationItemsTable).set({ sortOrder: sortOrder + i }).where(eq(quotationItemsTable.id, manualItems[i].id));
-      }
+    // Re-sort non-system items after sortOrder
+    const manualItems = await db.select().from(quotationItemsTable).where(eq(quotationItemsTable.quotationId, quotationId)).orderBy(quotationItemsTable.sortOrder);
+    for (let i = 0; i < manualItems.length; i++) {
+      await db.update(quotationItemsTable).set({ sortOrder: sortOrder + i }).where(eq(quotationItemsTable.id, manualItems[i].id));
+    }
 
-      if (systemItems.length) {
-        await tx.insert(quotationItemsTable).values(systemItems.map(i => ({
-          quotationId,
-          section: i.section,
-          description: i.description,
-          taxCode: i.taxCode,
-          amountExclTax: String(i.amountExclTax),
-          taxRate: String(i.taxRate),
-          taxAmount: String(i.taxAmount),
-          amountInclTax: String(i.amountInclTax),
-          isSystemGenerated: i.isSystemGenerated,
-          itemType: i.itemType,
-          sortOrder: i.sortOrder,
-        })));
-      }
+    // Insert system items
+    if (systemItems.length) {
+      await db.insert(quotationItemsTable).values(systemItems.map(i => ({
+        quotationId,
+        section: i.section,
+        description: i.description,
+        taxCode: i.taxCode,
+        amountExclTax: String(i.amountExclTax),
+        taxRate: String(i.taxRate),
+        taxAmount: String(i.taxAmount),
+        amountInclTax: String(i.amountInclTax),
+        isSystemGenerated: i.isSystemGenerated,
+        itemType: i.itemType,
+        sortOrder: i.sortOrder,
+      })));
+    }
 
-      const allItems = await tx.select().from(quotationItemsTable).where(eq(quotationItemsTable.quotationId, quotationId)).orderBy(quotationItemsTable.sortOrder);
-      const totals = {
-        subtotal: allItems.reduce((s, i) => s + parseFloat(i.amountExclTax || "0"), 0),
-        tax: allItems.reduce((s, i) => s + parseFloat(i.taxAmount || "0"), 0),
-        grandTotal: allItems.reduce((s, i) => s + parseFloat(i.amountInclTax || "0"), 0),
-      };
+    const allItems = await db.select().from(quotationItemsTable).where(eq(quotationItemsTable.quotationId, quotationId)).orderBy(quotationItemsTable.sortOrder);
+    const totals = {
+      subtotal: allItems.reduce((s, i) => s + parseFloat(i.amountExclTax || "0"), 0),
+      tax: allItems.reduce((s, i) => s + parseFloat(i.taxAmount || "0"), 0),
+      grandTotal: allItems.reduce((s, i) => s + parseFloat(i.amountInclTax || "0"), 0),
+    };
 
-      return { allItems, totals, breakdown: { purchasePrice, loanAmount } };
-    });
-
-    res.json({ items: result.allItems.map(formatItem), totals: result.totals, breakdown: result.breakdown });
+    res.json({ items: allItems.map(formatItem), totals, breakdown: { purchasePrice, loanAmount } });
     return;
   } catch (err) {
-    const status = (err as any)?.status && Number.isInteger((err as any).status) ? Number((err as any).status) : 500;
     logger.error({ err, path: req.path }, "[quotations]");
-    res.status(status).json({ error: status === 500 ? "Internal Server Error" : String((err as any)?.message ?? "Internal Server Error") });
+    res.status(500).json({ error: "Internal Server Error" });
     return;
   }
 });

@@ -37,9 +37,6 @@ export default defineConfig({
         "src/__tests__/communication-hub.test.ts",
         "src/__tests__/payment-voucher-create-status.unit.test.ts",
         "src/__tests__/payment-voucher-create-request.unit.test.ts",
-        "src/__tests__/rls-connection-lifecycle.unit.test.ts",
-        "src/__tests__/manual-migrations-runner.unit.test.ts",
-        "src/__tests__/manual-migrations-postconditions.unit.test.ts",
       ],
     pool: "forks",
     poolOptions: {

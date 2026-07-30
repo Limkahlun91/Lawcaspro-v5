@@ -18,6 +18,7 @@ import {
 import {
   requireAuth,
   requireFirmUser,
+  requireFirmUserSession,
   requireFounder,
   requireFounderPermission,
   requirePermission,

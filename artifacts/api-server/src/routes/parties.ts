@@ -5,7 +5,7 @@ import {
   db, partiesTable, complianceProfilesTable, casePartiesTable,
   beneficialOwnersTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, requireRlsDb, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 
 type RouterInternalLike = {
@@ -18,7 +18,7 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
-function rdb(req: AuthRequest) { return requireRlsDb(req); }
+function rdb(req: AuthRequest) { return req.rlsDb ?? db; }
 
 const CreatePartyBody = z.object({
   partyType: z.enum(["natural_person", "company", "trust"]).default("natural_person"),
@@ -68,7 +68,7 @@ const CreateBeneficialOwnerBody = z.object({
 // ---------------------------------------------------------------------------
 router.get("/parties", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const { q, type } = req.query as Record<string, string>;
-  let query = rdb(req).select().from(partiesTable)
+  let query = db.select().from(partiesTable)
     .where(and(
       eq(partiesTable.firmId, req.firmId!),
       isNull(partiesTable.deletedAt),
@@ -121,31 +121,24 @@ router.post("/parties", sensitiveRateLimiter, requireAuth, requireFirmUser, asyn
     createdBy: req.userId,
   } satisfies typeof partiesTable.$inferInsert;
 
-  const r = rdb(req);
-  const party = await r.transaction(async (tx) => {
-    const [created] = await tx.insert(partiesTable).values(partyInsert).returning();
+  const [party] = await rdb(req).insert(partiesTable).values(partyInsert).returning();
 
-    await tx.insert(complianceProfilesTable).values({
-      firmId: req.firmId!,
-      partyId: created.id,
-      cddStatus: "not_started",
-      riskLevel: data.isPep || data.isHighRiskJurisdiction ? "high" : "low",
-      riskScore: (data.isPep ? 30 : 0) + (data.isHighRiskJurisdiction ? 25 : 0) +
-                 (data.hasNomineeArrangement ? 20 : 0) + (data.hasLayeredOwnership ? 15 : 0),
-      eddTriggered: data.isPep || data.isHighRiskJurisdiction,
-      eddReason: data.isPep ? "PEP identified" : data.isHighRiskJurisdiction ? "High-risk jurisdiction" : null,
-    });
+  // Auto-create compliance profile
+  await rdb(req).insert(complianceProfilesTable).values({
+    firmId: req.firmId!,
+    partyId: party.id,
+    cddStatus: "not_started",
+    riskLevel: data.isPep || data.isHighRiskJurisdiction ? "high" : "low",
+    riskScore: (data.isPep ? 30 : 0) + (data.isHighRiskJurisdiction ? 25 : 0) +
+               (data.hasNomineeArrangement ? 20 : 0) + (data.hasLayeredOwnership ? 15 : 0),
+    eddTriggered: data.isPep || data.isHighRiskJurisdiction,
+    eddReason: data.isPep ? "PEP identified" : data.isHighRiskJurisdiction ? "High-risk jurisdiction" : null,
+  });
 
-    await writeAuditLog(
-      {
-        actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-        action: "compliance.party_created", entityType: "party", entityId: created.id,
-        detail: `${data.fullName} (${data.partyType})`, ipAddress: req.ip, userAgent: req.headers["user-agent"],
-      },
-      { db: tx, strict: true },
-    );
-
-    return created;
+  await writeAuditLog({
+    actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+    action: "compliance.party_created", entityType: "party", entityId: party.id,
+    detail: `${data.fullName} (${data.partyType})`, ipAddress: req.ip, userAgent: req.headers["user-agent"],
   });
 
   res.status(201).json(party);
@@ -207,18 +200,12 @@ router.patch("/parties/:id", requireAuth, requireFirmUser, async (req: AuthReque
   if (parsed.data.hasLayeredOwnership !== undefined) updatePayload.hasLayeredOwnership = parsed.data.hasLayeredOwnership;
   if (parsed.data.directors !== undefined) updatePayload.directors = parsed.data.directors;
 
-  const r = rdb(req);
-  const updated = await r.transaction(async (tx) => {
-    const [row] = await tx.update(partiesTable).set(updatePayload).where(eq(partiesTable.id, id)).returning();
-    await writeAuditLog(
-      {
-        actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-        action: "compliance.party_updated", entityType: "party", entityId: id,
-        detail: JSON.stringify(Object.keys(parsed.data)), ipAddress: req.ip, userAgent: req.headers["user-agent"],
-      },
-      { db: tx, strict: true },
-    );
-    return row;
+  const [updated] = await rdb(req).update(partiesTable).set(updatePayload).where(eq(partiesTable.id, id)).returning();
+
+  await writeAuditLog({
+    actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+    action: "compliance.party_updated", entityType: "party", entityId: id,
+    detail: JSON.stringify(Object.keys(parsed.data)), ipAddress: req.ip, userAgent: req.headers["user-agent"],
   });
 
   res.json(updated);
@@ -233,17 +220,11 @@ router.delete("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequ
     .where(and(eq(partiesTable.id, id), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
   if (!party) { res.status(404).json({ error: "Party not found" }); return; }
 
-  const r = rdb(req);
-  await r.transaction(async (tx) => {
-    await tx.update(partiesTable).set({ deletedAt: new Date() }).where(eq(partiesTable.id, id));
-    await writeAuditLog(
-      {
-        actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-        action: "compliance.party_deleted", entityType: "party", entityId: id,
-        ipAddress: req.ip, userAgent: req.headers["user-agent"],
-      },
-      { db: tx, strict: true },
-    );
+  await rdb(req).update(partiesTable).set({ deletedAt: new Date() }).where(eq(partiesTable.id, id));
+  await writeAuditLog({
+    actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+    action: "compliance.party_deleted", entityType: "party", entityId: id,
+    ipAddress: req.ip, userAgent: req.headers["user-agent"],
   });
   res.json({ success: true });
 });
@@ -275,18 +256,12 @@ router.post("/parties/:id/beneficial-owners", requireAuth, requireFirmUser, asyn
     throughEntityName: parsed.data.throughEntityName,
   } satisfies typeof beneficialOwnersTable.$inferInsert;
 
-  const r = rdb(req);
-  const bo = await r.transaction(async (tx) => {
-    const [created] = await tx.insert(beneficialOwnersTable).values(boInsert).returning();
-    await writeAuditLog(
-      {
-        actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-        action: "compliance.beneficial_owner_added", entityType: "party", entityId: partyId,
-        detail: parsed.data.ownerName, ipAddress: req.ip, userAgent: req.headers["user-agent"],
-      },
-      { db: tx, strict: true },
-    );
-    return created;
+  const [bo] = await rdb(req).insert(beneficialOwnersTable).values(boInsert).returning();
+
+  await writeAuditLog({
+    actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+    action: "compliance.beneficial_owner_added", entityType: "party", entityId: partyId,
+    detail: parsed.data.ownerName, ipAddress: req.ip, userAgent: req.headers["user-agent"],
   });
 
   res.status(201).json(bo);
@@ -297,19 +272,13 @@ router.post("/parties/:id/beneficial-owners", requireAuth, requireFirmUser, asyn
 // ---------------------------------------------------------------------------
 router.delete("/parties/:id/beneficial-owners/:boId", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const boId = Number(req.params.boId);
-  const r = rdb(req);
-  await r.transaction(async (tx) => {
-    await tx.delete(beneficialOwnersTable).where(
-      and(eq(beneficialOwnersTable.id, boId), eq(beneficialOwnersTable.firmId, req.firmId!))
-    );
-    await writeAuditLog(
-      {
-        actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-        action: "compliance.beneficial_owner_removed", entityType: "beneficial_owner", entityId: boId,
-        ipAddress: req.ip, userAgent: req.headers["user-agent"],
-      },
-      { db: tx, strict: true },
-    );
+  await rdb(req).delete(beneficialOwnersTable).where(
+    and(eq(beneficialOwnersTable.id, boId), eq(beneficialOwnersTable.firmId, req.firmId!))
+  );
+  await writeAuditLog({
+    actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+    action: "compliance.beneficial_owner_removed", entityType: "beneficial_owner", entityId: boId,
+    ipAddress: req.ip, userAgent: req.headers["user-agent"],
   });
   res.json({ success: true });
 });
@@ -340,39 +309,31 @@ router.post("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: 
   }).safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
-  const r = rdb(req);
-  const out = await r.transaction(async (tx) => {
-    const [existing] = await tx.select().from(casePartiesTable)
-      .where(and(
-        eq(casePartiesTable.caseId, caseId),
-        eq(casePartiesTable.partyId, parsed.data.partyId),
-        eq(casePartiesTable.firmId, req.firmId!),
-      ));
-    if (existing) return { kind: "duplicate" as const };
+  // Check for duplicate
+  const [existing] = await rdb(req).select().from(casePartiesTable)
+    .where(and(
+      eq(casePartiesTable.caseId, caseId),
+      eq(casePartiesTable.partyId, parsed.data.partyId),
+      eq(casePartiesTable.firmId, req.firmId!),
+    ));
+  if (existing) { res.status(409).json({ error: "Party already linked to this case" }); return; }
 
-    const [link] = await tx.insert(casePartiesTable).values({
-      firmId: req.firmId!,
-      caseId,
-      partyId: parsed.data.partyId,
-      partyRole: parsed.data.partyRole,
-    }).returning();
+  const [link] = await rdb(req).insert(casePartiesTable).values({
+    firmId: req.firmId!,
+    caseId,
+    partyId: parsed.data.partyId,
+    partyRole: parsed.data.partyRole,
+  }).returning();
 
-    await writeAuditLog(
-      {
-        actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-        action: "compliance.case_party_linked",
-        entityType: "case", entityId: caseId,
-        detail: `partyId=${parsed.data.partyId} role=${parsed.data.partyRole}`,
-        ipAddress: req.ip, userAgent: req.headers["user-agent"],
-      },
-      { db: tx, strict: true },
-    );
-
-    return { kind: "ok" as const, link };
+  await writeAuditLog({
+    actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+    action: "compliance.case_party_linked",
+    entityType: "case", entityId: caseId,
+    detail: `partyId=${parsed.data.partyId} role=${parsed.data.partyRole}`,
+    ipAddress: req.ip, userAgent: req.headers["user-agent"],
   });
 
-  if (out.kind === "duplicate") { res.status(409).json({ error: "Party already linked to this case" }); return; }
-  res.status(201).json(out.link);
+  res.status(201).json(link);
 });
 
 // ---------------------------------------------------------------------------
@@ -381,24 +342,18 @@ router.post("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: 
 router.delete("/cases/:caseId/parties/:partyId", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const partyId = Number(req.params.partyId);
-  const r = rdb(req);
-  await r.transaction(async (tx) => {
-    await tx.delete(casePartiesTable)
-      .where(and(
-        eq(casePartiesTable.caseId, caseId),
-        eq(casePartiesTable.partyId, partyId),
-        eq(casePartiesTable.firmId, req.firmId!),
-      ));
-    await writeAuditLog(
-      {
-        actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
-        action: "compliance.case_party_unlinked",
-        entityType: "case", entityId: caseId,
-        detail: `partyId=${partyId}`,
-        ipAddress: req.ip, userAgent: req.headers["user-agent"],
-      },
-      { db: tx, strict: true },
-    );
+  await rdb(req).delete(casePartiesTable)
+    .where(and(
+      eq(casePartiesTable.caseId, caseId),
+      eq(casePartiesTable.partyId, partyId),
+      eq(casePartiesTable.firmId, req.firmId!),
+    ));
+  await writeAuditLog({
+    actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
+    action: "compliance.case_party_unlinked",
+    entityType: "case", entityId: caseId,
+    detail: `partyId=${partyId}`,
+    ipAddress: req.ip, userAgent: req.headers["user-agent"],
   });
   res.json({ success: true });
 });

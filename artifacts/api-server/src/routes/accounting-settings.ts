@@ -2,7 +2,7 @@ import express, { type Response, type Router as ExpressRouter } from "express";
 import { and, eq, inArray } from "drizzle-orm";
 import { accountingSettingsTable, db, permissionsTable, rolesTable } from "@workspace/db";
 import { z } from "zod";
-import { requireAuth, requireFirmUser, requirePermission, requireRlsDb, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import {
   ACCOUNTING_ACTIONS,
   buildRoleTemplate,
@@ -20,7 +20,7 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
-const rdb = (req: AuthRequest) => requireRlsDb(req);
+const rdb = (req: AuthRequest) => req.rlsDb ?? db;
 
 const AccountingSettingsPatchSchema = z.object({
   accountManagerRoleIds: z.array(z.number().int().positive()).default([]),

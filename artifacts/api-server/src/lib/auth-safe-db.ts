@@ -1,4 +1,4 @@
-import { clearTenantContext, makeRlsDb, pool, setFounderContextSession } from "@workspace/db";
+import { clearTenantContext, makeRlsDb, pool, setFounderContext } from "@workspace/db";
 import { logger } from "./logger";
 
 export type AuthSafeDbContext = {
@@ -101,9 +101,10 @@ async function runWithAuthSafeDbOnce<T>(
   let destroyClient = false;
 
   try {
+    await client.query("BEGIN");
     if (allowUnsafe) {
       try {
-        await setFounderContextSession(client);
+        await setFounderContext(client);
       } catch (err) {
         const errMessageShort =
           err instanceof Error ? err.message.slice(0, 180) : String(err ?? "").slice(0, 180);
@@ -112,20 +113,26 @@ async function runWithAuthSafeDbOnce<T>(
           "auth-safe-db.founder_context_failed",
         );
         try {
-          await client.query("SET app.is_founder = 'true'");
-          await client.query("SET app.current_firm_id = '0'");
-          await client.query("SET app.current_user_id = '0'");
+          await client.query("SET LOCAL app.is_founder = 'true'");
+          await client.query("SET LOCAL app.current_firm_id = '0'");
+          await client.query("SET LOCAL app.current_user_id = '0'");
         } catch {
         }
       }
     } else {
-      await setFounderContextSession(client);
+      await setFounderContext(client);
     }
     const authDb = makeRlsDb(client);
     const result = await fn(authDb);
+    await client.query("COMMIT");
     return result;
   } catch (err) {
     destroyClient = isTransientDbConnectionError(err);
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      destroyClient = true;
+    }
     const kind = classifyTransientDbConnectionError(err) ?? "unknown";
     if (destroyClient) {
       logger.warn({ ...ctx, err, kind }, "auth-safe-db.destroying_client_due_to_error");
@@ -135,7 +142,6 @@ async function runWithAuthSafeDbOnce<T>(
     try {
       await clearTenantContext(client);
     } catch {
-      destroyClient = true;
     }
     client.release(destroyClient);
   }
@@ -149,20 +155,26 @@ async function runWithAuthUnsafeRoleOnce<T>(
   let destroyClient = false;
 
   try {
-    await client.query("SET app.is_founder = 'true'");
-    await client.query("SET app.current_firm_id = '0'");
-    await client.query("SET app.current_user_id = '0'");
+    await client.query("BEGIN");
+    await client.query("SET LOCAL app.is_founder = 'true'");
+    await client.query("SET LOCAL app.current_firm_id = '0'");
+    await client.query("SET LOCAL app.current_user_id = '0'");
     const authDb = makeRlsDb(client);
     const result = await fn(authDb);
+    await client.query("COMMIT");
     return result;
   } catch (err) {
     destroyClient = isTransientDbConnectionError(err);
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      destroyClient = true;
+    }
     throw err;
   } finally {
     try {
       await clearTenantContext(client);
     } catch {
-      destroyClient = true;
     }
     client.release(destroyClient);
   }

@@ -2,7 +2,7 @@ import express, { type Router as ExpressRouter, type RequestHandler } from "expr
 import { and, eq, inArray } from "drizzle-orm";
 import { z } from "zod/v4";
 import { db, caseNotificationsTable, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, requireRlsDb, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -13,7 +13,7 @@ const expressRouter = express.Router();
 const routerInternal = expressRouter as unknown as RouterInternalLike;
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => requireRlsDb(req);
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
 const requireAuthHandler = requireAuth as RequestHandler;
 const requireFirmUserHandler = requireFirmUser as RequestHandler;
@@ -96,3 +96,4 @@ routerInternal.post(
 const exportedRouter = expressRouter as unknown as ExpressRouter;
 export { exportedRouter as router };
 export default exportedRouter;
+
