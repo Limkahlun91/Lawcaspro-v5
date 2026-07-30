@@ -2,7 +2,7 @@ import express, { type Response, type Router as ExpressRouter } from "express";
 import { and, count, desc, eq, inArray, lte, or } from "drizzle-orm";
 import { casesTable, db, paymentVoucherActionsTable, paymentVouchersTable, permissionsTable, sql, userNotificationsTable } from "@workspace/db";
 import { z } from "zod";
-import { requireAuth, requireFirmUser, requirePermission, requireRlsDb, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 
 type RouterInternalLike = {
@@ -12,7 +12,7 @@ type RouterInternalLike = {
 
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
-const rdb = (req: AuthRequest) => requireRlsDb(req);
+const rdb = (req: AuthRequest) => req.rlsDb ?? db;
 const one = (v: string | string[] | undefined): string | undefined => Array.isArray(v) ? v[0] : v;
 
 async function roleHasPermission(req: AuthRequest, module: string, action: string): Promise<boolean> {
@@ -183,21 +183,17 @@ router.post("/payment-voucher-actions/:id/acknowledge", requireAuth, requireFirm
     res.status(409).json({ error: "Action already acknowledged or completed", code: "INVALID_STATUS" });
     return;
   }
-  const updated = await r.transaction(async (tx) => {
-    const [updated] = await tx.update(paymentVoucherActionsTable).set({
-      status: "acknowledged",
-      acknowledgedBy: req.userId!,
-      acknowledgedAt: new Date(),
-      updatedAt: new Date(),
-    }).where(and(eq(paymentVoucherActionsTable.id, id), eq(paymentVoucherActionsTable.firmId, req.firmId!), eq(paymentVoucherActionsTable.status, "assigned"))).returning();
-    if (!updated) return null;
-    await writeAuditLog(
-      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "payment_voucher.action_acknowledged", entityType: "payment_voucher_action", entityId: id, detail: `paymentVoucherId=${action.paymentVoucherId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
-      { db: tx, strict: true },
-    );
-    return updated;
-  });
-  if (!updated) { res.status(409).json({ error: "Action already acknowledged", code: "INVALID_STATUS" }); return; }
+  const [updated] = await r.update(paymentVoucherActionsTable).set({
+    status: "acknowledged",
+    acknowledgedBy: req.userId!,
+    acknowledgedAt: new Date(),
+    updatedAt: new Date(),
+  }).where(and(eq(paymentVoucherActionsTable.id, id), eq(paymentVoucherActionsTable.firmId, req.firmId!), eq(paymentVoucherActionsTable.status, "assigned"))).returning();
+  if (!updated) {
+    res.status(409).json({ error: "Action already acknowledged", code: "INVALID_STATUS" });
+    return;
+  }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "payment_voucher.action_acknowledged", entityType: "payment_voucher_action", entityId: id, detail: `paymentVoucherId=${action.paymentVoucherId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(updated);
 });
 
@@ -258,12 +254,9 @@ router.post("/payment-voucher-actions/:id/complete", requireAuth, requireFirmUse
         eq(userNotificationsTable.sourceId, id),
       ));
     }
-    await writeAuditLog(
-      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "payment_voucher.action_completed", entityType: "payment_voucher_action", entityId: id, detail: `paymentVoucherId=${action.paymentVoucherId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
-      { db: tx, strict: true },
-    );
     return { updatedAction, updatedVoucher };
   });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "payment_voucher.action_completed", entityType: "payment_voucher_action", entityId: id, detail: `paymentVoucherId=${action.paymentVoucherId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(result);
 });
 

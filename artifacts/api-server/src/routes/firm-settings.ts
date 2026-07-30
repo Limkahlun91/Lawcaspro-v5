@@ -2,7 +2,7 @@ import express, { type Response, type Router as ExpressRouter } from "express";
 import { Readable } from "stream";
 import { eq, and } from "drizzle-orm";
 import { db, firmBankAccountsTable, firmsTable, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, requireRlsDb, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { one } from "../lib/http.js";
 import { getSupabaseStorageConfigError, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage.js";
 
@@ -20,7 +20,7 @@ const router = expressRouter as unknown as RouterInternalLike;
 const supabaseStorage = new SupabaseStorageService();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => requireRlsDb(req);
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
 async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
   const result = await (r as any).execute(query);
@@ -223,37 +223,62 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
     if (email !== undefined) updates.email = email;
     if (desiredUseMasterDocuments !== undefined) updates.showMasterDocuments = Boolean(desiredUseMasterDocuments);
 
-    const out = await (r as any).transaction(async (tx: DbConn) => {
-      let schemaFallback = false;
+    let schemaFallback = false;
+    try {
+      await r.update(firmsTable)
+        .set(updates)
+        .where(eq(firmsTable.id, firmId))
+        .returning({ id: firmsTable.id });
+    } catch (err) {
+      const code = getPgCode(err);
+      if (code === "42703") {
+        schemaFallback = true;
+      } else {
+        throw err;
+      }
+    }
+
+    if (desiredUseMasterDocuments !== undefined) {
       try {
-        await (tx as any).update(firmsTable)
-          .set(updates)
-          .where(eq(firmsTable.id, firmId))
-          .returning({ id: firmsTable.id });
+        await queryRows(r, sql`
+          INSERT INTO firm_settings (firm_id, use_master_documents, enable_firm_letterhead, created_at, updated_at)
+          VALUES (${firmId}, ${Boolean(desiredUseMasterDocuments)}, false, now(), now())
+          ON CONFLICT (firm_id) DO UPDATE
+            SET use_master_documents = EXCLUDED.use_master_documents,
+                updated_at = now()
+        `);
       } catch (err) {
         const code = getPgCode(err);
-        if (code === "42703") schemaFallback = true;
-        else throw err;
+        if (code !== "42P01" && code !== "42501") throw err;
       }
+    }
 
-      if (desiredUseMasterDocuments !== undefined) {
-        try {
-          await queryRows(tx, sql`
-            INSERT INTO firm_settings (firm_id, use_master_documents, enable_firm_letterhead, created_at, updated_at)
-            VALUES (${firmId}, ${Boolean(desiredUseMasterDocuments)}, false, now(), now())
-            ON CONFLICT (firm_id) DO UPDATE
-              SET use_master_documents = EXCLUDED.use_master_documents,
-                  updated_at = now()
-          `);
-        } catch (err) {
-          const code = getPgCode(err);
-          if (code !== "42P01" && code !== "42501") throw err;
-        }
-      }
-
-      let firm: any | null = null;
-      try {
-        const firmRows = await queryRows(tx, sql`
+    let firm: any | null = null;
+    try {
+      const firmRows = await queryRows(r, sql`
+        SELECT
+          id,
+          name,
+          slug,
+          logo_url,
+          address,
+          st_number,
+          tin_number,
+          registration_no,
+          sst_no,
+          phone,
+          email,
+          show_master_documents
+        FROM firms
+        WHERE id = ${firmId}
+        LIMIT 1
+      `);
+      firm = (firmRows[0] as any) ?? null;
+    } catch (err) {
+      const code = getPgCode(err);
+      if (code === "42703") {
+        schemaFallback = true;
+        const firmRows = await queryRows(r, sql`
           SELECT
             id,
             name,
@@ -265,92 +290,59 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
             registration_no,
             sst_no,
             phone,
-            email,
-            show_master_documents
+            email
           FROM firms
           WHERE id = ${firmId}
           LIMIT 1
         `);
         firm = (firmRows[0] as any) ?? null;
-      } catch (err) {
-        const code = getPgCode(err);
-        if (code === "42703") {
-          schemaFallback = true;
-          const firmRows = await queryRows(tx, sql`
-            SELECT
-              id,
-              name,
-              slug,
-              logo_url,
-              address,
-              st_number,
-              tin_number,
-              registration_no,
-              sst_no,
-              phone,
-              email
-            FROM firms
-            WHERE id = ${firmId}
-            LIMIT 1
-          `);
-          firm = (firmRows[0] as any) ?? null;
-        } else {
-          throw err;
-        }
+      } else {
+        throw err;
       }
-      const bankAccounts = await (async () => {
-        try {
-          const rows = await (tx as any).select().from(firmBankAccountsTable)
-            .where(eq(firmBankAccountsTable.firmId, firmId));
-          return Array.isArray(rows) ? rows : [];
-        } catch {
-          return [];
-        }
-      })();
-
-      const masterSetting = await safeGetUseMasterDocuments(tx, firmId);
-      const showMasterDocumentsResolved = masterSetting.useMasterDocuments;
-
-      const payload = {
-        ok: true,
-        settings: { useMasterDocuments: Boolean(showMasterDocumentsResolved), enableFirmLetterhead: false },
-        data: {
-          id: firmId,
-          name: String(firm?.name ?? ""),
-          slug: String(firm?.slug ?? ""),
-          useMasterDocuments: Boolean(showMasterDocumentsResolved),
-          showMasterDocuments: Boolean(showMasterDocumentsResolved),
-          firmLetterheadEnabled: false,
-          logoUrl: typeof firm?.logo_url === "string" ? firm.logo_url : "",
-          address: typeof firm?.address === "string" ? firm.address : "",
-          stNumber: typeof firm?.st_number === "string" ? firm.st_number : "",
-          tinNumber: typeof firm?.tin_number === "string" ? firm.tin_number : "",
-          registrationNo: typeof firm?.registration_no === "string" ? firm.registration_no : "",
-          sstNo: typeof firm?.sst_no === "string" ? firm.sst_no : "",
-          phone: typeof firm?.phone === "string" ? firm.phone : "",
-          email: typeof firm?.email === "string" ? firm.email : "",
-          bankAccounts: bankAccounts.map((b: any) => ({
-            id: b.id,
-            bankName: b.bankName,
-            accountNo: b.accountNo,
-            accountType: b.accountType,
-            isDefault: b.isDefault,
-          })),
-        },
-        fallback: schemaFallback || masterSetting.fallback,
-      };
-
-      if (!schemaFallback) {
-        await writeAuditLog(
-          { firmId, actorId: req.userId, actorType: req.userType, action: "settings.update", entityType: "firm", entityId: firmId, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
-          { db: tx, strict: true },
-        );
+    }
+    const bankAccounts = await (async () => {
+      try {
+        const rows = await (r as any).select().from(firmBankAccountsTable)
+          .where(eq(firmBankAccountsTable.firmId, firmId));
+        return Array.isArray(rows) ? rows : [];
+      } catch {
+        return [];
       }
+    })();
 
-      return payload;
+    const masterSetting = await safeGetUseMasterDocuments(r, firmId);
+    const showMasterDocumentsResolved = masterSetting.useMasterDocuments;
+    res.status(200).json({
+      ok: true,
+      settings: { useMasterDocuments: Boolean(showMasterDocumentsResolved), enableFirmLetterhead: false },
+      data: {
+        id: firmId,
+        name: String(firm?.name ?? ""),
+        slug: String(firm?.slug ?? ""),
+        useMasterDocuments: Boolean(showMasterDocumentsResolved),
+        showMasterDocuments: Boolean(showMasterDocumentsResolved),
+        firmLetterheadEnabled: false,
+        logoUrl: typeof firm?.logo_url === "string" ? firm.logo_url : "",
+        address: typeof firm?.address === "string" ? firm.address : "",
+        stNumber: typeof firm?.st_number === "string" ? firm.st_number : "",
+        tinNumber: typeof firm?.tin_number === "string" ? firm.tin_number : "",
+        registrationNo: typeof firm?.registration_no === "string" ? firm.registration_no : "",
+        sstNo: typeof firm?.sst_no === "string" ? firm.sst_no : "",
+        phone: typeof firm?.phone === "string" ? firm.phone : "",
+        email: typeof firm?.email === "string" ? firm.email : "",
+        bankAccounts: bankAccounts.map((b: any) => ({
+          id: b.id,
+          bankName: b.bankName,
+          accountNo: b.accountNo,
+          accountType: b.accountType,
+          isDefault: b.isDefault,
+        })),
+      },
+      fallback: schemaFallback || masterSetting.fallback,
     });
-
-    res.status(200).json(out);
+    if (!schemaFallback) {
+      await writeAuditLog({ firmId, actorId: req.userId, actorType: req.userType, action: "settings.update", entityType: "firm", entityId: firmId, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    }
     return;
   } catch (err: any) {
     req.log.error({ err }, "firm_settings.update failed");
@@ -427,19 +419,12 @@ router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requir
       ctxIsFounder,
     }, "create route tenant context");
 
-    const account = await r.transaction(async (tx) => {
-      const [created] = await tx.insert(firmBankAccountsTable).values({
-        firmId,
-        bankName,
-        accountNo,
-        accountType: resolvedType,
-      }).returning();
-      await writeAuditLog(
-        { firmId, actorId: req.userId, actorType: req.userType, action: "settings.bank_account.create", entityType: "firm_bank_account", entityId: created.id, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
-        { db: tx, strict: true },
-      );
-      return created;
-    });
+    const [account] = await r.insert(firmBankAccountsTable).values({
+      firmId,
+      bankName,
+      accountNo,
+      accountType: resolvedType,
+    }).returning();
 
     res.status(201).json({
       id: account.id,
@@ -448,6 +433,7 @@ router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requir
       accountType: account.accountType,
       isDefault: account.isDefault,
     });
+    await writeAuditLog({ firmId, actorId: req.userId, actorType: req.userType, action: "settings.bank_account.create", entityType: "firm_bank_account", entityId: account.id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     return;
   } catch (err: any) {
     const pg = (() => {
@@ -525,29 +511,18 @@ router.patch("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, r
       return;
     }
 
-    const updated = await r.transaction(async (tx) => {
-      if (updates.isDefault === true) {
-        await tx
-          .update(firmBankAccountsTable)
-          .set({ isDefault: false })
-          .where(and(eq(firmBankAccountsTable.firmId, firmId), sql`${firmBankAccountsTable.id} <> ${id}`));
-      }
-
-      const [row] = await tx
+    if (updates.isDefault === true) {
+      await r
         .update(firmBankAccountsTable)
-        .set(updates)
-        .where(and(eq(firmBankAccountsTable.id, id), eq(firmBankAccountsTable.firmId, firmId)))
-        .returning();
+        .set({ isDefault: false })
+        .where(and(eq(firmBankAccountsTable.firmId, firmId), sql`${firmBankAccountsTable.id} <> ${id}`));
+    }
 
-      if (!row) return null;
-
-      await writeAuditLog(
-        { firmId, actorId: req.userId, actorType: req.userType, action: "settings.bank_account.update", entityType: "firm_bank_account", entityId: row.id, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
-        { db: tx, strict: true },
-      );
-
-      return row;
-    });
+    const [updated] = await r
+      .update(firmBankAccountsTable)
+      .set(updates)
+      .where(and(eq(firmBankAccountsTable.id, id), eq(firmBankAccountsTable.firmId, firmId)))
+      .returning();
 
     if (!updated) {
       res.status(404).json({ error: "Bank account not found" });
@@ -561,6 +536,7 @@ router.patch("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, r
       accountType: updated.accountType,
       isDefault: updated.isDefault,
     });
+    await writeAuditLog({ firmId, actorId: req.userId, actorType: req.userType, action: "settings.bank_account.update", entityType: "firm_bank_account", entityId: updated.id, detail: `fields=${Object.keys(updates).join(",")}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     return;
   } catch (err: any) {
     const pg = (() => {
@@ -610,15 +586,9 @@ router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, 
 
     if (!existing) { res.status(404).json({ error: "Bank account not found" }); return; }
 
-    await r.transaction(async (tx) => {
-      await tx.delete(firmBankAccountsTable).where(and(eq(firmBankAccountsTable.id, id), eq(firmBankAccountsTable.firmId, firmId)));
-      await writeAuditLog(
-        { firmId, actorId: req.userId, actorType: req.userType, action: "settings.bank_account.delete", entityType: "firm_bank_account", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
-        { db: tx, strict: true },
-      );
-    });
-
+    await r.delete(firmBankAccountsTable).where(and(eq(firmBankAccountsTable.id, id), eq(firmBankAccountsTable.firmId, firmId)));
     res.json({ success: true });
+    await writeAuditLog({ firmId, actorId: req.userId, actorType: req.userType, action: "settings.bank_account.delete", entityType: "firm_bank_account", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
     return;
   } catch (err: any) {
     const pg = (() => {

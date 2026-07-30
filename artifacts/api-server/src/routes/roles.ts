@@ -3,7 +3,7 @@ import { and, count, eq } from "drizzle-orm";
 import { db, permissionsTable, rolesTable, sql, usersTable } from "@workspace/db";
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { z } from "zod/v4";
-import { ensureRolePermissionsInitialized, requireAuth, requireFirmUser, requirePermission, requireRlsDb, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ensureRolePermissionsInitialized, requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 
 type ReqLike = IncomingMessage & {
   body?: unknown;
@@ -76,7 +76,7 @@ const UpdateRoleBodySchema = z.object({
 type UpdateRoleBody = z.infer<typeof UpdateRoleBodySchema>;
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequestLike): DbConn => requireRlsDb(req as AuthRequest);
+const rdb = (req: AuthRequestLike): DbConn => req.rlsDb ?? db;
 
 type TransactionCapable = {
   transaction: <T>(fn: (tx: DbConn) => Promise<T>) => Promise<T>;
@@ -159,33 +159,26 @@ routerInternal.post("/roles", requireAuth, requireFirmUser, requirePermission("r
     const body: CreateRoleBody = parsed.data;
 
     const r = rdb(req);
-    const role = await asTransactionCapable(r).transaction(async (tx: DbConn) => {
-      const [role] = await tx
-        .insert(rolesTable)
-        .values({ firmId: req.firmId!, name: body.name })
-        .returning();
+    const [role] = await r
+      .insert(rolesTable)
+      .values({ firmId: req.firmId!, name: body.name })
+      .returning();
 
-      if (body.permissions?.length) {
-        await tx.insert(permissionsTable).values(
-          body.permissions.map((p) => ({
-            roleId: role.id,
-            module: p.module,
-            action: p.action,
-            allowed: p.allowed,
-          }))
-        );
-      }
-      if (shouldAutoGrantRoleByName(role.name)) {
-        await ensureRolePermissionsInitialized(tx as any, req.firmId!, role.id);
-      }
-
-      await writeAuditLog(
-        { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.create", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") },
-        { db: tx, strict: true },
+    if (body.permissions?.length) {
+      await r.insert(permissionsTable).values(
+        body.permissions.map((p) => ({
+          roleId: role.id,
+          module: p.module,
+          action: p.action,
+          allowed: p.allowed,
+        }))
       );
-      return role;
-    });
+    }
+    if (shouldAutoGrantRoleByName(role.name)) {
+      await ensureRolePermissionsInitialized(r as any, req.firmId!, role.id);
+    }
 
+    await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.create", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
     res.status(201).json(await enrichRole(r, role));
   } catch (err) {
     console.error("SQL ERR:", err);
@@ -293,21 +286,6 @@ routerInternal.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePerm
         await ensureRolePermissionsInitialized(tx as any, req.firmId!, role.id);
       }
 
-      await writeAuditLog(
-        {
-          firmId: req.firmId,
-          actorId: req.userId,
-          actorType: req.userType,
-          action: "roles.update",
-          entityType: "role",
-          entityId: role.id,
-          detail: `fields=${Object.keys(updates).join(",")}${normalizedPermissions !== undefined ? " permissions=merged" : ""}`,
-          ipAddress: req.ip,
-          userAgent: getHeader(req, "user-agent"),
-        },
-        { db: tx, strict: true },
-      );
-
       return {
         ok: true as const,
         updatedFields: Object.keys(updates),
@@ -321,6 +299,18 @@ routerInternal.patch("/roles/:roleId", requireAuth, requireFirmUser, requirePerm
       res.status(404).json({ error: "Role not found" });
       return;
     }
+
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "roles.update",
+      entityType: "role",
+      entityId: result.role.id,
+      detail: `fields=${result.updatedFields.join(",")}${result.permissionsReplaced ? " permissions=merged" : ""}`,
+      ipAddress: req.ip,
+      userAgent: getHeader(req, "user-agent"),
+    });
     res.json(result.enriched);
   } catch (e) {
     console.error(e);
@@ -337,21 +327,15 @@ routerInternal.delete("/roles/:roleId", requireAuth, requireFirmUser, requirePer
   const p: RoleIdParams = params.data;
 
   const r = rdb(req);
-  const role = await asTransactionCapable(r).transaction(async (tx: DbConn) => {
-    await tx.delete(permissionsTable).where(eq(permissionsTable.roleId, p.roleId));
-    const [role] = await tx.delete(rolesTable).where(eq(rolesTable.id, p.roleId)).returning();
-    if (!role || role.firmId !== req.firmId) return null;
-    await writeAuditLog(
-      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.delete", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") },
-      { db: tx, strict: true },
-    );
-    return role;
-  });
+  await r.delete(permissionsTable).where(eq(permissionsTable.roleId, p.roleId));
+  const [role] = await r.delete(rolesTable).where(eq(rolesTable.id, p.roleId)).returning();
 
-  if (!role) {
+  if (!role || role.firmId !== req.firmId) {
     res.status(404).json({ error: "Role not found" });
     return;
   }
+
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "roles.delete", entityType: "role", entityId: role.id, detail: `name=${role.name}`, ipAddress: req.ip, userAgent: getHeader(req, "user-agent") });
   res.sendStatus(204);
 });
 

@@ -5,7 +5,7 @@ import {
   casesTable, clientsTable, casePurchasersTable, ledgerEntriesTable, caseLedgersTable,
   sql,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requirePermission, requireReAuth, requireRlsDb, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { one, queryOne } from "../lib/http.js";
 import { syncCaseFinancialTotals } from "../lib/caseFinancialSync.js";
@@ -19,7 +19,7 @@ const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => requireRlsDb(req);
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
 function firmGuard(req: AuthRequest, firmId: number): boolean {
   return req.firmId === firmId;
@@ -136,37 +136,30 @@ router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requi
   const today = new Date().toISOString().slice(0, 10);
   const dueDate = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
 
-  const inv = await r.transaction(async (tx) => {
-    const [inv] = await tx.insert(invoicesTable).values({
-      firmId: req.firmId!, caseId: q.caseId ?? null, quotationId,
-      invoiceNo, status: "draft",
-      subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2),
-      grandTotal: grandTotal.toFixed(2), amountPaid: "0", amountDue: grandTotal.toFixed(2),
-      issuedDate: today, dueDate,
-      notes: req.body.notes || null, createdBy: req.userId!,
-    }).returning();
+  const [inv] = await r.insert(invoicesTable).values({
+    firmId: req.firmId!, caseId: q.caseId ?? null, quotationId,
+    invoiceNo, status: "draft",
+    subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2),
+    grandTotal: grandTotal.toFixed(2), amountPaid: "0", amountDue: grandTotal.toFixed(2),
+    issuedDate: today, dueDate,
+    notes: req.body.notes || null, createdBy: req.userId!,
+  }).returning();
 
-    if (qItems.length) {
-      await tx.insert(invoiceItemsTable).values(qItems.map((qi, idx) => ({
-        invoiceId: inv.id,
-        description: qi.description,
-        itemType: qi.itemType || "disbursement",
-        itemCategory: qi.itemCategory === "disbursement" ? "disbursement" : "fee",
-        amountExclTax: String(qi.amountExclTax),
-        taxRate: String(qi.taxRate),
-        taxAmount: String(qi.taxAmount),
-        amountInclTax: String(qi.amountInclTax),
-        sortOrder: idx,
-      })));
-    }
+  if (qItems.length) {
+    await r.insert(invoiceItemsTable).values(qItems.map((qi, idx) => ({
+      invoiceId: inv.id,
+      description: qi.description,
+      itemType: qi.itemType || "disbursement",
+      itemCategory: qi.itemCategory === "disbursement" ? "disbursement" : "fee",
+      amountExclTax: String(qi.amountExclTax),
+      taxRate: String(qi.taxRate),
+      taxAmount: String(qi.taxAmount),
+      amountInclTax: String(qi.amountInclTax),
+      sortOrder: idx,
+    })));
+  }
 
-    await writeAuditLog(
-      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: inv.id, detail: `from=quotation quotationId=${quotationId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
-      { db: tx, strict: true },
-    );
-    return inv;
-  });
-
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: inv.id, detail: `from=quotation quotationId=${quotationId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(inv);
 });
 
@@ -196,36 +189,29 @@ router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, req
   const today = issuedDate || new Date().toISOString().slice(0, 10);
   const due = dueDate || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
 
-  const inv = await r.transaction(async (tx) => {
-    const [inv] = await tx.insert(invoicesTable).values({
-      firmId: req.firmId!, caseId: caseId || null, quotationId: quotationId || null,
-      invoiceNo, status: "draft",
-      subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2),
-      grandTotal: grandTotal.toFixed(2), amountPaid: "0", amountDue: grandTotal.toFixed(2),
-      issuedDate: typeof today === "string" ? today : String(today), dueDate: typeof due === "string" ? due : String(due),
-      notes: notes || null, createdBy: req.userId!,
-    }).returning();
+  const [inv] = await r.insert(invoicesTable).values({
+    firmId: req.firmId!, caseId: caseId || null, quotationId: quotationId || null,
+    invoiceNo, status: "draft",
+    subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2),
+    grandTotal: grandTotal.toFixed(2), amountPaid: "0", amountDue: grandTotal.toFixed(2),
+    issuedDate: typeof today === "string" ? today : String(today), dueDate: typeof due === "string" ? due : String(due),
+    notes: notes || null, createdBy: req.userId!,
+  }).returning();
 
-    if (parsedItems.length) {
-      await tx.insert(invoiceItemsTable).values(parsedItems.map((i, idx) => ({
-        invoiceId: inv.id,
-        description: i.description,
-        itemType: i.itemType || "professional_fee",
-        itemCategory: i.itemCategory,
-        amountExclTax: (Number.isFinite(i.amountExclTax) ? i.amountExclTax : 0).toFixed(2),
-        taxRate: (Number.isFinite(i.taxRate) ? i.taxRate : 0).toFixed(2),
-        taxAmount: (Number.isFinite(i.taxAmount) ? i.taxAmount : 0).toFixed(2),
-        amountInclTax: (Number.isFinite(i.amountInclTax) ? i.amountInclTax : 0).toFixed(2),
-        sortOrder: idx,
-      })));
-    }
-    await writeAuditLog(
-      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: inv.id, detail: "from=manual", ipAddress: req.ip, userAgent: req.headers["user-agent"] },
-      { db: tx, strict: true },
-    );
-    return inv;
-  });
-
+  if (parsedItems.length) {
+    await r.insert(invoiceItemsTable).values(parsedItems.map((i, idx) => ({
+      invoiceId: inv.id,
+      description: i.description,
+      itemType: i.itemType || "professional_fee",
+      itemCategory: i.itemCategory,
+      amountExclTax: (Number.isFinite(i.amountExclTax) ? i.amountExclTax : 0).toFixed(2),
+      taxRate: (Number.isFinite(i.taxRate) ? i.taxRate : 0).toFixed(2),
+      taxAmount: (Number.isFinite(i.taxAmount) ? i.taxAmount : 0).toFixed(2),
+      amountInclTax: (Number.isFinite(i.amountInclTax) ? i.amountInclTax : 0).toFixed(2),
+      sortOrder: idx,
+    })));
+  }
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: inv.id, detail: "from=manual", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(inv);
 });
 
@@ -267,12 +253,10 @@ router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFir
       await syncCaseFinancialTotals(tx, { firmId: req.firmId!, caseId });
     }
 
-    await writeAuditLog(
-      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.issue", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
-      { db: tx, strict: true },
-    );
     return row;
   });
+
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.issue", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(updated);
 });
 
@@ -285,14 +269,8 @@ router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirm
   const [inv] = await r.select().from(invoicesTable).where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!)));
   if (!inv) { res.status(404).json({ error: "Invoice not found" }); return; }
   if (inv.status === "paid") { res.status(400).json({ error: "Cannot void a paid invoice. Issue a credit note." }); return; }
-  const updated = await r.transaction(async (tx) => {
-    const [updated] = await tx.update(invoicesTable).set({ status: "void", amountDue: "0.00", updatedAt: new Date() }).where(eq(invoicesTable.id, id)).returning();
-    await writeAuditLog(
-      { firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.void", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] },
-      { db: tx, strict: true },
-    );
-    return updated;
-  });
+  const [updated] = await r.update(invoicesTable).set({ status: "void", amountDue: "0.00", updatedAt: new Date() }).where(eq(invoicesTable.id, id)).returning();
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.void", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.json(updated);
 });
 

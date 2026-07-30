@@ -107,11 +107,11 @@ export async function setTenantContextSession(
   await trySetRoleAppUserSession(client, "firm");
   await assertSafeRlsRole(client, "firm");
 
-  await client.query("select set_config('app.current_firm_id', $1, false)", [String(firmId)]);
-  await client.query("select set_config('app.firm_id', $1, false)", [String(firmId)]);
-  await client.query("select set_config('app.is_founder', 'false', false)");
+  await client.query(`SET app.current_firm_id = '${firmId}'`);
+  await client.query(`SET app.firm_id = '${firmId}'`);
+  await client.query("SET app.is_founder = 'false'");
   if (userId !== undefined) {
-    await client.query("select set_config('app.current_user_id', $1, false)", [String(userId)]);
+    await client.query(`SET app.current_user_id = '${userId}'`);
   } else {
     await client.query("RESET app.current_user_id");
   }
@@ -130,11 +130,11 @@ export async function setTenantContext(
   await trySetRoleAppUserLocal(client, "firm");
   await assertSafeRlsRole(client, "firm");
 
-  await client.query("select set_config('app.current_firm_id', $1, true)", [String(firmId)]);
-  await client.query("select set_config('app.firm_id', $1, true)", [String(firmId)]);
-  await client.query("select set_config('app.is_founder', 'false', true)");
+  await client.query(`SET LOCAL app.current_firm_id = '${firmId}'`);
+  await client.query(`SET LOCAL app.firm_id = '${firmId}'`);
+  await client.query("SET LOCAL app.is_founder = 'false'");
   if (userId !== undefined) {
-    await client.query("select set_config('app.current_user_id', $1, true)", [String(userId)]);
+    await client.query(`SET LOCAL app.current_user_id = '${userId}'`);
   }
 }
 
@@ -169,10 +169,10 @@ export async function setFounderContextSession(
  */
 export async function clearTenantContext(client: PoolClient): Promise<void> {
   // Note: no SET ROLE is performed here. Keep reset limited to GUCs.
-  await client.query("select set_config('app.current_firm_id', '0', false)");
-  await client.query("select set_config('app.firm_id', '0', false)");
-  await client.query("select set_config('app.is_founder', 'false', false)");
-  await client.query("select set_config('app.current_user_id', '0', false)");
+  await client.query("SET app.current_firm_id = '0'");
+  await client.query("SET app.firm_id = '0'");
+  await client.query("SET app.is_founder = 'false'");
+  await client.query("SET app.current_user_id = '0'");
   try {
     await client.query("RESET ROLE");
   } catch {

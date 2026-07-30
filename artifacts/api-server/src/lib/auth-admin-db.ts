@@ -1,4 +1,4 @@
-import { createPoolFromDatabaseUrl, makeRlsDb, type Pool, clearTenantContext, setFounderContextSession } from "@workspace/db";
+import { createPoolFromDatabaseUrl, makeRlsDb, type Pool, clearTenantContext } from "@workspace/db";
 import { logger } from "./logger.js";
 
 export type AuthAdminDbNotConfiguredError = Error & { code: "AUTH_ADMIN_DB_NOT_CONFIGURED" };
@@ -38,19 +38,27 @@ export async function withAuthAdminDb<T>(
   const client = await pool.connect();
   let destroyClient = false;
   try {
-    await setFounderContextSession(client);
+    await client.query("BEGIN");
+    await client.query("SET LOCAL app.is_founder = 'true'");
+    await client.query("SET LOCAL app.current_firm_id = '0'");
+    await client.query("SET LOCAL app.firm_id = '0'");
+    await client.query("SET LOCAL app.current_user_id = '0'");
     const adminDb = makeRlsDb(client);
     const result = await fn(adminDb);
+    await client.query("COMMIT");
     return result;
   } catch (err) {
     destroyClient = true;
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+    }
     logger.error({ ...ctx, err }, "auth-admin-db.query_failed");
     throw err;
   } finally {
     try {
       await clearTenantContext(client);
     } catch {
-      destroyClient = true;
     }
     client.release(destroyClient);
   }

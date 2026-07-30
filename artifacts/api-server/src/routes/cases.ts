@@ -27,7 +27,7 @@ import {
   GetCaseNotesParams, CreateCaseNoteParams, CreateCaseNoteBody
 } from "@workspace/api-zod";
 import { z } from "zod/v4";
-import { requireAuth, requireFirmUser, requirePermission, requireRlsDb, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { buildWorkflowSteps } from "../lib/workflow.js";
 import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type KeyDateField } from "../lib/keyDatesWorkflow.js";
 import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresenceWhereSql, normalizeMilestoneFilter, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic.js";
@@ -52,7 +52,7 @@ const router: ExpressRouter = express.Router();
 const supabaseStorage = new SupabaseStorageService();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => requireRlsDb(req);
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
 
 const milestonesSummaryCache = new Map<string, { expiresAt: number; payload: unknown }>();
 
@@ -1775,97 +1775,87 @@ router.post("/cases/bulk/status", requireAuthHandler, requireFirmUserHandler, re
           }
         }
 
-        await r.transaction(async (tx) => {
-          const patch = keyDatePatchFromWorkflow(keyDateField, ymd);
-          const [existingKd] = await tx
-            .select({ id: caseKeyDatesTable.id })
-            .from(caseKeyDatesTable)
+        const patch = keyDatePatchFromWorkflow(keyDateField, ymd);
+        const [existingKd] = await r
+          .select({ id: caseKeyDatesTable.id })
+          .from(caseKeyDatesTable)
+          .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
+        if (existingKd) {
+          await r
+            .update(caseKeyDatesTable)
+            .set({ ...patch, updatedAt: now })
             .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
-          if (existingKd) {
-            await tx
-              .update(caseKeyDatesTable)
-              .set({ ...patch, updatedAt: now })
-              .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
-          } else {
-            await tx
-              .insert(caseKeyDatesTable)
-              .values({ firmId: req.firmId!, caseId, ...patch });
-          }
+        } else {
+          await r
+            .insert(caseKeyDatesTable)
+            .values({ firmId: req.firmId!, caseId, ...patch });
+        }
 
-          await tx.insert(auditLogsTable).values({
-            firmId: req.firmId,
-            actorId: req.userId,
-            actorType: "firm_user",
-            action: "case.key_dates.updated",
-            entityType: "case",
-            entityId: caseId,
-            detail: JSON.stringify([keyDateField]),
-          });
+        await r.insert(auditLogsTable).values({
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: "firm_user",
+          action: "case.key_dates.updated",
+          entityType: "case",
+          entityId: caseId,
+          detail: JSON.stringify([keyDateField]),
+        });
 
-          await syncWorkflowStepsFromCaseState(tx as any, caseId, {
-            firmId: req.firmId!,
-            actorId: req.userId,
-            actorType: req.userType ?? "firm_user",
-            ipAddress: req.ip,
-            userAgent: req.headers["user-agent"],
-          });
-
-          await writeAuditLog({
-            firmId: req.firmId,
-            actorId: req.userId,
-            actorType: req.userType,
-            action: "cases.bulk.status",
-            entityType: "case",
-            entityId: caseId,
-            detail: `module=${moduleRaw} status=${statusName} date=${ymd}`,
-            ipAddress: req.ip,
-            userAgent: req.headers["user-agent"],
-          }, { db: tx, strict: true });
+        await syncWorkflowStepsFromCaseState(r, caseId, {
+          firmId: req.firmId!,
+          actorId: req.userId,
+          actorType: req.userType ?? "firm_user",
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
         });
       } else {
-        await r.transaction(async (tx) => {
-          const [step] = await tx
-            .select({ id: caseWorkflowStepsTable.id, stepName: caseWorkflowStepsTable.stepName })
-            .from(caseWorkflowStepsTable)
-            .where(and(eq(caseWorkflowStepsTable.caseId, caseId), eq(caseWorkflowStepsTable.stepKey, def.stepKey)))
-            .limit(1);
-          if (!step) throw new Error("Workflow step not found");
+        const [step] = await r
+          .select({ id: caseWorkflowStepsTable.id, stepName: caseWorkflowStepsTable.stepName })
+          .from(caseWorkflowStepsTable)
+          .where(and(eq(caseWorkflowStepsTable.caseId, caseId), eq(caseWorkflowStepsTable.stepKey, def.stepKey)))
+          .limit(1);
+        if (!step) {
+          failures.push({ caseId, error: "Workflow step not found" });
+          continue;
+        }
 
-          const [updated] = await tx
-            .update(caseWorkflowStepsTable)
-            .set({
-              status: "completed",
-              completedBy: req.userId ?? null,
-              completedAt: now,
-              updatedAt: now,
-            })
-            .where(and(eq(caseWorkflowStepsTable.id, step.id), eq(caseWorkflowStepsTable.caseId, caseId)))
-            .returning();
-          if (!updated) throw new Error("Workflow step not found");
+        const [updated] = await r
+          .update(caseWorkflowStepsTable)
+          .set({
+            status: "completed",
+            completedBy: req.userId ?? null,
+            completedAt: now,
+            updatedAt: now,
+          })
+          .where(and(eq(caseWorkflowStepsTable.id, step.id), eq(caseWorkflowStepsTable.caseId, caseId)))
+          .returning();
+        if (!updated) {
+          failures.push({ caseId, error: "Workflow step not found" });
+          continue;
+        }
 
-          await tx.insert(auditLogsTable).values({
-            firmId: req.firmId,
-            actorId: req.userId,
-            actorType: "firm_user",
-            action: "workflow.step_updated",
-            entityType: "case_workflow_step",
-            entityId: updated.id,
-            detail: `Step ${String(step.stepName)} -> completed`,
-          });
-
-          await writeAuditLog({
-            firmId: req.firmId,
-            actorId: req.userId,
-            actorType: req.userType,
-            action: "cases.bulk.status",
-            entityType: "case",
-            entityId: caseId,
-            detail: `module=${moduleRaw} status=${statusName} date=${ymd}`,
-            ipAddress: req.ip,
-            userAgent: req.headers["user-agent"],
-          }, { db: tx, strict: true });
+        await r.insert(auditLogsTable).values({
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: "firm_user",
+          action: "workflow.step_updated",
+          entityType: "case_workflow_step",
+          entityId: updated.id,
+          detail: `Step ${String(step.stepName)} -> completed`,
         });
       }
+
+      await writeAuditLog({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "cases.bulk.status",
+        entityType: "case",
+        entityId: caseId,
+        detail: `module=${moduleRaw} status=${statusName} date=${ymd}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
 
       succeeded += 1;
     } catch (err) {
@@ -4177,7 +4167,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       return {};
     })();
     if (pg?.code === "23505" && pg?.constraint === "cases_tracking_token_key" && typeof safeReqBody?.trackingToken === "string") {
-      const retryDb = requireRlsDb(req);
+      const retryDb = req.rlsDb ?? db;
       const [existingByTrackingToken] = await retryDb
         .select()
         .from(casesTable)
