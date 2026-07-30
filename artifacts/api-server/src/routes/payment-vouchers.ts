@@ -322,65 +322,90 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission(
   }
 });
 
-router.get("/payment-vouchers/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
-  const startedAt = Date.now();
-  if (!await roleHasPermission(req, "accounting", "read")) {
-    res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" });
-    return;
-  }
-  const r = rdb(req);
-  const now = new Date();
-  const firmId = req.firmId!;
-  try {
-    const [
-      awaitingReceipt,
-      receivedAndProcessing,
-      waitingApproval,
-      dueSoon,
-      overdue,
-      paidToday,
-      clerkPending,
-      clerkOverdue,
-      completedMonth,
-    ] = await Promise.all([
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), sql`${paymentVouchersTable.receivedAt} IS NULL` as any)),
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), sql`${paymentVouchersTable.receivedAt} IS NOT NULL` as any)),
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.approvalStatus, "pending_approval"))),
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), lte(paymentVouchersTable.paymentDueAt, new Date(now.getTime() + 2 * 60 * 60 * 1000)))),
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), lte(paymentVouchersTable.paymentDueAt, now))),
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "paid_pending_collection"), sql`date(${paymentVouchersTable.paidAt}) = current_date` as any)),
-      r.select({ c: count() }).from(paymentVoucherActionsTable).where(and(eq(paymentVoucherActionsTable.firmId, firmId), inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]))),
-      r.select({ c: count() }).from(paymentVoucherActionsTable).where(and(eq(paymentVoucherActionsTable.firmId, firmId), inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]), or(lte(paymentVoucherActionsTable.acknowledgeDueAt, now), lte(paymentVoucherActionsTable.completionDueAt, now)))),
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "completed"), sql`date_trunc('month', ${paymentVouchersTable.updatedAt}) = date_trunc('month', now())` as any)),
-    ]);
-    res.json({
-      awaitingReceipt: Number(awaitingReceipt[0]?.c ?? 0),
-      receivedAndProcessing: Number(receivedAndProcessing[0]?.c ?? 0),
-      waitingApproval: Number(waitingApproval[0]?.c ?? 0),
-      dueSoon: Number(dueSoon[0]?.c ?? 0),
-      overdue: Number(overdue[0]?.c ?? 0),
-      paidToday: Number(paidToday[0]?.c ?? 0),
-      clerkPending: Number(clerkPending[0]?.c ?? 0),
-      clerkOverdue: Number(clerkOverdue[0]?.c ?? 0),
-      completedMonth: Number(completedMonth[0]?.c ?? 0),
-    });
-    const durationMs = Date.now() - startedAt;
-    if (durationMs >= 2000) {
-      logger.warn({ durationMs, firmId: req.firmId, userId: req.userId, requestId: typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : null }, "payment_voucher.dashboard_slow");
-    }
-  } catch (err) {
-    const code = err && typeof err === "object" && "code" in (err as any) ? String((err as any).code) : null;
-    if (code === "42703" || code === "42P01") {
-      res.status(500).json({
-        error: "Database migration missing for Payment Voucher dashboard fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql",
-        code: "MIGRATION_MISSING",
-        request_id: typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : undefined,
+router.get(
+  "/payment-vouchers/dashboard",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("accounting", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    const startedAt = Date.now();
+    const r = rdb(req);
+    const now = new Date();
+    const firmId = req.firmId!;
+    const dueSoonCutoff = new Date(now.getTime() + 2 * 60 * 60 * 1000);
+
+    const toCount = (v: unknown): number => {
+      if (typeof v === "number" && Number.isFinite(v)) return v;
+      if (typeof v === "string" && v.trim()) {
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+      if (v == null) return 0;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    try {
+      const [pvAgg, actionAgg] = await Promise.all([
+        r
+          .select({
+            awaitingReceipt: sql`count(*) filter (where ${paymentVouchersTable.status} = 'pending_account' and ${paymentVouchersTable.receivedAt} is null)`,
+            receivedAndProcessing: sql`count(*) filter (where ${paymentVouchersTable.status} = 'pending_account' and ${paymentVouchersTable.receivedAt} is not null)`,
+            waitingApproval: sql`count(*) filter (where ${paymentVouchersTable.approvalStatus} = 'pending_approval')`,
+            dueSoon: sql`count(*) filter (where ${paymentVouchersTable.status} = 'pending_account' and ${paymentVouchersTable.paymentDueAt} <= ${dueSoonCutoff})`,
+            overdue: sql`count(*) filter (where ${paymentVouchersTable.status} = 'pending_account' and ${paymentVouchersTable.paymentDueAt} <= ${now})`,
+            paidToday: sql`count(*) filter (where ${paymentVouchersTable.status} = 'paid_pending_collection' and date(${paymentVouchersTable.paidAt}) = current_date)`,
+            completedMonth: sql`count(*) filter (where ${paymentVouchersTable.status} = 'completed' and date_trunc('month', ${paymentVouchersTable.updatedAt}) = date_trunc('month', now()))`,
+          })
+          .from(paymentVouchersTable)
+          .where(eq(paymentVouchersTable.firmId, firmId)),
+        r
+          .select({
+            clerkPending: sql`count(*) filter (where ${paymentVoucherActionsTable.status} in ('assigned', 'acknowledged'))`,
+            clerkOverdue: sql`count(*) filter (where ${paymentVoucherActionsTable.status} in ('assigned', 'acknowledged') and (${paymentVoucherActionsTable.acknowledgeDueAt} <= ${now} or ${paymentVoucherActionsTable.completionDueAt} <= ${now}))`,
+          })
+          .from(paymentVoucherActionsTable)
+          .where(eq(paymentVoucherActionsTable.firmId, firmId)),
+      ]);
+
+      const pv = (pvAgg?.[0] ?? {}) as Record<string, unknown>;
+      const pva = (actionAgg?.[0] ?? {}) as Record<string, unknown>;
+
+      res.json({
+        awaitingReceipt: toCount(pv.awaitingReceipt),
+        receivedAndProcessing: toCount(pv.receivedAndProcessing),
+        waitingApproval: toCount(pv.waitingApproval),
+        dueSoon: toCount(pv.dueSoon),
+        overdue: toCount(pv.overdue),
+        paidToday: toCount(pv.paidToday),
+        clerkPending: toCount(pva.clerkPending),
+        clerkOverdue: toCount(pva.clerkOverdue),
+        completedMonth: toCount(pv.completedMonth),
       });
-      return;
+
+      const durationMs = Date.now() - startedAt;
+      if (durationMs >= 2000) {
+        logger.warn({
+          durationMs,
+          firmId: req.firmId,
+          userId: req.userId,
+          requestId: typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : null,
+        }, "payment_voucher.dashboard_slow");
+      }
+    } catch (err) {
+      const code = err && typeof err === "object" && "code" in (err as any) ? String((err as any).code) : null;
+      if (code === "42703" || code === "42P01") {
+        res.status(500).json({
+          error: "Database migration missing for Payment Voucher dashboard fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql",
+          code: "MIGRATION_MISSING",
+          request_id: typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : undefined,
+        });
+        return;
+      }
+      throw err;
     }
-    throw err;
-  }
-});
+  },
+);
 
 // Detail
 router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
