@@ -1,5 +1,6 @@
 import { createPoolFromDatabaseUrl, makeRlsDb, type Pool, clearTenantContext } from "@workspace/db";
 import { logger } from "./logger.js";
+import { extractDbErrorInfo } from "./db-error.js";
 
 export type AuthAdminDbNotConfiguredError = Error & { code: "AUTH_ADMIN_DB_NOT_CONFIGURED" };
 
@@ -53,7 +54,15 @@ export async function withAuthAdminDb<T>(
       await client.query("ROLLBACK");
     } catch {
     }
-    logger.error({ ...ctx, err }, "auth-admin-db.query_failed");
+    const info = extractDbErrorInfo(err);
+    const sqlState = info.sqlstate ?? info.sqlState;
+    const errMessageShort =
+      err instanceof Error ? err.message.slice(0, 180) : typeof info.message === "string" ? info.message.slice(0, 180) : String(err ?? "").slice(0, 180);
+    if (sqlState === "28P01") {
+      logger.error({ ...ctx, safeCategory: "INVALID_DB_CREDENTIALS" }, "auth-admin-db.query_failed");
+    } else {
+      logger.error({ ...ctx, sqlState: sqlState ?? null, errMessageShort }, "auth-admin-db.query_failed");
+    }
     throw err;
   } finally {
     try {

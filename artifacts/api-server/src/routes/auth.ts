@@ -8,8 +8,9 @@ import { ensureRolePermissionsInitialized, loadFounderPermissions, lookupSession
 import { ApiError, sendError, sendOk } from "../lib/api-response.js";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { logger } from "../lib/logger.js";
-import { isTransientDbConnectionError } from "../lib/auth-safe-db.js";
+import { isTransientDbConnectionError, withAuthSafeDb } from "../lib/auth-safe-db.js";
 import { isAuthAdminDbConfigured, withAuthAdminDb } from "../lib/auth-admin-db.js";
+import { extractDbErrorInfo } from "../lib/db-error.js";
 import * as OTPAuth from "otpauth";
 import QRCode from "qrcode";
 
@@ -130,9 +131,9 @@ const isUndefinedColumnError = (err: unknown): boolean => {
 };
 
 const getSqlState = (err: unknown): string | undefined => {
-  if (!err || typeof err !== "object") return undefined;
-  const code = (err as { code?: unknown }).code;
-  return typeof code === "string" ? code : undefined;
+  const info = extractDbErrorInfo(err);
+  const sqlstate = info.sqlstate ?? info.sqlState;
+  return typeof sqlstate === "string" && sqlstate ? sqlstate : undefined;
 };
 
 async function withTransientDbRetry<T>(
@@ -183,6 +184,7 @@ async function insertAuthAuditLog(
     if (code === "AUTH_ADMIN_DB_NOT_CONFIGURED") return;
     const sqlState = getSqlState(err);
     if (sqlState === "42P01") return;
+    if (sqlState === "28P01") return;
     logger.error({ ...ctx, sqlState: sqlState ?? null, err }, "auth.audit_insert_failed");
   }
 }
@@ -236,7 +238,49 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
       firmId: undefined as number | undefined,
       userId: undefined as number | undefined,
     };
-    const useAdminDb = isAuthAdminDbConfigured();
+    let useAdminDb = isAuthAdminDbConfigured();
+    let useSafeDbFallback = false;
+
+    type LoginDbLike = Pick<typeof db, "select" | "insert" | "update">;
+
+    const safeDbFallbackCtx = (fallbackStage: string) => ({
+      route: ctx.route,
+      reqId: ctx.reqId,
+      firmId: optionalNumber(ctx.firmId) ?? null,
+      userId: optionalNumber(ctx.userId) ?? null,
+      emailHash: ctx.emailHash,
+      stage: fallbackStage,
+    });
+
+    const withLoginDb = async <T>(fn: (dbLike: LoginDbLike) => Promise<T>, opStage: string): Promise<T> => {
+      if (useAdminDb) {
+        try {
+          return await withAuthAdminDb(async (dbLike) => await fn(dbLike as unknown as LoginDbLike), { stage: opStage, route: ctx.route, reqId: typeof ctx.reqId === "string" ? ctx.reqId : null });
+        } catch (err) {
+          const sqlState = getSqlState(err);
+          if (sqlState === "28P01") {
+            useAdminDb = false;
+            useSafeDbFallback = true;
+            logger.error(
+              { ...ctx, stage: opStage, adminDbDisabled: true, safeCategory: "INVALID_DB_CREDENTIALS" },
+              "auth.login.admin_db_disabled",
+            );
+          } else {
+            throw err;
+          }
+        }
+      }
+
+      if (useSafeDbFallback) {
+        return await withAuthSafeDb(async (dbLike) => await fn(dbLike as unknown as LoginDbLike), {
+          retry: true,
+          maxRetries: 2,
+          allowUnsafe: true,
+          ctx: safeDbFallbackCtx(opStage),
+        });
+      }
+      return await fn(db);
+    };
 
     stage = "login_start";
     ctx.stage = stage;
@@ -262,40 +306,23 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
     const user: LoginUser | null = await (async () => {
       try {
         const rows = await withTransientDbRetry(async () => {
-          if (useAdminDb) {
-            return await withAuthAdminDb(async (adminDb) => {
-              return await adminDb
-                .select({
-                  id: usersTable.id,
-                  firmId: usersTable.firmId,
-                  email: usersTable.email,
-                  name: usersTable.name,
-                  passwordHash: usersTable.passwordHash,
-                  userType: usersTable.userType,
-                  roleId: usersTable.roleId,
-                  status: usersTable.status,
-                  totpSecret: usersTable.totpSecret,
-                  totpEnabled: usersTable.totpEnabled,
-                })
-                .from(usersTable)
-                .where(eq(sql`lower(trim(${usersTable.email}))`, emailNormalized));
-            }, { stage: "auth_login_user_lookup", route: ctx.route, reqId: typeof ctx.reqId === "string" ? ctx.reqId : null });
-          }
-          return await db
-            .select({
-              id: usersTable.id,
-              firmId: usersTable.firmId,
-              email: usersTable.email,
-              name: usersTable.name,
-              passwordHash: usersTable.passwordHash,
-              userType: usersTable.userType,
-              roleId: usersTable.roleId,
-              status: usersTable.status,
-              totpSecret: usersTable.totpSecret,
-              totpEnabled: usersTable.totpEnabled,
-            })
-            .from(usersTable)
-            .where(eq(sql`lower(trim(${usersTable.email}))`, emailNormalized));
+          return await withLoginDb(async (dbLike) => {
+            return await dbLike
+              .select({
+                id: usersTable.id,
+                firmId: usersTable.firmId,
+                email: usersTable.email,
+                name: usersTable.name,
+                passwordHash: usersTable.passwordHash,
+                userType: usersTable.userType,
+                roleId: usersTable.roleId,
+                status: usersTable.status,
+                totpSecret: usersTable.totpSecret,
+                totpEnabled: usersTable.totpEnabled,
+              })
+              .from(usersTable)
+              .where(eq(sql`lower(trim(${usersTable.email}))`, emailNormalized));
+          }, "auth_login_user_lookup");
         }, { ...ctx, stage: "user_lookup.query" }, 2);
         const u = rows[0] as LoginUser | undefined;
         return u ?? null;
@@ -306,36 +333,21 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
         logger.warn({ ...ctx, stage: "user_lookup_fallback", errMessageShort, err }, "auth.login.degraded_schema");
 
         const rows = await withTransientDbRetry(async () => {
-          if (useAdminDb) {
-            return await withAuthAdminDb(async (adminDb) => {
-              return await adminDb
-                .select({
-                  id: usersTable.id,
-                  firmId: usersTable.firmId,
-                  email: usersTable.email,
-                  name: usersTable.name,
-                  passwordHash: usersTable.passwordHash,
-                  userType: usersTable.userType,
-                  roleId: usersTable.roleId,
-                  status: usersTable.status,
-                })
-                .from(usersTable)
-                .where(eq(sql`lower(trim(${usersTable.email}))`, emailNormalized));
-            }, { stage: "auth_login_user_lookup_fallback", route: ctx.route, reqId: typeof ctx.reqId === "string" ? ctx.reqId : null });
-          }
-          return await db
-            .select({
-              id: usersTable.id,
-              firmId: usersTable.firmId,
-              email: usersTable.email,
-              name: usersTable.name,
-              passwordHash: usersTable.passwordHash,
-              userType: usersTable.userType,
-              roleId: usersTable.roleId,
-              status: usersTable.status,
-            })
-            .from(usersTable)
-            .where(eq(sql`lower(trim(${usersTable.email}))`, emailNormalized));
+          return await withLoginDb(async (dbLike) => {
+            return await dbLike
+              .select({
+                id: usersTable.id,
+                firmId: usersTable.firmId,
+                email: usersTable.email,
+                name: usersTable.name,
+                passwordHash: usersTable.passwordHash,
+                userType: usersTable.userType,
+                roleId: usersTable.roleId,
+                status: usersTable.status,
+              })
+              .from(usersTable)
+              .where(eq(sql`lower(trim(${usersTable.email}))`, emailNormalized));
+          }, "auth_login_user_lookup_fallback");
         }, { ...ctx, stage: "user_lookup_fallback.query" }, 2);
         const u = rows[0] as {
           id: number;
@@ -500,13 +512,9 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
           userAgent: asNullableString(ua),
           ipAddress: asNullableString(ip),
         };
-        if (useAdminDb) {
-          await withAuthAdminDb(async (adminDb) => {
-            await adminDb.insert(sessionsTable).values(row);
-          }, { stage: "auth_login_session_persist", route: ctx.route, reqId: typeof ctx.reqId === "string" ? ctx.reqId : null });
-        } else {
-          await db.insert(sessionsTable).values(row);
-        }
+        await withLoginDb(async (dbLike) => {
+          await dbLike.insert(sessionsTable).values(row);
+        }, "auth_login_session_persist");
       },
       { ...ctx, stage: "session_persist.query" },
       2,
@@ -517,26 +525,20 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
     logger.info({ ...ctx }, "auth.login.stage");
     void (async () => {
       try {
-        if (useAdminDb) {
-          await withAuthAdminDb(async (adminDb) => {
-            const updateFields: Partial<typeof usersTable.$inferInsert> = { lastLoginAt: new Date() };
-            if (didUseTotp) updateFields.totpLastUsedAt = new Date();
-            await adminDb.update(usersTable).set(updateFields).where(eq(usersTable.id, user.id));
-            await adminDb.insert(auditLogsTable).values({
-              firmId: user.firmId,
-              actorId: user.id,
-              actorType: user.userType,
-              action: "auth.login_success",
-              detail: null,
-              ipAddress: asNullableString(ip),
-              userAgent: asNullableString(ua),
-            });
-          }, { stage: "auth_login_side_effects", route: ctx.route, reqId: typeof ctx.reqId === "string" ? ctx.reqId : null });
-        } else {
+        await withLoginDb(async (dbLike) => {
           const updateFields: Partial<typeof usersTable.$inferInsert> = { lastLoginAt: new Date() };
           if (didUseTotp) updateFields.totpLastUsedAt = new Date();
-          await db.update(usersTable).set(updateFields).where(eq(usersTable.id, user.id));
-        }
+          await dbLike.update(usersTable).set(updateFields).where(eq(usersTable.id, user.id));
+          await dbLike.insert(auditLogsTable).values({
+            firmId: user.firmId,
+            actorId: user.id,
+            actorType: user.userType,
+            action: "auth.login_success",
+            detail: null,
+            ipAddress: asNullableString(ip),
+            userAgent: asNullableString(ua),
+          });
+        }, "auth_login_side_effects");
       } catch (err) {
         logger.error(
           {
@@ -559,11 +561,11 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
     let roleName: string | null = null;
     if (user.roleId) {
       try {
-        const [role] = useAdminDb
-          ? await withAuthAdminDb(async (adminDb) => {
-              return await adminDb.select().from(rolesTable).where(eq(rolesTable.id, user.roleId!));
-            }, { stage: "auth_login_role_lookup", route: ctx.route, reqId: typeof ctx.reqId === "string" ? ctx.reqId : null })
-          : await db.select().from(rolesTable).where(eq(rolesTable.id, user.roleId!));
+        const rows = await withLoginDb(async (dbLike) => {
+          return await dbLike.select().from(rolesTable).where(eq(rolesTable.id, user.roleId!));
+        }, "auth_login_role_lookup");
+        const roleRow = Array.isArray(rows) ? (rows[0] as unknown) : undefined;
+        const role = (roleRow && typeof roleRow === "object" ? (roleRow as { name?: unknown }) : undefined) ?? undefined;
         roleName = (role as { name?: unknown } | undefined)?.name as string | undefined ?? null;
       } catch (err) {
         logger.error({ ...ctx, stage: "role_lookup", err }, "auth.login.degraded");
@@ -574,11 +576,11 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
     let firmName: string | null = null;
     if (user.firmId) {
       try {
-        const [firm] = useAdminDb
-          ? await withAuthAdminDb(async (adminDb) => {
-              return await adminDb.select().from(firmsTable).where(eq(firmsTable.id, user.firmId!));
-            }, { stage: "auth_login_firm_lookup", route: ctx.route, reqId: typeof ctx.reqId === "string" ? ctx.reqId : null })
-          : await db.select().from(firmsTable).where(eq(firmsTable.id, user.firmId!));
+        const rows = await withLoginDb(async (dbLike) => {
+          return await dbLike.select().from(firmsTable).where(eq(firmsTable.id, user.firmId!));
+        }, "auth_login_firm_lookup");
+        const firmRow = Array.isArray(rows) ? (rows[0] as unknown) : undefined;
+        const firm = (firmRow && typeof firmRow === "object" ? (firmRow as { name?: unknown }) : undefined) ?? undefined;
         firmName = (firm as { name?: unknown } | undefined)?.name as string | undefined ?? null;
       } catch (err) {
         logger.error({ ...ctx, stage: "firm_lookup", err }, "auth.login.degraded");
