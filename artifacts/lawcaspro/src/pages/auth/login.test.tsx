@@ -10,6 +10,15 @@ import { ME_QUERY_KEY } from "@/lib/query-keys";
 
 (globalThis as any).React = React;
 
+const toastMock = vi.hoisted(() => vi.fn());
+vi.mock("@/hooks/use-toast", () => {
+  return { useToast: () => ({ toast: toastMock }) };
+});
+
+vi.mock("@/lib/toast-error", () => {
+  return { toastError: () => null };
+});
+
 const setLocationMock = vi.fn();
 let locationValue = "/auth/login";
 
@@ -58,6 +67,7 @@ beforeEach(() => {
   setLocationMock.mockReset();
   apiFetchJsonMock.mockReset();
   apiRequestMock.mockReset();
+  toastMock.mockReset();
 });
 
 afterEach(() => {
@@ -85,7 +95,7 @@ describe("Login flow", () => {
       firmId: 1,
       roleId: 1,
     };
-    apiFetchJsonMock.mockResolvedValue(loginUser);
+    apiFetchJsonMock.mockResolvedValue({ user: loginUser, token: "t" });
     apiRequestMock.mockResolvedValue(createResponse(200, { ok: true, data: meUser, meta: { request_id: "r", timestamp: "t", duration_ms: 1 } }));
 
     const { qc } = renderWithProviders();
@@ -101,6 +111,7 @@ describe("Login flow", () => {
     expect(setLocationMock).toHaveBeenCalledWith("/app/dashboard");
 
     expect(qc.getQueryData(ME_QUERY_KEY)).toMatchObject({ id: 1, email: "test@example.com" });
+    expect(toastMock).toHaveBeenCalledTimes(0);
   });
 
   it("keeps user on login when /api/auth/me returns 401", async () => {
@@ -125,6 +136,32 @@ describe("Login flow", () => {
 
     await waitFor(() => expect(apiFetchJsonMock).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(apiRequestMock).toHaveBeenCalled());
+    expect(setLocationMock).toHaveBeenCalledTimes(0);
+    await waitFor(() => expect(toastMock).toHaveBeenCalled());
+  });
+
+  it("rejects malformed 200 /api/auth/me payload", async () => {
+    const loginUser = {
+      token: "t",
+      id: 1,
+      email: "test@example.com",
+      name: "Test",
+      userType: "firm_user",
+      status: "active",
+      firmId: 1,
+      roleId: 1,
+    };
+    apiFetchJsonMock.mockResolvedValue(loginUser);
+    apiRequestMock.mockResolvedValue(createResponse(200, { ok: true, data: { nope: true }, meta: { request_id: "r", timestamp: "t", duration_ms: 1 } }));
+
+    renderWithProviders();
+
+    fireEvent.change(screen.getAllByPlaceholderText("name@firm.com")[0], { target: { value: "test@example.com" } });
+    fireEvent.change(screen.getByPlaceholderText("••••••••"), { target: { value: "pw" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => expect(apiRequestMock).toHaveBeenCalled());
+    await waitFor(() => expect(toastMock).toHaveBeenCalled());
     expect(setLocationMock).toHaveBeenCalledTimes(0);
   });
 

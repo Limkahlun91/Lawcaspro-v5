@@ -600,16 +600,7 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
     timing.roleLookupMs = Date.now() - roleLookupStartedAt;
     timing.firmLookupMs = Date.now() - firmLookupStartedAt;
 
-    const responseWriteStartedAt = Date.now();
-    res.cookie("auth_token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
-
-    res.json({
+    const payload = {
       token,
       id: user.id,
       email: user.email,
@@ -621,7 +612,22 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
       roleName,
       status: user.status,
       totpEnabled: user.totpEnabled,
+    };
+    logger.info(
+      { route: getRoute(req), reqId: getReqId(req) ?? null, stage: "response_shape", keys: Object.keys(payload).sort() },
+      "auth.login_response_shape",
+    );
+
+    const responseWriteStartedAt = Date.now();
+    res.cookie("auth_token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      path: "/",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
     });
+
+    res.json(payload);
     timing.responseWriteMs = Date.now() - responseWriteStartedAt;
 
     stage = "response_sent";
@@ -863,8 +869,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       ? await loadFounderPermissions({ userId: user.id, userType: "founder", email: user.email } as AuthRequest)
       : { permissions: [], highestLevel: null };
 
-    const startBuild = Date.now();
-    sendOk(res, {
+    const payload = {
       id: user.id,
       userType: user.userType,
       firmId: user.firmId,
@@ -879,7 +884,13 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       name: user.name,
       department: null,
       status: user.status,
-    });
+    };
+    logger.info(
+      { route: getRoute(req), reqId, stage: "response_shape", keys: Object.keys(payload).sort() },
+      "auth.me_response_shape",
+    );
+    const startBuild = Date.now();
+    sendOk(res, payload);
     responseBuildMs = Date.now() - startBuild;
     logger.info({ ...ctxBase, stage: "ok", ms: Date.now() - startedAt }, "auth.me");
     logger.info(

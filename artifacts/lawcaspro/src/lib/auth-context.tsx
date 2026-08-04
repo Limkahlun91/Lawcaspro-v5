@@ -7,6 +7,7 @@ import { clearStoredAuthToken } from "./auth-token";
 import { onAuthUnauthorized } from "./auth-events";
 import { ME_QUERY_KEY } from "./query-keys";
 import { unwrapApiData } from "./api-contract";
+import { extractAuthUser } from "./auth-response";
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
@@ -56,8 +57,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       if (res.status === 401) return null;
       const body = (await res.json()) as unknown;
-      const unwrapped = unwrapApiData<AuthUser | null>(body);
-      return unwrapped ?? null;
+      const unwrapped = unwrapApiData<unknown>(body);
+      return extractAuthUser(unwrapped);
     },
   });
   const { data: me, isLoading: isMeLoading, isError: isMeError } = meQuery;

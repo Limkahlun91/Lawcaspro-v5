@@ -9,7 +9,6 @@ import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Building2, Eye, EyeOff, ShieldCheck } from "lucide-react";
-import type { AuthUser } from "@workspace/api-client-react";
 import { setStoredAuthToken } from "@/lib/auth-token";
 import { apiFetchJson, apiRequest } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
@@ -18,6 +17,7 @@ import { useLocation } from "wouter";
 import { useQueryClient } from "@tanstack/react-query";
 import { ME_QUERY_KEY } from "@/lib/query-keys";
 import { unwrapApiData } from "@/lib/api-contract";
+import { extractAuthUser, extractToken, requiresTotp } from "@/lib/auth-response";
 
 const loginSchema = z.object({
   email: z.string().email("Please enter a valid email address"),
@@ -28,21 +28,6 @@ type LoginFormValues = z.infer<typeof loginSchema>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object";
-}
-
-function isAuthUser(value: unknown): value is AuthUser {
-  if (!isRecord(value)) return false;
-  return (
-    typeof value.id === "number" &&
-    typeof value.email === "string" &&
-    typeof value.name === "string" &&
-    typeof value.userType === "string" &&
-    typeof value.status === "string"
-  );
-}
-
-function requiresTotp(value: unknown): boolean {
-  return isRecord(value) && value.needsTotp === true;
 }
 
 export default function Login() {
@@ -95,14 +80,8 @@ export default function Login() {
         return;
       }
 
-      if (!isAuthUser(body)) {
-        toast({ title: "Login failed", description: "Unexpected response from server.", variant: "destructive" });
-        return;
-      }
-
-      if (isRecord(body) && typeof body.token === "string" && body.token.trim() !== "") {
-        setStoredAuthToken(body.token.trim());
-      }
+      const token = extractToken(body);
+      if (token) setStoredAuthToken(token);
 
       const meRes = await apiRequest("/api/auth/me", {
         allowStatuses: [401],
@@ -113,14 +92,14 @@ export default function Login() {
         return;
       }
       const meBody = (await meRes.json()) as unknown;
-      const verified = unwrapApiData<AuthUser | null>(meBody);
-      if (!verified || !isAuthUser(verified)) {
+      const unwrapped = unwrapApiData<unknown>(meBody);
+      const verified = extractAuthUser(unwrapped);
+      if (!verified) {
         toast({ title: "Login failed", description: "Unexpected response from server.", variant: "destructive" });
         return;
       }
 
       setAuthUser(verified);
-      queryClient.setQueryData(ME_QUERY_KEY, verified);
 
       const nextPath = (() => {
         if (verified.userType === "founder") return "/platform/dashboard";
