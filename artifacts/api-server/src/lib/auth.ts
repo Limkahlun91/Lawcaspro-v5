@@ -3,6 +3,7 @@ import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, roles
 import { and, eq } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
+import { isAuthAdminDbConfigured, withAuthAdminDb } from "./auth-admin-db";
 import { isTransientDbConnectionError, withAuthSafeDb } from "./auth-safe-db";
 
 export interface AuthRequest extends Request {
@@ -272,6 +273,7 @@ type SessionUserLookupTiming = {
   inflightShared: boolean;
   primaryLookupMs: number;
   fallbackLookupMs: number;
+  identityDbSource: "DATABASE_URL" | "AUTH_DATABASE_URL" | "ADMIN_DATABASE_URL" | "UNKNOWN";
 };
 
 type SessionUserLookupResult =
@@ -302,11 +304,28 @@ export async function lookupSessionAndUserByTokenHash(
   if (shared) {
     const r = await shared;
     if (!r) return null;
-    return { ...r, timing: { attempts: r.timing?.attempts ?? 1, inflightShared: true, primaryLookupMs: r.timing?.primaryLookupMs ?? 0, fallbackLookupMs: r.timing?.fallbackLookupMs ?? 0 } };
+    return {
+      ...r,
+      timing: {
+        attempts: r.timing?.attempts ?? 1,
+        inflightShared: true,
+        primaryLookupMs: r.timing?.primaryLookupMs ?? 0,
+        fallbackLookupMs: r.timing?.fallbackLookupMs ?? 0,
+        identityDbSource: r.timing?.identityDbSource ?? "UNKNOWN",
+      },
+    };
   }
 
   const p = (async (): Promise<SessionUserLookupResult> => {
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  const authAdminSource = (() => {
+    const rawAuth = typeof process.env.AUTH_DATABASE_URL === "string" ? process.env.AUTH_DATABASE_URL.trim() : "";
+    if (rawAuth) return "AUTH_DATABASE_URL";
+    const rawAdmin = typeof process.env.ADMIN_DATABASE_URL === "string" ? process.env.ADMIN_DATABASE_URL.trim() : "";
+    if (rawAdmin) return "ADMIN_DATABASE_URL";
+    return "UNKNOWN";
+  })();
 
   const lookupViaDb = async (): Promise<SessionUserLookupResult> => {
     if (process.env.NODE_ENV === "test") {
@@ -407,6 +426,62 @@ export async function lookupSessionAndUserByTokenHash(
     }
   };
 
+  const lookupViaAuthAdminDb = async (): Promise<
+    | {
+        session: typeof sessionsTable.$inferSelect;
+        user:
+          | {
+              id: number;
+              email: string;
+              name: string;
+              userType: string;
+              firmId: number | null;
+              roleId: number | null;
+              developerId: number | null;
+              status: string;
+            }
+          | undefined;
+      }
+    | null
+  > => {
+    if (!isAuthAdminDbConfigured()) return null;
+    return await withAuthAdminDb(async (authDb) => {
+      const [s] = await authDb.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
+      if (!s) return null;
+      const [u] = await authDb
+        .select({
+          id: usersTable.id,
+          email: usersTable.email,
+          name: usersTable.name,
+          userType: usersTable.userType,
+          firmId: usersTable.firmId,
+          roleId: usersTable.roleId,
+          developerId: usersTable.developerId,
+          status: usersTable.status,
+        })
+        .from(usersTable)
+        .where(eq(usersTable.id, s.userId))
+        .catch(async (err) => {
+          const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+          if (code !== "42703") throw err;
+          const [u2] = await authDb
+            .select({
+              id: usersTable.id,
+              email: usersTable.email,
+              name: usersTable.name,
+              userType: usersTable.userType,
+              firmId: usersTable.firmId,
+              roleId: usersTable.roleId,
+              status: usersTable.status,
+            })
+            .from(usersTable)
+            .where(eq(usersTable.id, s.userId));
+          return [u2 ? ({ ...u2, developerId: null }) : undefined] as any;
+        });
+      return { session: s, user: u as any };
+    });
+  };
+
   const lookupViaAuthSafeDb = async (): Promise<
     | {
         session: typeof sessionsTable.$inferSelect;
@@ -470,7 +545,7 @@ export async function lookupSessionAndUserByTokenHash(
     );
   };
 
-  const timing: SessionUserLookupTiming = { attempts: 0, inflightShared: false, primaryLookupMs: 0, fallbackLookupMs: 0 };
+  const timing: SessionUserLookupTiming = { attempts: 0, inflightShared: false, primaryLookupMs: 0, fallbackLookupMs: 0, identityDbSource: "UNKNOWN" };
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     timing.attempts = attempt;
@@ -479,18 +554,31 @@ export async function lookupSessionAndUserByTokenHash(
       const primary = await lookupViaDb();
       timing.primaryLookupMs += Date.now() - primaryStart;
       if (!primary?.session) {
+        const adminStart = Date.now();
+        const admin = await lookupViaAuthAdminDb();
+        timing.fallbackLookupMs += Date.now() - adminStart;
+        if (admin?.session) {
+          timing.identityDbSource = authAdminSource;
+          logger.info(
+            { stage: "session_lookup", identityDbSource: timing.identityDbSource, primarySessionFound: false, adminSessionFound: true },
+            "auth.session_lookup_admin_hit",
+          );
+          return admin?.user ? { ...(admin as any), timing } : { session: admin.session as any, user: undefined as any, timing };
+        }
         if (attempt < 2) {
           await sleep(30 * attempt);
           continue;
         }
         return null;
       }
+      timing.identityDbSource = "DATABASE_URL";
       if (primary.user) return { ...primary, timing };
 
       try {
         const fallbackStart = Date.now();
         const fallback = await lookupViaAuthSafeDb();
         timing.fallbackLookupMs += Date.now() - fallbackStart;
+        if (fallback?.session) timing.identityDbSource = "DATABASE_URL";
         return fallback?.session ? { ...(fallback as any), timing } : { ...primary, timing };
       } catch (err) {
         const shouldRetry = isTransientDbConnectionError(err);

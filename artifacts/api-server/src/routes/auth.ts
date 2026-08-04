@@ -785,8 +785,13 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
     sessionLookupInflightShared = found?.timing?.inflightShared ?? null;
     sessionLookupPrimaryMs = found?.timing?.primaryLookupMs ?? null;
     sessionLookupFallbackMs = found?.timing?.fallbackLookupMs ?? null;
+    const sessionLookupDbSource = found?.timing?.identityDbSource ?? null;
     const session = found?.session;
     const user = found?.user;
+    const sessionFound = Boolean(session);
+    const userFound = Boolean(user);
+    const sessionExpired = Boolean(session && session.expiresAt < new Date());
+    const userActive = Boolean(user && user.status === "active");
 
     if (!session || !user || session.expiresAt < new Date() || user.status !== "active") {
       if (!session || !user) sessionLookupOutcome = "NOT_FOUND";
@@ -795,7 +800,19 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
       sendOk(res, null);
       logger.info(
-        { ...ctxBase, stage: "not_authenticated", ms: Date.now() - startedAt, sessionLookupMs, sessionLookupOutcome },
+        {
+          ...ctxBase,
+          stage: "not_authenticated",
+          ms: Date.now() - startedAt,
+          sessionLookupMs,
+          sessionLookupOutcome,
+          sessionLookupDbSource,
+          sessionFound,
+          sessionExpired,
+          userFound,
+          userActive,
+          dataKind: "NULL",
+        },
         "auth.me",
       );
       return;
@@ -908,6 +925,8 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       ? await loadFounderPermissions({ userId: user.id, userType: "founder", email: user.email } as AuthRequest)
       : { permissions: [], highestLevel: null };
 
+    const enrichmentDbSource =
+      user.userType === "firm_user" && user.firmId ? "DATABASE_URL/app_user" : "DATABASE_URL";
     const payload = {
       id: user.id,
       userType: user.userType,
@@ -943,12 +962,15 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
         sessionLookupPrimaryMs,
         sessionLookupFallbackMs,
         sessionLookupOutcome,
+        sessionLookupDbSource,
         tenantContextDbConnectMs,
         tenantContextMs,
         roleLookupMs,
         permissionsLookupMs,
         firmLookupMs,
         responseBuildMs,
+        enrichmentDbSource,
+        dataKind: "USER",
         userId: user.id,
         firmId: user.firmId,
         roleId: user.roleId,

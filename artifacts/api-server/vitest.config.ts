@@ -14,6 +14,7 @@ export default defineConfig({
       : [
         "src/__tests__/auth-founder-bcrypt-regression.test.ts",
         "src/__tests__/auth-mocked-regression.test.ts",
+        "src/__tests__/auth-me-admin-session-lookup.test.ts",
         "src/__tests__/users-hub-regression.test.ts",
         "src/__tests__/sql-regression.test.ts",
         "src/__tests__/runtime-500-regression.test.ts",
