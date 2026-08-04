@@ -212,6 +212,7 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
   let stage: string = "parse";
   let emailHash: string | undefined;
   let userId: number | undefined;
+  const timing: Record<string, number> = {};
   try {
     const parsed = LoginBody.safeParse(req.body);
     if (!parsed.success) {
@@ -321,7 +322,7 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
                 totpEnabled: usersTable.totpEnabled,
               })
               .from(usersTable)
-              .where(eq(sql`lower(trim(${usersTable.email}))`, emailNormalized));
+              .where(eq(usersTable.email, emailNormalized));
           }, "auth_login_user_lookup");
         }, { ...ctx, stage: "user_lookup.query" }, 2);
         const u = rows[0] as LoginUser | undefined;
@@ -346,7 +347,7 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
                 status: usersTable.status,
               })
               .from(usersTable)
-              .where(eq(sql`lower(trim(${usersTable.email}))`, emailNormalized));
+              .where(eq(usersTable.email, emailNormalized));
           }, "auth_login_user_lookup_fallback");
         }, { ...ctx, stage: "user_lookup_fallback.query" }, 2);
         const u = rows[0] as {
@@ -398,6 +399,7 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
     ctx.userId = user.id;
     ctx.firmId = optionalNumber(user.firmId) ?? undefined;
     const userLookupMs = Date.now() - userLookupStartedAt;
+    timing.userLookupMs = userLookupMs;
     logger.info({ ...ctx, ms: userLookupMs }, "auth.login.stage.user_lookup_done");
 
     if (user.userType === "founder" && emailNormalized !== FOUNDER_EMAIL) {
@@ -421,7 +423,9 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
     stage = "password_verify";
     ctx.stage = stage;
     logger.info({ ...ctx }, "auth.login.stage");
+    const passwordVerifyStartedAt = Date.now();
     const passwordMatch = await bcrypt.compare(password, user.passwordHash);
+    timing.passwordVerifyMs = Date.now() - passwordVerifyStartedAt;
     if (!passwordMatch) {
       logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.invalid_password");
       await insertAuthAuditLog(
@@ -502,6 +506,7 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
     stage = "session_persist";
     ctx.stage = stage;
     logger.info({ ...ctx }, "auth.login.stage");
+    const sessionPersistStartedAt = Date.now();
     await withTransientDbRetry(
       async () => {
         type SessionInsert = typeof sessionsTable.$inferInsert;
@@ -519,6 +524,7 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
       { ...ctx, stage: "session_persist.query" },
       2,
     );
+    timing.sessionPersistMs = Date.now() - sessionPersistStartedAt;
 
     stage = "side_effects";
     ctx.stage = stage;
@@ -558,36 +564,43 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
       }
     })();
 
-    let roleName: string | null = null;
-    if (user.roleId) {
+    const roleLookupStartedAt = Date.now();
+    const roleLookupPromise = (async (): Promise<string | null> => {
+      if (!user.roleId) return null;
       try {
         const rows = await withLoginDb(async (dbLike) => {
           return await dbLike.select().from(rolesTable).where(eq(rolesTable.id, user.roleId!));
         }, "auth_login_role_lookup");
         const roleRow = Array.isArray(rows) ? (rows[0] as unknown) : undefined;
         const role = (roleRow && typeof roleRow === "object" ? (roleRow as { name?: unknown }) : undefined) ?? undefined;
-        roleName = (role as { name?: unknown } | undefined)?.name as string | undefined ?? null;
+        return (role as { name?: unknown } | undefined)?.name as string | undefined ?? null;
       } catch (err) {
         logger.error({ ...ctx, stage: "role_lookup", err }, "auth.login.degraded");
-        roleName = null;
+        return null;
       }
-    }
+    })();
 
-    let firmName: string | null = null;
-    if (user.firmId) {
+    const firmLookupStartedAt = Date.now();
+    const firmLookupPromise = (async (): Promise<string | null> => {
+      if (!user.firmId) return null;
       try {
         const rows = await withLoginDb(async (dbLike) => {
           return await dbLike.select().from(firmsTable).where(eq(firmsTable.id, user.firmId!));
         }, "auth_login_firm_lookup");
         const firmRow = Array.isArray(rows) ? (rows[0] as unknown) : undefined;
         const firm = (firmRow && typeof firmRow === "object" ? (firmRow as { name?: unknown }) : undefined) ?? undefined;
-        firmName = (firm as { name?: unknown } | undefined)?.name as string | undefined ?? null;
+        return (firm as { name?: unknown } | undefined)?.name as string | undefined ?? null;
       } catch (err) {
         logger.error({ ...ctx, stage: "firm_lookup", err }, "auth.login.degraded");
-        firmName = null;
+        return null;
       }
-    }
+    })();
 
+    const [roleName, firmName] = await Promise.all([roleLookupPromise, firmLookupPromise]);
+    timing.roleLookupMs = Date.now() - roleLookupStartedAt;
+    timing.firmLookupMs = Date.now() - firmLookupStartedAt;
+
+    const responseWriteStartedAt = Date.now();
     res.cookie("auth_token", token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -609,11 +622,24 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
       status: user.status,
       totpEnabled: user.totpEnabled,
     });
+    timing.responseWriteMs = Date.now() - responseWriteStartedAt;
 
     stage = "response_sent";
     ctx.stage = stage;
     logger.info({ ...ctx, userLookupMs, ms: Date.now() - startedAt }, "auth.login.stage");
     logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.login.success");
+    logger.info(
+      {
+        route: getRoute(req),
+        reqId: getReqId(req) ?? null,
+        emailHash,
+        userId: user.id,
+        firmId: user.firmId ?? null,
+        durationMs: Date.now() - startedAt,
+        timing,
+      },
+      "auth.login_timing",
+    );
   } catch (err) {
     const errMessageShort =
       err instanceof Error ? err.message.slice(0, 180) : String(err ?? "").slice(0, 180);

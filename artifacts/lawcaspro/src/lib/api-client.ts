@@ -90,7 +90,7 @@ export async function apiRequest(path: string, options: ApiFetchOptions = {}): P
   const timeoutMs = options.timeoutMs ?? 15000;
   const token = getStoredAuthToken();
   const headers = mergeHeaders(options.headers);
-  const shouldAttachBearer = Boolean(token) && !headers.has("authorization") && !isSameOriginUrl(url);
+  const shouldAttachBearer = Boolean(token) && !headers.has("authorization") && isSameOriginUrl(url);
   if (shouldAttachBearer) headers.set("authorization", `Bearer ${token}`);
   const supportSessionId = getSupportSessionId();
   if (supportSessionId && !headers.has("x-support-session-id")) {

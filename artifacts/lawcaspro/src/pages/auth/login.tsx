@@ -11,9 +11,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Building2, Eye, EyeOff, ShieldCheck } from "lucide-react";
 import type { AuthUser } from "@workspace/api-client-react";
 import { setStoredAuthToken } from "@/lib/auth-token";
-import { apiFetchJson } from "@/lib/api-client";
+import { apiFetchJson, apiRequest } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { hasPermission } from "@/lib/permissions";
+import { useLocation } from "wouter";
+import { useQueryClient } from "@tanstack/react-query";
+import { ME_QUERY_KEY } from "@/lib/query-keys";
+import { unwrapApiData } from "@/lib/api-contract";
 
 const loginSchema = z.object({
   email: z.string().email("Please enter a valid email address"),
@@ -44,12 +48,15 @@ function requiresTotp(value: unknown): boolean {
 export default function Login() {
   const { login: setAuthUser, user, isLoading } = useAuth();
   const { toast } = useToast();
+  const [, setLocation] = useLocation();
+  const queryClient = useQueryClient();
   const [showPassword, setShowPassword] = useState(false);
   const [isPending, setIsPending] = useState(false);
 
   const [totpStep, setTotpStep] = useState(false);
   const [totpCode, setTotpCode] = useState("");
   const [savedCredentials, setSavedCredentials] = useState<LoginFormValues | null>(null);
+  const [hasNavigated, setHasNavigated] = useState(false);
 
   const form = useForm<LoginFormValues>({
     resolver: zodResolver(loginSchema),
@@ -59,19 +66,23 @@ export default function Login() {
   useEffect(() => {
     if (isLoading) return;
     if (!user) return;
+    if (hasNavigated) return;
     const roleName = String((user as any)?.roleName ?? "");
     const nextPath = (() => {
       if (user.userType === "founder") return "/platform/dashboard";
       if (roleName === "Developer_User") return "/developer/dashboard";
       return "/app/dashboard";
     })();
-    const base = import.meta.env.BASE_URL ? String(import.meta.env.BASE_URL).replace(/\/$/, "") : "";
-    window.location.assign(`${base}${nextPath}`);
-  }, [isLoading, user]);
+    setHasNavigated(true);
+    setLocation(nextPath);
+  }, [hasNavigated, isLoading, setLocation, user]);
 
   async function doLogin(data: LoginFormValues, code?: string) {
     setIsPending(true);
     try {
+      await queryClient.cancelQueries({ queryKey: ME_QUERY_KEY, exact: true });
+      queryClient.removeQueries({ queryKey: ME_QUERY_KEY, exact: true });
+
       const body = await apiFetchJson<unknown>("/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -92,17 +103,36 @@ export default function Login() {
       if (isRecord(body) && typeof body.token === "string" && body.token.trim() !== "") {
         setStoredAuthToken(body.token.trim());
       }
-      const effective = body;
-      setAuthUser(effective);
+
+      const meRes = await apiRequest("/api/auth/me", {
+        allowStatuses: [401],
+        timeoutMs: 15000,
+      });
+      if (meRes.status === 401) {
+        toast({ title: "Login failed", description: "Unable to verify your session.", variant: "destructive" });
+        return;
+      }
+      const meBody = (await meRes.json()) as unknown;
+      const verified = unwrapApiData<AuthUser | null>(meBody);
+      if (!verified || !isAuthUser(verified)) {
+        toast({ title: "Login failed", description: "Unexpected response from server.", variant: "destructive" });
+        return;
+      }
+
+      setAuthUser(verified);
+      queryClient.setQueryData(ME_QUERY_KEY, verified);
+
       const nextPath = (() => {
-        if (effective.userType === "founder") return "/platform/dashboard";
-        const roleName = String((effective as any)?.roleName ?? "");
+        if (verified.userType === "founder") return "/platform/dashboard";
+        const roleName = String((verified as any)?.roleName ?? "");
         if (roleName === "Developer_User") return "/developer/dashboard";
-        if (hasPermission(effective, "dashboard", "read")) return "/app/dashboard";
+        if (hasPermission(verified, "dashboard", "read")) return "/app/dashboard";
         return "/app/dashboard";
       })();
-      const base = import.meta.env.BASE_URL ? String(import.meta.env.BASE_URL).replace(/\/$/, "") : "";
-      window.location.assign(`${base}${nextPath}`);
+      if (!hasNavigated) {
+        setHasNavigated(true);
+        setLocation(nextPath);
+      }
     } catch (e) {
       toastError(toast, e, "Login failed");
       setTotpStep(false);
