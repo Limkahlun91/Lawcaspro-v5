@@ -38,6 +38,7 @@ export default defineConfig({
         "src/__tests__/communication-hub.test.ts",
         "src/__tests__/payment-voucher-create-status.unit.test.ts",
         "src/__tests__/payment-voucher-create-request.unit.test.ts",
+        "src/__tests__/payment-voucher-case-attachment-isolation.test.ts",
       ],
     pool: "forks",
     poolOptions: {

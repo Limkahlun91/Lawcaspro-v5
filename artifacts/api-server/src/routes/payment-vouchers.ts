@@ -1,6 +1,6 @@
 import express, { type NextFunction, type Response, type Router as ExpressRouter } from "express";
 import crypto from "crypto";
-import { eq, and, desc, asc, inArray, ne } from "drizzle-orm";
+import { eq, and, desc, asc, inArray, ne, isNull } from "drizzle-orm";
 import {
   accountingSettingsTable,
   caseLedgersTable,
@@ -494,7 +494,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       .where(and(
         eq(casesTable.firmId, req.firmId!),
         eq(casesTable.id, caseIdValue),
-        sql`${casesTable.deletedAt} IS NULL` as any,
+        isNull(casesTable.deletedAt),
       ))
       .limit(1);
     if (!rows[0]) { res.status(404).json({ error: "Case not found" }); return; }
@@ -506,7 +506,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       .where(and(
         eq(casesTable.firmId, req.firmId!),
         eq(casesTable.id, targetCaseIdValue),
-        sql`${casesTable.deletedAt} IS NULL` as any,
+        isNull(casesTable.deletedAt),
       ))
       .limit(1);
     if (!rows[0]) { res.status(404).json({ error: "Target case not found" }); return; }
