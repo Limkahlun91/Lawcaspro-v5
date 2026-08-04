@@ -8,7 +8,6 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { apiFetchJson } from "@/lib/api-client";
-import { useListProjects } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { MilestonesTable } from "@/components/milestones-table";
 import { useToast } from "@/hooks/use-toast";
@@ -111,23 +110,32 @@ export default function Workbench() {
     queryKey: ["cases", "filter-options"],
     queryFn: ({ signal }) => apiFetchJson("/cases/filter-options", { signal }),
     retry: false,
+    enabled: tab !== "my-work",
+    staleTime: 5 * 60 * 1000,
   });
   const filterOptions = _filterOptions as any;
   const lawyers: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.lawyers) ? filterOptions.assignees.lawyers : [];
   const clerks: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.clerks) ? filterOptions.assignees.clerks : [];
 
-  const { data: projectsRes } = useListProjects({ page: 1, limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
-  const projects = projectsRes?.data ?? [];
+  const { data: projectsRes } = useQuery({
+    queryKey: ["projects", "list", { page: 1, limit: 200 }],
+    queryFn: ({ signal }) => apiFetchJson("/projects?page=1&limit=200", { signal }) as Promise<{ data?: unknown[] }>,
+    enabled: tab !== "my-work",
+    retry: false,
+    staleTime: 5 * 60 * 1000,
+  });
+  const projects: any[] = Array.isArray((projectsRes as any)?.data) ? ((projectsRes as any).data as any[]) : [];
 
   const workbenchQuery = useMemo(() => {
     const q = new URLSearchParams();
+    q.set("section", tab);
     if (userId !== "me") q.set("userId", userId);
     if (projectId !== "all") q.set("projectId", projectId);
     if (purchaseMode !== "all") q.set("purchaseMode", purchaseMode);
     if (assignedLawyerId !== "all") q.set("assignedLawyerId", assignedLawyerId);
     if (assignedClerkId !== "all") q.set("assignedClerkId", assignedClerkId);
     return q.toString();
-  }, [userId, projectId, purchaseMode, assignedLawyerId, assignedClerkId]);
+  }, [assignedClerkId, assignedLawyerId, projectId, purchaseMode, tab, userId]);
 
   const logSectionError = (args: { section: string; queryKey: unknown; endpoint?: string; err: unknown }) => {
     try {
@@ -203,6 +211,22 @@ export default function Workbench() {
     retry: false,
     enabled: tab === "my-work" && milestonesTargetUserId != null,
   });
+  const filteredPaymentVoucherActions = useMemo(() => {
+    const rows = paymentVoucherActionsQuery.data ?? [];
+    const now = Date.now();
+    if (pvActionFilter === "active") {
+      return rows.filter((row) => row.status === "assigned" || row.status === "acknowledged");
+    }
+    if (pvActionFilter === "overdue") {
+      return rows.filter((row) => {
+        const ackDue = row.acknowledgeDueAt ? new Date(row.acknowledgeDueAt).getTime() : NaN;
+        const completionDue = row.completionDueAt ? new Date(row.completionDueAt).getTime() : NaN;
+        return (row.status === "assigned" && Number.isFinite(ackDue) && ackDue <= now)
+          || (row.status === "acknowledged" && Number.isFinite(completionDue) && completionDue <= now);
+      });
+    }
+    return rows;
+  }, [paymentVoucherActionsQuery.data, pvActionFilter]);
 
   const acknowledgeMutation = useMutation({
     mutationFn: (id: number) => apiFetchJson(`/payment-voucher-actions/${id}/acknowledge`, { method: "POST" }),
@@ -257,22 +281,6 @@ export default function Workbench() {
   const myWorkRecent = Array.isArray((data as any)?.myWork?.recent) ? ((data as any).myWork.recent as any[]) : [];
   const missingCards = Array.isArray((data as any)?.missingDates?.cards) ? ((data as any).missingDates.cards as WorkbenchCard[]) : [];
   const overdueCards = Array.isArray((data as any)?.overdue?.cards) ? ((data as any).overdue.cards as WorkbenchCard[]) : [];
-  const filteredPaymentVoucherActions = useMemo(() => {
-    const rows = paymentVoucherActionsQuery.data ?? [];
-    const now = Date.now();
-    if (pvActionFilter === "active") {
-      return rows.filter((row) => row.status === "assigned" || row.status === "acknowledged");
-    }
-    if (pvActionFilter === "overdue") {
-      return rows.filter((row) => {
-        const ackDue = row.acknowledgeDueAt ? new Date(row.acknowledgeDueAt).getTime() : NaN;
-        const completionDue = row.completionDueAt ? new Date(row.completionDueAt).getTime() : NaN;
-        return (row.status === "assigned" && Number.isFinite(ackDue) && ackDue <= now)
-          || (row.status === "acknowledged" && Number.isFinite(completionDue) && completionDue <= now);
-      });
-    }
-    return rows;
-  }, [paymentVoucherActionsQuery.data, pvActionFilter]);
 
   return (
     <div className="space-y-6">

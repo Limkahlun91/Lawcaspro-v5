@@ -2164,6 +2164,11 @@ router.get("/cases/workbench", requireAuthHandler, requireFirmUserHandler, requi
     const hasKeyDates = await tableExists(r, "public.case_key_dates");
 
   const one = (v: string | string[] | undefined): string | undefined => Array.isArray(v) ? v[0] : v;
+  const sectionRaw = one(req.query.section as any);
+  const section = sectionRaw === "my-work" || sectionRaw === "missing" || sectionRaw === "overdue" ? sectionRaw : "all";
+  const wantsMyWork = section === "all" || section === "my-work";
+  const wantsMissing = section === "all" || section === "missing";
+  const wantsOverdue = section === "all" || section === "overdue";
   const staffUserIdRaw = one(req.query.userId as any);
   const staffUserId = staffUserIdRaw ? Number(staffUserIdRaw) : req.userId!;
   if (!Number.isInteger(staffUserId)) {
@@ -2275,37 +2280,47 @@ router.get("/cases/workbench", requireAuthHandler, requireFirmUserHandler, requi
       AND ${caseAssignmentsTable.unassignedAt} IS NULL
   )`;
 
-  const [{ c: assignedLawyerCount }] = await r
-    .select({ c: sql<number>`COUNT(*)` })
-    .from(casesTable)
-    .where(and(...baseConditions, staffAssignedLawyerSql));
-  const [{ c: assignedClerkCount }] = await r
-    .select({ c: sql<number>`COUNT(*)` })
-    .from(casesTable)
-    .where(and(...baseConditions, staffAssignedClerkSql));
+  let assignedLawyerCount = 0;
+  let assignedClerkCount = 0;
   let needingActionCount = 0;
-  if (hasKeyDates) {
-    const overdue7 = overdueAnySql(7) ?? sql`FALSE`;
-    const [{ c }] = await r
-      .select({ c: sql<number>`COUNT(DISTINCT ${casesTable.id})` })
-      .from(casesTable)
-      .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
-      .where(and(...baseConditions, staffAssignedAnySql, overdue7));
-    needingActionCount = Number(c ?? 0);
-  }
+  let recentRows: Array<{ id: number; referenceNo: string; projectName: string | null; updatedAt: Date }> = [];
 
-  const recentRows = await r
-    .select({
-      id: casesTable.id,
-      referenceNo: casesTable.referenceNo,
-      projectName: projectsTable.name,
-      updatedAt: casesTable.updatedAt,
-    })
-    .from(casesTable)
-    .leftJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
-    .where(and(...baseConditions, staffAssignedAnySql))
-    .orderBy(desc(casesTable.updatedAt))
-    .limit(8);
+  if (wantsMyWork) {
+    const [{ c: assignedLawyerCountRaw }] = await r
+      .select({ c: sql<number>`COUNT(*)` })
+      .from(casesTable)
+      .where(and(...baseConditions, staffAssignedLawyerSql));
+    assignedLawyerCount = Number(assignedLawyerCountRaw ?? 0);
+
+    const [{ c: assignedClerkCountRaw }] = await r
+      .select({ c: sql<number>`COUNT(*)` })
+      .from(casesTable)
+      .where(and(...baseConditions, staffAssignedClerkSql));
+    assignedClerkCount = Number(assignedClerkCountRaw ?? 0);
+
+    if (hasKeyDates) {
+      const overdue7 = overdueAnySql(7) ?? sql`FALSE`;
+      const [{ c }] = await r
+        .select({ c: sql<number>`COUNT(DISTINCT ${casesTable.id})` })
+        .from(casesTable)
+        .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
+        .where(and(...baseConditions, staffAssignedAnySql, overdue7));
+      needingActionCount = Number(c ?? 0);
+    }
+
+    recentRows = await r
+      .select({
+        id: casesTable.id,
+        referenceNo: casesTable.referenceNo,
+        projectName: projectsTable.name,
+        updatedAt: casesTable.updatedAt,
+      })
+      .from(casesTable)
+      .leftJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
+      .where(and(...baseConditions, staffAssignedAnySql))
+      .orderBy(desc(casesTable.updatedAt))
+      .limit(8);
+  }
 
   const milestones: Array<{ key: CaseMilestoneKey; label: string }> = [
     { key: "spa_date", label: "SPA Date Missing" },
@@ -2316,32 +2331,34 @@ router.get("/cases/workbench", requireAuthHandler, requireFirmUserHandler, requi
   ];
 
   const missingCards: Array<{ key: string; label: string; count: number; query: Record<string, string> }> = [];
-  for (const m of milestones) {
-    const loanOnly = hasLoanOnlyMilestone(m.key);
-    let c = 0;
-    if (hasKeyDates) {
-      const [row] = await r
-        .select({ c: sql<number>`COUNT(DISTINCT ${casesTable.id})` })
-        .from(casesTable)
-        .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
-        .where(and(...baseConditions, ...(loanOnly ? [eq(casesTable.purchaseMode, "loan")] : []), milestonePresenceWhereSql(m.key, "missing")));
-      c = Number(row?.c ?? 0);
+  if (wantsMissing) {
+    for (const m of milestones) {
+      const loanOnly = hasLoanOnlyMilestone(m.key);
+      let c = 0;
+      if (hasKeyDates) {
+        const [row] = await r
+          .select({ c: sql<number>`COUNT(DISTINCT ${casesTable.id})` })
+          .from(casesTable)
+          .leftJoin(caseKeyDatesTable, and(eq(caseKeyDatesTable.caseId, casesTable.id), eq(caseKeyDatesTable.firmId, casesTable.firmId)))
+          .where(and(...baseConditions, ...(loanOnly ? [eq(casesTable.purchaseMode, "loan")] : []), milestonePresenceWhereSql(m.key, "missing")));
+        c = Number(row?.c ?? 0);
+      }
+
+      const query: Record<string, string> = { milestone: m.key, milestonePresence: "missing", page: "1", sortBy: "updatedAt", sortDir: "desc" };
+      if (purchaseMode === "cash" || purchaseMode === "loan") query.purchaseMode = purchaseMode;
+      if (Number.isInteger(projectId)) query.projectId = String(projectId);
+      if (Number.isInteger(developerId)) query.developerId = String(developerId);
+      if (Number.isInteger(assignedLawyerId)) query.assignedLawyerId = String(assignedLawyerId);
+      if (Number.isInteger(assignedClerkId)) query.assignedClerkId = String(assignedClerkId);
+
+      if (loanOnly) query.purchaseMode = "loan";
+
+      missingCards.push({ key: m.key, label: m.label, count: c, query });
     }
-
-    const query: Record<string, string> = { milestone: m.key, milestonePresence: "missing", page: "1", sortBy: "updatedAt", sortDir: "desc" };
-    if (purchaseMode === "cash" || purchaseMode === "loan") query.purchaseMode = purchaseMode;
-    if (Number.isInteger(projectId)) query.projectId = String(projectId);
-    if (Number.isInteger(developerId)) query.developerId = String(developerId);
-    if (Number.isInteger(assignedLawyerId)) query.assignedLawyerId = String(assignedLawyerId);
-    if (Number.isInteger(assignedClerkId)) query.assignedClerkId = String(assignedClerkId);
-
-    if (loanOnly) query.purchaseMode = "loan";
-
-    missingCards.push({ key: m.key, label: m.label, count: c, query });
   }
 
   const overdueThresholds = [7, 14, 30] as const;
-  const overdueCards = await Promise.all(overdueThresholds.map(async (days) => {
+  const overdueCards = wantsOverdue ? await Promise.all(overdueThresholds.map(async (days) => {
     let c = 0;
     if (hasKeyDates) {
       const overdue = overdueAnySql(days) ?? sql`FALSE`;
@@ -2366,13 +2383,13 @@ router.get("/cases/workbench", requireAuthHandler, requireFirmUserHandler, requi
     if (Number.isInteger(assignedClerkId)) query.assignedClerkId = String(assignedClerkId);
 
     return { key: `overdue_${days}`, label: `Overdue > ${days} days`, count: c, query };
-  }));
+  })) : [];
 
   const myWorkCards = [
-    { key: "assigned_lawyer", label: "Assigned to me (Lawyer)", count: Number(assignedLawyerCount ?? 0), query: { assignedLawyerId: String(staffUserId), page: "1", sortBy: "updatedAt", sortDir: "desc" } },
-    { key: "assigned_clerk", label: "Assigned to me (Clerk)", count: Number(assignedClerkCount ?? 0), query: { assignedClerkId: String(staffUserId), page: "1", sortBy: "updatedAt", sortDir: "desc" } },
+    { key: "assigned_lawyer", label: "Assigned to me (Lawyer)", count: assignedLawyerCount, query: { assignedLawyerId: String(staffUserId), page: "1", sortBy: "updatedAt", sortDir: "desc" } },
+    { key: "assigned_clerk", label: "Assigned to me (Clerk)", count: assignedClerkCount, query: { assignedClerkId: String(staffUserId), page: "1", sortBy: "updatedAt", sortDir: "desc" } },
     { key: "recently_updated", label: "Recently updated (my cases)", count: Number(recentRows.length), query: { assignedToUserId: String(staffUserId), page: "1", sortBy: "updatedAt", sortDir: "desc" } },
-    { key: "needing_action", label: "Cases needing my action", count: Number(needingActionCount ?? 0), query: { assignedToUserId: String(staffUserId), overdueDays: "7", page: "1", sortBy: "updatedAt", sortDir: "desc" } },
+    { key: "needing_action", label: "Cases needing my action", count: needingActionCount, query: { assignedToUserId: String(staffUserId), overdueDays: "7", page: "1", sortBy: "updatedAt", sortDir: "desc" } },
   ];
 
   const staffOptions = canViewUsers
@@ -2388,8 +2405,8 @@ router.get("/cases/workbench", requireAuthHandler, requireFirmUserHandler, requi
       staffUser,
       staffOptions,
       myWork: {
-        cards: myWorkCards,
-        recent: recentRows.map((c) => ({ id: c.id, referenceNo: c.referenceNo, projectName: c.projectName ?? "Unknown", updatedAt: c.updatedAt.toISOString(), query: { search: c.referenceNo, page: "1", sortBy: "updatedAt", sortDir: "desc" } })),
+        cards: wantsMyWork ? myWorkCards : [],
+        recent: wantsMyWork ? recentRows.map((c) => ({ id: c.id, referenceNo: c.referenceNo, projectName: c.projectName ?? "Unknown", updatedAt: c.updatedAt.toISOString(), query: { search: c.referenceNo, page: "1", sortBy: "updatedAt", sortDir: "desc" } })) : [],
       },
       missingDates: {
         cards: missingCards,

@@ -12,15 +12,19 @@ const router = expressRouter as unknown as RouterInternalLike;
 const rdb = (req: AuthRequest) => req.rlsDb ?? db;
 
 router.get("/user-notifications/unread-count", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
-  const [row] = await rdb(req)
-    .select({ count: count() })
-    .from(userNotificationsTable)
-    .where(and(
-      eq(userNotificationsTable.firmId, req.firmId!),
-      eq(userNotificationsTable.userId, req.userId!),
-      eq(userNotificationsTable.isRead, false),
-    ));
-  res.json({ count: Number(row?.count ?? 0) });
+  try {
+    const [row] = await rdb(req)
+      .select({ count: count() })
+      .from(userNotificationsTable)
+      .where(and(
+        eq(userNotificationsTable.firmId, req.firmId!),
+        eq(userNotificationsTable.userId, req.userId!),
+        eq(userNotificationsTable.isRead, false),
+      ));
+    res.json({ count: Number(row?.count ?? 0) });
+  } catch {
+    res.json({ count: 0 });
+  }
 });
 
 const exportedRouter = expressRouter as unknown as ExpressRouter;

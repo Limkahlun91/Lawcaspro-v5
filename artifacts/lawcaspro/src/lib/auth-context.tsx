@@ -67,12 +67,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (isMeLoading) return;
     if (isMeError) {
+      if (user) return;
       setAuthStatus("error");
       return;
     }
     setUser(me ?? null);
     setAuthStatus(me ? "authenticated" : "unauthenticated");
-  }, [me, isMeLoading, isMeError]);
+  }, [isMeError, isMeLoading, me, user]);
 
   const permissionsQuery = useQuery<{ permissions: Array<{ module: string; action: string }>; unavailable?: boolean }>({
     queryKey: ["auth-permissions", user?.roleId ?? null],
@@ -136,7 +137,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(newUser);
     setAuthStatus("authenticated");
     queryClient.setQueryData(ME_QUERY_KEY, newUser);
-    void meQuery.refetch();
     void permissionsQuery.refetch();
   };
 

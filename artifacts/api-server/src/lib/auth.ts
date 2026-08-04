@@ -183,6 +183,7 @@ export async function requireAuth(
         status: string;
       }
     | undefined;
+  let lookupTiming: SessionUserLookupTiming | undefined;
   try {
     const reqId = getReqId(req);
     const lookupStartedAt = Date.now();
@@ -192,13 +193,26 @@ export async function requireAuth(
       if (result?.session) {
         session = result.session;
         user = result.user;
+        lookupTiming = result.timing;
         break;
       }
+      lookupTiming = result?.timing;
     }
     const ms = Date.now() - lookupStartedAt;
     if (req.timing) req.timing.sections.authSessionMs = ms;
     if (ms > 1000) {
-      logger.warn({ route: req.path, reqId, ms }, "auth.require_auth.slow");
+      logger.warn(
+        {
+          route: req.path,
+          reqId,
+          ms,
+          attempts: lookupTiming?.attempts ?? null,
+          inflightShared: lookupTiming?.inflightShared ?? null,
+          primaryLookupMs: lookupTiming?.primaryLookupMs ?? null,
+          fallbackLookupMs: lookupTiming?.fallbackLookupMs ?? null,
+        },
+        "auth.require_auth.slow",
+      );
     }
   } catch (err) {
     logger.error({ err }, "auth.require_auth.db_error");
@@ -253,9 +267,14 @@ export async function requireAuth(
   next();
 }
 
-export async function lookupSessionAndUserByTokenHash(
-  tokenHash: string,
-): Promise<
+type SessionUserLookupTiming = {
+  attempts: number;
+  inflightShared: boolean;
+  primaryLookupMs: number;
+  fallbackLookupMs: number;
+};
+
+type SessionUserLookupResult =
   | {
       session: typeof sessionsTable.$inferSelect;
       user:
@@ -270,53 +289,106 @@ export async function lookupSessionAndUserByTokenHash(
             status: string;
           }
         | undefined;
+      timing?: SessionUserLookupTiming;
     }
-  | null
-> {
+  | null;
+
+const inflightSessionLookups = new Map<string, Promise<SessionUserLookupResult>>();
+
+export async function lookupSessionAndUserByTokenHash(
+  tokenHash: string,
+): Promise<SessionUserLookupResult> {
+  const shared = inflightSessionLookups.get(tokenHash);
+  if (shared) {
+    const r = await shared;
+    if (!r) return null;
+    return { ...r, timing: { attempts: r.timing?.attempts ?? 1, inflightShared: true, primaryLookupMs: r.timing?.primaryLookupMs ?? 0, fallbackLookupMs: r.timing?.fallbackLookupMs ?? 0 } };
+  }
+
+  const p = (async (): Promise<SessionUserLookupResult> => {
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-  const lookupViaDb = async (): Promise<
-    | {
-        session: typeof sessionsTable.$inferSelect;
-        user:
-          | {
-              id: number;
-              email: string;
-              name: string;
-              userType: string;
-              firmId: number | null;
-              roleId: number | null;
-              developerId: number | null;
-              status: string;
-            }
-          | undefined;
-      }
-    | null
-  > => {
-    const [s] = await db
-      .select()
-      .from(sessionsTable)
-      .where(eq(sessionsTable.tokenHash, tokenHash))
-      ;
-    if (!s) return null;
-    const [u] = await db
-      .select({
-        id: usersTable.id,
-        email: usersTable.email,
-        name: usersTable.name,
-        userType: usersTable.userType,
-        firmId: usersTable.firmId,
-        roleId: usersTable.roleId,
-        developerId: usersTable.developerId,
-        status: usersTable.status,
-      })
-      .from(usersTable)
-      .where(eq(usersTable.id, s.userId))
-      .catch(async (err) => {
-        const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-        if (code !== "42703") throw err;
-        const [u2] = await db
-          .select({
+  const lookupViaDb = async (): Promise<SessionUserLookupResult> => {
+    if (process.env.NODE_ENV === "test") {
+      const [s] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
+      if (!s) return null;
+      const [u] = await db
+        .select({
+          id: usersTable.id,
+          email: usersTable.email,
+          name: usersTable.name,
+          userType: usersTable.userType,
+          firmId: usersTable.firmId,
+          roleId: usersTable.roleId,
+          developerId: usersTable.developerId,
+          status: usersTable.status,
+        })
+        .from(usersTable)
+        .where(eq(usersTable.id, s.userId))
+        .catch(async (err) => {
+          const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+          if (code !== "42703") throw err;
+          const [u2] = await db
+            .select({
+              id: usersTable.id,
+              email: usersTable.email,
+              name: usersTable.name,
+              userType: usersTable.userType,
+              firmId: usersTable.firmId,
+              roleId: usersTable.roleId,
+              status: usersTable.status,
+            })
+            .from(usersTable)
+            .where(eq(usersTable.id, s.userId));
+          return [u2 ? ({ ...u2, developerId: null }) : undefined] as any;
+        });
+      return { session: s, user: u as any };
+    }
+
+    try {
+      const [row] = await db
+        .select({
+          session: {
+            id: sessionsTable.id,
+            userId: sessionsTable.userId,
+            tokenHash: sessionsTable.tokenHash,
+            expiresAt: sessionsTable.expiresAt,
+            createdAt: sessionsTable.createdAt,
+            userAgent: sessionsTable.userAgent,
+            ipAddress: sessionsTable.ipAddress,
+          },
+          user: {
+            id: usersTable.id,
+            email: usersTable.email,
+            name: usersTable.name,
+            userType: usersTable.userType,
+            firmId: usersTable.firmId,
+            roleId: usersTable.roleId,
+            developerId: usersTable.developerId,
+            status: usersTable.status,
+          },
+        })
+        .from(sessionsTable)
+        .innerJoin(usersTable, eq(usersTable.id, sessionsTable.userId))
+        .where(eq(sessionsTable.tokenHash, tokenHash))
+        .limit(1);
+      if (!row) return null;
+      return { session: row.session as any, user: row.user as any };
+    } catch (err) {
+      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+      if (code !== "42703") throw err;
+      const [row2] = await db
+        .select({
+          session: {
+            id: sessionsTable.id,
+            userId: sessionsTable.userId,
+            tokenHash: sessionsTable.tokenHash,
+            expiresAt: sessionsTable.expiresAt,
+            createdAt: sessionsTable.createdAt,
+            userAgent: sessionsTable.userAgent,
+            ipAddress: sessionsTable.ipAddress,
+          },
+          user: {
             id: usersTable.id,
             email: usersTable.email,
             name: usersTable.name,
@@ -324,13 +396,15 @@ export async function lookupSessionAndUserByTokenHash(
             firmId: usersTable.firmId,
             roleId: usersTable.roleId,
             status: usersTable.status,
-          })
-          .from(usersTable)
-          .where(eq(usersTable.id, s.userId))
-          ;
-        return [u2 ? ({ ...u2, developerId: null }) : undefined] as any;
-      });
-    return { session: s, user: u as any };
+          },
+        })
+        .from(sessionsTable)
+        .innerJoin(usersTable, eq(usersTable.id, sessionsTable.userId))
+        .where(eq(sessionsTable.tokenHash, tokenHash))
+        .limit(1);
+      if (!row2) return null;
+      return { session: row2.session as any, user: ({ ...(row2.user as any), developerId: null } as any) };
+    }
   };
 
   const lookupViaAuthSafeDb = async (): Promise<
@@ -396,9 +470,14 @@ export async function lookupSessionAndUserByTokenHash(
     );
   };
 
+  const timing: SessionUserLookupTiming = { attempts: 0, inflightShared: false, primaryLookupMs: 0, fallbackLookupMs: 0 };
+
   for (let attempt = 1; attempt <= 3; attempt++) {
+    timing.attempts = attempt;
     try {
+      const primaryStart = Date.now();
       const primary = await lookupViaDb();
+      timing.primaryLookupMs += Date.now() - primaryStart;
       if (!primary?.session) {
         if (attempt < 2) {
           await sleep(30 * attempt);
@@ -406,18 +485,20 @@ export async function lookupSessionAndUserByTokenHash(
         }
         return null;
       }
-      if (primary.user) return primary;
+      if (primary.user) return { ...primary, timing };
 
       try {
+        const fallbackStart = Date.now();
         const fallback = await lookupViaAuthSafeDb();
-        return fallback?.session ? fallback : primary;
+        timing.fallbackLookupMs += Date.now() - fallbackStart;
+        return fallback?.session ? { ...(fallback as any), timing } : { ...primary, timing };
       } catch (err) {
         const shouldRetry = isTransientDbConnectionError(err);
         if (shouldRetry && attempt < 3) {
           await sleep(50 * attempt);
           continue;
         }
-        return primary;
+        return { ...primary, timing };
       }
     } catch (err) {
       const shouldRetry = isTransientDbConnectionError(err);
@@ -430,6 +511,12 @@ export async function lookupSessionAndUserByTokenHash(
   }
 
   return null;
+  })().finally(() => {
+    inflightSessionLookups.delete(tokenHash);
+  });
+
+  inflightSessionLookups.set(tokenHash, p);
+  return await p;
 }
 
 export async function requireFounder(

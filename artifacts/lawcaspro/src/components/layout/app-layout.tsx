@@ -29,12 +29,20 @@ export function AppLayout({ children }: { children: ReactNode }) {
   const [location] = useLocation();
   const queryClient = useQueryClient();
   const prefetchStateRef = useRef<Record<string, { timer: any | null; lastAt: number }>>({});
+  const [unreadEnabled, setUnreadEnabled] = useState(false);
+
+  useEffect(() => {
+    setUnreadEnabled(false);
+    if (!user || user.userType !== "firm_user") return;
+    const t = setTimeout(() => setUnreadEnabled(true), 1500);
+    return () => clearTimeout(t);
+  }, [user && user.userType === "firm_user" ? (user as any).id : null, user && user.userType === "firm_user" ? (user as any).firmId : null]);
 
   const { data: unreadData } = useQuery({
     queryKey: ["unread-count"],
     queryFn: () => apiFetchJson<{ count: number }>("/communications/unread-count").catch(() => ({ count: 0 })),
     refetchInterval: 30000,
-    enabled: !!user && user.userType === "firm_user" && hasPermission(user, "communications", "read"),
+    enabled: unreadEnabled && !!user && user.userType === "firm_user" && hasPermission(user, "communications", "read"),
     retry: false,
   });
   const unreadCount = unreadData?.count ?? 0;
@@ -43,7 +51,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     queryKey: ["case-notifications", "unread-counts"],
     queryFn: () => apiFetchJson<{ totalUnreadCount: number }>("/case-notifications/unread-counts").catch(() => ({ totalUnreadCount: 0 })),
     refetchInterval: 30000,
-    enabled: !!user && user.userType === "firm_user" && hasPermission(user, "cases", "read"),
+    enabled: unreadEnabled && !!user && user.userType === "firm_user" && hasPermission(user, "cases", "read"),
     retry: false,
   });
   const caseUnreadCount = caseUnreadData?.totalUnreadCount ?? 0;
@@ -51,7 +59,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     queryKey: ["user-notifications", "unread-count"],
     queryFn: () => apiFetchJson<{ count: number }>("/user-notifications/unread-count").catch(() => ({ count: 0 })),
     refetchInterval: 30000,
-    enabled: !!user && user.userType === "firm_user",
+    enabled: unreadEnabled && !!user && user.userType === "firm_user",
     retry: false,
   });
   const accountingUnreadCount = accountingUnreadData?.count ?? 0;

@@ -703,6 +703,11 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
   const ctxBase = { route: getRoute(req), reqId, stage: "start" };
   const t0 = Date.now();
   let sessionLookupMs = 0;
+  let sessionLookupAttempts: number | null = null;
+  let sessionLookupInflightShared: boolean | null = null;
+  let sessionLookupPrimaryMs: number | null = null;
+  let sessionLookupFallbackMs: number | null = null;
+  let tenantContextDbConnectMs = 0;
   let tenantContextMs = 0;
   let roleLookupMs = 0;
   let permissionsLookupMs = 0;
@@ -712,6 +717,10 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
   try {
     const result = await lookupSessionAndUserByTokenHash(tokenHash);
     sessionLookupMs = Date.now() - t0;
+    sessionLookupAttempts = result?.timing?.attempts ?? null;
+    sessionLookupInflightShared = result?.timing?.inflightShared ?? null;
+    sessionLookupPrimaryMs = result?.timing?.primaryLookupMs ?? null;
+    sessionLookupFallbackMs = result?.timing?.fallbackLookupMs ?? null;
     const session = result?.session;
     const user = result?.user;
 
@@ -730,7 +739,9 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       if (process.env.NODE_ENV === "test") {
         return await fn(db as any);
       }
+      const connectStartedAt = Date.now();
       const client = await pool.connect();
+      tenantContextDbConnectMs += Date.now() - connectStartedAt;
       let destroy = false;
       try {
         const start = Date.now();
@@ -851,6 +862,11 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
         stage: "timing",
         ms: Date.now() - startedAt,
         sessionLookupMs,
+        sessionLookupAttempts,
+        sessionLookupInflightShared,
+        sessionLookupPrimaryMs,
+        sessionLookupFallbackMs,
+        tenantContextDbConnectMs,
         tenantContextMs,
         roleLookupMs,
         permissionsLookupMs,

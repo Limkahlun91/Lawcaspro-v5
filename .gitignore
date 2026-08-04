@@ -57,6 +57,8 @@ Thumbs.db
 .vercel-cli/
 .xdg/
 .xdg-data/
+.xdg-cache/
+.secrets/
 .sandbox-appdata/
 .npm-cache/
 .env*.local

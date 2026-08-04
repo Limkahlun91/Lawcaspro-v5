@@ -106,15 +106,12 @@ export async function setTenantContextSession(
 ): Promise<void> {
   await trySetRoleAppUserSession(client, "firm");
   await assertSafeRlsRole(client, "firm");
-
-  await client.query(`SET app.current_firm_id = '${firmId}'`);
-  await client.query(`SET app.firm_id = '${firmId}'`);
-  await client.query("SET app.is_founder = 'false'");
-  if (userId !== undefined) {
-    await client.query(`SET app.current_user_id = '${userId}'`);
-  } else {
-    await client.query("RESET app.current_user_id");
-  }
+  const firmIdStr = String(firmId);
+  const userIdStr = String(userId ?? 0);
+  await client.query(
+    "SELECT set_config('app.current_firm_id', $1, false), set_config('app.firm_id', $1, false), set_config('app.is_founder', 'false', false), set_config('app.current_user_id', $2, false)",
+    [firmIdStr, userIdStr],
+  );
 }
 
 /**
@@ -129,22 +126,20 @@ export async function setTenantContext(
 ): Promise<void> {
   await trySetRoleAppUserLocal(client, "firm");
   await assertSafeRlsRole(client, "firm");
-
-  await client.query(`SET LOCAL app.current_firm_id = '${firmId}'`);
-  await client.query(`SET LOCAL app.firm_id = '${firmId}'`);
-  await client.query("SET LOCAL app.is_founder = 'false'");
-  if (userId !== undefined) {
-    await client.query(`SET LOCAL app.current_user_id = '${userId}'`);
-  }
+  const firmIdStr = String(firmId);
+  const userIdStr = String(userId ?? 0);
+  await client.query(
+    "SELECT set_config('app.current_firm_id', $1, true), set_config('app.firm_id', $1, true), set_config('app.is_founder', 'false', true), set_config('app.current_user_id', $2, true)",
+    [firmIdStr, userIdStr],
+  );
 }
 
 export async function setFounderContext(client: PoolClient): Promise<void> {
   await trySetRoleAppUserLocal(client, "founder");
   await assertSafeRlsRole(client, "founder");
-  await client.query("SET LOCAL app.is_founder = 'true'");
-  await client.query("SET LOCAL app.current_firm_id = '0'");
-  await client.query("SET LOCAL app.firm_id = '0'");
-  await client.query("SET LOCAL app.current_user_id = '0'");
+  await client.query(
+    "SELECT set_config('app.is_founder', 'true', true), set_config('app.current_firm_id', '0', true), set_config('app.firm_id', '0', true), set_config('app.current_user_id', '0', true)",
+  );
 }
 
 /**
@@ -156,11 +151,9 @@ export async function setFounderContextSession(
 ): Promise<void> {
   await trySetRoleAppUserSession(client, "founder");
   await assertSafeRlsRole(client, "founder");
-
-  await client.query("SET app.is_founder = 'true'");
-  await client.query("SET app.current_firm_id = '0'");
-  await client.query("SET app.firm_id = '0'");
-  await client.query("SET app.current_user_id = '0'");
+  await client.query(
+    "SELECT set_config('app.is_founder', 'true', false), set_config('app.current_firm_id', '0', false), set_config('app.firm_id', '0', false), set_config('app.current_user_id', '0', false)",
+  );
 }
 
 /**
@@ -169,10 +162,9 @@ export async function setFounderContextSession(
  */
 export async function clearTenantContext(client: PoolClient): Promise<void> {
   // Note: no SET ROLE is performed here. Keep reset limited to GUCs.
-  await client.query("SET app.current_firm_id = '0'");
-  await client.query("SET app.firm_id = '0'");
-  await client.query("SET app.is_founder = 'false'");
-  await client.query("SET app.current_user_id = '0'");
+  await client.query(
+    "SELECT set_config('app.current_firm_id', '0', false), set_config('app.firm_id', '0', false), set_config('app.is_founder', 'false', false), set_config('app.current_user_id', '0', false)",
+  );
   try {
     await client.query("RESET ROLE");
   } catch {

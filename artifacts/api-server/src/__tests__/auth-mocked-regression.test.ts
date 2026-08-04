@@ -2,6 +2,7 @@ import request from "supertest";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { usersTable, sessionsTable, rolesTable, firmsTable, permissionsTable } from "@workspace/db";
 import type { Application } from "express";
+import crypto from "crypto";
 
 type MockDb = {
   execute: (query?: unknown) => Promise<unknown[]>;
@@ -20,6 +21,7 @@ type AuthDbState = {
   throwSessionSelectTransient: boolean;
   sessionSelectEmptyOnce: boolean;
   sessionSelectCalls: number;
+  sessionSelectDelayMs: number;
   throwUndefinedColumnOnUserLookup: boolean;
   throwSideEffects: boolean;
 };
@@ -34,6 +36,7 @@ const state: AuthDbState = {
   throwSessionSelectTransient: false,
   sessionSelectEmptyOnce: false,
   sessionSelectCalls: 0,
+  sessionSelectDelayMs: 0,
   throwUndefinedColumnOnUserLookup: false,
   throwSideEffects: false,
 };
@@ -63,6 +66,9 @@ vi.mock("@workspace/db", async (orig) => {
               const e = new Error("connect timeout") as Error & { code?: string };
               e.code = "ETIMEDOUT";
               throw e;
+            }
+            if (state.sessionSelectDelayMs > 0) {
+              await new Promise<void>((r) => setTimeout(r, state.sessionSelectDelayMs));
             }
             state.sessionSelectCalls += 1;
             if (state.sessionSelectEmptyOnce && state.sessionSelectCalls === 1) return emptyRows();
@@ -294,5 +300,84 @@ describe("Auth mocked regressions", () => {
     expect(res.body?.ok).toBe(true);
     expect(res.body?.data).toHaveProperty("permissions");
     expect(Array.isArray(res.body?.data?.permissions)).toBe(true);
+  });
+
+  it("auth/me succeeds on first verification even if session is briefly not visible", async () => {
+    state.usersById.clear();
+    state.sessionsByTokenHash.clear();
+    state.rolesById.clear();
+    state.firmsById.clear();
+    state.throwPermissionsSelect = false;
+    state.throwSessionSelectTransient = false;
+    state.sessionSelectEmptyOnce = true;
+    state.sessionSelectCalls = 0;
+    state.sessionSelectDelayMs = 0;
+    state.throwUndefinedColumnOnUserLookup = false;
+    state.throwSideEffects = false;
+    state.throwSideEffects = false;
+
+    const user = {
+      id: 12,
+      firmId: 5,
+      email: "u@test.com",
+      name: "U",
+      userType: "firm_user",
+      roleId: 7,
+      department: null,
+      status: "active",
+    };
+    state.usersById.set(12, user);
+    state.rolesById.set(7, { id: 7, name: "Clerk" });
+    state.firmsById.set(5, { id: 5, name: "Firm" });
+    state.sessionsByTokenHash.set("any", { userId: 12, expiresAt: new Date(Date.now() + 60_000) });
+
+    const res = await request(app).get("/api/auth/me").set("Cookie", "auth_token=any");
+    expect(res.status).toBe(200);
+    expect(res.body?.ok).toBe(true);
+    expect(res.body?.data?.id).toBe(12);
+    expect(state.sessionSelectCalls).toBeGreaterThanOrEqual(2);
+  });
+
+  it("auth/me de-duplicates concurrent session lookups", async () => {
+    state.usersById.clear();
+    state.sessionsByTokenHash.clear();
+    state.rolesById.clear();
+    state.firmsById.clear();
+    state.throwPermissionsSelect = false;
+    state.throwSessionSelectTransient = false;
+    state.sessionSelectEmptyOnce = false;
+    state.sessionSelectCalls = 0;
+    state.sessionSelectDelayMs = 0;
+    state.throwUndefinedColumnOnUserLookup = false;
+    state.throwSideEffects = false;
+    state.throwSideEffects = false;
+    state.throwSideEffects = false;
+
+    const user = {
+      id: 13,
+      firmId: 5,
+      email: "u2@test.com",
+      name: "U2",
+      userType: "firm_user",
+      roleId: 7,
+      department: null,
+      status: "active",
+    };
+    state.usersById.set(13, user);
+    state.rolesById.set(7, { id: 7, name: "Clerk" });
+    state.firmsById.set(5, { id: 5, name: "Firm" });
+    state.sessionsByTokenHash.set("any", { userId: 13, expiresAt: new Date(Date.now() + 60_000) });
+
+    const { lookupSessionAndUserByTokenHash } = await import("../lib/auth.js");
+    const tokenHash = crypto.createHash("sha256").update("any").digest("hex");
+    const results = await Promise.all(
+      Array.from({ length: 10 }).map(() => lookupSessionAndUserByTokenHash(tokenHash)),
+    );
+    for (const r of results) {
+      expect(r?.session?.userId).toBe(13);
+      expect(r?.user?.id).toBe(13);
+    }
+    expect(state.sessionSelectCalls).toBe(1);
+    state.sessionSelectDelayMs = 0;
   });
 });
