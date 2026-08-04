@@ -6,6 +6,7 @@ import {
   caseLedgersTable,
   casesTable,
   db,
+  firmsTable,
   ledgerEntriesTable,
   paymentVoucherCreateRequestsTable,
   paymentVoucherActionsTable,
@@ -59,6 +60,8 @@ describe("payment voucher accounting workflow", () => {
   let clerkToken = "";
   let clerkUserId = 0;
   let caseId = 0;
+  let otherFirmId = 0;
+  let otherFirmCaseId = 0;
   let voucherId = 0;
   let actionId = 0;
   const extraVoucherIds: number[] = [];
@@ -80,6 +83,29 @@ describe("payment voucher accounting workflow", () => {
       createdBy: partnerUserId,
     } as any).returning({ id: casesTable.id });
     caseId = Number(createdCase.id);
+
+    const [firmRow] = await db
+      .select({ subscriptionPlanId: firmsTable.subscriptionPlanId })
+      .from(firmsTable)
+      .where(eq(firmsTable.id, firmId))
+      .limit(1);
+
+    const [createdOtherFirm] = await db
+      .insert(firmsTable)
+      .values({
+        name: `PV Other Firm ${Date.now()}`,
+        slug: `pv-other-firm-${Date.now()}`,
+        subscriptionPlanId: Number(firmRow?.subscriptionPlanId ?? 1),
+      })
+      .returning({ id: firmsTable.id });
+    otherFirmId = Number(createdOtherFirm.id);
+
+    const [otherCase] = await db.insert(casesTable).values({
+      firmId: otherFirmId,
+      referenceNo: `PV-OTHER-${Date.now()}`,
+      createdBy: partnerUserId,
+    } as any).returning({ id: casesTable.id });
+    otherFirmCaseId = Number(otherCase.id);
 
     const unreadRes = await request(app)
       .get("/api/user-notifications/unread-count")
@@ -143,6 +169,12 @@ describe("payment voucher accounting workflow", () => {
     }
     if (caseId) {
       await db.delete(casesTable).where(eq(casesTable.id, caseId));
+    }
+    if (otherFirmCaseId) {
+      await db.delete(casesTable).where(eq(casesTable.id, otherFirmCaseId));
+    }
+    if (otherFirmId) {
+      await db.delete(firmsTable).where(eq(firmsTable.id, otherFirmId));
     }
     if (partnerToken) {
       await request(app).post("/api/auth/logout").set("Authorization", `Bearer ${partnerToken}`);
@@ -265,6 +297,34 @@ describe("payment voucher accounting workflow", () => {
         eq(ledgerEntriesTable.sourceId, voucherId),
       ));
     expect(Number(ledgerCountRow?.c ?? 0)).toBe(1);
+  });
+
+  it("rejects attaching a caseId from another firm (server-side integrity check)", async () => {
+    const createRes = await request(app)
+      .post("/api/payment-vouchers")
+      .set("Authorization", `Bearer ${partnerToken}`)
+      .send({
+        caseId: otherFirmCaseId,
+        voucherType: "external_payment",
+        payeeName: "Cross-firm Payee",
+        amount: 10,
+        purpose: "Cross-firm case should be rejected",
+      });
+
+    expect([400, 404, 422]).toContain(createRes.status);
+    expect(String(createRes.body?.error ?? "")).toMatch(/case/i);
+  });
+
+  it("does not return other firm's cases in /accounting/cases/search", async () => {
+    const q = `PV-OTHER-`;
+    const res = await request(app)
+      .get(`/api/accounting/cases/search?query=${encodeURIComponent(q)}&limit=20`)
+      .set("Authorization", `Bearer ${partnerToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty("data");
+    const rows = Array.isArray(res.body.data) ? res.body.data : [];
+    expect(rows.some((r: any) => Number(r?.id ?? r?.case_id) === otherFirmCaseId)).toBe(false);
   });
 
   it("returns the existing voucher for an idempotent retry with the same clientRequestId", async () => {

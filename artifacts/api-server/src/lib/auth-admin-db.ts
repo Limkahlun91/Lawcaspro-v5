@@ -36,7 +36,21 @@ export async function withAuthAdminDb<T>(
   ctx?: { stage?: string; route?: string; reqId?: string | null },
 ): Promise<T> {
   const pool = getAuthAdminPoolOrThrow();
+  const connectStartedAt = Date.now();
   const client = await pool.connect();
+  const connectMs = Date.now() - connectStartedAt;
+  if (connectMs > 250) {
+    logger.warn(
+      {
+        ...ctx,
+        connectMs,
+        poolTotal: typeof (pool as any)?.totalCount === "number" ? (pool as any).totalCount : null,
+        poolIdle: typeof (pool as any)?.idleCount === "number" ? (pool as any).idleCount : null,
+        poolWaiting: typeof (pool as any)?.waitingCount === "number" ? (pool as any).waitingCount : null,
+      },
+      "auth-admin-db.pool_connect_slow",
+    );
+  }
   let destroyClient = false;
   try {
     await client.query("BEGIN");

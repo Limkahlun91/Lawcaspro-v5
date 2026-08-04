@@ -895,15 +895,23 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
 router.get("/accounting/cases/search", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const firmId = req.firmId!;
   const q = typeof (req.query as any)?.query === "string" ? String((req.query as any).query).trim() : "";
-  if (!q) { res.json({ data: [] }); return; }
+  const limitRaw = typeof (req.query as any)?.limit === "string" ? String((req.query as any).limit).trim() : "";
+  const limitParsed = limitRaw ? Number.parseInt(limitRaw, 10) : NaN;
+  const safeLimit = Number.isFinite(limitParsed) && limitParsed > 0 ? Math.min(50, limitParsed) : 20;
+  if (!q || q.length < 2) { res.json({ data: [] }); return; }
 
   const like = `%${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
   const rows = await queryRows(sql`
     SELECT
       c.id,
       c.reference_no,
-      COALESCE(cl.name, '') as client_name
+      c.status,
+      COALESCE(cl.name, '') as client_name,
+      COALESCE(p.name, '') as project_name,
+      COALESCE(d.name, '') as developer_name
     FROM cases c
+    LEFT JOIN projects p ON p.id = c.project_id AND p.firm_id = ${firmId}
+    LEFT JOIN developers d ON d.id = c.developer_id AND d.firm_id = ${firmId}
     LEFT JOIN case_purchasers cp ON cp.case_id = c.id AND cp.role = 'main'
     LEFT JOIN clients cl ON cl.id = cp.client_id AND cl.firm_id = ${firmId}
     WHERE c.firm_id = ${firmId}
@@ -911,17 +919,31 @@ router.get("/accounting/cases/search", requireAuth, requireFirmUser, requirePerm
       AND (
         c.reference_no ILIKE ${like}
         OR COALESCE(cl.name, '') ILIKE ${like}
+        OR COALESCE(p.name, '') ILIKE ${like}
+        OR COALESCE(d.name, '') ILIKE ${like}
       )
     ORDER BY c.updated_at DESC
-    LIMIT 20
+    LIMIT ${safeLimit}
   `);
 
   const data = (rows as any[]).map((r) => {
     const id = parseIdInt(r.id);
-    const ref = String(r.reference_no ?? "");
+    const ref = String(r.reference_no ?? "").trim();
     const clientName = String(r.client_name ?? "");
-    const title = clientName ? `${ref} • ${clientName}` : ref;
-    return { case_id: id, title };
+    const projectName = String(r.project_name ?? "") || null;
+    const developerName = String(r.developer_name ?? "") || null;
+    const status = String(r.status ?? "") || null;
+    const shortLabel = clientName ? `${ref} • ${clientName}` : ref;
+    return {
+      id,
+      referenceNo: ref,
+      shortLabel,
+      projectName,
+      developerName,
+      status,
+      case_id: id,
+      title: shortLabel,
+    };
   }).filter((x) => x.case_id);
 
   res.json({ data });

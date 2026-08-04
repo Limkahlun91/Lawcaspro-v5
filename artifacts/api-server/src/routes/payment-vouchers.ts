@@ -484,6 +484,34 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       clientRequestId: undefined,
     })
     : null;
+
+  const caseIdValue = typeof caseId === "number" && Number.isFinite(caseId) ? Number(caseId) : null;
+  const targetCaseIdValue = typeof targetCaseId === "number" && Number.isFinite(targetCaseId) ? Number(targetCaseId) : null;
+  if (caseIdValue) {
+    const rows = await r
+      .select({ id: casesTable.id })
+      .from(casesTable)
+      .where(and(
+        eq(casesTable.firmId, req.firmId!),
+        eq(casesTable.id, caseIdValue),
+        sql`${casesTable.deletedAt} IS NULL` as any,
+      ))
+      .limit(1);
+    if (!rows[0]) { res.status(404).json({ error: "Case not found" }); return; }
+  }
+  if (targetCaseIdValue) {
+    const rows = await r
+      .select({ id: casesTable.id })
+      .from(casesTable)
+      .where(and(
+        eq(casesTable.firmId, req.firmId!),
+        eq(casesTable.id, targetCaseIdValue),
+        sql`${casesTable.deletedAt} IS NULL` as any,
+      ))
+      .limit(1);
+    if (!rows[0]) { res.status(404).json({ error: "Target case not found" }); return; }
+  }
+
   if (normalizedClientRequestId) {
     try {
       const inserted = await r

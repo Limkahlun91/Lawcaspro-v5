@@ -211,6 +211,9 @@ export async function requireAuth(
           inflightShared: lookupTiming?.inflightShared ?? null,
           primaryLookupMs: lookupTiming?.primaryLookupMs ?? null,
           fallbackLookupMs: lookupTiming?.fallbackLookupMs ?? null,
+          poolTotal: typeof (pool as any)?.totalCount === "number" ? (pool as any).totalCount : null,
+          poolIdle: typeof (pool as any)?.idleCount === "number" ? (pool as any).idleCount : null,
+          poolWaiting: typeof (pool as any)?.waitingCount === "number" ? (pool as any).waitingCount : null,
         },
         "auth.require_auth.slow",
       );
@@ -769,6 +772,23 @@ export async function requireFirmUser(
     return;
   }
   if (req.timing) req.timing.sections.tenantContextDbConnectMs = Date.now() - dbConnectStartedAt;
+  const dbConnectMs = Date.now() - dbConnectStartedAt;
+  if (dbConnectMs > 250) {
+    logger.warn(
+      {
+        route: req.path,
+        requestId: getReqId(req) ?? null,
+        method: req.method ?? null,
+        firmId: req.firmId ?? null,
+        userId: req.userId ?? null,
+        dbConnectMs,
+        poolTotal: typeof (pool as any)?.totalCount === "number" ? (pool as any).totalCount : null,
+        poolIdle: typeof (pool as any)?.idleCount === "number" ? (pool as any).idleCount : null,
+        poolWaiting: typeof (pool as any)?.waitingCount === "number" ? (pool as any).waitingCount : null,
+      },
+      "db.pool_connect_slow",
+    );
+  }
   if (!client) {
     res.status(503).json({
       error: "Tenant context temporarily unavailable",

@@ -97,7 +97,21 @@ async function runWithAuthSafeDbOnce<T>(
   ctx?: AuthSafeDbContext,
   allowUnsafe?: boolean,
 ): Promise<T> {
+  const connectStartedAt = Date.now();
   const client = await pool.connect();
+  const connectMs = Date.now() - connectStartedAt;
+  if (connectMs > 250) {
+    logger.warn(
+      {
+        ...ctx,
+        connectMs,
+        poolTotal: typeof (pool as any)?.totalCount === "number" ? (pool as any).totalCount : null,
+        poolIdle: typeof (pool as any)?.idleCount === "number" ? (pool as any).idleCount : null,
+        poolWaiting: typeof (pool as any)?.waitingCount === "number" ? (pool as any).waitingCount : null,
+      },
+      "auth-safe-db.pool_connect_slow",
+    );
+  }
   let destroyClient = false;
 
   try {
@@ -151,7 +165,21 @@ async function runWithAuthUnsafeRoleOnce<T>(
   fn: (db: ReturnType<typeof makeRlsDb>) => Promise<T>,
   ctx?: AuthSafeDbContext,
 ): Promise<T> {
+  const connectStartedAt = Date.now();
   const client = await pool.connect();
+  const connectMs = Date.now() - connectStartedAt;
+  if (connectMs > 250) {
+    logger.warn(
+      {
+        ...ctx,
+        connectMs,
+        poolTotal: typeof (pool as any)?.totalCount === "number" ? (pool as any).totalCount : null,
+        poolIdle: typeof (pool as any)?.idleCount === "number" ? (pool as any).idleCount : null,
+        poolWaiting: typeof (pool as any)?.waitingCount === "number" ? (pool as any).waitingCount : null,
+      },
+      "auth-safe-db.pool_connect_slow",
+    );
+  }
   let destroyClient = false;
 
   try {

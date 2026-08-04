@@ -21,6 +21,7 @@ import { useListQuotations } from "@workspace/api-client-react";
 import { QueryFallback } from "@/components/query-fallback";
 import { useReAuth } from "@/components/re-auth-dialog";
 import { useAuth } from "@/lib/auth-context";
+import { CaseMultiSelect, type SelectedCase } from "@/components/accounting/case-multi-select";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody, type PaymentVoucherFundStatus } from "@workspace/api-zod";
@@ -1005,12 +1006,9 @@ function PaymentVouchersTab() {
     if (!Number.isFinite(n) || n <= 0) return sum;
     return sum + n;
   }, 0);
-  const [caseQueryText, setCaseQueryText] = useState("");
-  const [casePickerOpen, setCasePickerOpen] = useState(false);
-  const [selectedCases, setSelectedCases] = useState<Array<{ case_id: number; title: string }>>([]);
-  const [targetCaseQueryText, setTargetCaseQueryText] = useState("");
-  const [targetCasePickerOpen, setTargetCasePickerOpen] = useState(false);
-  const [targetCase, setTargetCase] = useState<{ case_id: number; title: string } | null>(null);
+  const [selectedCases, setSelectedCases] = useState<SelectedCase[]>([]);
+  const [caseSelectionError, setCaseSelectionError] = useState<string | null>(null);
+  const [targetCase, setTargetCase] = useState<SelectedCase | null>(null);
   const [pendingCreateRequestIds, setPendingCreateRequestIds] = useState<string[]>([]);
   const [pendingCreatePhase, setPendingCreatePhase] = useState<PaymentVoucherPendingCreatePhase | null>(null);
   const didRestorePendingRef = useRef(false);
@@ -1020,23 +1018,9 @@ function PaymentVouchersTab() {
   const firmId = user?.userType === "firm_user" ? Number((user as any).firmId ?? (user as any).firm_id ?? 0) : 0;
   const userId = user?.userType === "firm_user" ? Number((user as any).id ?? (user as any).userId ?? 0) : 0;
 
-  const caseSearchQuery = useQuery({
-    queryKey: ["accounting", "cases-search", "multi", caseQueryText],
-    queryFn: ({ signal }) =>
-      apiFetchJson(`/accounting/cases/search?query=${encodeURIComponent(caseQueryText)}`, { signal }) as Promise<{ data?: any[] }>,
-    retry: false,
-    enabled: caseQueryText.trim().length >= 2 && casePickerOpen,
-  });
-  const caseResults = Array.isArray(caseSearchQuery.data?.data) ? (caseSearchQuery.data?.data ?? []) : [];
-
-  const targetCaseSearchQuery = useQuery({
-    queryKey: ["accounting", "cases-search", "target", targetCaseQueryText],
-    queryFn: ({ signal }) =>
-      apiFetchJson(`/accounting/cases/search?query=${encodeURIComponent(targetCaseQueryText)}`, { signal }) as Promise<{ data?: any[] }>,
-    retry: false,
-    enabled: targetCaseQueryText.trim().length >= 2 && targetCasePickerOpen,
-  });
-  const targetCaseResults = Array.isArray(targetCaseSearchQuery.data?.data) ? (targetCaseSearchQuery.data?.data ?? []) : [];
+  useEffect(() => {
+    if (selectedCases.length > 0) setCaseSelectionError(null);
+  }, [selectedCases.length]);
 
   useEffect(() => {
     if (didPrefillRef.current) return;
@@ -1245,7 +1229,10 @@ function PaymentVouchersTab() {
 
   const createBatchMut = useMutation({
     mutationFn: async () => {
-      if (selectedCases.length === 0) throw new Error("Please select at least one case");
+      if (selectedCases.length === 0) {
+        setCaseSelectionError("Please select at least one case.");
+        throw new Error("Please select at least one case");
+      }
       const voucherType = simpleForm.voucherType;
       const sourceCase = selectedCases[0] ?? null;
       const target = targetCase;
@@ -1339,6 +1326,7 @@ function PaymentVouchersTab() {
       if (lastCreateAttemptRef.current.length > 0) {
         setFailedCreateRequestIds(lastCreateAttemptRef.current.map((x) => x.clientRequestId));
       }
+      if (e instanceof Error && e.message === "Please select at least one case") return;
       toastError(toast, e, "Create failed");
     },
   });
@@ -1628,54 +1616,16 @@ function PaymentVouchersTab() {
 
                 <div className="space-y-1.5 md:col-span-2">
                   <label className="text-sm font-medium text-slate-700 block">Case Reference (multi-select)</label>
-                  <Input
-                    placeholder="Search case ref / client name…"
-                    value={caseQueryText}
-                    onFocus={() => setCasePickerOpen(true)}
-                    onBlur={() => setTimeout(() => setCasePickerOpen(false), 120)}
-                    onChange={(e) => setCaseQueryText(e.target.value)}
+                  <CaseMultiSelect
+                    value={selectedCases}
+                    onChange={setSelectedCases}
+                    placeholder="Search case ref / client / project…"
+                    mode={simpleForm.voucherType === "file_to_file_transfer" ? "single" : "multi"}
+                    error={caseSelectionError}
+                    minSearchLength={2}
+                    debounceMs={300}
+                    limit={20}
                   />
-                  {selectedCases.length > 0 ? (
-                    <div className="flex flex-wrap gap-2 pt-2">
-                      {selectedCases.map((c) => (
-                        <button
-                          key={c.case_id}
-                          type="button"
-                          className="px-2 py-1 rounded-md border border-slate-200 bg-white text-xs text-slate-700 hover:bg-slate-50"
-                          onClick={() => setSelectedCases((xs) => xs.filter((x) => x.case_id !== c.case_id))}
-                          title="Remove"
-                        >
-                          {c.title} ×
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                  {casePickerOpen && caseQueryText.trim().length >= 2 && caseResults.length > 0 ? (
-                    <div className="border border-slate-200 rounded-md bg-white shadow-sm overflow-hidden mt-2">
-                      {caseResults.map((c: any) => {
-                        const id = Number(c.case_id);
-                        const title = String(c.title ?? "");
-                        const already = selectedCases.some((x) => x.case_id === id);
-                        return (
-                          <button
-                            key={String(c.case_id)}
-                            type="button"
-                            className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50 flex items-center justify-between gap-3"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => {
-                              if (!Number.isFinite(id) || id <= 0) return;
-                              if (already) return;
-                              setSelectedCases((xs) => simpleForm.voucherType === "file_to_file_transfer" ? [{ case_id: id, title }] : [...xs, { case_id: id, title }]);
-                              setCaseQueryText("");
-                            }}
-                          >
-                            <span className="truncate">{title}</span>
-                            {already ? <span className="text-xs text-slate-400">Selected</span> : <span className="text-xs text-amber-600">Add</span>}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : null}
                 </div>
 
                 <div className="space-y-1.5">
@@ -1743,42 +1693,15 @@ function PaymentVouchersTab() {
                       </div>
                       <div className="space-y-1">
                         <div className="text-xs text-slate-500">Target Case</div>
-                        <div className="relative">
-                          <Input
-                            placeholder="Search target case..."
-                            value={targetCase ? targetCase.title : targetCaseQueryText}
-                            onChange={(e) => {
-                              setTargetCase(null);
-                              setTargetCaseQueryText(e.target.value);
-                              setTargetCasePickerOpen(true);
-                            }}
-                            onFocus={() => setTargetCasePickerOpen(true)}
-                          />
-                          {targetCasePickerOpen && targetCaseQueryText.trim().length >= 2 ? (
-                            <div className="absolute z-30 mt-1 w-full rounded-md border border-slate-200 bg-white shadow-sm max-h-56 overflow-auto">
-                              {targetCaseResults.map((c: any) => {
-                                const id = Number(c.case_id);
-                                const title = String(c.title ?? "");
-                                return (
-                                  <button
-                                    key={String(id)}
-                                    type="button"
-                                    className="w-full text-left px-3 py-2 text-sm hover:bg-slate-50"
-                                    onMouseDown={(e) => e.preventDefault()}
-                                    onClick={() => {
-                                      if (!Number.isFinite(id) || id <= 0) return;
-                                      setTargetCase({ case_id: id, title });
-                                      setTargetCaseQueryText("");
-                                      setTargetCasePickerOpen(false);
-                                    }}
-                                  >
-                                    {title}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          ) : null}
-                        </div>
+                        <CaseMultiSelect
+                          value={targetCase ? [targetCase] : []}
+                          onChange={(next) => setTargetCase(next[0] ?? null)}
+                          placeholder="Search target case..."
+                          mode="single"
+                          minSearchLength={2}
+                          debounceMs={300}
+                          limit={20}
+                        />
                       </div>
                     </div>
                   </div>

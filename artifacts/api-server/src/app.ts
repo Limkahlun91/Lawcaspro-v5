@@ -20,6 +20,7 @@ type ReqLike = IncomingMessage & {
   params?: Record<string, string>;
   query?: Record<string, unknown>;
   headers: IncomingMessage["headers"];
+  timing?: { startAt: number; sections: Record<string, number> };
   log?: {
     error?: (...args: unknown[]) => void;
     warn?: (...args: unknown[]) => void;
@@ -70,6 +71,35 @@ app.use(((req: ReqLike, res: ResLike, next: Next) => {
 
 const createPinoHttpMiddleware = pinoHttp as unknown as (options: unknown) => MiddlewareLike;
 app.use(createPinoHttpMiddleware({ logger }));
+
+app.use(((req: ReqLike, res: ResLike, next: Next) => {
+  const rawSlowMs = process.env.API_SLOW_REQUEST_MS;
+  const slowMs =
+    typeof rawSlowMs === "string" && rawSlowMs.trim() && Number.isFinite(Number(rawSlowMs))
+      ? Number(rawSlowMs)
+      : 2_000;
+  const startedAtMs = typeof (res.locals as any)?.startedAtMs === "number" ? Number((res.locals as any).startedAtMs) : Date.now();
+  req.timing = { startAt: startedAtMs, sections: {} };
+
+  res.on("finish", () => {
+    const durationMs = Math.max(0, Date.now() - startedAtMs);
+    if (durationMs < slowMs) return;
+    const requestId = typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : "unknown";
+    logger.warn(
+      {
+        requestId,
+        method: req.method ?? null,
+        path: req.path ?? req.originalUrl ?? req.url ?? null,
+        status: res.statusCode,
+        durationMs,
+        sections: req.timing?.sections ?? null,
+      },
+      "api.slow_request",
+    );
+  });
+
+  next();
+}) as unknown as MiddlewareLike);
 
 app.use(((req: ReqLike, res: ResLike, next: Next) => {
   const contentType = req.headers?.["content-type"];

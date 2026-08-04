@@ -13,6 +13,7 @@ import { MilestonesTable } from "@/components/milestones-table";
 import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
 import { useAuth } from "@/lib/auth-context";
+import { getListProjectsQueryKey } from "@workspace/api-client-react";
 
 type WorkbenchCard = { key: string; label: string; count: number; query: Record<string, string> };
 type WorkbenchResponse = {
@@ -49,6 +50,11 @@ type PaymentVoucherAction = {
   payeeName: string;
   nextActionRemarks: string | null;
   referenceNo: string | null;
+};
+
+type PaymentVoucherActionsOverview = {
+  counts: { all: number; active: number; overdue: number };
+  items: PaymentVoucherAction[];
 };
 
 function fmtDateTime(value: string | null | undefined): string {
@@ -118,7 +124,7 @@ export default function Workbench() {
   const clerks: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.clerks) ? filterOptions.assignees.clerks : [];
 
   const { data: projectsRes } = useQuery({
-    queryKey: ["projects", "list", { page: 1, limit: 200 }],
+    queryKey: getListProjectsQueryKey({ page: 1, limit: 200 }),
     queryFn: ({ signal }) => apiFetchJson("/projects?page=1&limit=200", { signal }) as Promise<{ data?: unknown[] }>,
     enabled: tab !== "my-work",
     retry: false,
@@ -196,37 +202,34 @@ export default function Workbench() {
     gcTime: 5 * 60_000,
     refetchOnWindowFocus: false,
   });
-  const paymentVoucherActionsQuery = useQuery<PaymentVoucherAction[]>({
-    queryKey: ["payment-voucher-actions", "my-work", milestonesTargetUserId],
+  const paymentVoucherActionsQuery = useQuery<PaymentVoucherActionsOverview>({
+    queryKey: ["payment-voucher-actions", "my-work", "overview", milestonesTargetUserId, pvActionFilter],
     queryFn: async ({ signal }) => {
-      const endpoint = `/payment-voucher-actions/my-work${milestonesTargetUserId ? `?userId=${encodeURIComponent(String(milestonesTargetUserId))}` : ""}`;
+      const qs = new URLSearchParams();
+      if (milestonesTargetUserId) qs.set("userId", String(milestonesTargetUserId));
+      qs.set("filter", pvActionFilter);
+      qs.set("limit", "20");
+      const endpoint = `/payment-voucher-actions/my-work/overview?${qs.toString()}`;
       try {
-        const rows = await apiFetchJson(endpoint, { signal });
-        return Array.isArray(rows) ? (rows as PaymentVoucherAction[]) : [];
+        const payload = await apiFetchJson(endpoint, { signal });
+        const countsRaw = (payload as any)?.counts;
+        const itemsRaw = (payload as any)?.items;
+        const counts = {
+          all: Number((countsRaw as any)?.all ?? 0),
+          active: Number((countsRaw as any)?.active ?? 0),
+          overdue: Number((countsRaw as any)?.overdue ?? 0),
+        };
+        const items = Array.isArray(itemsRaw) ? (itemsRaw as PaymentVoucherAction[]) : [];
+        return { counts, items };
       } catch (err) {
-        logSectionError({ section: "payment-voucher-actions", queryKey: ["payment-voucher-actions", "my-work", milestonesTargetUserId], endpoint, err });
+        logSectionError({ section: "payment-voucher-actions", queryKey: ["payment-voucher-actions", "my-work", "overview", milestonesTargetUserId, pvActionFilter], endpoint, err });
         throw err;
       }
     },
     retry: false,
     enabled: tab === "my-work" && milestonesTargetUserId != null,
   });
-  const filteredPaymentVoucherActions = useMemo(() => {
-    const rows = paymentVoucherActionsQuery.data ?? [];
-    const now = Date.now();
-    if (pvActionFilter === "active") {
-      return rows.filter((row) => row.status === "assigned" || row.status === "acknowledged");
-    }
-    if (pvActionFilter === "overdue") {
-      return rows.filter((row) => {
-        const ackDue = row.acknowledgeDueAt ? new Date(row.acknowledgeDueAt).getTime() : NaN;
-        const completionDue = row.completionDueAt ? new Date(row.completionDueAt).getTime() : NaN;
-        return (row.status === "assigned" && Number.isFinite(ackDue) && ackDue <= now)
-          || (row.status === "acknowledged" && Number.isFinite(completionDue) && completionDue <= now);
-      });
-    }
-    return rows;
-  }, [paymentVoucherActionsQuery.data, pvActionFilter]);
+  const paymentVoucherActions = useMemo(() => paymentVoucherActionsQuery.data?.items ?? [], [paymentVoucherActionsQuery.data]);
 
   const acknowledgeMutation = useMutation({
     mutationFn: (id: number) => apiFetchJson(`/payment-voucher-actions/${id}/acknowledge`, { method: "POST" }),
@@ -366,13 +369,13 @@ export default function Workbench() {
             <CardContent>
               <div className="mb-3 flex items-center gap-2">
                 <Button variant={pvActionFilter === "all" ? "default" : "outline"} size="sm" onClick={() => setParam("pvActionFilter", "all")}>
-                  All
+                  All ({paymentVoucherActionsQuery.data?.counts?.all ?? 0})
                 </Button>
                 <Button variant={pvActionFilter === "active" ? "default" : "outline"} size="sm" onClick={() => setParam("pvActionFilter", "active")}>
-                  Active
+                  Active ({paymentVoucherActionsQuery.data?.counts?.active ?? 0})
                 </Button>
                 <Button variant={pvActionFilter === "overdue" ? "default" : "outline"} size="sm" onClick={() => setParam("pvActionFilter", "overdue")}>
-                  Overdue
+                  Overdue ({paymentVoucherActionsQuery.data?.counts?.overdue ?? 0})
                 </Button>
               </div>
               {paymentVoucherActionsQuery.isError ? (
@@ -384,13 +387,13 @@ export default function Workbench() {
                 />
               ) : paymentVoucherActionsQuery.isLoading ? (
                 <div className="text-sm text-slate-500">Loading payment voucher actions...</div>
-              ) : filteredPaymentVoucherActions.length === 0 ? (
+              ) : paymentVoucherActions.length === 0 ? (
                 <div className="text-sm text-slate-500">
                   {pvActionFilter === "all" ? "No assigned payment voucher actions." : "No payment voucher actions match this filter."}
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {filteredPaymentVoucherActions.map((action) => (
+                  {paymentVoucherActions.map((action) => (
                     <div key={action.id} className="rounded-lg border border-slate-200 p-4">
                       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                         <div className="space-y-1">

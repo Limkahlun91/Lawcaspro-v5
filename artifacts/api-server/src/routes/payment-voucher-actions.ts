@@ -107,6 +107,99 @@ router.get("/payment-voucher-actions/my-work", requireAuth, requireFirmUser, asy
   res.json(rows);
 });
 
+router.get("/payment-voucher-actions/my-work/overview", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const requestedUserId = one((req.query as any).userId);
+  const userId = requestedUserId ? Number.parseInt(requestedUserId, 10) : req.userId!;
+  if (!Number.isFinite(userId) || userId <= 0) {
+    res.status(400).json({ error: "Invalid userId" });
+    return;
+  }
+  if (userId !== req.userId && !await roleHasPermission(req, "accounting", "read")) {
+    res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" });
+    return;
+  }
+  const filter = (() => {
+    const v = one((req.query as any).filter);
+    return v === "active" || v === "overdue" ? v : "all";
+  })();
+  const limitRaw = one((req.query as any).limit);
+  const limitParsed = limitRaw ? Number.parseInt(limitRaw, 10) : NaN;
+  const limit = Number.isFinite(limitParsed) && limitParsed > 0 ? Math.min(50, limitParsed) : 20;
+
+  const r = rdb(req);
+  const now = new Date();
+  const firmId = req.firmId!;
+
+  const baseConds = and(
+    eq(paymentVoucherActionsTable.firmId, firmId),
+    eq(paymentVoucherActionsTable.assignedUserId, userId),
+  );
+
+  const activeConds = and(
+    baseConds,
+    inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]),
+  );
+
+  const overdueConds = and(
+    activeConds,
+    or(
+      lte(paymentVoucherActionsTable.acknowledgeDueAt, now),
+      lte(paymentVoucherActionsTable.completionDueAt, now),
+    ),
+  );
+
+  const [allRow, activeRow, overdueRow] = await Promise.all([
+    r.select({ count: count() }).from(paymentVoucherActionsTable).where(baseConds),
+    r.select({ count: count() }).from(paymentVoucherActionsTable).where(activeConds),
+    r.select({ count: count() }).from(paymentVoucherActionsTable).where(overdueConds),
+  ]);
+
+  const listWhere =
+    filter === "active"
+      ? activeConds
+      : filter === "overdue"
+        ? overdueConds
+        : baseConds;
+
+  const items = await r
+    .select({
+      id: paymentVoucherActionsTable.id,
+      paymentVoucherId: paymentVoucherActionsTable.paymentVoucherId,
+      caseId: paymentVoucherActionsTable.caseId,
+      actionType: paymentVoucherActionsTable.actionType,
+      customAction: paymentVoucherActionsTable.customAction,
+      status: paymentVoucherActionsTable.status,
+      priority: paymentVoucherActionsTable.priority,
+      assignedAt: paymentVoucherActionsTable.assignedAt,
+      acknowledgeDueAt: paymentVoucherActionsTable.acknowledgeDueAt,
+      acknowledgedAt: paymentVoucherActionsTable.acknowledgedAt,
+      completionDueAt: paymentVoucherActionsTable.completionDueAt,
+      completedAt: paymentVoucherActionsTable.completedAt,
+      voucherNo: paymentVouchersTable.voucherNo,
+      payeeName: paymentVouchersTable.payeeName,
+      nextActionRemarks: paymentVouchersTable.nextActionRemarks,
+      referenceNo: casesTable.referenceNo,
+    })
+    .from(paymentVoucherActionsTable)
+    .innerJoin(paymentVouchersTable, and(
+      eq(paymentVouchersTable.id, paymentVoucherActionsTable.paymentVoucherId),
+      eq(paymentVouchersTable.firmId, paymentVoucherActionsTable.firmId),
+    ))
+    .leftJoin(casesTable, and(eq(casesTable.id, paymentVoucherActionsTable.caseId), eq(casesTable.firmId, paymentVoucherActionsTable.firmId)))
+    .where(listWhere)
+    .orderBy(desc(paymentVoucherActionsTable.createdAt))
+    .limit(limit);
+
+  res.json({
+    counts: {
+      all: Number(allRow?.[0]?.count ?? 0),
+      active: Number(activeRow?.[0]?.count ?? 0),
+      overdue: Number(overdueRow?.[0]?.count ?? 0),
+    },
+    items,
+  });
+});
+
 router.get("/payment-vouchers/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();
   if (!await roleHasPermission(req, "accounting", "read")) {

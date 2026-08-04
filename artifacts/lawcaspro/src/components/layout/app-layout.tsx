@@ -183,26 +183,6 @@ export function AppLayout({ children }: { children: ReactNode }) {
         queryFn: () => apiFetchJson(`/cases?page=${params.page}&limit=${params.limit}`),
         staleTime: 30_000,
       });
-      queryClient.prefetchQuery({
-        queryKey: ["cases", "filter-options"],
-        queryFn: () => apiFetchJson("/cases/filter-options"),
-        staleTime: 30_000,
-      });
-      queryClient.prefetchQuery({
-        queryKey: getListProjectsQueryKey({ page: 1, limit: 200 }),
-        queryFn: () => apiFetchJson("/projects?page=1&limit=200"),
-        staleTime: 30_000,
-      });
-      queryClient.prefetchQuery({
-        queryKey: getListDevelopersQueryKey({ page: 1, limit: 200 }),
-        queryFn: () => apiFetchJson("/developers?page=1&limit=200"),
-        staleTime: 30_000,
-      });
-      queryClient.prefetchQuery({
-        queryKey: getListUsersQueryKey({ page: 1, limit: 200 }),
-        queryFn: () => apiFetchJson("/users?page=1&limit=200"),
-        staleTime: 30_000,
-      });
     },
     "/app/projects": () => {
       queryClient.prefetchQuery({
