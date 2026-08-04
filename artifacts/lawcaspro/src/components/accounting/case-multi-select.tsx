@@ -13,8 +13,6 @@ type CaseSearchItem = {
   shortLabel: string;
   projectName: string | null;
   status: string | null;
-  case_id: number;
-  title: string;
 };
 
 export type SelectedCase = {
@@ -36,15 +34,12 @@ function coerceCaseSearchItem(v: unknown): CaseSearchItem | null {
   if (!Number.isFinite(id)) return null;
   const referenceNo = typeof v.referenceNo === "string" ? v.referenceNo : typeof v.reference_no === "string" ? v.reference_no : "";
   const shortLabel = typeof v.shortLabel === "string" ? v.shortLabel : typeof v.title === "string" ? v.title : "";
-  const title = typeof v.title === "string" ? v.title : shortLabel;
   return {
     id,
     referenceNo: String(referenceNo ?? "").trim(),
     shortLabel: String(shortLabel ?? "").trim() || String(referenceNo ?? "").trim(),
     projectName: typeof v.projectName === "string" ? v.projectName : null,
     status: typeof v.status === "string" ? v.status : null,
-    case_id: id,
-    title: String(title ?? "").trim() || String(shortLabel ?? "").trim(),
   };
 }
 
@@ -81,9 +76,15 @@ export function CaseMultiSelect(props: {
       const qs = new URLSearchParams();
       qs.set("query", debounced);
       qs.set("limit", String(limit));
-      const res = await apiFetchJson(`${endpoint}?${qs.toString()}`, { signal, timeoutMs: 15000 });
-      const rows = isRecord(res) && Array.isArray(res.data) ? res.data : [];
-      return rows.map(coerceCaseSearchItem).filter(Boolean) as CaseSearchItem[];
+      const res = await apiFetchJson(`${endpoint}?${qs.toString()}`, { signal, timeoutMs: 15000 }) as unknown;
+      const itemsRaw = isRecord(res) && Array.isArray((res as any).items)
+        ? (res as any).items
+        : isRecord(res) && isRecord((res as any).data) && Array.isArray((res as any).data.items)
+          ? (res as any).data.items
+          : isRecord(res) && Array.isArray((res as any).data)
+            ? (res as any).data
+            : [];
+      return (itemsRaw as unknown[]).map(coerceCaseSearchItem).filter(Boolean) as CaseSearchItem[];
     },
     enabled: open && debounced.length >= minSearchLength,
     retry: false,
@@ -96,8 +97,8 @@ export function CaseMultiSelect(props: {
 
   const add = (item: CaseSearchItem) => {
     const next: SelectedCase = {
-      case_id: item.case_id,
-      title: item.title || item.shortLabel || item.referenceNo,
+      case_id: item.id,
+      title: item.shortLabel || item.referenceNo,
       referenceNo: item.referenceNo,
       projectName: item.projectName,
       status: item.status,
@@ -108,7 +109,7 @@ export function CaseMultiSelect(props: {
       setRaw("");
       return;
     }
-    if (selectedIds.has(item.case_id)) return;
+    if (selectedIds.has(item.id)) return;
     props.onChange([...props.value, next]);
   };
 
@@ -148,7 +149,7 @@ export function CaseMultiSelect(props: {
             <CommandList>
               {raw.trim().length < minSearchLength ? (
                 <CommandEmpty>Type at least {minSearchLength} characters.</CommandEmpty>
-              ) : query.isLoading ? (
+              ) : query.isFetching ? (
                 <CommandEmpty>Searching…</CommandEmpty>
               ) : query.isError ? (
                 <CommandEmpty>Search failed. Please retry.</CommandEmpty>
@@ -157,12 +158,12 @@ export function CaseMultiSelect(props: {
               ) : (
                 <CommandGroup>
                   {(query.data ?? []).map((c) => {
-                    const already = selectedIds.has(c.case_id);
-                    const rowLabel = c.shortLabel || c.title || c.referenceNo;
+                    const already = selectedIds.has(c.id);
+                    const rowLabel = c.shortLabel || c.referenceNo;
                     return (
                       <CommandItem
-                        key={String(c.case_id)}
-                        value={String(c.case_id)}
+                        key={String(c.id)}
+                        value={String(c.id)}
                         onSelect={() => add(c)}
                         disabled={mode === "multi" ? already : false}
                       >

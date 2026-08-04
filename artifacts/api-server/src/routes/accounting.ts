@@ -47,6 +47,14 @@ async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, 
   return [];
 }
 
+async function queryRowsFromReq(req: AuthRequest, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
+  const executor = (req.rlsDb ?? db) as unknown as { execute: (q: ReturnType<typeof sql>) => Promise<unknown> };
+  const result = await executor.execute(query);
+  if (Array.isArray(result)) return result as Record<string, unknown>[];
+  if (result && typeof result === "object" && "rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
+  return [];
+}
+
 async function queryRowsFrom(
   executor: { execute: (query: ReturnType<typeof sql>) => Promise<unknown> },
   query: ReturnType<typeof sql>,
@@ -892,48 +900,60 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
   res.json({ data });
 });
 
-router.get("/accounting/cases/search", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+export async function handleAccountingCaseSearch(req: AuthRequest, res: Response): Promise<void> {
+  const startedAt = Date.now();
   const firmId = req.firmId!;
   const q = typeof (req.query as any)?.query === "string" ? String((req.query as any).query).trim() : "";
   const limitRaw = typeof (req.query as any)?.limit === "string" ? String((req.query as any).limit).trim() : "";
   const limitParsed = limitRaw ? Number.parseInt(limitRaw, 10) : NaN;
   const safeLimit = Number.isFinite(limitParsed) && limitParsed > 0 ? Math.min(50, limitParsed) : 20;
-  if (!q || q.length < 2) { res.json({ data: [] }); return; }
+
+  const meta = () => ({
+    request_id: typeof (req as any)?.id === "string" ? String((req as any).id) : "",
+    timestamp: new Date().toISOString(),
+    duration_ms: Date.now() - startedAt,
+  });
+
+  if (!q || q.length < 2) {
+    res.json({
+      ok: true,
+      data: { items: [], pagination: { limit: safeLimit } },
+      meta: meta(),
+    });
+    return;
+  }
 
   const like = `%${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
-  const rows = await queryRows(sql`
+  const queryStartedAt = Date.now();
+  const rows = await queryRowsFromReq(req, sql`
     SELECT
       c.id,
       c.reference_no,
       c.status,
-      COALESCE(cl.name, '') as client_name,
       COALESCE(p.name, '') as project_name,
       COALESCE(d.name, '') as developer_name
     FROM cases c
     LEFT JOIN projects p ON p.id = c.project_id AND p.firm_id = ${firmId}
     LEFT JOIN developers d ON d.id = c.developer_id AND d.firm_id = ${firmId}
-    LEFT JOIN case_purchasers cp ON cp.case_id = c.id AND cp.role = 'main'
-    LEFT JOIN clients cl ON cl.id = cp.client_id AND cl.firm_id = ${firmId}
     WHERE c.firm_id = ${firmId}
       AND c.deleted_at IS NULL
       AND (
         c.reference_no ILIKE ${like}
-        OR COALESCE(cl.name, '') ILIKE ${like}
         OR COALESCE(p.name, '') ILIKE ${like}
         OR COALESCE(d.name, '') ILIKE ${like}
       )
     ORDER BY c.updated_at DESC
     LIMIT ${safeLimit}
   `);
+  const queryMs = Date.now() - queryStartedAt;
 
-  const data = (rows as any[]).map((r) => {
+  const items = (rows as any[]).map((r) => {
     const id = parseIdInt(r.id);
     const ref = String(r.reference_no ?? "").trim();
-    const clientName = String(r.client_name ?? "");
     const projectName = String(r.project_name ?? "") || null;
     const developerName = String(r.developer_name ?? "") || null;
     const status = String(r.status ?? "") || null;
-    const shortLabel = clientName ? `${ref} • ${clientName}` : ref;
+    const shortLabel = projectName ? `${ref} • ${projectName}` : ref;
     return {
       id,
       referenceNo: ref,
@@ -941,13 +961,17 @@ router.get("/accounting/cases/search", requireAuth, requireFirmUser, requirePerm
       projectName,
       developerName,
       status,
-      case_id: id,
-      title: shortLabel,
     };
-  }).filter((x) => x.case_id);
+  }).filter((x) => x.id);
 
-  res.json({ data });
-});
+  res.json({
+    ok: true,
+    data: { items, pagination: { limit: safeLimit } },
+    meta: { ...meta(), db_result_count: rows.length, db_query_ms: queryMs },
+  });
+}
+
+router.get("/accounting/cases/search", requireAuth, requireFirmUser, requirePermission("accounting", "read"), handleAccountingCaseSearch);
 
 router.post("/accounting/bank-transactions/:id/bind-case", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const firmId = req.firmId!;

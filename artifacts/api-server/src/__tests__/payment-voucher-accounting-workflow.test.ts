@@ -322,8 +322,8 @@ describe("payment voucher accounting workflow", () => {
       .set("Authorization", `Bearer ${partnerToken}`);
 
     expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("data");
-    const rows = Array.isArray(res.body.data) ? res.body.data : [];
+    expect(res.body?.ok).toBe(true);
+    const rows = Array.isArray(res.body?.data?.items) ? res.body.data.items : [];
     expect(rows.some((r: any) => Number(r?.id ?? r?.case_id) === otherFirmCaseId)).toBe(false);
   });
 

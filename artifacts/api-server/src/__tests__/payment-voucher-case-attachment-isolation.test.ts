@@ -85,8 +85,8 @@ suite("Payment voucher case attachment tenant isolation", () => {
       .set("Authorization", `Bearer ${partnerToken}`);
 
     expect(res.status).toBe(200);
-    const rows = Array.isArray(res.body?.data) ? res.body.data : [];
+    expect(res.body?.ok).toBe(true);
+    const rows = Array.isArray(res.body?.data?.items) ? res.body.data.items : [];
     expect(rows.some((r: any) => Number(r?.id ?? r?.case_id) === otherFirmCaseId)).toBe(false);
   });
 });
-

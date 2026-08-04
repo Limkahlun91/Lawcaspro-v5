@@ -56,7 +56,7 @@ describe("CaseMultiSelect", () => {
 
   it("does not treat typed text as a selection", async () => {
     apiFetchJsonMock.mockResolvedValueOnce({
-      data: [{ id: 1, referenceNo: "LEGASI-001", shortLabel: "LEGASI-001 • Client A", projectName: null, status: "open" }],
+      items: [{ id: 1, referenceNo: "LEGASI-001", shortLabel: "LEGASI-001 • Client A", projectName: null, status: "open" }],
     });
 
     renderWithQueryClient(<Wrapper />);
@@ -71,7 +71,7 @@ describe("CaseMultiSelect", () => {
 
   it("adds a chip only after selecting a dropdown result", async () => {
     apiFetchJsonMock.mockResolvedValueOnce({
-      data: [
+      items: [
         { id: 1, referenceNo: "LEGASI-001", shortLabel: "LEGASI-001 • Client A", projectName: null, status: "open" },
         { id: 2, referenceNo: "LEGASI-002", shortLabel: "LEGASI-002 • Client B", projectName: null, status: "open" },
       ],
@@ -96,7 +96,7 @@ describe("CaseMultiSelect", () => {
 
   it("removes a selected chip", async () => {
     apiFetchJsonMock.mockResolvedValueOnce({
-      data: [{ id: 1, referenceNo: "LEGASI-001", shortLabel: "LEGASI-001 • Client A", projectName: null, status: "open" }],
+      items: [{ id: 1, referenceNo: "LEGASI-001", shortLabel: "LEGASI-001 • Client A", projectName: null, status: "open" }],
     });
 
     renderWithQueryClient(<Wrapper />);
@@ -112,7 +112,7 @@ describe("CaseMultiSelect", () => {
 
   it("in single mode, keeps exactly one selection", async () => {
     apiFetchJsonMock.mockResolvedValueOnce({
-      data: [
+      items: [
         { id: 1, referenceNo: "LEGASI-001", shortLabel: "LEGASI-001 • Client A", projectName: null, status: "open" },
         { id: 2, referenceNo: "LEGASI-002", shortLabel: "LEGASI-002 • Client B", projectName: null, status: "open" },
       ],

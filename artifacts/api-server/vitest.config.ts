@@ -39,6 +39,7 @@ export default defineConfig({
         "src/__tests__/payment-voucher-create-status.unit.test.ts",
         "src/__tests__/payment-voucher-create-request.unit.test.ts",
         "src/__tests__/payment-voucher-case-attachment-isolation.test.ts",
+        "src/__tests__/accounting-case-search.contract.test.ts",
       ],
     pool: "forks",
     poolOptions: {

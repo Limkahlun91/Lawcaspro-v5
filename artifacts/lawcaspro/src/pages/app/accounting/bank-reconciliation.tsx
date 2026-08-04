@@ -141,7 +141,7 @@ export default function BankReconciliationPage() {
       return await apiFetchJson(`/accounting/cases/search?query=${encodeURIComponent(q)}`);
     },
     onSuccess: (data: any) => {
-      const rows = Array.isArray(data?.data) ? data.data : [];
+      const rows = Array.isArray(data?.items) ? data.items : Array.isArray(data?.data) ? data.data : [];
       setCaseResults(rows);
     },
     onError: (e) => toastError(toast, e, "Search failed"),

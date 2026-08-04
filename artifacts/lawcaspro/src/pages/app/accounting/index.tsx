@@ -1043,13 +1043,13 @@ function PaymentVouchersTab() {
     queryKey: ["payment-vouchers"],
     queryFn: () => apiFetchJson("/payment-vouchers?page=1&limit=200", { timeoutMs: 20000 }),
     retry: false,
-    enabled: canAccountingRead,
+    enabled: canAccountingRead && !showCreate,
   });
   const dashboardQuery = useQuery({
     queryKey: ["payment-vouchers", "dashboard"],
     queryFn: () => apiFetchJson("/payment-vouchers/dashboard"),
     retry: false,
-    enabled: canAccountingRead,
+    enabled: canAccountingRead && !showCreate,
   });
   const { data, isLoading } = vouchersQuery;
   const vouchers = (data ?? []) as any[];
