@@ -93,6 +93,10 @@ export default function Login() {
       }
       const meBody = (await meRes.json()) as unknown;
       const unwrapped = unwrapApiData<unknown>(meBody);
+      if (unwrapped === null) {
+        toast({ title: "Login failed", description: "Unable to verify your session.", variant: "destructive" });
+        return;
+      }
       const verified = extractAuthUser(unwrapped);
       if (!verified) {
         toast({ title: "Login failed", description: "Unexpected response from server.", variant: "destructive" });
