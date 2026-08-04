@@ -614,7 +614,15 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
       totpEnabled: user.totpEnabled,
     };
     logger.info(
-      { route: getRoute(req), reqId: getReqId(req) ?? null, stage: "response_shape", keys: Object.keys(payload).sort() },
+      {
+        route: getRoute(req),
+        reqId: getReqId(req) ?? null,
+        stage: "response_shape",
+        keys: Object.keys(payload).sort(),
+        tokenReturned: true,
+        setCookiePresent: true,
+        cookie: { domain: null, path: "/", secure: process.env.NODE_ENV === "production", sameSite: "lax" },
+      },
       "auth.login_response_shape",
     );
 
@@ -723,15 +731,29 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
   const authHeader = req.headers.authorization;
   const headerToken =
     typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7) : undefined;
-  const token = (typeof cookieToken === "string" ? cookieToken : undefined) || headerToken;
+  const cookie = typeof cookieToken === "string" ? cookieToken : undefined;
+  const bearer = typeof headerToken === "string" ? headerToken : undefined;
+  const candidates = Array.from(new Set([cookie, bearer].filter(Boolean))) as string[];
+  const tokenSource = cookie ? "COOKIE" : bearer ? "BEARER" : "NONE";
+  logger.info(
+    {
+      route: getRoute(req),
+      reqId,
+      stage: "auth_inputs",
+      cookiePresent: Boolean(cookie),
+      bearerPresent: Boolean(bearer),
+      candidateCount: candidates.length,
+      tokenSource,
+    },
+    "auth.me_inputs",
+  );
 
-  if (!token) {
+  if (candidates.length === 0) {
     sendOk(res, null);
     logger.info({ route: getRoute(req), reqId, stage: "no_token", ms: Date.now() - startedAt }, "auth.me");
     return;
   }
 
-  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
   const ctxBase = { route: getRoute(req), reqId, stage: "start" };
   const t0 = Date.now();
   let sessionLookupMs = 0;
@@ -739,6 +761,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
   let sessionLookupInflightShared: boolean | null = null;
   let sessionLookupPrimaryMs: number | null = null;
   let sessionLookupFallbackMs: number | null = null;
+  let sessionLookupOutcome: "FOUND" | "NOT_FOUND" | "EXPIRED" | "INACTIVE" = "NOT_FOUND";
   let tenantContextDbConnectMs = 0;
   let tenantContextMs = 0;
   let roleLookupMs = 0;
@@ -747,21 +770,37 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
   let responseBuildMs = 0;
 
   try {
-    const result = await lookupSessionAndUserByTokenHash(tokenHash);
+    let found: Awaited<ReturnType<typeof lookupSessionAndUserByTokenHash>> | null = null;
+    for (const token of candidates) {
+      const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+      const r = await lookupSessionAndUserByTokenHash(tokenHash);
+      if (r?.session) {
+        found = r;
+        break;
+      }
+      found = r;
+    }
     sessionLookupMs = Date.now() - t0;
-    sessionLookupAttempts = result?.timing?.attempts ?? null;
-    sessionLookupInflightShared = result?.timing?.inflightShared ?? null;
-    sessionLookupPrimaryMs = result?.timing?.primaryLookupMs ?? null;
-    sessionLookupFallbackMs = result?.timing?.fallbackLookupMs ?? null;
-    const session = result?.session;
-    const user = result?.user;
+    sessionLookupAttempts = found?.timing?.attempts ?? null;
+    sessionLookupInflightShared = found?.timing?.inflightShared ?? null;
+    sessionLookupPrimaryMs = found?.timing?.primaryLookupMs ?? null;
+    sessionLookupFallbackMs = found?.timing?.fallbackLookupMs ?? null;
+    const session = found?.session;
+    const user = found?.user;
 
     if (!session || !user || session.expiresAt < new Date() || user.status !== "active") {
+      if (!session || !user) sessionLookupOutcome = "NOT_FOUND";
+      else if (session.expiresAt < new Date()) sessionLookupOutcome = "EXPIRED";
+      else if (user.status !== "active") sessionLookupOutcome = "INACTIVE";
       if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
       sendOk(res, null);
-      logger.info({ ...ctxBase, stage: "not_authenticated", ms: Date.now() - startedAt, sessionLookupMs }, "auth.me");
+      logger.info(
+        { ...ctxBase, stage: "not_authenticated", ms: Date.now() - startedAt, sessionLookupMs, sessionLookupOutcome },
+        "auth.me",
+      );
       return;
     }
+    sessionLookupOutcome = "FOUND";
 
     const withFirmRlsDb = async <T,>(
       firmId: number,
@@ -903,6 +942,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
         sessionLookupInflightShared,
         sessionLookupPrimaryMs,
         sessionLookupFallbackMs,
+        sessionLookupOutcome,
         tenantContextDbConnectMs,
         tenantContextMs,
         roleLookupMs,
