@@ -51,9 +51,24 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
-type DbConn = Pick<typeof db, "select" | "insert" | "update" | "delete" | "transaction">;
-type DbTxConn = Pick<typeof db, "select" | "insert" | "update" | "delete">;
+type DbConn = Pick<typeof db, "select" | "insert" | "update" | "delete" | "transaction" | "execute">;
+type DbTxConn = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 const rdb = (req: AuthRequest): DbConn => (req.rlsDb ?? db) as unknown as DbConn;
+
+const createSectionTimer = (req: AuthRequest, key: string) => {
+  const start = Date.now();
+  return () => {
+    const ms = Math.max(0, Date.now() - start);
+    if (req.timing?.sections) {
+      req.timing.sections[key] = (req.timing.sections[key] ?? 0) + ms;
+    }
+    return ms;
+  };
+};
+
+const PV_CREATE_PRELOCK_TIMEOUT_MS = 2_000;
+const PV_CREATE_TX_LOCK_TIMEOUT_MS = 5_000;
+const PV_CREATE_TX_STATEMENT_TIMEOUT_MS = 55_000;
 
 async function getRoleName(req: AuthRequest): Promise<string> {
   return String((req as { roleName?: unknown }).roleName ?? "").trim();
@@ -377,7 +392,9 @@ router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requirePermiss
 // Create
 router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();
+  const stopParse = createSectionTimer(req, "pv.create.parse");
   const parsed = CreatePaymentVoucherBody.safeParse(req.body);
+  stopParse();
   if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
   const {
     clientRequestId,
@@ -419,6 +436,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       ? `${normalizedLineItems[0].purpose} (+${normalizedLineItems.length - 1} more)`
       : purpose;
 
+  const stopPermissions = createSectionTimer(req, "pv.create.permissions");
   const roleName = await getRoleName(req);
   const roleKind = classifyCaseWorkflowRole(roleName);
   const canCreateAccountingRequest = await roleHasPermission(req, "accounting", "create");
@@ -452,6 +470,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (!bankAccountId || !targetAccountId) { res.status(400).json({ error: "bankAccountId and targetAccountId are required" }); return; }
     if (bankAccountId === targetAccountId) { res.status(400).json({ error: "targetAccountId must be different from bankAccountId" }); return; }
   }
+  stopPermissions();
   const initialStatus =
     (() => {
       const isSimplified = !paymentMethod && !accountType && !bankAccountId;
@@ -466,6 +485,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
 
   const effectiveIsAdvance = Boolean(isAdvance);
   const effectiveFundStatus = effectiveIsAdvance ? "request_advance" : (fundStatus ?? "client_paid");
+  const stopSettings = createSectionTimer(req, "pv.create.settings");
   const settings = await getAccountingSettings(req);
   const approvalDecision = resolveApprovalRequirement(effectiveAmount, voucherType, settings);
   const approvalStatus = resolvePaymentVoucherApprovalStatus({
@@ -474,6 +494,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     fundStatus: effectiveFundStatus,
     requiresPartnerApproval: Boolean(approvalDecision.requiresPartnerApproval),
   });
+  stopSettings();
 
   const r = rdb(req);
   const now = new Date();
@@ -485,6 +506,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     })
     : null;
 
+  const stopCaseCheck = createSectionTimer(req, "pv.create.case_check");
   const caseIdValue = typeof caseId === "number" && Number.isFinite(caseId) ? Number(caseId) : null;
   const targetCaseIdValue = typeof targetCaseId === "number" && Number.isFinite(targetCaseId) ? Number(targetCaseId) : null;
   if (caseIdValue) {
@@ -511,20 +533,25 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       .limit(1);
     if (!rows[0]) { res.status(404).json({ error: "Target case not found" }); return; }
   }
+  stopCaseCheck();
 
   if (normalizedClientRequestId) {
+    const stopIdempotency = createSectionTimer(req, "pv.create.idempotency");
     try {
-      const inserted = await r
-        .insert(paymentVoucherCreateRequestsTable)
-        .values({
-          firmId: req.firmId!,
-          createdByUserId: req.userId!,
-          clientRequestId: normalizedClientRequestId,
-          requestPayloadHash,
-          status: "processing",
-        })
-        .onConflictDoNothing()
-        .returning({ id: paymentVoucherCreateRequestsTable.id });
+      const inserted = await r.transaction(async (tx) => {
+        await tx.execute(sql.raw(`SET LOCAL lock_timeout = ${PV_CREATE_PRELOCK_TIMEOUT_MS}`));
+        return await tx
+          .insert(paymentVoucherCreateRequestsTable)
+          .values({
+            firmId: req.firmId!,
+            createdByUserId: req.userId!,
+            clientRequestId: normalizedClientRequestId,
+            requestPayloadHash,
+            status: "processing",
+          })
+          .onConflictDoNothing()
+          .returning({ id: paymentVoucherCreateRequestsTable.id });
+      });
 
       if (!inserted[0]) {
         const [existingRequest] = await r
@@ -548,21 +575,24 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
             res.status(200).json(existingVoucher);
             return;
           }
-          const reclaimed = await r
-            .update(paymentVoucherCreateRequestsTable)
-            .set({
-              status: "processing",
-              lastError: null,
-              completedAt: null,
-              updatedAt: now,
-            })
-            .where(and(
-              eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
-              eq(paymentVoucherCreateRequestsTable.createdByUserId, req.userId!),
-              eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
-              eq(paymentVoucherCreateRequestsTable.status, "failed"),
-            ))
-            .returning({ id: paymentVoucherCreateRequestsTable.id });
+          const reclaimed = await r.transaction(async (tx) => {
+            await tx.execute(sql.raw(`SET LOCAL lock_timeout = ${PV_CREATE_PRELOCK_TIMEOUT_MS}`));
+            return await tx
+              .update(paymentVoucherCreateRequestsTable)
+              .set({
+                status: "processing",
+                lastError: null,
+                completedAt: null,
+                updatedAt: now,
+              })
+              .where(and(
+                eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
+                eq(paymentVoucherCreateRequestsTable.createdByUserId, req.userId!),
+                eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
+                eq(paymentVoucherCreateRequestsTable.status, "failed"),
+              ))
+              .returning({ id: paymentVoucherCreateRequestsTable.id });
+          });
           if (!reclaimed[0]) {
             res.status(202).json({ status: "processing", clientRequestId: normalizedClientRequestId });
             return;
@@ -597,20 +627,23 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
           if (stale) {
             const activeLockHeld = await isCreateRequestActivelyLocked(r, req.firmId!, requestOwnerId, normalizedClientRequestId);
             if (!activeLockHeld) {
-              const reclaimed = await r
-                .update(paymentVoucherCreateRequestsTable)
-                .set({
-                  updatedAt: now,
-                  lastError: null,
-                })
-                .where(and(
-                  eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
-                  eq(paymentVoucherCreateRequestsTable.createdByUserId, requestOwnerId),
-                  eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
-                  eq(paymentVoucherCreateRequestsTable.status, "processing"),
-                  eq(paymentVoucherCreateRequestsTable.updatedAt, existingRequest.updatedAt as any),
-                ))
-                .returning({ id: paymentVoucherCreateRequestsTable.id });
+              const reclaimed = await r.transaction(async (tx) => {
+                await tx.execute(sql.raw(`SET LOCAL lock_timeout = ${PV_CREATE_PRELOCK_TIMEOUT_MS}`));
+                return await tx
+                  .update(paymentVoucherCreateRequestsTable)
+                  .set({
+                    updatedAt: now,
+                    lastError: null,
+                  })
+                  .where(and(
+                    eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
+                    eq(paymentVoucherCreateRequestsTable.createdByUserId, requestOwnerId),
+                    eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
+                    eq(paymentVoucherCreateRequestsTable.status, "processing"),
+                    eq(paymentVoucherCreateRequestsTable.updatedAt, existingRequest.updatedAt as any),
+                  ))
+                  .returning({ id: paymentVoucherCreateRequestsTable.id });
+              });
               if (reclaimed[0]) {
                 // Continue into a same-key retry only after proving there is no committed voucher and no active lock holder.
               } else {
@@ -628,9 +661,21 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
         }
       }
     } catch (err) {
+      const code = typeof (err as { code?: unknown } | null)?.code === "string" ? String((err as { code?: unknown }).code) : "";
+      if (code === "55P03" || code === "57014") {
+        const fallbackVoucher = await loadVoucherByClientRequest(r, req.firmId!, normalizedClientRequestId);
+        if (fallbackVoucher) {
+          res.status(200).json(fallbackVoucher);
+          return;
+        }
+        res.status(202).json({ status: "processing", clientRequestId: normalizedClientRequestId });
+        return;
+      }
       if (!isMissingSchemaError(err)) throw err;
       res.status(500).json({ error: "Database migration missing for idempotency. Apply migration 0126_payment_voucher_create_request_tracking.sql", code: "MIGRATION_MISSING" });
       return;
+    } finally {
+      stopIdempotency();
     }
   }
 
@@ -656,6 +701,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     : payeeName;
 
   if (normalizedAccountType === "client") {
+    const stopBalance = createSectionTimer(req, "pv.create.balance_check");
     const cid = caseId ? Number(caseId) : NaN;
     if (!Number.isFinite(cid) || cid <= 0) { res.status(400).json({ error: "caseId is required when deducting from Client Account" }); return; }
     const [row] = await r.select({ bal: sql<string>`COALESCE(SUM(credit - debit), 0)` }).from(ledgerEntriesTable).where(and(
@@ -665,11 +711,15 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     )).limit(1);
     const bal = Number(row?.bal ?? 0);
     if (bal + 1e-9 < effectiveAmount) { res.status(400).json({ error: "Insufficient Client Account Balance", code: "INSUFFICIENT_CLIENT_BALANCE" }); return; }
+    stopBalance();
   }
 
   let pv: typeof paymentVouchersTable.$inferSelect;
+  const stopTx = createSectionTimer(req, "pv.create.tx");
   try {
     pv = await r.transaction(async (tx) => {
+      await tx.execute(sql.raw(`SET LOCAL lock_timeout = ${PV_CREATE_TX_LOCK_TIMEOUT_MS}`));
+      await tx.execute(sql.raw(`SET LOCAL statement_timeout = ${PV_CREATE_TX_STATEMENT_TIMEOUT_MS}`));
       if (normalizedClientRequestId) {
         const locked = await tryAcquireCreateRequestTxnLock(tx, req.firmId!, req.userId!, normalizedClientRequestId);
         if (!locked) {
@@ -757,18 +807,21 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (normalizedClientRequestId) {
       try {
         if (String(err?.code ?? "") !== "CLIENT_REQUEST_IN_PROGRESS") {
-          await r
-            .update(paymentVoucherCreateRequestsTable)
-            .set({
-              status: "failed",
-              lastError: String(err?.message ?? err ?? "").slice(0, 500),
-              updatedAt: new Date(),
-            })
-            .where(and(
-              eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
-              eq(paymentVoucherCreateRequestsTable.createdByUserId, req.userId!),
-              eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
-            ));
+          await r.transaction(async (tx) => {
+            await tx.execute(sql.raw(`SET LOCAL lock_timeout = ${PV_CREATE_PRELOCK_TIMEOUT_MS}`));
+            await tx
+              .update(paymentVoucherCreateRequestsTable)
+              .set({
+                status: "failed",
+                lastError: String(err?.message ?? err ?? "").slice(0, 500),
+                updatedAt: new Date(),
+              })
+              .where(and(
+                eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
+                eq(paymentVoucherCreateRequestsTable.createdByUserId, req.userId!),
+                eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
+              ));
+          });
         }
       } catch {
       }
@@ -784,17 +837,24 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
         return;
       }
     }
+    if (normalizedClientRequestId && (String(err?.code ?? "") === "55P03" || String(err?.code ?? "") === "57014" || String(err?.code ?? "") === "40P01")) {
+      res.status(202).json({ status: "processing", clientRequestId: normalizedClientRequestId });
+      return;
+    }
     throw err;
+  } finally {
+    stopTx();
   }
 
   res.status(201).json(pv);
   const durationMs = Date.now() - startedAt;
   if (durationMs >= 2000) {
-    logger.warn({ durationMs, firmId: req.firmId, userId: req.userId, voucherType }, "payment_voucher.create_slow");
+    logger.warn({ durationMs, firmId: req.firmId, userId: req.userId, voucherType, sections: req.timing?.sections ?? null }, "payment_voucher.create_slow");
   }
 });
 
 router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const startedAt = Date.now();
   const raw = one(req.params.clientRequestId);
   const clientRequestId = typeof raw === "string" ? raw.trim() : "";
   if (!clientRequestId || clientRequestId.length > 80) {
@@ -803,12 +863,17 @@ router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, 
   }
   const r = rdb(req);
   try {
-    const canReadAccounting = await roleHasPermission(req, "accounting", "read");
-    const canReviewAccounting = await roleHasPermission(req, "accounting", "review");
-    const canApproveAccounting = await roleHasPermission(req, "accounting", "approve");
-    const roleName = await getRoleName(req);
+    const stopPermissions = createSectionTimer(req, "pv.by_client_request.permissions");
+    const [canReadAccounting, canReviewAccounting, canApproveAccounting, roleName] = await Promise.all([
+      roleHasPermission(req, "accounting", "read"),
+      roleHasPermission(req, "accounting", "review"),
+      roleHasPermission(req, "accounting", "approve"),
+      getRoleName(req),
+    ]);
     const roleKind = classifyCaseWorkflowRole(roleName);
+    stopPermissions();
     const canViewOtherUsers = Boolean(canReadAccounting || canReviewAccounting || canApproveAccounting || roleKind === "partner");
+    const stopRequestLoad = createSectionTimer(req, "pv.by_client_request.request_state");
     const [ownRequestState] = await r
       .select()
       .from(paymentVoucherCreateRequestsTable)
@@ -831,6 +896,7 @@ router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, 
       : [null];
 
     const requestState = ownRequestState ?? reviewerRequestState ?? null;
+    stopRequestLoad();
     if (!requestState) {
       res.status(404).json({ error: "Not found" });
       return;
@@ -842,6 +908,7 @@ router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, 
       return;
     }
 
+    const stopVoucherLookup = createSectionTimer(req, "pv.by_client_request.voucher_lookup");
     const voucher = requestState.paymentVoucherId
       ? (await r
         .select({
@@ -865,13 +932,17 @@ router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, 
           eq(paymentVouchersTable.clientRequestId, clientRequestId),
         ))
         .limit(1))[0] ?? null;
+    stopVoucherLookup();
 
     const requestOwnerId = Number(requestState.createdByUserId ?? req.userId!);
+    const stopLockProbe = createSectionTimer(req, "pv.by_client_request.lock_probe");
     const activeLockHeld =
       requestState?.status === "processing" && isPaymentVoucherCreateRequestStale(requestState.updatedAt)
         ? await isCreateRequestActivelyLocked(r, req.firmId!, requestOwnerId, clientRequestId)
         : false;
+    stopLockProbe();
 
+    const stopResolve = createSectionTimer(req, "pv.by_client_request.resolve");
     const resolved = resolvePaymentVoucherCreateStatus({
       clientRequestId,
       requestState: requestState ?? undefined,
@@ -879,6 +950,7 @@ router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, 
       isViewerAllowed: Boolean(canViewOtherUsers || isOwner || requestOwnerId === Number(req.userId)),
       activeLockHeld,
     });
+    stopResolve();
     if (resolved.httpStatus === 403) {
       res.status(403).json(resolved.body);
       return;
@@ -888,6 +960,10 @@ router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, 
         ? { ...resolved.body, staleAfterMs: PAYMENT_VOUCHER_CREATE_STALE_MS }
         : resolved.body,
     );
+    const durationMs = Date.now() - startedAt;
+    if (durationMs >= 1000) {
+      logger.warn({ durationMs, firmId: req.firmId, userId: req.userId, sections: req.timing?.sections ?? null }, "payment_voucher.by_client_request_slow");
+    }
   } catch (err) {
     if (isMissingSchemaError(err)) {
       res.status(500).json({ error: "Database migration missing for idempotency. Apply migration 0126_payment_voucher_create_request_tracking.sql", code: "MIGRATION_MISSING" });

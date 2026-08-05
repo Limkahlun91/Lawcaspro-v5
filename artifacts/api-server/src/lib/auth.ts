@@ -553,21 +553,25 @@ export async function lookupSessionAndUserByTokenHash(
   for (let attempt = 1; attempt <= 3; attempt++) {
     timing.attempts = attempt;
     try {
+      if (isAuthAdminDbConfigured()) {
+        const adminStart = Date.now();
+        const admin = await lookupViaAuthAdminDb();
+        timing.primaryLookupMs += Date.now() - adminStart;
+        if (admin?.session) {
+          timing.identityDbSource = authAdminSource;
+          return admin?.user ? { ...(admin as any), timing } : { session: admin.session as any, user: undefined as any, timing };
+        }
+        if (attempt < 2) {
+          await sleep(30 * attempt);
+          continue;
+        }
+        return null;
+      }
+
       const primaryStart = Date.now();
       const primary = await lookupViaDb();
       timing.primaryLookupMs += Date.now() - primaryStart;
       if (!primary?.session) {
-        const adminStart = Date.now();
-        const admin = await lookupViaAuthAdminDb();
-        timing.fallbackLookupMs += Date.now() - adminStart;
-        if (admin?.session) {
-          timing.identityDbSource = authAdminSource;
-          logger.info(
-            { stage: "session_lookup", identityDbSource: timing.identityDbSource, primarySessionFound: false, adminSessionFound: true },
-            "auth.session_lookup_admin_hit",
-          );
-          return admin?.user ? { ...(admin as any), timing } : { session: admin.session as any, user: undefined as any, timing };
-        }
         if (attempt < 2) {
           await sleep(30 * attempt);
           continue;

@@ -1,6 +1,6 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import CasesList from "./index";
@@ -263,7 +263,9 @@ describe("/app/cases regressions", () => {
     });
 
     renderWithQueryClient();
-    expect(await screen.findByRole("button", { name: "Resubmit for Approval" })).toBeInTheDocument();
+    const [tab] = await screen.findAllByText("Case Details to Amend");
+    fireEvent.click(tab!);
+    expect((await screen.findAllByRole("button", { name: "Resubmit for Approval" })).length).toBeGreaterThan(0);
   });
 
   it("keeps last-known-good data when a request is aborted", async () => {

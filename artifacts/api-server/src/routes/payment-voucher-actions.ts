@@ -4,6 +4,7 @@ import { casesTable, db, paymentVoucherActionsTable, paymentVouchersTable, permi
 import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
+import { extractDbErrorInfo } from "../lib/db-error.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -108,6 +109,7 @@ router.get("/payment-voucher-actions/my-work", requireAuth, requireFirmUser, asy
 });
 
 router.get("/payment-voucher-actions/my-work/overview", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const startedAt = Date.now();
   const requestedUserId = one((req.query as any).userId);
   const userId = requestedUserId ? Number.parseInt(requestedUserId, 10) : req.userId!;
   if (!Number.isFinite(userId) || userId <= 0) {
@@ -135,69 +137,88 @@ router.get("/payment-voucher-actions/my-work/overview", requireAuth, requireFirm
     eq(paymentVoucherActionsTable.assignedUserId, userId),
   );
 
-  const activeConds = and(
-    baseConds,
-    inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]),
-  );
-
+  const activeConds = and(baseConds, inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]));
   const overdueConds = and(
     activeConds,
-    or(
-      lte(paymentVoucherActionsTable.acknowledgeDueAt, now),
-      lte(paymentVoucherActionsTable.completionDueAt, now),
-    ),
+    or(lte(paymentVoucherActionsTable.acknowledgeDueAt, now), lte(paymentVoucherActionsTable.completionDueAt, now)),
   );
 
-  const [allRow, activeRow, overdueRow] = await Promise.all([
-    r.select({ count: count() }).from(paymentVoucherActionsTable).where(baseConds),
-    r.select({ count: count() }).from(paymentVoucherActionsTable).where(activeConds),
-    r.select({ count: count() }).from(paymentVoucherActionsTable).where(overdueConds),
-  ]);
+  try {
+    const result = await (r as any).transaction(async (tx: any) => {
+      await tx.execute(sql.raw("SET LOCAL lock_timeout = '2000ms'"));
+      await tx.execute(sql.raw("SET LOCAL statement_timeout = '15000ms'"));
 
-  const listWhere =
-    filter === "active"
-      ? activeConds
-      : filter === "overdue"
-        ? overdueConds
-        : baseConds;
+      const countsRows = await tx.execute(sql`
+        SELECT
+          COUNT(*)::bigint AS all,
+          COUNT(*) FILTER (WHERE status IN ('assigned','acknowledged'))::bigint AS active,
+          COUNT(*) FILTER (
+            WHERE status IN ('assigned','acknowledged')
+              AND (
+                (acknowledge_due_at IS NOT NULL AND acknowledge_due_at <= NOW())
+                OR (completion_due_at IS NOT NULL AND completion_due_at <= NOW())
+              )
+          )::bigint AS overdue
+        FROM payment_voucher_actions
+        WHERE firm_id = ${firmId}
+          AND assigned_user_id = ${userId}
+      `);
+      const countsRowsArray = Array.isArray(countsRows)
+        ? countsRows
+        : (countsRows && typeof countsRows === "object" && "rows" in countsRows)
+          ? (countsRows as { rows?: unknown }).rows
+          : null;
+      const countsRow = Array.isArray(countsRowsArray) ? (countsRowsArray[0] as Record<string, unknown> | undefined) : undefined;
+      const counts = {
+        all: Number(countsRow?.all ?? 0),
+        active: Number(countsRow?.active ?? 0),
+        overdue: Number(countsRow?.overdue ?? 0),
+      };
 
-  const items = await r
-    .select({
-      id: paymentVoucherActionsTable.id,
-      paymentVoucherId: paymentVoucherActionsTable.paymentVoucherId,
-      caseId: paymentVoucherActionsTable.caseId,
-      actionType: paymentVoucherActionsTable.actionType,
-      customAction: paymentVoucherActionsTable.customAction,
-      status: paymentVoucherActionsTable.status,
-      priority: paymentVoucherActionsTable.priority,
-      assignedAt: paymentVoucherActionsTable.assignedAt,
-      acknowledgeDueAt: paymentVoucherActionsTable.acknowledgeDueAt,
-      acknowledgedAt: paymentVoucherActionsTable.acknowledgedAt,
-      completionDueAt: paymentVoucherActionsTable.completionDueAt,
-      completedAt: paymentVoucherActionsTable.completedAt,
-      voucherNo: paymentVouchersTable.voucherNo,
-      payeeName: paymentVouchersTable.payeeName,
-      nextActionRemarks: paymentVouchersTable.nextActionRemarks,
-      referenceNo: casesTable.referenceNo,
-    })
-    .from(paymentVoucherActionsTable)
-    .innerJoin(paymentVouchersTable, and(
-      eq(paymentVouchersTable.id, paymentVoucherActionsTable.paymentVoucherId),
-      eq(paymentVouchersTable.firmId, paymentVoucherActionsTable.firmId),
-    ))
-    .leftJoin(casesTable, and(eq(casesTable.id, paymentVoucherActionsTable.caseId), eq(casesTable.firmId, paymentVoucherActionsTable.firmId)))
-    .where(listWhere)
-    .orderBy(desc(paymentVoucherActionsTable.createdAt))
-    .limit(limit);
+      const listWhere = filter === "active" ? activeConds : filter === "overdue" ? overdueConds : baseConds;
+      const items = await tx
+        .select({
+          id: paymentVoucherActionsTable.id,
+          paymentVoucherId: paymentVoucherActionsTable.paymentVoucherId,
+          caseId: paymentVoucherActionsTable.caseId,
+          actionType: paymentVoucherActionsTable.actionType,
+          customAction: paymentVoucherActionsTable.customAction,
+          status: paymentVoucherActionsTable.status,
+          priority: paymentVoucherActionsTable.priority,
+          assignedAt: paymentVoucherActionsTable.assignedAt,
+          acknowledgeDueAt: paymentVoucherActionsTable.acknowledgeDueAt,
+          acknowledgedAt: paymentVoucherActionsTable.acknowledgedAt,
+          completionDueAt: paymentVoucherActionsTable.completionDueAt,
+          completedAt: paymentVoucherActionsTable.completedAt,
+          voucherNo: paymentVouchersTable.voucherNo,
+          payeeName: paymentVouchersTable.payeeName,
+          nextActionRemarks: paymentVouchersTable.nextActionRemarks,
+          referenceNo: casesTable.referenceNo,
+        })
+        .from(paymentVoucherActionsTable)
+        .innerJoin(paymentVouchersTable, and(
+          eq(paymentVouchersTable.id, paymentVoucherActionsTable.paymentVoucherId),
+          eq(paymentVouchersTable.firmId, paymentVoucherActionsTable.firmId),
+        ))
+        .leftJoin(casesTable, and(eq(casesTable.id, paymentVoucherActionsTable.caseId), eq(casesTable.firmId, paymentVoucherActionsTable.firmId)))
+        .where(listWhere)
+        .orderBy(desc(paymentVoucherActionsTable.createdAt))
+        .limit(limit);
 
-  res.json({
-    counts: {
-      all: Number(allRow?.[0]?.count ?? 0),
-      active: Number(activeRow?.[0]?.count ?? 0),
-      overdue: Number(overdueRow?.[0]?.count ?? 0),
-    },
-    items,
-  });
+      return { counts, items };
+    });
+
+    res.json({ ...result, meta: { durationMs: Date.now() - startedAt } });
+  } catch (err) {
+    const info = extractDbErrorInfo(err);
+    const sqlState = info.sqlstate ?? info.sqlState ?? null;
+    logger.error({ err, sqlState, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt, firmId, userId }, "payment_voucher_actions.overview_failed");
+    if (sqlState === "42P01" || sqlState === "42703") {
+      res.status(500).json({ error: "Database migration missing for Payment Voucher actions fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql", code: "MIGRATION_MISSING", meta: { sqlState, durationMs: Date.now() - startedAt } });
+      return;
+    }
+    res.status(500).json({ error: "Payment voucher actions unavailable", code: "PV_ACTIONS_UNAVAILABLE", meta: { sqlState, durationMs: Date.now() - startedAt } });
+  }
 });
 
 router.get("/payment-vouchers/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {

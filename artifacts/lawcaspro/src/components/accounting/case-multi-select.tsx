@@ -11,6 +11,8 @@ type CaseSearchItem = {
   id: number;
   referenceNo: string;
   shortLabel: string;
+  purchaserNames: string[];
+  purchaserLabel: string | null;
   projectName: string | null;
   status: string | null;
 };
@@ -19,6 +21,7 @@ export type SelectedCase = {
   case_id: number;
   title: string;
   referenceNo?: string;
+  purchaserLabel?: string | null;
   projectName?: string | null;
   status?: string | null;
 };
@@ -34,10 +37,15 @@ function coerceCaseSearchItem(v: unknown): CaseSearchItem | null {
   if (!Number.isFinite(id)) return null;
   const referenceNo = typeof v.referenceNo === "string" ? v.referenceNo : typeof v.reference_no === "string" ? v.reference_no : "";
   const shortLabel = typeof v.shortLabel === "string" ? v.shortLabel : typeof v.title === "string" ? v.title : "";
+  const purchaserNamesRaw = Array.isArray((v as any).purchaserNames) ? ((v as any).purchaserNames as unknown[]) : [];
+  const purchaserNames = purchaserNamesRaw.map((x) => (typeof x === "string" ? x.trim() : "")).filter((x) => Boolean(x));
+  const purchaserLabel = typeof (v as any).purchaserLabel === "string" ? String((v as any).purchaserLabel).trim() : null;
   return {
     id,
     referenceNo: String(referenceNo ?? "").trim(),
     shortLabel: String(shortLabel ?? "").trim() || String(referenceNo ?? "").trim(),
+    purchaserNames,
+    purchaserLabel: purchaserLabel || null,
     projectName: typeof v.projectName === "string" ? v.projectName : null,
     status: typeof v.status === "string" ? v.status : null,
   };
@@ -77,14 +85,12 @@ export function CaseMultiSelect(props: {
       qs.set("query", debounced);
       qs.set("limit", String(limit));
       const res = await apiFetchJson(`${endpoint}?${qs.toString()}`, { signal, timeoutMs: 15000 }) as unknown;
-      const itemsRaw = isRecord(res) && Array.isArray((res as any).items)
-        ? (res as any).items
-        : isRecord(res) && isRecord((res as any).data) && Array.isArray((res as any).data.items)
-          ? (res as any).data.items
-          : isRecord(res) && Array.isArray((res as any).data)
-            ? (res as any).data
-            : [];
-      return (itemsRaw as unknown[]).map(coerceCaseSearchItem).filter(Boolean) as CaseSearchItem[];
+      const itemsRaw =
+        isRecord(res) && (res as any).ok === true && isRecord((res as any).data) && Array.isArray(((res as any).data as any).items)
+          ? (((res as any).data as any).items as unknown[])
+          : null;
+      if (!itemsRaw) throw new Error("Unexpected response from server");
+      return itemsRaw.map(coerceCaseSearchItem).filter(Boolean) as CaseSearchItem[];
     },
     enabled: open && debounced.length >= minSearchLength,
     retry: false,
@@ -96,10 +102,15 @@ export function CaseMultiSelect(props: {
   const selectedIds = useMemo(() => new Set(props.value.map((x) => x.case_id)), [props.value]);
 
   const add = (item: CaseSearchItem) => {
+    const chipTitle = (() => {
+      const firstName = item.purchaserNames[0] ? String(item.purchaserNames[0]).trim() : "";
+      return firstName ? `${item.referenceNo} • ${firstName}` : item.referenceNo;
+    })();
     const next: SelectedCase = {
       case_id: item.id,
-      title: item.shortLabel || item.referenceNo,
+      title: chipTitle,
       referenceNo: item.referenceNo,
+      purchaserLabel: item.purchaserLabel,
       projectName: item.projectName,
       status: item.status,
     };
@@ -159,7 +170,8 @@ export function CaseMultiSelect(props: {
                 <CommandGroup>
                   {(query.data ?? []).map((c) => {
                     const already = selectedIds.has(c.id);
-                    const rowLabel = c.shortLabel || c.referenceNo;
+                    const lower = c.purchaserLabel ? `${c.purchaserLabel} • ` : "";
+                    const rowSecondary = `${lower}${c.projectName ?? ""}`.trim().replace(/\s+•\s*$/, "");
                     return (
                       <CommandItem
                         key={String(c.id)}
@@ -167,7 +179,10 @@ export function CaseMultiSelect(props: {
                         onSelect={() => add(c)}
                         disabled={mode === "multi" ? already : false}
                       >
-                        <span className="truncate">{rowLabel}</span>
+                        <div className="flex flex-col min-w-0">
+                          <span className="truncate">{c.referenceNo}</span>
+                          {rowSecondary ? <span className="truncate text-xs text-slate-500">{rowSecondary}</span> : null}
+                        </div>
                         {already ? <span className="ml-auto text-xs text-slate-400">Selected</span> : null}
                       </CommandItem>
                     );

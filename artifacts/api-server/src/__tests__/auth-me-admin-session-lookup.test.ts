@@ -1,5 +1,5 @@
 import request from "supertest";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { usersTable, sessionsTable, rolesTable, firmsTable, permissionsTable } from "@workspace/db";
 import type { Application } from "express";
 
@@ -18,7 +18,13 @@ type DbState = {
   firmsById: Map<number, unknown>;
 };
 
-const makeDb = async (orig: () => Promise<typeof import("@workspace/db")>, state: DbState): Promise<MockDb> => {
+let appSessionSelectCalls = 0;
+
+const makeDb = async (
+  orig: () => Promise<typeof import("@workspace/db")>,
+  state: DbState,
+  opts?: { kind?: "app" | "admin" },
+): Promise<MockDb> => {
   const actual = await orig();
   const emptyRows = (): unknown[] => [];
   const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
@@ -29,6 +35,7 @@ const makeDb = async (orig: () => Promise<typeof import("@workspace/db")>, state
       from: (table: unknown) => ({
         where: async () => {
           if (table === actual.sessionsTable) {
+            if (opts?.kind === "app") appSessionSelectCalls += 1;
             const s = Array.from(state.sessionsByTokenHash.values())[0] ?? null;
             return s ? [s] : emptyRows();
           }
@@ -94,6 +101,11 @@ const adminState: DbState = {
 
 let authAdminCalls = 0;
 
+const ENV_SNAPSHOT = {
+  AUTH_DATABASE_URL: process.env.AUTH_DATABASE_URL,
+  ADMIN_DATABASE_URL: process.env.ADMIN_DATABASE_URL,
+};
+
 vi.mock("bcryptjs", () => ({
   default: {
     compare: async (plain: string, hash: string) => plain === "goodpw" && hash === "hash",
@@ -108,7 +120,7 @@ vi.mock("../lib/auth-admin-db", () => {
     isAuthAdminDbConfigured: () => true,
     withAuthAdminDb: async (fn: any) => {
       authAdminCalls += 1;
-      const db = await makeDb(async () => await import("@workspace/db"), adminState);
+      const db = await makeDb(async () => await import("@workspace/db"), adminState, { kind: "admin" });
       return await fn(db as any);
     },
   };
@@ -116,7 +128,7 @@ vi.mock("../lib/auth-admin-db", () => {
 
 vi.mock("@workspace/db", async (orig) => {
   const actual = await orig<typeof import("@workspace/db")>();
-  const db = await makeDb(async () => await orig<typeof import("@workspace/db")>(), appState);
+  const db = await makeDb(async () => await orig<typeof import("@workspace/db")>(), appState, { kind: "app" });
   return {
     ...actual,
     db: db as unknown as typeof actual.db,
@@ -139,9 +151,18 @@ beforeAll(async () => {
   app = mod.default;
 });
 
+afterEach(() => {
+  if (typeof ENV_SNAPSHOT.AUTH_DATABASE_URL === "string") process.env.AUTH_DATABASE_URL = ENV_SNAPSHOT.AUTH_DATABASE_URL;
+  else delete process.env.AUTH_DATABASE_URL;
+  if (typeof ENV_SNAPSHOT.ADMIN_DATABASE_URL === "string") process.env.ADMIN_DATABASE_URL = ENV_SNAPSHOT.ADMIN_DATABASE_URL;
+  else delete process.env.ADMIN_DATABASE_URL;
+  vi.useRealTimers();
+});
+
 describe("GET /api/auth/me uses auth-admin session lookup", () => {
   it("finds newly created session when session lives only in auth-admin db", async () => {
     authAdminCalls = 0;
+    appSessionSelectCalls = 0;
     appState.sessionsByTokenHash.clear();
     adminState.sessionsByTokenHash.clear();
     appState.rolesById.clear();
@@ -178,6 +199,62 @@ describe("GET /api/auth/me uses auth-admin session lookup", () => {
     expect(me.body?.data).toBeTruthy();
     expect(me.body?.data?.id).toBe(10);
     expect(authAdminCalls).toBeGreaterThan(adminCallsAfterLogin);
+    expect(appSessionSelectCalls).toBe(0);
   });
 });
 
+describe("lookupSessionAndUserByTokenHash", () => {
+  it("reports AUTH_DATABASE_URL as identity source when configured, without using normal DB session lookup", async () => {
+    process.env.AUTH_DATABASE_URL = "postgres://example.invalid/auth";
+    authAdminCalls = 0;
+    appSessionSelectCalls = 0;
+    appState.sessionsByTokenHash.clear();
+    adminState.sessionsByTokenHash.clear();
+    adminState.usersById.clear();
+    adminState.usersByEmail.clear();
+
+    const tokenHash = "tok_hash_1";
+    const expiresAt = new Date(Date.now() + 60_000);
+    adminState.sessionsByTokenHash.set(tokenHash, { userId: 10, expiresAt });
+    adminState.usersById.set(10, {
+      id: 10,
+      firmId: 5,
+      email: "user@test.com",
+      name: "U",
+      userType: "firm_user",
+      roleId: 7,
+      status: "active",
+      developerId: null,
+    });
+
+    const { lookupSessionAndUserByTokenHash } = await import("../lib/auth");
+    const result = await lookupSessionAndUserByTokenHash(tokenHash);
+
+    expect(result?.timing?.identityDbSource).toBe("AUTH_DATABASE_URL");
+    expect(result?.session).toBeTruthy();
+    expect(result?.user).toBeTruthy();
+    expect(appSessionSelectCalls).toBe(0);
+    expect(authAdminCalls).toBeGreaterThan(0);
+  });
+
+  it("does not fall back to normal DB lookup when auth-admin DB is configured but has no session", async () => {
+    vi.useFakeTimers();
+    process.env.AUTH_DATABASE_URL = "postgres://example.invalid/auth";
+    authAdminCalls = 0;
+    appSessionSelectCalls = 0;
+    appState.sessionsByTokenHash.clear();
+    adminState.sessionsByTokenHash.clear();
+
+    const tokenHash = "tok_hash_2";
+    appState.sessionsByTokenHash.set(tokenHash, { userId: 10, expiresAt: new Date(Date.now() + 60_000) });
+
+    const { lookupSessionAndUserByTokenHash } = await import("../lib/auth");
+    const p = lookupSessionAndUserByTokenHash(tokenHash);
+    await vi.runAllTimersAsync();
+    const result = await p;
+
+    expect(result).toBeNull();
+    expect(appSessionSelectCalls).toBe(0);
+    expect(authAdminCalls).toBeGreaterThanOrEqual(2);
+  });
+});

@@ -56,7 +56,13 @@ describe("CaseMultiSelect", () => {
 
   it("does not treat typed text as a selection", async () => {
     apiFetchJsonMock.mockResolvedValueOnce({
-      items: [{ id: 1, referenceNo: "LEGASI-001", shortLabel: "LEGASI-001 • Client A", projectName: null, status: "open" }],
+      ok: true,
+      data: {
+        items: [
+          { id: 1, referenceNo: "LEGASI-001", purchaserNames: ["Client A"], purchaserLabel: "Client A", projectName: null, status: "open" },
+        ],
+        pagination: { limit: 20 },
+      },
     });
 
     renderWithQueryClient(<Wrapper />);
@@ -71,10 +77,14 @@ describe("CaseMultiSelect", () => {
 
   it("adds a chip only after selecting a dropdown result", async () => {
     apiFetchJsonMock.mockResolvedValueOnce({
-      items: [
-        { id: 1, referenceNo: "LEGASI-001", shortLabel: "LEGASI-001 • Client A", projectName: null, status: "open" },
-        { id: 2, referenceNo: "LEGASI-002", shortLabel: "LEGASI-002 • Client B", projectName: null, status: "open" },
-      ],
+      ok: true,
+      data: {
+        items: [
+          { id: 1, referenceNo: "LEGASI-001", purchaserNames: ["Client A"], purchaserLabel: "Client A", projectName: null, status: "open" },
+          { id: 2, referenceNo: "LEGASI-002", purchaserNames: ["Client B"], purchaserLabel: "Client B", projectName: null, status: "open" },
+        ],
+        pagination: { limit: 20 },
+      },
     });
 
     renderWithQueryClient(<Wrapper />);
@@ -83,20 +93,26 @@ describe("CaseMultiSelect", () => {
     const input = await screen.findByRole("combobox");
     fireEvent.change(input, { target: { value: "leg" } });
 
-    expect(await screen.findByText("LEGASI-001 • Client A")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("LEGASI-001 • Client A"));
+    expect(await screen.findByText("LEGASI-001")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("LEGASI-001"));
 
     expect(screen.getByRole("button", { name: /legasi-001/i })).toBeInTheDocument();
     expect(screen.getAllByLabelText("Remove").length).toBe(1);
 
-    fireEvent.click(screen.getByText("LEGASI-002 • Client B"));
+    fireEvent.click(screen.getByText("LEGASI-002"));
     expect(screen.getByRole("button", { name: /selected 2 cases/i })).toBeInTheDocument();
     expect(screen.getAllByLabelText("Remove").length).toBe(2);
   });
 
   it("removes a selected chip", async () => {
     apiFetchJsonMock.mockResolvedValueOnce({
-      items: [{ id: 1, referenceNo: "LEGASI-001", shortLabel: "LEGASI-001 • Client A", projectName: null, status: "open" }],
+      ok: true,
+      data: {
+        items: [
+          { id: 1, referenceNo: "LEGASI-001", purchaserNames: ["Client A"], purchaserLabel: "Client A", projectName: null, status: "open" },
+        ],
+        pagination: { limit: 20 },
+      },
     });
 
     renderWithQueryClient(<Wrapper />);
@@ -104,7 +120,7 @@ describe("CaseMultiSelect", () => {
     fireEvent.click(screen.getByRole("button", { name: /search cases/i }));
     const input = await screen.findByRole("combobox");
     fireEvent.change(input, { target: { value: "leg" } });
-    fireEvent.click(await screen.findByText("LEGASI-001 • Client A"));
+    fireEvent.click(await screen.findByText("LEGASI-001"));
 
     fireEvent.click(screen.getByLabelText("Remove"));
     await waitFor(() => expect(screen.queryByLabelText("Remove")).toBeNull());
@@ -112,10 +128,14 @@ describe("CaseMultiSelect", () => {
 
   it("in single mode, keeps exactly one selection", async () => {
     apiFetchJsonMock.mockResolvedValueOnce({
-      items: [
-        { id: 1, referenceNo: "LEGASI-001", shortLabel: "LEGASI-001 • Client A", projectName: null, status: "open" },
-        { id: 2, referenceNo: "LEGASI-002", shortLabel: "LEGASI-002 • Client B", projectName: null, status: "open" },
-      ],
+      ok: true,
+      data: {
+        items: [
+          { id: 1, referenceNo: "LEGASI-001", purchaserNames: ["Client A"], purchaserLabel: "Client A", projectName: null, status: "open" },
+          { id: 2, referenceNo: "LEGASI-002", purchaserNames: ["Client B"], purchaserLabel: "Client B", projectName: null, status: "open" },
+        ],
+        pagination: { limit: 20 },
+      },
     });
 
     renderWithQueryClient(<Wrapper mode="single" />);
@@ -123,12 +143,12 @@ describe("CaseMultiSelect", () => {
     fireEvent.click(screen.getByRole("button", { name: /search cases/i }));
     const input = await screen.findByRole("combobox");
     fireEvent.change(input, { target: { value: "leg" } });
-    fireEvent.click(await screen.findByText("LEGASI-001 • Client A"));
+    fireEvent.click(await screen.findByText("LEGASI-001"));
 
     fireEvent.click(screen.getByRole("button", { name: /legasi-001/i }));
     const input2 = await screen.findByRole("combobox");
     fireEvent.change(input2, { target: { value: "leg" } });
-    fireEvent.click(await screen.findByText("LEGASI-002 • Client B"));
+    fireEvent.click(await screen.findByText("LEGASI-002"));
 
     expect(screen.getByRole("button", { name: /legasi-002/i })).toBeInTheDocument();
     expect(screen.getAllByLabelText("Remove").length).toBe(1);

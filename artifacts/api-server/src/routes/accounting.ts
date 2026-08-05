@@ -931,7 +931,25 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
       c.reference_no,
       c.status,
       COALESCE(p.name, '') as project_name,
-      COALESCE(d.name, '') as developer_name
+      COALESCE(d.name, '') as developer_name,
+      COALESCE((
+        SELECT json_agg(t.name)
+        FROM (
+          SELECT cl.name
+          FROM case_purchasers cp
+          INNER JOIN clients cl
+            ON cl.id = cp.client_id
+           AND cl.firm_id = ${firmId}
+          WHERE cp.case_id = c.id
+          ORDER BY cp.order_no ASC
+          LIMIT 2
+        ) t
+      ), '[]'::json) AS purchaser_names,
+      COALESCE((
+        SELECT count(*)
+        FROM case_purchasers cp2
+        WHERE cp2.case_id = c.id
+      ), 0) AS purchaser_count
     FROM cases c
     LEFT JOIN projects p ON p.id = c.project_id AND p.firm_id = ${firmId}
     LEFT JOIN developers d ON d.id = c.developer_id AND d.firm_id = ${firmId}
@@ -941,6 +959,15 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
         c.reference_no ILIKE ${like}
         OR COALESCE(p.name, '') ILIKE ${like}
         OR COALESCE(d.name, '') ILIKE ${like}
+        OR EXISTS (
+          SELECT 1
+          FROM case_purchasers cp3
+          INNER JOIN clients cl3
+            ON cl3.id = cp3.client_id
+           AND cl3.firm_id = ${firmId}
+          WHERE cp3.case_id = c.id
+            AND cl3.name ILIKE ${like}
+        )
       )
     ORDER BY c.updated_at DESC
     LIMIT ${safeLimit}
@@ -953,11 +980,27 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
     const projectName = String(r.project_name ?? "") || null;
     const developerName = String(r.developer_name ?? "") || null;
     const status = String(r.status ?? "") || null;
-    const shortLabel = projectName ? `${ref} • ${projectName}` : ref;
+    const purchaserNames =
+      Array.isArray((r as any).purchaser_names)
+        ? ((r as any).purchaser_names as unknown[])
+          .map((v: unknown) => (typeof v === "string" ? v.trim() : ""))
+          .filter((v: string) => Boolean(v))
+        : [];
+    const purchaserCountRaw = typeof (r as any).purchaser_count === "number" ? (r as any).purchaser_count : Number.parseInt(String((r as any).purchaser_count ?? "0"), 10);
+    const purchaserCount = Number.isFinite(purchaserCountRaw) && purchaserCountRaw > 0 ? purchaserCountRaw : 0;
+    const purchaserLabel = (() => {
+      if (purchaserNames.length === 0) return null;
+      const firstTwo = purchaserNames.slice(0, 2);
+      const remaining = purchaserCount > firstTwo.length ? purchaserCount - firstTwo.length : 0;
+      return remaining > 0 ? `${firstTwo.join(" / ")} +${remaining}` : firstTwo.join(" / ");
+    })();
+    const shortLabel = [ref, purchaserLabel, projectName].filter((v) => typeof v === "string" && v.trim().length > 0).join(" • ");
     return {
       id,
       referenceNo: ref,
       shortLabel,
+      purchaserNames,
+      purchaserLabel,
       projectName,
       developerName,
       status,
