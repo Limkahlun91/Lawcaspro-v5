@@ -1,5 +1,5 @@
 import request from "supertest";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { usersTable, sessionsTable, rolesTable, firmsTable, permissionsTable } from "@workspace/db";
 import type { Application } from "express";
 import crypto from "crypto";
@@ -141,6 +141,11 @@ vi.mock("@workspace/db", async (orig) => {
       },
     } as unknown as typeof actual.pool,
   };
+});
+
+beforeEach(async () => {
+  const { __clearAuthCachesForTests } = await import("../lib/auth.js");
+  __clearAuthCachesForTests();
 });
 
 let app: Application;

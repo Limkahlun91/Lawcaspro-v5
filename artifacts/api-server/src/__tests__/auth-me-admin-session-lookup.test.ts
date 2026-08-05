@@ -237,6 +237,46 @@ describe("lookupSessionAndUserByTokenHash", () => {
     expect(authAdminCalls).toBeGreaterThan(0);
   });
 
+  it("uses short-lived verified-session cache and invalidates by tokenHash", async () => {
+    process.env.AUTH_DATABASE_URL = "postgres://example.invalid/auth";
+    authAdminCalls = 0;
+    appSessionSelectCalls = 0;
+    appState.sessionsByTokenHash.clear();
+    adminState.sessionsByTokenHash.clear();
+    adminState.usersById.clear();
+    adminState.usersByEmail.clear();
+
+    const tokenHash = "tok_hash_cache_1";
+    adminState.sessionsByTokenHash.set(tokenHash, { userId: 10, expiresAt: new Date(Date.now() + 60_000) });
+    adminState.usersById.set(10, {
+      id: 10,
+      firmId: 5,
+      email: "user@test.com",
+      name: "U",
+      userType: "firm_user",
+      roleId: 7,
+      status: "active",
+      developerId: null,
+    });
+
+    const { lookupSessionAndUserByTokenHash, invalidateVerifiedSessionCacheByTokenHash } = await import("../lib/auth");
+
+    const r1 = await lookupSessionAndUserByTokenHash(tokenHash);
+    const callsAfterFirst = authAdminCalls;
+    expect(r1?.session).toBeTruthy();
+    expect(r1?.timing?.cacheHit).not.toBe(true);
+
+    const r2 = await lookupSessionAndUserByTokenHash(tokenHash);
+    expect(r2?.session).toBeTruthy();
+    expect(r2?.timing?.cacheHit).toBe(true);
+    expect(authAdminCalls).toBe(callsAfterFirst);
+
+    invalidateVerifiedSessionCacheByTokenHash(tokenHash);
+    const r3 = await lookupSessionAndUserByTokenHash(tokenHash);
+    expect(r3?.session).toBeTruthy();
+    expect(authAdminCalls).toBeGreaterThan(callsAfterFirst);
+  });
+
   it("does not fall back to normal DB lookup when auth-admin DB is configured but has no session", async () => {
     vi.useFakeTimers();
     process.env.AUTH_DATABASE_URL = "postgres://example.invalid/auth";

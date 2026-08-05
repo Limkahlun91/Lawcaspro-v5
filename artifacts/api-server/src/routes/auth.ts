@@ -4,7 +4,7 @@ import crypto from "crypto";
 import { and, eq } from "drizzle-orm";
 import { auditLogsTable, clearTenantContext, db, firmsTable, makeRlsDb, permissionsTable, pool, rolesTable, sessionsTable, setTenantContextSession, sql, usersTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
-import { ensureRolePermissionsInitialized, loadFounderPermissions, lookupSessionAndUserByTokenHash, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ensureRolePermissionsInitialized, invalidateVerifiedSessionCacheByTokenHash, invalidateVerifiedSessionCacheByUserId, loadFounderPermissions, lookupSessionAndUserByTokenHash, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { ApiError, sendError, sendOk } from "../lib/api-response.js";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { logger } from "../lib/logger.js";
@@ -710,6 +710,7 @@ routerInternal.post(
   if (token) {
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
     await db.delete(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
+    invalidateVerifiedSessionCacheByTokenHash(tokenHash);
   }
   await writeAuditLog({
     firmId: typeof req.firmId === "number" ? req.firmId : req.firmId ?? null,
@@ -1061,6 +1062,7 @@ routerInternal.delete(
   if (!id) { res.status(400).json({ error: "Missing id" }); return; }
   const sessionId = Number(id);
   await db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId));
+  invalidateVerifiedSessionCacheByUserId(req.userId!);
   await writeAuditLog({
     firmId: req.firmId,
     actorId: req.userId,

@@ -19,7 +19,7 @@ import {
   type SQL,
 } from "@workspace/db";
 import { CreateFirmBody, UpdateFirmBody, ListFirmsQueryParams, GetFirmParams, UpdateFirmParams } from "@workspace/api-zod";
-import { ensureRolePermissionsInitialized, requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { ensureRolePermissionsInitialized, invalidateVerifiedSessionCacheByUserId, requireAuth, requireFounder, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { withAuthSafeDb, isTransientDbConnectionError } from "../lib/auth-safe-db.js";
 import { logger } from "../lib/logger.js";
 import bcrypt from "bcryptjs";
@@ -566,6 +566,7 @@ routerInternal.post("/platform/firms/:firmId/users/:userId/reset-password", requ
       { retry: true, allowUnsafe: true, ctx: { route: "POST /platform/firms/:firmId/users/:userId/reset-password", firmId, userId } }
     );
 
+    invalidateVerifiedSessionCacheByUserId(result.userId);
     sendOk(res, { result: { user_id: result.userId, password_reset: true } });
   } catch (err) {
     if (err instanceof RouteTimeoutError) {

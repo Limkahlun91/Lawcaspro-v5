@@ -252,9 +252,9 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission(
   const pageRaw = one((req.query as any).page);
   const limitRaw = one((req.query as any).limit);
   const page = pageRaw ? parseInt(pageRaw, 10) : 1;
-  const limit = limitRaw ? parseInt(limitRaw, 10) : 200;
+  const limit = limitRaw ? parseInt(limitRaw, 10) : 50;
   const safePage = Number.isFinite(page) && page > 0 ? page : 1;
-  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(200, limit) : 200;
+  const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(50, limit) : 50;
   const offset = (safePage - 1) * safeLimit;
   const conds = [eq(paymentVouchersTable.firmId, req.firmId!)];
   if (caseId) {
@@ -265,47 +265,86 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission(
   if (status) conds.push(eq(paymentVouchersTable.status, status));
   const r = rdb(req);
   try {
-    const rows = await r
-      .select({
-        id: paymentVouchersTable.id,
-        firmId: paymentVouchersTable.firmId,
-        caseId: paymentVouchersTable.caseId,
-        voucherType: paymentVouchersTable.voucherType,
-        targetCaseId: paymentVouchersTable.targetCaseId,
-        targetAccountId: paymentVouchersTable.targetAccountId,
-        approvalStatus: paymentVouchersTable.approvalStatus,
-        isAdvance: paymentVouchersTable.isAdvance,
-        approvedBy: paymentVouchersTable.approvedBy,
-        voucherNo: paymentVouchersTable.voucherNo,
-        status: paymentVouchersTable.status,
-        fundStatus: paymentVouchersTable.fundStatus,
-        payeeName: paymentVouchersTable.payeeName,
-        paymentMethod: paymentVouchersTable.paymentMethod,
-        bankAccountId: paymentVouchersTable.bankAccountId,
-        accountType: paymentVouchersTable.accountType,
-        bankChequeRefNo: paymentVouchersTable.bankChequeRefNo,
-        amount: paymentVouchersTable.amount,
-        purpose: paymentVouchersTable.purpose,
-        receivedAt: paymentVouchersTable.receivedAt,
-        paymentDueAt: paymentVouchersTable.paymentDueAt,
-        assignedAccountUserId: paymentVouchersTable.assignedAccountUserId,
-        assignedClerkUserId: paymentVouchersTable.assignedClerkUserId,
-        paidAt: paymentVouchersTable.paidAt,
-        paidBy: paymentVouchersTable.paidBy,
-        updatedAt: paymentVouchersTable.updatedAt,
-        createdAt: paymentVouchersTable.createdAt,
-      })
-      .from(paymentVouchersTable)
-      .where(and(...conds))
-      .orderBy(desc(paymentVouchersTable.createdAt))
-      .limit(safeLimit)
-      .offset(offset);
-    res.json(rows);
+    const withScopedTimeouts = async <T,>(fn: (conn: any) => Promise<T>): Promise<T> => {
+      if (req.rlsDb) {
+        await (r as any).execute(sql`SET LOCAL lock_timeout = '500ms'`);
+        await (r as any).execute(sql`SET LOCAL statement_timeout = '2500ms'`);
+        return await fn(r as any);
+      }
+      return await (r as any).transaction(async (tx: any) => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '500ms'`);
+        await tx.execute(sql`SET LOCAL statement_timeout = '2500ms'`);
+        return await fn(tx);
+      });
+    };
+
+    const queryStartedAt = Date.now();
+    const rows = await withScopedTimeouts(async (tx) => {
+      return await tx
+        .select({
+          id: paymentVouchersTable.id,
+          firmId: paymentVouchersTable.firmId,
+          caseId: paymentVouchersTable.caseId,
+          voucherType: paymentVouchersTable.voucherType,
+          targetCaseId: paymentVouchersTable.targetCaseId,
+          targetAccountId: paymentVouchersTable.targetAccountId,
+          approvalStatus: paymentVouchersTable.approvalStatus,
+          isAdvance: paymentVouchersTable.isAdvance,
+          approvedBy: paymentVouchersTable.approvedBy,
+          voucherNo: paymentVouchersTable.voucherNo,
+          status: paymentVouchersTable.status,
+          fundStatus: paymentVouchersTable.fundStatus,
+          payeeName: paymentVouchersTable.payeeName,
+          paymentMethod: paymentVouchersTable.paymentMethod,
+          bankAccountId: paymentVouchersTable.bankAccountId,
+          accountType: paymentVouchersTable.accountType,
+          bankChequeRefNo: paymentVouchersTable.bankChequeRefNo,
+          amount: paymentVouchersTable.amount,
+          purpose: paymentVouchersTable.purpose,
+          receivedAt: paymentVouchersTable.receivedAt,
+          paymentDueAt: paymentVouchersTable.paymentDueAt,
+          assignedAccountUserId: paymentVouchersTable.assignedAccountUserId,
+          assignedClerkUserId: paymentVouchersTable.assignedClerkUserId,
+          paidAt: paymentVouchersTable.paidAt,
+          paidBy: paymentVouchersTable.paidBy,
+          updatedAt: paymentVouchersTable.updatedAt,
+          createdAt: paymentVouchersTable.createdAt,
+        })
+        .from(paymentVouchersTable)
+        .where(and(...conds))
+        .orderBy(desc(paymentVouchersTable.createdAt))
+        .limit(safeLimit)
+        .offset(offset);
+    });
+    const queryMs = Date.now() - queryStartedAt;
     const durationMs = Date.now() - startedAt;
+    const serializeStartedAt = Date.now();
+    const payload = JSON.stringify(rows);
+    const serializeMs = Date.now() - serializeStartedAt;
+    const timing = {
+      authMs: req.timing?.sections?.authSessionMs ?? null,
+      permissionMs: req.timing?.sections?.permissionMs ?? null,
+      tenantContextDbAcquireMs: req.timing?.sections?.tenantContextDbConnectMs ?? null,
+      tenantContextMs: req.timing?.sections?.tenantContextMs ?? null,
+      queryMs,
+      serializeMs,
+      totalMs: durationMs,
+    };
+    res.setHeader("x-lawcaspro-timing", JSON.stringify(timing));
+    res.type("application/json").send(payload);
     if (durationMs >= 2000) {
       logger.warn({ durationMs, firmId: req.firmId, userId: req.userId, safePage, safeLimit }, "payment_voucher.list_slow");
     }
   } catch (err) {
+    const code = err && typeof err === "object" && "code" in (err as any) ? String((err as any).code) : null;
+    if (code === "57014") {
+      res.status(503).json({ error: "Payment voucher list timed out", code: "QUERY_TIMEOUT" });
+      return;
+    }
+    if (code === "55P03") {
+      res.status(503).json({ error: "Payment voucher list temporarily unavailable", code: "LOCK_TIMEOUT" });
+      return;
+    }
     if (isMissingSchemaError(err)) {
       res.status(500).json({ error: "Database migration missing for Payment Voucher SLA fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql", code: "MIGRATION_MISSING" });
       return;
@@ -315,7 +354,7 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission(
 });
 
 // Detail
-router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/payment-vouchers/:id(\\d+)", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid voucher ID" }); return; }
@@ -387,6 +426,10 @@ router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requirePermiss
     partnerApprovedByName,
     paidByName,
   });
+});
+
+router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  res.status(400).json({ error: "Invalid voucher ID" });
 });
 
 // Create

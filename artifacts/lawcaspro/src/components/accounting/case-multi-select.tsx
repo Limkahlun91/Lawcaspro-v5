@@ -1,5 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetchJson } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,6 +27,19 @@ export type SelectedCase = {
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
+}
+
+function normalizeQuery(v: string): string {
+  return v.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function isAbortLikeError(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  const rec = e as Record<string, unknown>;
+  if (rec.name === "AbortError") return true;
+  const msg = typeof rec.message === "string" ? rec.message.toLowerCase() : "";
+  if (msg.includes("signal is aborted")) return true;
+  return false;
 }
 
 function coerceCaseSearchItem(v: unknown): CaseSearchItem | null {
@@ -74,37 +86,87 @@ export function CaseMultiSelect(props: {
   const [debounced, setDebounced] = useState("");
 
   useEffect(() => {
-    const t = setTimeout(() => setDebounced(raw.trim()), debounceMs);
+    const t = setTimeout(() => setDebounced(normalizeQuery(raw)), debounceMs);
     return () => clearTimeout(t);
   }, [raw, debounceMs]);
 
-  const query = useQuery({
-    queryKey: ["accounting", "cases", "search", debounced, limit],
-    queryFn: async ({ signal }) => {
-      const qs = new URLSearchParams();
-      qs.set("query", debounced);
-      qs.set("limit", String(limit));
-      const res = await apiFetchJson(`${endpoint}?${qs.toString()}`, { signal, timeoutMs: 15000 }) as unknown;
-      const itemsRaw =
-        isRecord(res) && (res as any).ok === true && isRecord((res as any).data) && Array.isArray(((res as any).data as any).items)
-          ? (((res as any).data as any).items as unknown[])
-          : null;
-      if (!itemsRaw) throw new Error("Unexpected response from server");
-      return itemsRaw.map(coerceCaseSearchItem).filter(Boolean) as CaseSearchItem[];
-    },
-    enabled: open && debounced.length >= minSearchLength,
-    retry: false,
-    staleTime: 30_000,
-    gcTime: 5 * 60_000,
-    refetchOnWindowFocus: false,
-  });
+  const [items, setItems] = useState<CaseSearchItem[]>([]);
+  const [isFetching, setIsFetching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const requestSeqRef = useRef(0);
+  const activeSeqRef = useRef(0);
+  const abortRef = useRef<AbortController | null>(null);
+  const lastQueryRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      abortRef.current?.abort();
+      abortRef.current = null;
+      setIsFetching(false);
+      setError(null);
+      return;
+    }
+
+    const q = normalizeQuery(debounced);
+    if (q.length < minSearchLength) {
+      abortRef.current?.abort();
+      abortRef.current = null;
+      setIsFetching(false);
+      setError(null);
+      return;
+    }
+
+    if (lastQueryRef.current === q) return;
+    lastQueryRef.current = q;
+
+    requestSeqRef.current += 1;
+    const seq = requestSeqRef.current;
+    activeSeqRef.current = seq;
+
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    setIsFetching(true);
+
+    const qs = new URLSearchParams();
+    qs.set("query", q);
+    qs.set("limit", String(limit));
+    const url = `${endpoint}?${qs.toString()}`;
+
+    void (async () => {
+      try {
+        const data = await apiFetchJson<{ items?: unknown[] | null }>(url, { signal: ac.signal, timeoutMs: 15000 });
+        if (activeSeqRef.current !== seq) return;
+        const rawItems = Array.isArray(data?.items) ? data.items : null;
+        if (!rawItems) throw new Error("Unexpected response from server");
+        const next = rawItems.map(coerceCaseSearchItem).filter(Boolean) as CaseSearchItem[];
+        setItems(next);
+        setError(null);
+        setIsFetching(false);
+      } catch (e: any) {
+        if (activeSeqRef.current !== seq) return;
+        if (isAbortLikeError(e)) {
+          setIsFetching(false);
+          return;
+        }
+        setError("Search failed. Please retry.");
+        setIsFetching(false);
+      }
+    })();
+
+    return () => {
+      if (abortRef.current === ac) ac.abort();
+    };
+  }, [debounced, endpoint, limit, minSearchLength, open]);
 
   const selectedIds = useMemo(() => new Set(props.value.map((x) => x.case_id)), [props.value]);
 
   const add = (item: CaseSearchItem) => {
     const chipTitle = (() => {
       const firstName = item.purchaserNames[0] ? String(item.purchaserNames[0]).trim() : "";
-      return firstName ? `${item.referenceNo} • ${firstName}` : item.referenceNo;
+      const proj = item.projectName ? String(item.projectName).trim() : "";
+      const mid = firstName ? `${item.referenceNo} • ${firstName}` : item.referenceNo;
+      return proj ? `${mid} • ${proj}` : mid;
     })();
     const next: SelectedCase = {
       case_id: item.id,
@@ -160,15 +222,15 @@ export function CaseMultiSelect(props: {
             <CommandList>
               {raw.trim().length < minSearchLength ? (
                 <CommandEmpty>Type at least {minSearchLength} characters.</CommandEmpty>
-              ) : query.isFetching ? (
+            ) : isFetching && items.length === 0 ? (
                 <CommandEmpty>Searching…</CommandEmpty>
-              ) : query.isError ? (
-                <CommandEmpty>Search failed. Please retry.</CommandEmpty>
-              ) : (query.data?.length ?? 0) === 0 ? (
+            ) : error && items.length === 0 ? (
+              <CommandEmpty>{error}</CommandEmpty>
+            ) : items.length === 0 ? (
                 <CommandEmpty>No cases found.</CommandEmpty>
               ) : (
                 <CommandGroup>
-                  {(query.data ?? []).map((c) => {
+                  {items.map((c) => {
                     const already = selectedIds.has(c.id);
                     const lower = c.purchaserLabel ? `${c.purchaserLabel} • ` : "";
                     const rowSecondary = `${lower}${c.projectName ?? ""}`.trim().replace(/\s+•\s*$/, "");

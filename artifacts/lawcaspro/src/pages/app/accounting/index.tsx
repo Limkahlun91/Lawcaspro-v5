@@ -920,7 +920,7 @@ function QuotationsTab() {
 
 // ── PAYMENT VOUCHERS TAB ──────────────────────────────────────────────────────
 
-function PaymentVouchersTab() {
+export function PaymentVouchersTab() {
   const [, setLocation] = useLocation();
   const searchString = useSearch();
   const printVoucherIdParam = useMemo(() => new URLSearchParams(searchString).get("printVoucherId"), [searchString]);
@@ -935,7 +935,7 @@ function PaymentVouchersTab() {
   }, [searchString]);
   const didAutoPrintRef = useRef(false);
   const didPrefillRef = useRef(false);
-  const [showCreate, setShowCreate] = useState(false);
+  const [showCreate, setShowCreate] = useState(() => createParams.openCreate);
   const { toast } = useToast();
   const qc = useQueryClient();
   const { wrapWithReAuth } = useReAuth();
@@ -1026,7 +1026,7 @@ function PaymentVouchersTab() {
     if (didPrefillRef.current) return;
     if (!createParams.openCreate) return;
     didPrefillRef.current = true;
-    if (canAccountingCreate) setShowCreate(true);
+    setShowCreate(canAccountingCreate);
     const cid = createParams.caseId ? Number.parseInt(createParams.caseId, 10) : NaN;
     if (Number.isFinite(cid) && cid > 0 && selectedCases.length === 0) {
       const title = String(createParams.caseTitle ?? "").trim() || `Case #${cid}`;
@@ -1039,17 +1039,29 @@ function PaymentVouchersTab() {
     setLocation(`/app/accounting?${next.toString()}`);
   }, [canAccountingCreate, createParams.caseId, createParams.caseTitle, createParams.openCreate, searchString, selectedCases.length]);
 
+  useEffect(() => {
+    if (!showCreate) return;
+    void qc.cancelQueries({ queryKey: ["payment-vouchers"], exact: false });
+  }, [qc, showCreate]);
+
+  const [pvPage, setPvPage] = useState(1);
+  const pvPageSize = 50;
+
   const vouchersQuery = useQuery({
-    queryKey: ["payment-vouchers"],
-    queryFn: () => apiFetchJson("/payment-vouchers?page=1&limit=200", { timeoutMs: 20000 }),
+    queryKey: ["payment-vouchers", { page: pvPage, limit: pvPageSize }],
+    queryFn: ({ signal }) => apiFetchJson(`/payment-vouchers?page=${pvPage}&limit=${pvPageSize}`, { timeoutMs: 20000, signal }),
     retry: false,
     enabled: canAccountingRead && !showCreate,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
   const dashboardQuery = useQuery({
     queryKey: ["payment-vouchers", "dashboard"],
-    queryFn: () => apiFetchJson("/payment-vouchers/dashboard"),
+    queryFn: ({ signal }) => apiFetchJson("/payment-vouchers/dashboard", { signal }),
     retry: false,
     enabled: canAccountingRead && !showCreate,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
   const { data, isLoading } = vouchersQuery;
   const vouchers = (data ?? []) as any[];

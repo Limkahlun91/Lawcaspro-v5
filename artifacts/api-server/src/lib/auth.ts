@@ -277,6 +277,8 @@ type SessionUserLookupTiming = {
   primaryLookupMs: number;
   fallbackLookupMs: number;
   identityDbSource: "DATABASE_URL" | "AUTH_DATABASE_URL" | "ADMIN_DATABASE_URL" | "UNKNOWN";
+  cacheHit?: boolean;
+  cacheAgeMs?: number | null;
 };
 
 type SessionUserLookupResult =
@@ -299,10 +301,88 @@ type SessionUserLookupResult =
   | null;
 
 const inflightSessionLookups = new Map<string, Promise<SessionUserLookupResult>>();
+const VERIFIED_SESSION_CACHE_TTL_MS = 30_000;
+const VERIFIED_SESSION_CACHE_MAX_ENTRIES = 300;
+const verifiedSessionCache = new Map<string, { cachedAtMs: number; value: NonNullable<SessionUserLookupResult> }>();
+
+export function invalidateVerifiedSessionCacheByTokenHash(tokenHash: string): void {
+  if (!tokenHash) return;
+  verifiedSessionCache.delete(tokenHash);
+}
+
+export function invalidateVerifiedSessionCacheByUserId(userId: number): void {
+  if (!Number.isFinite(userId) || userId <= 0) return;
+  for (const [k, v] of verifiedSessionCache.entries()) {
+    const uid = Number((v.value as any)?.user?.id ?? (v.value as any)?.session?.userId ?? 0);
+    if (uid === userId) verifiedSessionCache.delete(k);
+  }
+}
+
+export function __clearAuthCachesForTests(): void {
+  verifiedSessionCache.clear();
+  inflightSessionLookups.clear();
+}
+
+function getVerifiedSessionFromCache(tokenHash: string): SessionUserLookupResult {
+  const hit = verifiedSessionCache.get(tokenHash);
+  if (!hit) return null;
+  const now = Date.now();
+  const ageMs = now - hit.cachedAtMs;
+  if (ageMs < 0 || ageMs > VERIFIED_SESSION_CACHE_TTL_MS) {
+    verifiedSessionCache.delete(tokenHash);
+    return null;
+  }
+  const session = (hit.value as any)?.session as typeof sessionsTable.$inferSelect | undefined;
+  const user = (hit.value as any)?.user as { status?: unknown } | undefined;
+  if (!session) {
+    verifiedSessionCache.delete(tokenHash);
+    return null;
+  }
+  const expiresAtMs = session.expiresAt instanceof Date ? session.expiresAt.getTime() : new Date(session.expiresAt as any).getTime();
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now) {
+    verifiedSessionCache.delete(tokenHash);
+    return null;
+  }
+  if (user && String((user as any).status ?? "") !== "active") {
+    verifiedSessionCache.delete(tokenHash);
+    return null;
+  }
+  return {
+    ...(hit.value as any),
+    timing: {
+      attempts: 0,
+      inflightShared: false,
+      primaryLookupMs: 0,
+      fallbackLookupMs: 0,
+      identityDbSource: hit.value.timing?.identityDbSource ?? "UNKNOWN",
+      cacheHit: true,
+      cacheAgeMs: ageMs,
+    },
+  };
+}
+
+function setVerifiedSessionCache(tokenHash: string, value: SessionUserLookupResult): void {
+  if (!value?.session) return;
+  const session = value.session;
+  const now = Date.now();
+  const expiresAtMs = session.expiresAt instanceof Date ? session.expiresAt.getTime() : new Date(session.expiresAt as any).getTime();
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now) return;
+  const status = String((value as any)?.user?.status ?? "active");
+  if (status !== "active") return;
+  while (verifiedSessionCache.size >= VERIFIED_SESSION_CACHE_MAX_ENTRIES) {
+    const first = verifiedSessionCache.keys().next();
+    if (first.done) break;
+    verifiedSessionCache.delete(first.value);
+  }
+  verifiedSessionCache.set(tokenHash, { cachedAtMs: now, value: value as NonNullable<SessionUserLookupResult> });
+}
 
 export async function lookupSessionAndUserByTokenHash(
   tokenHash: string,
 ): Promise<SessionUserLookupResult> {
+  const cached = getVerifiedSessionFromCache(tokenHash);
+  if (cached) return cached;
+
   const shared = inflightSessionLookups.get(tokenHash);
   if (shared) {
     const r = await shared;
@@ -611,7 +691,9 @@ export async function lookupSessionAndUserByTokenHash(
   });
 
   inflightSessionLookups.set(tokenHash, p);
-  return await p;
+  const result = await p;
+  if (result?.session) setVerifiedSessionCache(tokenHash, result);
+  return result;
 }
 
 export async function requireFounder(
@@ -1037,6 +1119,7 @@ export function requirePermission(moduleName: string, action: string) {
     res: Response,
     next: NextFunction
   ): Promise<void> {
+    const startedAt = Date.now();
     try {
       const safeAudit = async (detail: string) => {
         if (!req.rlsDb) return;
@@ -1204,6 +1287,10 @@ export function requirePermission(moduleName: string, action: string) {
       );
       res.status(503).json({ error: "Auth temporarily unavailable" });
       return;
+    } finally {
+      if (req.timing?.sections) {
+        req.timing.sections.permissionMs = (req.timing.sections.permissionMs ?? 0) + Math.max(0, Date.now() - startedAt);
+      }
     }
   };
 }

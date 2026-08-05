@@ -143,38 +143,53 @@ router.get("/payment-voucher-actions/my-work/overview", requireAuth, requireFirm
     or(lte(paymentVoucherActionsTable.acknowledgeDueAt, now), lte(paymentVoucherActionsTable.completionDueAt, now)),
   );
 
+  let stage: "timeouts" | "counts" | "list" | "unknown" = "unknown";
   try {
-    const result = await (r as any).transaction(async (tx: any) => {
-      await tx.execute(sql.raw("SET LOCAL lock_timeout = '2000ms'"));
-      await tx.execute(sql.raw("SET LOCAL statement_timeout = '15000ms'"));
+    const withScopedTimeouts = async <T,>(fn: (conn: any) => Promise<T>): Promise<T> => {
+      if (req.rlsDb) {
+        stage = "timeouts";
+        await (r as any).execute(sql`SET LOCAL lock_timeout = '500ms'`);
+        await (r as any).execute(sql`SET LOCAL statement_timeout = '2500ms'`);
+        return await fn(r as any);
+      }
+      return await (r as any).transaction(async (tx: any) => {
+        stage = "timeouts";
+        await tx.execute(sql`SET LOCAL lock_timeout = '500ms'`);
+        await tx.execute(sql`SET LOCAL statement_timeout = '2500ms'`);
+        return await fn(tx);
+      });
+    };
 
+    const result = await withScopedTimeouts(async (tx: any) => {
+      stage = "counts";
       const countsRows = await tx.execute(sql`
-        SELECT
-          COUNT(*)::bigint AS all,
-          COUNT(*) FILTER (WHERE status IN ('assigned','acknowledged'))::bigint AS active,
-          COUNT(*) FILTER (
-            WHERE status IN ('assigned','acknowledged')
-              AND (
-                (acknowledge_due_at IS NOT NULL AND acknowledge_due_at <= NOW())
-                OR (completion_due_at IS NOT NULL AND completion_due_at <= NOW())
-              )
-          )::bigint AS overdue
-        FROM payment_voucher_actions
-        WHERE firm_id = ${firmId}
-          AND assigned_user_id = ${userId}
-      `);
+          SELECT
+            COUNT(*)::bigint AS all,
+            COUNT(*) FILTER (WHERE status IN ('assigned','acknowledged'))::bigint AS active,
+            COUNT(*) FILTER (
+              WHERE status IN ('assigned','acknowledged')
+                AND (
+                  (acknowledge_due_at IS NOT NULL AND acknowledge_due_at <= NOW())
+                  OR (completion_due_at IS NOT NULL AND completion_due_at <= NOW())
+                )
+            )::bigint AS overdue
+          FROM payment_voucher_actions
+          WHERE firm_id = ${firmId}
+            AND assigned_user_id = ${userId}
+        `);
       const countsRowsArray = Array.isArray(countsRows)
-        ? countsRows
-        : (countsRows && typeof countsRows === "object" && "rows" in countsRows)
-          ? (countsRows as { rows?: unknown }).rows
-          : null;
+          ? countsRows
+          : (countsRows && typeof countsRows === "object" && "rows" in countsRows)
+              ? (countsRows as { rows?: unknown }).rows
+              : null;
       const countsRow = Array.isArray(countsRowsArray) ? (countsRowsArray[0] as Record<string, unknown> | undefined) : undefined;
       const counts = {
-        all: Number(countsRow?.all ?? 0),
-        active: Number(countsRow?.active ?? 0),
-        overdue: Number(countsRow?.overdue ?? 0),
-      };
+          all: Number(countsRow?.all ?? 0),
+          active: Number(countsRow?.active ?? 0),
+          overdue: Number(countsRow?.overdue ?? 0),
+        };
 
+      stage = "list";
       const listWhere = filter === "active" ? activeConds : filter === "overdue" ? overdueConds : baseConds;
       const items = await tx
         .select({
@@ -212,14 +227,55 @@ router.get("/payment-voucher-actions/my-work/overview", requireAuth, requireFirm
   } catch (err) {
     const info = extractDbErrorInfo(err);
     const sqlState = info.sqlstate ?? info.sqlState ?? null;
-    logger.error({ err, sqlState, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt, firmId, userId }, "payment_voucher_actions.overview_failed");
+    const safeCategory =
+      sqlState === "42P01"
+        ? "MISSING_TABLE"
+        : sqlState === "42703"
+          ? "MISSING_COLUMN"
+          : sqlState === "42501"
+            ? "INSUFFICIENT_PRIVILEGE"
+            : sqlState === "57014"
+              ? "QUERY_TIMEOUT"
+              : sqlState === "55P03"
+                ? "LOCK_TIMEOUT"
+                : "UNKNOWN";
+    logger.error(
+      { err, sqlState, safeCategory, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt, firmId, userId },
+      "payment_voucher_actions.overview_failed",
+    );
     if (sqlState === "42P01" || sqlState === "42703") {
-      res.status(500).json({ error: "Database migration missing for Payment Voucher actions fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql", code: "MIGRATION_MISSING", meta: { sqlState, durationMs: Date.now() - startedAt } });
+      res.status(500).json({
+        error: "Database migration missing for Payment Voucher actions fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql",
+        code: "MIGRATION_MISSING",
+        meta: { sqlState, safeCategory, stage, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt },
+      });
       return;
     }
-    res.status(500).json({ error: "Payment voucher actions unavailable", code: "PV_ACTIONS_UNAVAILABLE", meta: { sqlState, durationMs: Date.now() - startedAt } });
+    if (sqlState === "42501") {
+      res.status(500).json({
+        error: "Payment voucher actions unavailable",
+        code: "PV_ACTIONS_INSUFFICIENT_PRIVILEGE",
+        meta: { sqlState, safeCategory, stage, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt },
+      });
+      return;
+    }
+    if (sqlState === "57014" || sqlState === "55P03") {
+      res.status(503).json({
+        error: "Payment voucher actions temporarily unavailable",
+        code: "PV_ACTIONS_TIMEOUT",
+        meta: { sqlState, safeCategory, stage, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt },
+      });
+      return;
+    }
+    res.status(500).json({
+      error: "Payment voucher actions unavailable",
+      code: "PV_ACTIONS_UNAVAILABLE",
+      meta: { sqlState, safeCategory, stage, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt },
+    });
+    return;
   }
 });
+
 
 router.get("/payment-vouchers/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();

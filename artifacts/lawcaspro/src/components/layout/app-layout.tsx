@@ -44,6 +44,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
     refetchInterval: 30000,
     enabled: unreadEnabled && !!user && user.userType === "firm_user" && hasPermission(user, "communications", "read"),
     retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
   const unreadCount = unreadData?.count ?? 0;
 
@@ -53,6 +55,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
     refetchInterval: 30000,
     enabled: unreadEnabled && !!user && user.userType === "firm_user" && hasPermission(user, "cases", "read"),
     retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
   const caseUnreadCount = caseUnreadData?.totalUnreadCount ?? 0;
   const { data: accountingUnreadData } = useQuery({
@@ -61,6 +65,8 @@ export function AppLayout({ children }: { children: ReactNode }) {
     refetchInterval: 30000,
     enabled: unreadEnabled && !!user && user.userType === "firm_user",
     retry: false,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
   const accountingUnreadCount = accountingUnreadData?.count ?? 0;
 
