@@ -1,6 +1,7 @@
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
+import { isEmailControlEnabled, isEmailSettingsEnabled, isWhatsAppInboxEnabled } from "@/lib/feature-flags";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import { 
@@ -38,11 +39,12 @@ export function AppLayout({ children }: { children: ReactNode }) {
     return () => clearTimeout(t);
   }, [user && user.userType === "firm_user" ? (user as any).id : null, user && user.userType === "firm_user" ? (user as any).firmId : null]);
 
+  const phase2CommsEnabled = isEmailControlEnabled() || isWhatsAppInboxEnabled();
   const { data: unreadData } = useQuery({
     queryKey: ["unread-count"],
     queryFn: () => apiFetchJson<{ count: number }>("/communications/unread-count").catch(() => ({ count: 0 })),
     refetchInterval: 30000,
-    enabled: unreadEnabled && !!user && user.userType === "firm_user" && hasPermission(user, "communications", "read"),
+    enabled: phase2CommsEnabled && unreadEnabled && !!user && user.userType === "firm_user" && hasPermission(user, "communications", "read"),
     retry: false,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
@@ -131,6 +133,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
       label: g.label,
       items: g.items.filter((i) => {
         if (!hasPermission(user, i.perm[0], i.perm[1])) return false;
+        if (i.href === "/app/communication/email" && !isEmailControlEnabled()) return false;
+        if (i.href === "/app/communication/whatsapp" && !isWhatsAppInboxEnabled()) return false;
+        if (i.href === "/app/settings/email" && !isEmailSettingsEnabled()) return false;
         return true;
       }),
     }))

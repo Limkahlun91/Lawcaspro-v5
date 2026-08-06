@@ -1,4 +1,4 @@
-import { Switch, Route, Router as WouterRouter, Redirect } from "wouter";
+import { Switch, Route, Router as WouterRouter, Redirect, useLocation } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setAuthTokenGetter, setBaseUrl } from "@workspace/api-client-react";
 import { Toaster } from "@/components/ui/toaster";
@@ -16,6 +16,9 @@ import { GlobalCaseSearch } from "@/components/GlobalCaseSearch";
 import { getApiOrigin } from "@/lib/api-base";
 import { getStoredAuthToken } from "@/lib/auth-token";
 import { DeveloperGuard } from "@/components/developer-guard";
+import { isEmailControlEnabled, isEmailSettingsEnabled, isWhatsAppInboxEnabled, PHASE2_NOTICE } from "@/lib/feature-flags";
+import { useEffect, type ReactNode } from "react";
+import { useToast } from "@/hooks/use-toast";
 
 import Login from "@/pages/auth/login";
 import NotFound from "@/pages/not-found";
@@ -121,6 +124,26 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+function Phase2RedirectGuard({
+  enabled,
+  fallback = "/app/dashboard",
+  children,
+}: {
+  enabled: boolean;
+  fallback?: "/app/dashboard" | "/app/workbench";
+  children: ReactNode;
+}) {
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  useEffect(() => {
+    if (enabled) return;
+    toast({ title: PHASE2_NOTICE, variant: "default" });
+    setLocation(fallback, { replace: true });
+  }, [enabled, fallback, setLocation, toast]);
+  if (enabled) return <>{children}</>;
+  return null;
+}
 
 function PlatformRoutes() {
   return (
@@ -256,14 +279,18 @@ function AppRoutes() {
           )} />
 
           <Route path="/app/communication/email" component={() => (
-            <PermissionGuard module="communications" action="read">
-              <EmailControlCenterPage />
-            </PermissionGuard>
+            <Phase2RedirectGuard enabled={isEmailControlEnabled()}>
+              <PermissionGuard module="communications" action="read">
+                <EmailControlCenterPage />
+              </PermissionGuard>
+            </Phase2RedirectGuard>
           )} />
           <Route path="/app/communication/whatsapp" component={() => (
-            <PermissionGuard module="communications" action="read">
-              <WhatsAppInboxPlaceholderPage />
-            </PermissionGuard>
+            <Phase2RedirectGuard enabled={isWhatsAppInboxEnabled()}>
+              <PermissionGuard module="communications" action="read">
+                <WhatsAppInboxPlaceholderPage />
+              </PermissionGuard>
+            </Phase2RedirectGuard>
           )} />
 
           <Route path="/app/quotations/new" component={() => (
@@ -379,9 +406,11 @@ function AppRoutes() {
             </PermissionGuard>
           )} />
           <Route path="/app/settings/email" component={() => (
-            <PermissionGuard module="communications" action="read">
-              <EmailSettingsPage />
-            </PermissionGuard>
+            <Phase2RedirectGuard enabled={isEmailSettingsEnabled()}>
+              <PermissionGuard module="communications" action="read">
+                <EmailSettingsPage />
+              </PermissionGuard>
+            </Phase2RedirectGuard>
           )} />
           <Route path="/app/settings" component={() => (
             <PermissionGuard module="settings" action="read">

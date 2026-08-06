@@ -1,5 +1,11 @@
 export type FeatureFlagKey = "intake_inbox";
 
+export const PHASE2_FLAGS = {
+  phase2EmailEnabled: false,
+  phase2WhatsAppEnabled: false,
+  phase2EmailSettingsEnabled: false,
+} as const;
+
 function parseBool(v: unknown): boolean {
   const s = String(v ?? "").trim().toLowerCase();
   if (!s) return false;
@@ -14,3 +20,17 @@ export function isFeatureEnabled(key: FeatureFlagKey): boolean {
   }
   return false;
 }
+
+export function isEmailControlEnabled(): boolean {
+  return PHASE2_FLAGS.phase2EmailEnabled;
+}
+
+export function isWhatsAppInboxEnabled(): boolean {
+  return PHASE2_FLAGS.phase2WhatsAppEnabled;
+}
+
+export function isEmailSettingsEnabled(): boolean {
+  return PHASE2_FLAGS.phase2EmailSettingsEnabled;
+}
+
+export const PHASE2_NOTICE = "This module will be available in Phase 2.";
