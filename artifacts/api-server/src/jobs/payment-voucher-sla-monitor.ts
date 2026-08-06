@@ -11,7 +11,12 @@ import {
 } from "@workspace/db";
 import { logger } from "../lib/logger.js";
 import { writeAuditLog } from "../lib/auth.js";
-import { normalizeAccountingSettings, type AccountingSettingsRecord } from "../modules/accounting/accounting-settings.js";
+import {
+  AccountingSettingsLoaderError,
+  normalizeAccountingSettings,
+  safeLoadAccountingSettingsOrDefault,
+  type AccountingSettingsRecord,
+} from "../modules/accounting/accounting-settings.js";
 
 async function tryAcquireLock(): Promise<boolean> {
   const r = await db.execute(sql`SELECT pg_try_advisory_lock(hashtext('payment_voucher_sla_monitor')) as ok`);
@@ -88,14 +93,26 @@ export function startPaymentVoucherSlaMonitor(): void {
   const getSettings = async (firmId: number): Promise<AccountingSettingsRecord> => {
     const cached = settingsCache.get(firmId);
     if (cached) return cached;
-    const [row] = await db
-      .select()
-      .from(accountingSettingsTable)
-      .where(eq(accountingSettingsTable.firmId, firmId))
-      .limit(1);
-    const normalized = normalizeAccountingSettings(firmId, row as Record<string, unknown> | undefined);
-    settingsCache.set(firmId, normalized);
-    return normalized;
+    try {
+      const normalized = await safeLoadAccountingSettingsOrDefault({
+        firmId,
+        db: db as any,
+        accountingSettingsTable,
+        sql,
+        eq,
+      });
+      settingsCache.set(firmId, normalized);
+      return normalized;
+    } catch (err) {
+      if (err instanceof AccountingSettingsLoaderError) {
+        const def = normalizeAccountingSettings(firmId, undefined);
+        settingsCache.set(firmId, def);
+        return def;
+      }
+      const def = normalizeAccountingSettings(firmId, undefined);
+      settingsCache.set(firmId, def);
+      return def;
+    }
   };
 
   const getActiveUsersByRoleIds = async (firmId: number, roleIds: number[]): Promise<number[]> => {

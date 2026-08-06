@@ -1,3 +1,150 @@
+import type { sql as SqlT } from "drizzle-orm";
+
+export type AccountingSettingsLoaderErrorCode =
+  | "MIGRATION_MISSING"
+  | "DATABASE_PERMISSION_ERROR"
+  | "QUERY_TIMEOUT"
+  | "LOCK_TIMEOUT"
+  | "ACCOUNTING_SETTINGS_UNAVAILABLE"
+  | "SETTINGS_NOT_CONFIGURED";
+
+export class AccountingSettingsLoaderError extends Error {
+  readonly code: AccountingSettingsLoaderErrorCode;
+  readonly sqlstate: string | null;
+  constructor(
+    code: AccountingSettingsLoaderErrorCode,
+    message: string,
+    opts?: { cause?: unknown; sqlstate?: string | null },
+  ) {
+    super(message);
+    this.name = "AccountingSettingsLoaderError";
+    this.code = code;
+    this.sqlstate = opts?.sqlstate ?? null;
+    if (opts?.cause && typeof (Error as any).captureStackTrace === "function") {
+      try { (Error as any).captureStackTrace(this, AccountingSettingsLoaderError); } catch { /* noop */ }
+    }
+  }
+}
+
+export const ACCOUNTING_SETTINGS_STATEMENT_TIMEOUT_MS = 4500;
+export const ACCOUNTING_SETTINGS_LOCK_TIMEOUT_MS = 500;
+
+export type AccountingSettingsLoaderConn = {
+  select: (...args: unknown[]) => any;
+  execute?: (query: unknown) => Promise<unknown>;
+  transaction?: <T>(fn: (tx: AccountingSettingsLoaderConn) => Promise<T>) => Promise<T>;
+};
+
+function extractSqlstate(err: unknown): string | null {
+  if (!err || typeof err !== "object") return null;
+  const seen = new Set<unknown>();
+  const queue: unknown[] = [err];
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    if (!cur || seen.has(cur) || typeof cur !== "object") continue;
+    seen.add(cur);
+    const e = cur as Record<string, unknown>;
+    const codeVal = typeof e.code === "string" ? e.code : null;
+    const s1 = (e as { sqlstate?: unknown }).sqlstate;
+    const s2 = (e as { sqlState?: unknown }).sqlState;
+    const raw = codeVal ?? (typeof s1 === "string" && s1 ? s1 : null) ?? (typeof s2 === "string" && s2 ? s2 : null);
+    if (typeof raw === "string" && raw) return raw;
+    for (const k of ["cause", "original", "parent", "error", "err"]) {
+      const next = e[k];
+      if (next && typeof next === "object") queue.push(next);
+    }
+  }
+  return null;
+}
+
+function sqlstateToLoaderCode(sqlstate: string | null): AccountingSettingsLoaderErrorCode | null {
+  if (!sqlstate) return null;
+  switch (sqlstate) {
+    case "42P01":
+    case "42703":
+      return "MIGRATION_MISSING";
+    case "42501":
+      return "DATABASE_PERMISSION_ERROR";
+    case "57014":
+    case "57P01":
+    case "57P02":
+      return "QUERY_TIMEOUT";
+    case "55P03":
+      return "LOCK_TIMEOUT";
+    default:
+      return null;
+  }
+}
+
+function makeSetTimeoutSql(sqlBuilder: typeof SqlT, lockMs: number, stmtMs: number) {
+  return [
+    sqlBuilder.raw(`SET LOCAL lock_timeout = '${lockMs}ms'`),
+    sqlBuilder.raw(`SET LOCAL statement_timeout = '${stmtMs}ms'`),
+  ];
+}
+
+export type EqBuilder = (lhs: unknown, rhs: unknown) => unknown;
+
+export async function safeLoadAccountingSettings(args: {
+  firmId: number;
+  db: AccountingSettingsLoaderConn;
+  accountingSettingsTable: { firmId: any } & Record<string, any>;
+  sql: typeof SqlT;
+  eq: EqBuilder;
+}): Promise<{ settings: AccountingSettingsRecord; rowExisted: boolean }> {
+  const { firmId, db, accountingSettingsTable, sql, eq } = args;
+  if (!Number.isFinite(firmId) || firmId <= 0) {
+    throw new AccountingSettingsLoaderError("ACCOUNTING_SETTINGS_UNAVAILABLE", "Invalid firmId");
+  }
+  let row: Record<string, unknown> | undefined;
+  let sqlstate: string | null = null;
+  try {
+    const runBounded = async (conn: AccountingSettingsLoaderConn) => {
+      if (typeof conn.execute === "function") {
+        const [setLock, setStmt] = makeSetTimeoutSql(sql, ACCOUNTING_SETTINGS_LOCK_TIMEOUT_MS, ACCOUNTING_SETTINGS_STATEMENT_TIMEOUT_MS);
+        await conn.execute(setLock);
+        await conn.execute(setStmt);
+      }
+      const rows = await conn
+        .select()
+        .from(accountingSettingsTable)
+        .where(eq(accountingSettingsTable.firmId, firmId))
+        .limit(1);
+      return rows?.[0];
+    };
+    const useTx = typeof db.transaction === "function" && typeof db.execute !== "function";
+    row = (useTx && db.transaction)
+      ? await db.transaction(async (tx) => runBounded(tx))
+      : await runBounded(db);
+  } catch (err) {
+    sqlstate = extractSqlstate(err);
+    const mapped = sqlstateToLoaderCode(sqlstate);
+    if (mapped) {
+      throw new AccountingSettingsLoaderError(mapped, `accounting_settings load failed (sqlstate=${sqlstate})`, { cause: err, sqlstate });
+    }
+    throw new AccountingSettingsLoaderError("ACCOUNTING_SETTINGS_UNAVAILABLE", `accounting_settings load failed (unexpected)`, { cause: err, sqlstate });
+  }
+  if (!row) {
+    return { settings: getDefaultAccountingSettings(firmId), rowExisted: false };
+  }
+  return { settings: normalizeAccountingSettings(firmId, row as Record<string, unknown>), rowExisted: true };
+}
+
+export async function safeLoadAccountingSettingsOrDefault(args: {
+  firmId: number;
+  db: AccountingSettingsLoaderConn;
+  accountingSettingsTable: { firmId: any } & Record<string, any>;
+  sql: typeof SqlT;
+  eq: EqBuilder;
+}): Promise<AccountingSettingsRecord> {
+  const r = await safeLoadAccountingSettings(args);
+  return r.settings;
+}
+
+export function accountingSettingsErrorHttpStatus(code: AccountingSettingsLoaderErrorCode): 503 {
+  return 503;
+}
+
 export type PermissionTuple = { module: string; action: string; allowed: boolean };
 
 export type AccountingApprovalThresholdRule = {

@@ -164,7 +164,7 @@ export class PaymentVoucherConfirmationUnknownError extends Error {
   readonly clientRequestIds: string[];
 
   constructor(clientRequestIds: string[]) {
-    super("Payment Voucher submission is still being confirmed. Please do not submit again.");
+    super("Outcome unknown — Check Status");
     this.name = "PaymentVoucherConfirmationUnknownError";
     this.clientRequestIds = clientRequestIds;
   }
@@ -180,58 +180,95 @@ export class PaymentVoucherConfirmationStaleError extends Error {
   }
 }
 
+export class PaymentVoucherNotFoundError extends Error {
+  readonly clientRequestIds: string[];
+
+  constructor(clientRequestIds: string[]) {
+    super("No Payment Voucher request was recorded. You may submit again.");
+    this.name = "PaymentVoucherNotFoundError";
+    this.clientRequestIds = clientRequestIds;
+  }
+}
+
+export class PaymentVoucherStatusCheckFailedError extends Error {
+  readonly clientRequestIds: string[];
+
+  constructor(clientRequestIds: string[]) {
+    super("Status check failed.");
+    this.name = "PaymentVoucherStatusCheckFailedError";
+    this.clientRequestIds = clientRequestIds;
+  }
+}
+
 export async function getPaymentVoucherCreateStatus(clientRequestId: string): Promise<PaymentVoucherCreateStatus> {
-  const res = await apiRequest(`/payment-vouchers/by-client-request/${encodeURIComponent(clientRequestId)}`, {
-    timeoutMs: 12000,
-    allowStatuses: [202, 404, 409],
-  });
+  try {
+    const res = await apiRequest(`/payment-vouchers/by-client-request/${encodeURIComponent(clientRequestId)}`, {
+      timeoutMs: 12000,
+      allowStatuses: [202, 404, 409, 503],
+    });
 
-  if (res.status === 404) {
-    return { status: "not_found", clientRequestId };
-  }
+    if (res.status === 503) {
+      return { status: "failed", clientRequestId, error: "STATUS_CHECK_UNAVAILABLE" };
+    }
 
-  const body = await res.json();
-  if (res.status === 202) {
-    return {
-      status: "processing",
-      clientRequestId: String(body?.clientRequestId ?? clientRequestId),
-    };
-  }
+    if (res.status === 404) {
+      return { status: "not_found", clientRequestId };
+    }
 
-  if (res.status === 409) {
-    if (body?.status === "stale") {
+    const body = await res.json();
+    if (res.status === 202) {
       return {
-        status: "stale",
+        status: "processing",
         clientRequestId: String(body?.clientRequestId ?? clientRequestId),
-        error: typeof body?.error === "string" ? body.error : null,
-        staleAfterMs: typeof body?.staleAfterMs === "number" ? body.staleAfterMs : null,
       };
     }
-    return {
-      status: "failed",
-      clientRequestId: String(body?.clientRequestId ?? clientRequestId),
-      error: typeof body?.error === "string" ? body.error : null,
-    };
-  }
 
-  return {
-    status: "completed",
-    voucher: body?.voucher ?? body,
-  };
+    if (res.status === 409) {
+      if (body?.status === "stale") {
+        return {
+          status: "stale",
+          clientRequestId: String(body?.clientRequestId ?? clientRequestId),
+          error: typeof body?.error === "string" ? body.error : null,
+          staleAfterMs: typeof body?.staleAfterMs === "number" ? body.staleAfterMs : null,
+        };
+      }
+      return {
+        status: "failed",
+        clientRequestId: String(body?.clientRequestId ?? clientRequestId),
+        error: typeof body?.error === "string" ? body.error : null,
+      };
+    }
+
+    return {
+      status: "completed",
+      voucher: body?.voucher ?? body,
+    };
+  } catch (err) {
+    const isTimeout =
+      err instanceof RequestTimeoutError ||
+      (err && typeof err === "object" && (err as any).name === "RequestTimeoutError");
+    if (isTimeout) {
+      return { status: "failed", clientRequestId, error: "STATUS_CHECK_TIMEOUT" };
+    }
+    return { status: "failed", clientRequestId, error: "STATUS_CHECK_UNAVAILABLE" };
+  }
 }
 
 export async function submitPaymentVoucherWithRecovery(payload: unknown, clientRequestId: string): Promise<any> {
   const resolvePendingStatus = async (): Promise<any> => {
-    const status = await getPaymentVoucherCreateStatus(clientRequestId).catch(() => ({ status: "not_found", clientRequestId } as const));
+    const status = await getPaymentVoucherCreateStatus(clientRequestId);
     if (status.status === "completed") return status.voucher;
     if (status.status === "failed") {
+      if (status.error === "STATUS_CHECK_UNAVAILABLE" || status.error === "STATUS_CHECK_TIMEOUT") {
+        throw new PaymentVoucherStatusCheckFailedError([clientRequestId]);
+      }
       throw new Error(status.error || "Payment Voucher submission failed");
     }
     if (status.status === "stale") {
       throw new PaymentVoucherConfirmationStaleError([clientRequestId]);
     }
     if (status.status === "not_found") {
-      throw new PaymentVoucherConfirmationUnknownError([clientRequestId]);
+      throw new PaymentVoucherNotFoundError([clientRequestId]);
     }
     throw new PaymentVoucherConfirmationPendingError([clientRequestId]);
   };
@@ -253,6 +290,19 @@ export async function submitPaymentVoucherWithRecovery(payload: unknown, clientR
       err instanceof RequestTimeoutError ||
       (err && typeof err === "object" && (err as any).name === "RequestTimeoutError");
     if (!isTimeout) throw err;
-    return await resolvePendingStatus();
+    throw new PaymentVoucherConfirmationUnknownError([clientRequestId]);
   }
+}
+
+export function blockRepeatedEnterWhenDisabled(args: {
+  event: React.KeyboardEvent<HTMLFormElement | HTMLButtonElement>;
+  disabled: boolean;
+}): boolean {
+  if (args.event.key !== "Enter") return true;
+  if (args.disabled) {
+    args.event.preventDefault();
+    args.event.stopPropagation();
+    return false;
+  }
+  return true;
 }

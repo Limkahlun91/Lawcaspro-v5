@@ -1,14 +1,17 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { accountingSettingsTable, db, permissionsTable, rolesTable } from "@workspace/db";
 import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import {
   ACCOUNTING_ACTIONS,
+  accountingSettingsErrorHttpStatus,
+  AccountingSettingsLoaderError,
   buildRoleTemplate,
   diffPermissions,
   getDefaultAccountingSettings,
   normalizeAccountingSettings,
+  safeLoadAccountingSettings,
 } from "../modules/accounting/accounting-settings.js";
 
 type RouterInternalLike = {
@@ -53,12 +56,20 @@ async function buildRoleChangePreview(args: {
 }) {
   const r = rdb(args.req);
   const firmId = args.req.firmId!;
-  const [existingSettingsRow] = await r
-    .select()
-    .from(accountingSettingsTable)
-    .where(eq(accountingSettingsTable.firmId, firmId))
-    .limit(1);
-  const existing = normalizeAccountingSettings(firmId, existingSettingsRow as Record<string, unknown> | undefined);
+  let existingSettingsRow: Record<string, unknown> | undefined;
+  try {
+    const loaded = await safeLoadAccountingSettings({
+      firmId,
+      db: r as any,
+      accountingSettingsTable,
+      sql,
+      eq,
+    });
+    existingSettingsRow = loaded.rowExisted ? (loaded.settings as unknown as Record<string, unknown>) : undefined;
+  } catch {
+    existingSettingsRow = undefined;
+  }
+  const existing = normalizeAccountingSettings(firmId, existingSettingsRow);
   const previousMappedRoleIds = Array.from(new Set([...existing.accountManagerRoleIds, ...existing.accountAdminRoleIds]));
   const managedRoleIds = Array.from(new Set([...previousMappedRoleIds, ...args.next.accountManagerRoleIds, ...args.next.accountAdminRoleIds]));
   const existingPermissions = managedRoleIds.length > 0
@@ -94,12 +105,30 @@ async function buildRoleChangePreview(args: {
 router.get("/accounting/settings", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = rdb(req);
   const firmId = req.firmId!;
-  const [settingsRow] = await r
-    .select()
-    .from(accountingSettingsTable)
-    .where(eq(accountingSettingsTable.firmId, firmId))
-    .limit(1);
-  const settings = normalizeAccountingSettings(firmId, settingsRow as Record<string, unknown> | undefined);
+  let settings: ReturnType<typeof normalizeAccountingSettings>;
+  let settingsRow: Record<string, unknown> | undefined;
+  try {
+    const loaded = await safeLoadAccountingSettings({
+      firmId,
+      db: r as any,
+      accountingSettingsTable,
+      sql,
+      eq,
+    });
+    settings = loaded.settings;
+    settingsRow = loaded.rowExisted ? (loaded.settings as unknown as Record<string, unknown>) : undefined;
+  } catch (err) {
+    if (err instanceof AccountingSettingsLoaderError) {
+      res.status(accountingSettingsErrorHttpStatus(err.code)).json({
+        error: "Accounting settings unavailable",
+        code: err.code,
+        sqlstate: err.sqlstate ?? undefined,
+      });
+      return;
+    }
+    res.status(503).json({ error: "Accounting settings unavailable", code: "ACCOUNTING_SETTINGS_UNAVAILABLE" });
+    return;
+  }
 
   const roles = await r.select().from(rolesTable).where(eq(rolesTable.firmId, firmId));
   const roleIds = roles.map((role) => role.id);
