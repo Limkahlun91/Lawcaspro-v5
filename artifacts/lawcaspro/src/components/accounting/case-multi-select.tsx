@@ -11,16 +11,17 @@ type CaseSearchItem = {
   referenceNo: string;
   shortLabel: string;
   purchaserNames: string[];
-  purchaserLabel: string | null;
+  mainPurchaserName: string | null;
   projectName: string | null;
   status: string | null;
+  title: string;
 };
 
 export type SelectedCase = {
   case_id: number;
   title: string;
   referenceNo?: string;
-  purchaserLabel?: string | null;
+  mainPurchaserName?: string | null;
   projectName?: string | null;
   status?: string | null;
 };
@@ -48,18 +49,20 @@ function coerceCaseSearchItem(v: unknown): CaseSearchItem | null {
   const id = Number.isFinite(idRaw) && idRaw > 0 ? idRaw : NaN;
   if (!Number.isFinite(id)) return null;
   const referenceNo = typeof v.referenceNo === "string" ? v.referenceNo : typeof v.reference_no === "string" ? v.reference_no : "";
-  const shortLabel = typeof v.shortLabel === "string" ? v.shortLabel : typeof v.title === "string" ? v.title : "";
-  const purchaserNamesRaw = Array.isArray((v as any).purchaserNames) ? ((v as any).purchaserNames as unknown[]) : [];
+  const title = typeof v.title === "string" ? v.title : "";
+  const purchaserNamesRaw = Array.isArray((v as any).purchaserNames) ? ((v as any).purchaserNames as unknown[]) : Array.isArray((v as any).purchaser_names) ? ((v as any).purchaser_names as unknown[]) : [];
   const purchaserNames = purchaserNamesRaw.map((x) => (typeof x === "string" ? x.trim() : "")).filter((x) => Boolean(x));
-  const purchaserLabel = typeof (v as any).purchaserLabel === "string" ? String((v as any).purchaserLabel).trim() : null;
+  const mainPurchaserName = typeof (v as any).mainPurchaserName === "string" ? String((v as any).mainPurchaserName).trim() : typeof (v as any).main_purchaser_name === "string" ? String((v as any).main_purchaser_name).trim() : purchaserNames[0] ?? null;
+  const projectName = typeof v.projectName === "string" ? v.projectName : typeof (v as any).project_name === "string" ? (v as any).project_name : null;
   return {
     id,
     referenceNo: String(referenceNo ?? "").trim(),
-    shortLabel: String(shortLabel ?? "").trim() || String(referenceNo ?? "").trim(),
+    shortLabel: title || String(referenceNo ?? "").trim(),
     purchaserNames,
-    purchaserLabel: purchaserLabel || null,
-    projectName: typeof v.projectName === "string" ? v.projectName : null,
+    mainPurchaserName: mainPurchaserName || null,
+    projectName: projectName ? String(projectName).trim() : null,
     status: typeof v.status === "string" ? v.status : null,
+    title,
   };
 }
 
@@ -76,7 +79,7 @@ export function CaseMultiSelect(props: {
   limit?: number;
 }) {
   const mode = props.mode ?? "multi";
-  const endpoint = props.endpoint ?? "/accounting/cases/search";
+  const endpoint = props.endpoint ?? "/api/payment-voucher-actions/cases/reference-search";
   const minSearchLength = props.minSearchLength ?? 2;
   const debounceMs = props.debounceMs ?? 300;
   const limit = props.limit ?? 20;
@@ -129,15 +132,22 @@ export function CaseMultiSelect(props: {
     setIsFetching(true);
 
     const qs = new URLSearchParams();
-    qs.set("query", q);
+    qs.set("q", q);
     qs.set("limit", String(limit));
     const url = `${endpoint}?${qs.toString()}`;
 
     void (async () => {
       try {
-        const data = await apiFetchJson<{ items?: unknown[] | null }>(url, { signal: ac.signal, timeoutMs: 15000 });
+        const data = await apiFetchJson<unknown>(url, { signal: ac.signal, timeoutMs: 15000 });
         if (activeSeqRef.current !== seq) return;
-        const rawItems = Array.isArray(data?.items) ? data.items : null;
+        let rawItems: unknown[] | null = null;
+        if (Array.isArray(data)) {
+          rawItems = data;
+        } else if (isRecord(data) && Array.isArray((data as any).items)) {
+          rawItems = (data as any).items as unknown[];
+        } else if (isRecord(data) && Array.isArray((data as any).data)) {
+          rawItems = (data as any).data as unknown[];
+        }
         if (!rawItems) throw new Error("Unexpected response from server");
         const next = rawItems.map(coerceCaseSearchItem).filter(Boolean) as CaseSearchItem[];
         setItems(next);
@@ -162,17 +172,16 @@ export function CaseMultiSelect(props: {
   const selectedIds = useMemo(() => new Set(props.value.map((x) => x.case_id)), [props.value]);
 
   const add = (item: CaseSearchItem) => {
-    const chipTitle = (() => {
-      const firstName = item.purchaserNames[0] ? String(item.purchaserNames[0]).trim() : "";
-      const proj = item.projectName ? String(item.projectName).trim() : "";
-      const mid = firstName ? `${item.referenceNo} • ${firstName}` : item.referenceNo;
-      return proj ? `${mid} • ${proj}` : mid;
+    const chipText = (() => {
+      const purchaser = item.mainPurchaserName ? String(item.mainPurchaserName).trim() : item.purchaserNames[0] ? String(item.purchaserNames[0]).trim() : "";
+      if (purchaser) return `${item.referenceNo} • ${purchaser}`;
+      return item.referenceNo;
     })();
     const next: SelectedCase = {
       case_id: item.id,
-      title: chipTitle,
+      title: chipText,
       referenceNo: item.referenceNo,
-      purchaserLabel: item.purchaserLabel,
+      mainPurchaserName: item.mainPurchaserName,
       projectName: item.projectName,
       status: item.status,
     };
@@ -232,8 +241,7 @@ export function CaseMultiSelect(props: {
                 <CommandGroup>
                   {items.map((c) => {
                     const already = selectedIds.has(c.id);
-                    const lower = c.purchaserLabel ? `${c.purchaserLabel} • ` : "";
-                    const rowSecondary = `${lower}${c.projectName ?? ""}`.trim().replace(/\s+•\s*$/, "");
+                    const purchaser = c.mainPurchaserName ? String(c.mainPurchaserName).trim() : c.purchaserNames[0] ? String(c.purchaserNames[0]).trim() : "";
                     return (
                       <CommandItem
                         key={String(c.id)}
@@ -241,11 +249,12 @@ export function CaseMultiSelect(props: {
                         onSelect={() => add(c)}
                         disabled={mode === "multi" ? already : false}
                       >
-                        <div className="flex flex-col min-w-0">
-                          <span className="truncate">{c.referenceNo}</span>
-                          {rowSecondary ? <span className="truncate text-xs text-slate-500">{rowSecondary}</span> : null}
+                        <div className="flex flex-col min-w-0 w-full">
+                          <span className="truncate font-medium text-slate-900">{c.referenceNo || "—"}</span>
+                          {purchaser ? <span className="truncate text-xs text-slate-600">{purchaser}</span> : null}
+                          {c.projectName ? <span className="truncate text-[11px] text-slate-400">{c.projectName}</span> : null}
                         </div>
-                        {already ? <span className="ml-auto text-xs text-slate-400">Selected</span> : null}
+                        {already ? <span className="ml-auto text-xs text-slate-400 whitespace-nowrap">Selected</span> : null}
                       </CommandItem>
                     );
                   })}

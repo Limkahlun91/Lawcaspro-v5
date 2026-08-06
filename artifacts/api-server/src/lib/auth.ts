@@ -92,6 +92,11 @@ export async function writeAuditLog(params: {
   detail?: string;
   ipAddress?: string;
   userAgent?: string;
+  before?: unknown;
+  after?: unknown;
+  reason?: string;
+  requestId?: string | null;
+  actingForUserId?: number | string | null;
 }, options?: { db?: RlsDb; strict?: boolean }) {
   const targetDb = options?.db;
   const strict = options?.strict ?? false;
@@ -113,30 +118,38 @@ export async function writeAuditLog(params: {
       );
       return;
     }
+    let storedDetail: string | null = params.detail ?? null;
+    const hasStructured =
+      params.before !== undefined ||
+      params.after !== undefined ||
+      params.reason !== undefined ||
+      params.requestId !== undefined ||
+      params.actingForUserId !== undefined;
+    if (hasStructured) {
+      const structured: Record<string, unknown> = {};
+      if (params.detail !== undefined && params.detail !== null) structured.message = params.detail;
+      if (params.reason !== undefined) structured.reason = params.reason;
+      if (params.requestId !== undefined) structured.requestId = params.requestId;
+      if (params.actingForUserId !== undefined) structured.actingForUserId = params.actingForUserId;
+      if (params.before !== undefined) structured.before = params.before;
+      if (params.after !== undefined) structured.after = params.after;
+      storedDetail = JSON.stringify(structured);
+    }
+    const shared = {
+      firmId,
+      actorId,
+      actorType: params.actorType ?? "firm_user",
+      action: params.action,
+      entityType: params.entityType ?? null,
+      entityId: params.entityId ?? null,
+      detail: storedDetail,
+      ipAddress: params.ipAddress ?? null,
+      userAgent: params.userAgent ?? null,
+    };
     if (targetDb) {
-      await targetDb.insert(auditLogsTable).values({
-        firmId,
-        actorId,
-        actorType: params.actorType ?? "firm_user",
-        action: params.action,
-        entityType: params.entityType ?? null,
-        entityId: params.entityId ?? null,
-        detail: params.detail ?? null,
-        ipAddress: params.ipAddress ?? null,
-        userAgent: params.userAgent ?? null,
-      });
+      await targetDb.insert(auditLogsTable).values(shared);
     } else {
-      await db.insert(auditLogsTable).values({
-        firmId,
-        actorId,
-        actorType: params.actorType ?? "firm_user",
-        action: params.action,
-        entityType: params.entityType ?? null,
-        entityId: params.entityId ?? null,
-        detail: params.detail ?? null,
-        ipAddress: params.ipAddress ?? null,
-        userAgent: params.userAgent ?? null,
-      });
+      await db.insert(auditLogsTable).values(shared);
     }
   } catch (err) {
     logger.error(
@@ -822,7 +835,17 @@ export async function requireFirmUser(
   try {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
+        const connStart = Date.now();
         client = await pool.connect();
+        const connMs = Date.now() - connStart;
+        if (req.timing?.sections) {
+          req.timing.sections["db_pool_connect"] = connMs;
+          if (typeof (pool as any)?.totalCount !== undefined) {
+            req.timing.sections["pool.totalCount"] = (pool as any).totalCount;
+            req.timing.sections["pool.idleCount"] = (pool as any).idleCount;
+            req.timing.sections["pool.waitingCount"] = (pool as any).waitingCount;
+          }
+        }
         break;
       } catch (err) {
         const transient = isTransientDbConnectionError(err);
@@ -1005,7 +1028,17 @@ export async function requireFirmUserSession(
   try {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
+        const connStart = Date.now();
         client = await pool.connect();
+        const connMs = Date.now() - connStart;
+        if (req.timing?.sections) {
+          req.timing.sections["db_pool_connect"] = connMs;
+          if (typeof (pool as any)?.totalCount !== undefined) {
+            req.timing.sections["pool.totalCount"] = (pool as any).totalCount;
+            req.timing.sections["pool.idleCount"] = (pool as any).idleCount;
+            req.timing.sections["pool.waitingCount"] = (pool as any).waitingCount;
+          }
+        }
         break;
       } catch (err) {
         const transient = isTransientDbConnectionError(err);

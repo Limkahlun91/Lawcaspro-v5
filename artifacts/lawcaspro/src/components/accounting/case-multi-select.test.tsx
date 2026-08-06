@@ -88,10 +88,11 @@ describe("CaseMultiSelect", () => {
     await new Promise<void>((r) => setTimeout(r, 260));
 
     expect(await screen.findByText("LEGASI-001")).toBeInTheDocument();
-    expect(screen.getByText(/client a\s+•\s+project 1/i)).toBeInTheDocument();
+    expect(screen.getByText("Client A")).toBeInTheDocument();
+    expect(screen.getByText("Project 1")).toBeInTheDocument();
     fireEvent.click(screen.getByText("LEGASI-001"));
 
-    expect(screen.getByRole("button", { name: /legasi-001 • client a • project 1/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /legasi-001 • client a/i })).toBeInTheDocument();
     expect(screen.getAllByLabelText("Remove").length).toBe(1);
 
     fireEvent.click(screen.getByText("LEGASI-002"));
@@ -132,16 +133,16 @@ describe("CaseMultiSelect", () => {
     await new Promise<void>((r) => setTimeout(r, 260));
     fireEvent.click(await screen.findByText("LEGASI-001"));
 
-    fireEvent.click(screen.getByRole("button", { name: /legasi-001 • client a • project 1/i }));
+    fireEvent.click(screen.getByRole("button", { name: /legasi-001 • client a/i }));
     await new Promise<void>((r) => setTimeout(r, 0));
     const input2 = await screen.findByPlaceholderText(/search cases/i);
     fireEvent.change(input2, { target: { value: "le" } });
     await new Promise<void>((r) => setTimeout(r, 260));
     fireEvent.click(await screen.findByText("LEGASI-002"));
 
-    expect(screen.getByRole("button", { name: /legasi-002 • client b • project 2/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /legasi-002 • client b/i })).toBeInTheDocument();
     expect(screen.getAllByLabelText("Remove").length).toBe(1);
-    expect(screen.queryByRole("button", { name: /legasi-001 • client a • project 1/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /legasi-001 • client a/i })).toBeNull();
   });
 
   it("does not show error for an aborted request", async () => {

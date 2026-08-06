@@ -1,6 +1,6 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { and, count, desc, eq, inArray, lte, or } from "drizzle-orm";
-import { casesTable, db, paymentVoucherActionsTable, paymentVouchersTable, permissionsTable, sql, userNotificationsTable } from "@workspace/db";
+import { casesTable, casePurchasersTable, clientsTable, db, paymentVoucherActionsTable, paymentVouchersTable, permissionsTable, projectsTable, sql, userNotificationsTable } from "@workspace/db";
 import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
@@ -16,6 +16,10 @@ const router = expressRouter as unknown as RouterInternalLike;
 const rdb = (req: AuthRequest) => req.rlsDb ?? db;
 const one = (v: string | string[] | undefined): string | undefined => Array.isArray(v) ? v[0] : v;
 
+function escapedLike(s: string): string {
+  return s.replace(/[%_]/g, (c) => "\\" + c);
+}
+
 async function roleHasPermission(req: AuthRequest, module: string, action: string): Promise<boolean> {
   if (!req.roleId) return false;
   const rows = await rdb(req)
@@ -30,6 +34,82 @@ async function roleHasPermission(req: AuthRequest, module: string, action: strin
     .limit(1);
   return Boolean(rows[0]);
 }
+
+router.get("/cases/reference-search", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const startedAt = Date.now();
+  const q = one((req.query as any).q)?.trim();
+  if (!q || q.length < 2) {
+    res.json([]);
+    return;
+  }
+  const firmId = req.firmId!;
+  const r = rdb(req);
+  try {
+    const withScopedTimeouts = async <T,>(fn: (conn: any) => Promise<T>): Promise<T> => {
+      if (req.rlsDb) {
+        await (r as any).execute(sql`SET LOCAL lock_timeout = '300ms'`);
+        await (r as any).execute(sql`SET LOCAL statement_timeout = '1500ms'`);
+        return await fn(r as any);
+      }
+      return await (r as any).transaction(async (tx: any) => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '300ms'`);
+        await tx.execute(sql`SET LOCAL statement_timeout = '1500ms'`);
+        return await fn(tx);
+      });
+    };
+
+    const result = await withScopedTimeouts(async (tx: any) => {
+      return await tx.execute(sql`
+        SELECT
+          c.id AS case_id,
+          c.reference_no AS reference_no,
+          c.project_id AS project_id,
+          p.name AS project_name,
+          ARRAY_AGG(DISTINCT(clients.name) || (CASE WHEN cp.role = 'main' THEN '*' ELSE '' END) ORDER BY (clients.name) || (CASE WHEN cp.role = 'main' THEN '*' ELSE '' END)) FILTER (WHERE clients.name IS NOT NULL) AS purchaser_names,
+          MAX(clients.name) FILTER (WHERE cp.role = 'main') AS main_purchaser_name
+        FROM cases c
+        LEFT JOIN projects p ON p.id = c.project_id AND p.firm_id = c.firm_id
+        LEFT JOIN case_purchasers cp ON cp.case_id = c.id
+        LEFT JOIN clients ON clients.id = cp.client_id AND clients.firm_id = c.firm_id AND clients.deleted_at IS NULL
+        WHERE c.firm_id = ${firmId}
+          AND c.deleted_at IS NULL
+          AND (
+            LOWER(c.reference_no) LIKE LOWER('%' || ${escapedLike(q)} || '%')
+            OR LOWER(clients.name) LIKE LOWER('%' || ${escapedLike(q)} || '%')
+            OR LOWER(p.name) LIKE LOWER('%' || ${escapedLike(q)} || '%')
+          )
+        GROUP BY c.id, c.reference_no, c.project_id, p.name
+        ORDER BY c.reference_no IS NULL, c.reference_no ASC NULLS LAST, c.id DESC
+        LIMIT 20;
+      `);
+    });
+
+    const rows = Array.isArray(result) ? result : result?.rows ?? [];
+    res.json(rows.map((r: any) => ({
+      case_id: Number(r.case_id),
+      reference_no: String(r.reference_no ?? ""),
+      project_id: r.project_id ? Number(r.project_id) : null,
+      project_name: String(r.project_name ?? ""),
+      purchaser_names: Array.isArray(r.purchaser_names) ? (r.purchaser_names as string[]).map(n => String(n).replace(/\*$/, "").trim()) : [],
+      main_purchaser_name: String(r.main_purchaser_name ?? ""),
+      title: [String(r.reference_no || ""), String(r.main_purchaser_name || "")].filter(Boolean).join(" — "),
+    })));
+  } catch (err) {
+    const info = extractDbErrorInfo(err);
+    const sqlState = info.sqlstate ?? info.sqlState ?? null;
+    const durationMs = Date.now() - startedAt;
+    logger.error(
+      { err, sqlState, durationMs, firmId, q },
+      "case_search.reference_search_failed",
+    );
+    res.status(503).json({
+      code: "CASE_SEARCH_UNAVAILABLE",
+      error: "Case search temporarily unavailable",
+      meta: { sqlState, durationMs },
+    });
+    return;
+  }
+});
 
 router.get("/payment-voucher-actions/cases/:caseId/summary", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number.parseInt(one(req.params.caseId) ?? "", 10);
@@ -234,7 +314,7 @@ router.get("/payment-voucher-actions/my-work/overview", requireAuth, requireFirm
           ? "MISSING_COLUMN"
           : sqlState === "42501"
             ? "INSUFFICIENT_PRIVILEGE"
-            : sqlState === "57014"
+            : sqlState === "57014" || sqlState === "57P01" || sqlState === "57P02"
               ? "QUERY_TIMEOUT"
               : sqlState === "55P03"
                 ? "LOCK_TIMEOUT"
@@ -243,34 +323,35 @@ router.get("/payment-voucher-actions/my-work/overview", requireAuth, requireFirm
       { err, sqlState, safeCategory, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt, firmId, userId },
       "payment_voucher_actions.overview_failed",
     );
+    const meta = { sqlState, safeCategory, stage, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt };
     if (sqlState === "42P01" || sqlState === "42703") {
-      res.status(500).json({
+      res.status(503).json({
         error: "Database migration missing for Payment Voucher actions fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql",
         code: "MIGRATION_MISSING",
-        meta: { sqlState, safeCategory, stage, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt },
+        meta,
       });
       return;
     }
     if (sqlState === "42501") {
-      res.status(500).json({
+      res.status(503).json({
         error: "Payment voucher actions unavailable",
         code: "PV_ACTIONS_INSUFFICIENT_PRIVILEGE",
-        meta: { sqlState, safeCategory, stage, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt },
+        meta,
       });
       return;
     }
-    if (sqlState === "57014" || sqlState === "55P03") {
+    if (sqlState === "57014" || sqlState === "57P01" || sqlState === "57P02" || sqlState === "55P03") {
       res.status(503).json({
         error: "Payment voucher actions temporarily unavailable",
         code: "PV_ACTIONS_TIMEOUT",
-        meta: { sqlState, safeCategory, stage, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt },
+        meta,
       });
       return;
     }
-    res.status(500).json({
+    res.status(503).json({
       error: "Payment voucher actions unavailable",
       code: "PV_ACTIONS_UNAVAILABLE",
-      meta: { sqlState, safeCategory, stage, db: { table: info.table, column: info.column, constraint: info.constraint }, durationMs: Date.now() - startedAt },
+      meta,
     });
     return;
   }
@@ -284,52 +365,142 @@ router.get("/payment-vouchers/dashboard", requireAuth, requireFirmUser, async (r
     return;
   }
   const r = rdb(req);
-  const now = new Date();
   const firmId = req.firmId!;
   try {
-    const [
-      awaitingReceipt,
-      receivedAndProcessing,
-      waitingApproval,
-      dueSoon,
-      overdue,
-      paidToday,
-      clerkPending,
-      clerkOverdue,
-      completedMonth,
-    ] = await Promise.all([
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), sql`${paymentVouchersTable.receivedAt} IS NULL` as any)),
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), sql`${paymentVouchersTable.receivedAt} IS NOT NULL` as any)),
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.approvalStatus, "pending_approval"))),
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), lte(paymentVouchersTable.paymentDueAt, new Date(now.getTime() + 2 * 60 * 60 * 1000)))),
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "pending_account"), lte(paymentVouchersTable.paymentDueAt, now))),
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "paid_pending_collection"), sql`date(${paymentVouchersTable.paidAt}) = current_date` as any)),
-      r.select({ c: count() }).from(paymentVoucherActionsTable).where(and(eq(paymentVoucherActionsTable.firmId, firmId), inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]))),
-      r.select({ c: count() }).from(paymentVoucherActionsTable).where(and(eq(paymentVoucherActionsTable.firmId, firmId), inArray(paymentVoucherActionsTable.status, ["assigned", "acknowledged"]), or(lte(paymentVoucherActionsTable.acknowledgeDueAt, now), lte(paymentVoucherActionsTable.completionDueAt, now)))),
-      r.select({ c: count() }).from(paymentVouchersTable).where(and(eq(paymentVouchersTable.firmId, firmId), eq(paymentVouchersTable.status, "completed"), sql`date_trunc('month', ${paymentVouchersTable.updatedAt}) = date_trunc('month', now())` as any)),
-    ]);
-    res.json({
-      awaitingReceipt: Number(awaitingReceipt[0]?.c ?? 0),
-      receivedAndProcessing: Number(receivedAndProcessing[0]?.c ?? 0),
-      waitingApproval: Number(waitingApproval[0]?.c ?? 0),
-      dueSoon: Number(dueSoon[0]?.c ?? 0),
-      overdue: Number(overdue[0]?.c ?? 0),
-      paidToday: Number(paidToday[0]?.c ?? 0),
-      clerkPending: Number(clerkPending[0]?.c ?? 0),
-      clerkOverdue: Number(clerkOverdue[0]?.c ?? 0),
-      completedMonth: Number(completedMonth[0]?.c ?? 0),
+    const withScopedTimeouts = async <T,>(fn: (conn: any) => Promise<T>): Promise<T> => {
+      if (req.rlsDb) {
+        await (r as any).execute(sql`SET LOCAL lock_timeout = '500ms'`);
+        await (r as any).execute(sql`SET LOCAL statement_timeout = '4500ms'`);
+        return await fn(r as any);
+      }
+      return await (r as any).transaction(async (tx: any) => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '500ms'`);
+        await tx.execute(sql`SET LOCAL statement_timeout = '4500ms'`);
+        return await fn(tx);
+      });
+    };
+
+    const dashboard = await withScopedTimeouts(async (tx: any) => {
+      const result = await tx.execute(sql`
+        WITH counts AS (
+          SELECT
+            COUNT(*)::bigint AS total_pv,
+            COUNT(*) FILTER (WHERE status = 'pending_account' AND received_at IS NULL)::bigint AS awaiting_receipt,
+            COUNT(*) FILTER (WHERE status = 'pending_account' AND received_at IS NOT NULL)::bigint AS received_and_processing,
+            COUNT(*) FILTER (WHERE approval_status = 'pending_approval')::bigint AS waiting_approval,
+            COUNT(*) FILTER (WHERE status = 'pending_account' AND payment_due_at <= NOW() + INTERVAL '2 hours')::bigint AS due_soon,
+            COUNT(*) FILTER (WHERE status = 'pending_account' AND payment_due_at <= NOW())::bigint AS overdue,
+            COUNT(*) FILTER (WHERE status = 'paid_pending_collection' AND date(paid_at) = current_date)::bigint AS paid_today,
+            COUNT(*) FILTER (WHERE status = 'completed' AND date_trunc('month', updated_at) = date_trunc('month', NOW()))::bigint AS completed_month
+          FROM payment_vouchers
+          WHERE firm_id = ${firmId}
+        ),
+        action_counts AS (
+          SELECT
+            COUNT(*)::bigint AS clerk_pending,
+            COUNT(*) FILTER (
+              WHERE status IN ('assigned', 'acknowledged')
+                AND (
+                  (acknowledge_due_at IS NOT NULL AND acknowledge_due_at <= NOW())
+                  OR (completion_due_at IS NOT NULL AND completion_due_at <= NOW())
+                )
+            )::bigint AS clerk_overdue
+          FROM payment_voucher_actions
+          WHERE firm_id = ${firmId}
+            AND status IN ('assigned', 'acknowledged')
+        ),
+        status_grouped AS (
+          SELECT COALESCE(json_agg(json_build_object('status', status, 'count', cnt)), '[]'::json) AS arr
+          FROM (
+            SELECT status, COUNT(*)::bigint AS cnt
+            FROM payment_vouchers
+            WHERE firm_id = ${firmId}
+            GROUP BY status
+            ORDER BY status
+          ) s
+        )
+        SELECT
+          c.awaiting_receipt,
+          c.received_and_processing,
+          c.waiting_approval,
+          c.due_soon,
+          c.overdue,
+          c.paid_today,
+          a.clerk_pending,
+          a.clerk_overdue,
+          c.completed_month,
+          sg.arr AS status_grouped
+        FROM counts c
+        CROSS JOIN action_counts a
+        CROSS JOIN status_grouped sg
+      `);
+      const rows = Array.isArray(result) ? result : result?.rows ?? [];
+      const row = rows[0] ?? {};
+      return {
+        awaitingReceipt: Number(row.awaiting_receipt ?? 0),
+        receivedAndProcessing: Number(row.received_and_processing ?? 0),
+        waitingApproval: Number(row.waiting_approval ?? 0),
+        dueSoon: Number(row.due_soon ?? 0),
+        overdue: Number(row.overdue ?? 0),
+        paidToday: Number(row.paid_today ?? 0),
+        clerkPending: Number(row.clerk_pending ?? 0),
+        clerkOverdue: Number(row.clerk_overdue ?? 0),
+        completedMonth: Number(row.completed_month ?? 0),
+        statusGrouped: Array.isArray(row.status_grouped) ? row.status_grouped : [],
+      };
     });
+
     const durationMs = Date.now() - startedAt;
     if (durationMs >= 2000) {
       logger.warn({ durationMs, firmId: req.firmId, userId: req.userId }, "payment_voucher.dashboard_slow");
     }
+    res.json({ ...dashboard, meta: { durationMs } });
   } catch (err) {
-    const code = err && typeof err === "object" && "code" in (err as any) ? String((err as any).code) : null;
-    if (code === "42703" || code === "42P01") {
-      res.status(500).json({ error: "Database migration missing for Payment Voucher dashboard fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql", code: "MIGRATION_MISSING" });
+    const info = extractDbErrorInfo(err);
+    const sqlState = info.sqlstate ?? info.sqlState ?? null;
+    const durationMs = Date.now() - startedAt;
+    logger.error(
+      { err, sqlState, durationMs, firmId },
+      "payment_voucher.dashboard_failed",
+    );
+    if (sqlState === "42P01" || sqlState === "42703") {
+      res.status(503).json({
+        code: "DASHBOARD_MIGRATION_MISSING",
+        error: "Database migration missing for Payment Voucher dashboard fields. Apply migration 0122_accounting_settings_and_payment_voucher_sla.sql",
+        meta: { sqlState, durationMs },
+      });
       return;
     }
-    throw err;
+    if (sqlState === "42501") {
+      res.status(503).json({
+        code: "DASHBOARD_PERMISSION_ERROR",
+        error: "Payment voucher dashboard unavailable due to permissions",
+        meta: { sqlState, durationMs },
+      });
+      return;
+    }
+    if (sqlState === "57014" || sqlState === "57P01" || sqlState === "57P02") {
+      res.status(503).json({
+        code: "DASHBOARD_QUERY_TIMEOUT",
+        error: "Payment voucher dashboard query timed out",
+        meta: { sqlState, durationMs },
+      });
+      return;
+    }
+    if (sqlState === "55P03") {
+      res.status(503).json({
+        code: "DASHBOARD_LOCK_TIMEOUT",
+        error: "Payment voucher dashboard lock timeout",
+        meta: { sqlState, durationMs },
+      });
+      return;
+    }
+    res.status(503).json({
+      code: "DASHBOARD_UNAVAILABLE",
+      error: "Payment voucher dashboard temporarily unavailable",
+      meta: { sqlState, durationMs },
+    });
+    return;
   }
 });
 

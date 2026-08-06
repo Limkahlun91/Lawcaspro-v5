@@ -171,7 +171,7 @@ function toDateTimeLocalValue(value: string | null | undefined): string {
 // ── OVERVIEW TAB ─────────────────────────────────────────────────────────────
 
 function LedgerSummaryInline() {
-  const { data } = useQuery({ queryKey: ["ledger-summary"], queryFn: () => apiFetchJson("/ledger/summary"), retry: false });
+  const { data } = useQuery({ queryKey: ["ledger-summary"], queryFn: () => apiFetchJson("/ledger/summary"), retry: false, staleTime: 30_000, refetchInterval: false, refetchOnWindowFocus: false });
   const rows = (data ?? []) as any[];
   if (!rows.length) return <div className="text-slate-400 text-sm py-4 text-center">No ledger entries yet</div>;
   const acctLabel = (acct: string) => acct === "balance_sheet" ? "Balance Sheet / FD" : acct === "client" ? "Client Account" : "Office Account";
@@ -199,11 +199,17 @@ function OverviewTab() {
     queryKey: ["invoice-metrics"],
     queryFn: () => apiFetchJson<{ totalInvoiced: number; totalCollected: number; totalOutstanding: number; invoiceCount: number }>("/accounting/invoice-metrics"),
     retry: false,
+    staleTime: 30_000,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
   });
   const { data: invData } = useQuery({
     queryKey: ["invoices"],
     queryFn: () => apiFetchJson<InvoiceRow[]>("/invoices"),
     retry: false,
+    staleTime: 30_000,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
   });
   const invoices = invData ?? [];
   const invTotals = {
@@ -216,6 +222,9 @@ function OverviewTab() {
     queryKey: ["accounting-summary"],
     queryFn: () => apiFetchJson<AccountingSummaryResponse>("/accounting/summary"),
     retry: false,
+    staleTime: 30_000,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
   });
   const monthly = accData?.monthly ?? [];
 
@@ -322,6 +331,9 @@ function FileListingTab() {
       return await apiFetchJson<CaseFilesListResponse>(`/case-files${suffix}`);
     },
     retry: false,
+    staleTime: 30_000,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
   });
 
   const rows = listQuery.data?.data ?? [];
@@ -475,7 +487,7 @@ function InvoicesTab() {
   const roleName = String((user as any)?.roleName ?? "").trim().toLowerCase();
   const canCreateInvoices = roleName.includes("partner") || roleName === "account" || roleName === "accounts" || roleName === "accountant" || roleName === "finance";
 
-  const invoicesQuery = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetchJson("/invoices"), retry: false });
+  const invoicesQuery = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetchJson("/invoices"), retry: false, enabled: !showCreate, staleTime: 30_000, refetchInterval: false, refetchOnWindowFocus: false });
   const { data, isLoading } = invoicesQuery;
   const invoices = (data ?? []) as any[];
   const { data: quotations = [] } = useListQuotations();
@@ -649,10 +661,10 @@ function ReceiptsTab() {
     amount: "", receivedDate: new Date().toISOString().slice(0, 10), referenceNo: "", notes: "",
   });
 
-  const receiptsQuery = useQuery({ queryKey: ["receipts"], queryFn: () => apiFetchJson("/receipts"), retry: false });
+  const receiptsQuery = useQuery({ queryKey: ["receipts"], queryFn: () => apiFetchJson("/receipts"), retry: false, enabled: !showCreate, staleTime: 30_000, refetchInterval: false, refetchOnWindowFocus: false });
   const { data, isLoading } = receiptsQuery;
   const receipts = (data ?? []) as any[];
-  const invoicesQuery = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetchJson("/invoices"), retry: false });
+  const invoicesQuery = useQuery({ queryKey: ["invoices"], queryFn: () => apiFetchJson("/invoices"), retry: false, enabled: !showCreate, staleTime: 30_000, refetchInterval: false, refetchOnWindowFocus: false });
   const openInvoices = (((invoicesQuery.data ?? []) as any[]).filter((i: any) => i.status !== "void" && i.status !== "paid"));
 
   const receiptCreateParams = useMemo(() => {
@@ -1053,6 +1065,7 @@ export function PaymentVouchersTab() {
     retry: false,
     enabled: canAccountingRead && !showCreate,
     staleTime: 30_000,
+    refetchInterval: false,
     refetchOnWindowFocus: false,
   });
   const dashboardQuery = useQuery({
@@ -1060,7 +1073,8 @@ export function PaymentVouchersTab() {
     queryFn: ({ signal }) => apiFetchJson("/payment-vouchers/dashboard", { signal }),
     retry: false,
     enabled: canAccountingRead && !showCreate,
-    staleTime: 30_000,
+    staleTime: 15_000,
+    refetchInterval: false,
     refetchOnWindowFocus: false,
   });
   const { data, isLoading } = vouchersQuery;
@@ -2340,8 +2354,11 @@ function LedgerTab() {
     queryKey: ["ledger", accountType],
     queryFn: () => apiFetchJson(`/ledger${accountType ? `?accountType=${accountType}` : ""}`),
     retry: false,
+    staleTime: 30_000,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
   });
-  const sumQuery = useQuery({ queryKey: ["ledger-summary"], queryFn: () => apiFetchJson("/ledger/summary"), retry: false });
+  const sumQuery = useQuery({ queryKey: ["ledger-summary"], queryFn: () => apiFetchJson("/ledger/summary"), retry: false, staleTime: 30_000, refetchInterval: false, refetchOnWindowFocus: false });
   const entries = ((ledgerQuery.data ?? []) as any[]);
   const summary = ((sumQuery.data ?? []) as any[]);
   const acctLabel = (acct: string) => acct === "balance_sheet" ? "Balance Sheet / FD" : acct === "client" ? "Client Account" : "Office Account";
