@@ -35,7 +35,7 @@ async function roleHasPermission(req: AuthRequest, module: string, action: strin
   return Boolean(rows[0]);
 }
 
-router.get("/cases/reference-search", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/payment-voucher-actions/cases/reference-search", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();
   const q = one((req.query as any).q)?.trim();
   if (!q || q.length < 2) {
