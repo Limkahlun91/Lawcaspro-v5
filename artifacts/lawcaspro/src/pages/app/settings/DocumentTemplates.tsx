@@ -1606,7 +1606,7 @@ export default function DocumentTemplates() {
               <div className="text-sm text-slate-500 py-6">Loading clauses...</div>
             ) : (
               <div className="space-y-2">
-                {ensureArray(clausesQuery.data).map((c) => (
+                {ensureArray<ClauseRow>(clausesQuery.data).map((c) => (
                   <div key={`${c.scope}-${c.id}`} className="rounded border bg-white p-2">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">

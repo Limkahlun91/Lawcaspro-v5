@@ -160,7 +160,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     queryKey: ["user-notifications", "summary"],
     queryFn: () =>
       apiFetchJson<{ unread: number; urgent: number; escalated: number; overdue: number; monitorUniqueCount?: number; overlap?: { criticalOverdue?: number; criticalEscalated?: number; overdueEscalated?: number; allThree?: number } }>("/user-notifications/summary").catch(
-        () => ({ unread: 0, urgent: 0, escalated: 0, overdue: 0 })
+        () => ({ unread: 0, urgent: 0, escalated: 0, overdue: 0, monitorUniqueCount: 0 })
       ),
     enabled: unreadEnabled && !!user && user.userType === "firm_user",
     refetchInterval: 45000,
@@ -168,7 +168,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     refetchOnWindowFocus: false,
     retry: false,
   });
-  const notifSummary = notifSummaryQuery.data ?? { unread: 0, urgent: 0, escalated: 0, overdue: 0 };
+  const notifSummary = notifSummaryQuery.data ?? { unread: 0, urgent: 0, escalated: 0, overdue: 0, monitorUniqueCount: 0 };
 
   const notifListQuery = useQuery({
     queryKey: ["user-notifications", "list", notifFilter],

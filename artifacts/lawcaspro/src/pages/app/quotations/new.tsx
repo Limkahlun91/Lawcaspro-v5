@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useLocation, useSearch } from "wouter";
-import { useCreateQuotation, getListQuotationsQueryKey, useListCases, useGetCase, getGetCaseQueryKey, useGetClient } from "@workspace/api-client-react";
+import { useCreateQuotation, getListQuotationsQueryKey, useListCases, useGetCase, getGetCaseQueryKey, useGetClient, getGetClientQueryKey } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -187,7 +187,7 @@ export default function NewQuotation() {
     const id = Number(primary?.clientId);
     return Number.isFinite(id) ? id : 0;
   })();
-  const { data: primaryClient } = useGetClient(primaryClientId, { query: { enabled: primaryClientId > 0, staleTime: 5 * 60 * 1000 } });
+  const { data: primaryClient } = useGetClient(primaryClientId, { query: { enabled: primaryClientId > 0, staleTime: 5 * 60 * 1000, queryKey: getGetClientQueryKey(primaryClientId) } });
 
   useEffect(() => {
     if (!primaryClient) return;
@@ -440,7 +440,6 @@ export default function NewQuotation() {
       {
         data: {
           referenceNo,
-          clientAddress: clientAddress || undefined,
           clientDetails: clientDetails
             .map((c) => ({ name: c.name.trim(), tin: c.tin.trim() || undefined }))
             .filter((c) => c.name),
@@ -449,9 +448,9 @@ export default function NewQuotation() {
           purchasePrice: purchasePrice || undefined,
           bankName: bankName || undefined,
           loanAmount: loanAmount || undefined,
-          taxRate,
           items: allItems,
-        },
+          ...({ clientAddress: clientAddress || undefined, taxRate } as any),
+        } as any,
       },
       {
         onSuccess: (data) => {

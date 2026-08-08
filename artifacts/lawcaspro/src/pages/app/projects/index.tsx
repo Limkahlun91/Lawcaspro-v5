@@ -1,4 +1,4 @@
-import { useListProjects, useListDevelopers } from "@workspace/api-client-react";
+import { useListProjects, useListDevelopers, getListProjectsQueryKey, getListDevelopersQueryKey } from "@workspace/api-client-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Plus, Search, Pencil } from "lucide-react";
@@ -21,9 +21,10 @@ export default function ProjectsList() {
     developerId: developerId !== "all" ? parseInt(developerId) : undefined,
     projectType: projectType !== "all" ? projectType : undefined,
     titleType: titleType !== "all" ? titleType : undefined,
-  }, { query: { staleTime: 5 * 60 * 1000 } });
+  }, { query: { staleTime: 5 * 60 * 1000, queryKey: getListProjectsQueryKey({ page: 1, limit: 50, search: search || undefined, developerId: developerId !== "all" ? parseInt(developerId) : undefined, projectType: projectType !== "all" ? projectType : undefined, titleType: titleType !== "all" ? titleType : undefined }) } });
 
-  const { data: devsRes } = useListDevelopers({ limit: 100 }, { query: { staleTime: 5 * 60 * 1000 } });
+  const listDevelopersParams = { limit: 100 };
+  const { data: devsRes } = useListDevelopers(listDevelopersParams, { query: { staleTime: 5 * 60 * 1000, queryKey: getListDevelopersQueryKey(listDevelopersParams) } });
   const developers = devsRes?.data || [];
   const projects = response?.data ?? [];
 

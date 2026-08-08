@@ -78,7 +78,12 @@ export default function CaseCommunicationTimelineTab(props: { caseId: number }) 
           <CardTitle className="text-sm">Payment Voucher Activity</CardTitle>
         </CardHeader>
         <CardContent>
-          <QueryFallback query={query}>
+          <QueryFallback
+            title={query.isError ? "Failed to load timeline" : undefined}
+            error={query.error}
+            onRetry={query.isError ? () => { void query.refetch(); } : undefined}
+            isRetrying={query.isFetching}
+          >
             <div className="space-y-2">
               {data.paymentEvents.length === 0 ? (
                 <div className="text-sm text-slate-500">No payment voucher activity linked to this case.</div>
@@ -123,7 +128,12 @@ export default function CaseCommunicationTimelineTab(props: { caseId: number }) 
           <CardTitle className="text-sm">Incoming / Outgoing Messages</CardTitle>
         </CardHeader>
         <CardContent>
-          <QueryFallback query={query}>
+          <QueryFallback
+            title={query.isError ? "Failed to load timeline" : undefined}
+            error={query.error}
+            onRetry={query.isError ? () => { void query.refetch(); } : undefined}
+            isRetrying={query.isFetching}
+          >
             <div className="space-y-2">
               {data.messages.length === 0 ? (
                 <div className="text-sm text-slate-500">No communication messages linked to this case.</div>
@@ -151,7 +161,12 @@ export default function CaseCommunicationTimelineTab(props: { caseId: number }) 
           <CardTitle className="text-sm">Case Tasks</CardTitle>
         </CardHeader>
         <CardContent>
-          <QueryFallback query={query}>
+          <QueryFallback
+            title={query.isError ? "Failed to load timeline" : undefined}
+            error={query.error}
+            onRetry={query.isError ? () => { void query.refetch(); } : undefined}
+            isRetrying={query.isFetching}
+          >
             <div className="space-y-2">
               {data.tasks.length === 0 ? (
                 <div className="text-sm text-slate-500">No communication tasks linked to this case.</div>

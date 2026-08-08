@@ -531,7 +531,7 @@ export default function AppDashboard() {
                 <CardTitle className="text-base">Partner Bottleneck Monitor</CardTitle>
                 {!monitorSummary.isLoading && (
                   ((monitorBottlenecks.data?.items?.length ?? 0) > 0) ? (
-                    <Badge variant="secondary" className="bg-slate-100 text-slate-700 text-xs">Top {monitorBottlenecks.data.items.length}</Badge>
+                    <Badge variant="secondary" className="bg-slate-100 text-slate-700 text-xs">Top {monitorBottlenecks.data?.items?.length ?? 0}</Badge>
                   ) : null
                 )}
               </div>
@@ -630,7 +630,7 @@ export default function AppDashboard() {
             <div className="flex items-center gap-2">
               <CardTitle className="text-base flex items-center gap-2"><FolderKey className="w-4 h-4 text-amber-600" /> File Custody Escalation</CardTitle>
               {!custodySummary.isLoading && (custodySummary.data?.out ?? 0) > 0 ? (
-                <Badge variant="secondary" className="bg-slate-100 text-slate-700 text-xs">{custodySummary.data.out} out</Badge>
+                <Badge variant="secondary" className="bg-slate-100 text-slate-700 text-xs">{custodySummary.data?.out ?? 0} out</Badge>
               ) : null}
             </div>
             <button

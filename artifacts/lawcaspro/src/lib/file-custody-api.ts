@@ -281,7 +281,7 @@ export async function createFileCustodyItem(
 ): Promise<{ ok: boolean; id: number; lifecycleStatus: FileCustodyStatus }> {
   return await apiFetchJson<{ ok: boolean; id: number; lifecycleStatus: FileCustodyStatus }>(
     `/api/file-custody/items`,
-    { method: "POST", body: payload },
+    { method: "POST", body: payload as unknown as BodyInit },
   );
 }
 
@@ -291,7 +291,7 @@ export async function patchFileCustodyItem(
 ): Promise<{ ok: boolean; id: number; version?: number }> {
   return await apiFetchJson<{ ok: boolean; id: number; version?: number }>(
     `/api/file-custody/items/${id}`,
-    { method: "PATCH", body: payload },
+    { method: "PATCH", body: payload as unknown as BodyInit },
   );
 }
 
@@ -300,7 +300,7 @@ export async function releaseCustody(
 ): Promise<{ ok: boolean; movementId: number; custodyItemId: number }> {
   return await apiFetchJson<{ ok: boolean; movementId: number; custodyItemId: number }>(
     `/api/file-custody/movements/release`,
-    { method: "POST", body: payload },
+    { method: "POST", body: payload as unknown as BodyInit },
   );
 }
 
@@ -319,7 +319,7 @@ export async function acknowledgeCustody(
     acknowledgeMovementId: number;
     acknowledgedAt: string;
     version?: number;
-  }>(`/api/file-custody/movements/acknowledge`, { method: "POST", body: payload });
+  }>(`/api/file-custody/movements/acknowledge`, { method: "POST", body: payload as unknown as BodyInit });
 }
 
 export async function requestReturnCustody(
@@ -337,7 +337,7 @@ export async function requestReturnCustody(
     custodyItemId: number;
     returnBy: string;
     version?: number;
-  }>(`/api/file-custody/movements/return_request`, { method: "POST", body: payload });
+  }>(`/api/file-custody/movements/return_request`, { method: "POST", body: payload as unknown as BodyInit });
 }
 
 export async function returnCustody(
@@ -355,7 +355,7 @@ export async function returnCustody(
     custodyItemId: number;
     returnMovementId: number;
     returnedAt: string;
-  }>(`/api/file-custody/movements/return`, { method: "POST", body: payload });
+  }>(`/api/file-custody/movements/return`, { method: "POST", body: payload as unknown as BodyInit });
 }
 
 export async function receiveReturnCustody(
@@ -373,7 +373,7 @@ export async function receiveReturnCustody(
     receiveReturnMovementId: number;
     custodyItemId: number;
     returnedAt: string;
-  }>(`/api/file-custody/movements/receive_return`, { method: "POST", body: payload });
+  }>(`/api/file-custody/movements/receive_return`, { method: "POST", body: payload as unknown as BodyInit });
 }
 
 export async function escalateCustody(
@@ -395,7 +395,7 @@ export async function escalateCustody(
     escalatedAt: string;
   }>(`/api/file-custody/movements/${payload.movementId}/escalate`, {
     method: "POST",
-    body: { targetPartnerUserId: payload.targetPartnerUserId, note: payload.note },
+    body: { targetPartnerUserId: payload.targetPartnerUserId, note: payload.note } as unknown as BodyInit,
   });
 }
 

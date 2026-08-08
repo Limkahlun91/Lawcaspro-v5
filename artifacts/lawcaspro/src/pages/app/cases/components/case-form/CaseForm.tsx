@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
 import { Plus, Trash2 } from "lucide-react";
-import { useListDevelopers, useListProjects } from "@workspace/api-client-react";
+import { useListDevelopers, useListProjects, getListDevelopersQueryKey, getListProjectsQueryKey } from "@workspace/api-client-react";
 import { AddressLinesFields } from "./AddressLinesFields";
 import { HistoryInput } from "./HistoryInput";
 import { PricingBreakdown } from "./PricingBreakdown";
@@ -149,9 +149,15 @@ export function CaseForm(props: {
   const [purchasePriceManuallyChanged, setPurchasePriceManuallyChanged] = useState(false);
   const [postcodeWarnings, setPostcodeWarnings] = useState<Record<string, string>>({});
 
-  const { data: projectsRes } = useListProjects({ limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
+  const listProjectsParamsCf = { limit: 200 };
+  const { data: projectsRes } = useListProjects(listProjectsParamsCf, {
+    query: { staleTime: 5 * 60 * 1000, queryKey: getListProjectsQueryKey(listProjectsParamsCf) },
+  });
   const projects = projectsRes?.data || [];
-  const { data: devsRes } = useListDevelopers({ limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
+  const listDevelopersParamsCf = { limit: 200 };
+  const { data: devsRes } = useListDevelopers(listDevelopersParamsCf, {
+    query: { staleTime: 5 * 60 * 1000, queryKey: getListDevelopersQueryKey(listDevelopersParamsCf) },
+  });
   const developers = devsRes?.data || [];
 
   const selectedProject = useMemo(() => {

@@ -173,15 +173,16 @@ const BlockIndent = Extension.create({
       },
     ];
   },
+  // @ts-expect-error tiptap RawCommands is too strict for custom extension commands
   addCommands() {
     const getTargetType = (editor: Editor) => (editor.isActive("heading") ? "heading" : "paragraph");
     return {
-      indentBlock: () => ({ editor, commands }) => {
+      indentBlock: () => ({ editor, commands }: any) => {
         const type = getTargetType(editor);
         const currentIndent = Number(editor.getAttributes(type).indent ?? 0);
         return commands.updateAttributes(type, { indent: Math.min(4, currentIndent + 1) });
       },
-      outdentBlock: () => ({ editor, commands }) => {
+      outdentBlock: () => ({ editor, commands }: any) => {
         const type = getTargetType(editor);
         const currentIndent = Number(editor.getAttributes(type).indent ?? 0);
         return commands.updateAttributes(type, { indent: Math.max(0, currentIndent - 1) });
@@ -378,7 +379,7 @@ function EditorToolbar({ editor, onInsertSignature }: { editor: Editor | null; o
               editor.chain().focus().sinkListItem("listItem").run();
               return;
             }
-            editor.chain().focus().indentBlock().run();
+            (editor.chain().focus() as any).indentBlock().run();
           }}
         >
           <IndentIncrease className="h-4 w-4" />
@@ -390,7 +391,7 @@ function EditorToolbar({ editor, onInsertSignature }: { editor: Editor | null; o
               editor.chain().focus().liftListItem("listItem").run();
               return;
             }
-            editor.chain().focus().outdentBlock().run();
+            (editor.chain().focus() as any).outdentBlock().run();
           }}
         >
           <IndentDecrease className="h-4 w-4" />
@@ -497,7 +498,7 @@ export function EmailComposeDialog({ open, mode, account, message, attachments, 
     setCcValue(mode === "replyAll" ? replyAllCc.join(", ") : "");
     setBccValue("");
     setSubject(formatComposeSubject(message.subject, mode));
-    editor?.commands.setContent(initialHtml, false);
+    editor?.commands.setContent(initialHtml, { emitUpdate: false } as any);
   }, [account, editor, initialHtml, message, mode, open]);
 
   const sendMutation = useMutation({
@@ -516,7 +517,7 @@ export function EmailComposeDialog({ open, mode, account, message, attachments, 
           bodyHtml,
           bodyText,
           attachments: [],
-        },
+        } as unknown as BodyInit,
       }) as Promise<SendResponse>;
     },
     onSuccess: (result) => {

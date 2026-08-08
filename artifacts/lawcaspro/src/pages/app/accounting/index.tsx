@@ -558,7 +558,7 @@ function InvoicesTab() {
 
   const bulkPrepareMut = useMutation({
     mutationFn: async (ids: number[]) => {
-      const results = [];
+      const results: Array<{ id: number; ok: boolean; data?: unknown; error?: string }> = [];
       for (const id of ids) {
         try { results.push({ id, ok: true, data: await apiFetchJson(`/invoices/${id}/einvoice/prepare`, { method: "POST" }) }); }
         catch (e: any) { results.push({ id, ok: false, error: e?.message ?? String(e) }); }
@@ -1154,8 +1154,17 @@ export function PaymentVouchersTab() {
 
   const todayLabel = new Date().toLocaleDateString("en-MY", { year: "numeric", month: "short", day: "2-digit" });
 
-  const [simpleForm, setSimpleForm] = useState({
-    voucherType: "external_payment" as const,
+  const [simpleForm, setSimpleForm] = useState<{
+    voucherType: "external_payment" | "internal_transfer" | "file_to_file_transfer";
+    payeeName: string;
+    beneficiaryBank: string;
+    beneficiaryAccountNo: string;
+    isAdvance: boolean;
+    responsibleLawyerId: string;
+    approvingPartnerId: string;
+    quotationId: string;
+  }>({
+    voucherType: "external_payment",
     payeeName: "",
     beneficiaryBank: "",
     beneficiaryAccountNo: "",
@@ -1215,6 +1224,8 @@ export function PaymentVouchersTab() {
   }, 0);
   const [selectedCases, setSelectedCases] = useState<SelectedCase[]>([]);
   const [caseSelectionError, setCaseSelectionError] = useState<string | null>(null);
+  const [caseQueryText, setCaseQueryText] = useState<string>("");
+  const [targetCaseQueryText, setTargetCaseQueryText] = useState<string>("");
   const [targetCase, setTargetCase] = useState<SelectedCase | null>(null);
   const [pendingCreateRequestIds, setPendingCreateRequestIds] = useState<string[]>([]);
   const [pendingCreatePhase, setPendingCreatePhase] = useState<PaymentVoucherPendingCreatePhase | null>(null);
@@ -2066,7 +2077,7 @@ export function PaymentVouchersTab() {
                   >
                     <option value="">— None —</option>
                     {(quotationsQuery.data ?? [])
-                      .filter((q) => selectedCases.length === 0 || selectedCases.some((c) => c.id === q.caseId))
+                      .filter((q) => selectedCases.length === 0 || selectedCases.some((c) => c.case_id === q.caseId))
                       .map((q) => (
                         <option key={`quot-${q.id}`} value={String(q.id)}>
                           Q-{q.id} · RM{(Number(q.totalAmount) || 0).toFixed(2)} · Case #{q.caseId}
@@ -2215,7 +2226,7 @@ export function PaymentVouchersTab() {
               ) : null}
 
               {preflightUnclaimedWarnings.length > 0 && !createSubmitUi.showCheckStatus ? (
-                <Alert variant="warning" className="bg-amber-50 border border-amber-200 text-amber-900">
+                <Alert variant="default" className="bg-amber-50 border border-amber-200 text-amber-900">
                   <AlertTriangle className="w-5 h-5 text-amber-600" />
                   <AlertTitle className="text-amber-900 font-semibold">Quotation Claim Check — Items Not Found</AlertTitle>
                   <AlertDescription className="text-amber-800 text-sm">
@@ -4165,7 +4176,7 @@ function SettingsTab() {
             <div>
               <Label className="mb-2 block">Roles</Label>
               <div className="space-y-2 max-h-[360px] overflow-y-auto pr-2">
-                {settingsQuery.data.roles.map((role) => (
+                {(settingsQuery.data?.roles ?? []).map((role) => (
                   <div key={role.id} className={cn("flex items-center justify-between gap-3 p-3 border rounded-md", role.suggestedAccountingRole && "bg-amber-50/40 border-amber-200")}>
                     <div>
                       <div className="text-sm font-medium text-slate-900 flex items-center gap-2">

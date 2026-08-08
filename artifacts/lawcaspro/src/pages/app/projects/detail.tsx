@@ -349,8 +349,8 @@ function ProjectDocumentsPanel(props: { projectId: number; category: "general" |
             </Button>
           </div>
 
-          {error && (
-            <QueryFallback title="Documents unavailable" error={error} onRetry={fetchDocs} isRetrying={loading} />
+          {!!error && (
+            <QueryFallback title="Documents unavailable" error={String(error)} onRetry={fetchDocs} isRetrying={loading} />
           )}
 
           <div className="border rounded-lg overflow-hidden">

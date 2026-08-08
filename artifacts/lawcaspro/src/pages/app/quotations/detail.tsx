@@ -202,35 +202,31 @@ export default function QuotationDetail() {
       status: quotation.status,
     });
     setEditItems(
-      (quotation.items || []).map((item: any, idx: number) => ({
-        ...((): Partial<LocalItem> => {
-          const decoded = decodeCategory(item.category || "");
-          const itemNoNum = Number.parseInt(String(item.itemNo ?? ""), 10);
-          const isCustom =
-            String(item.section ?? "") === "disbursement"
-              ? Boolean(item.subItemNo)
-              : String(item.section ?? "") === "fees"
-                ? (Number.isFinite(itemNoNum) && itemNoNum >= 27)
-                : false;
-          return {
-            category: decoded.base || "",
-            quantity: decoded.meta.quantity,
-            unitAmount: decoded.meta.unitAmount,
-            remarks: decoded.meta.remarks,
-            isCustom,
-          };
-        })(),
-        id: String(item.id || idx),
-        section: item.section,
-        itemNo: item.itemNo || "",
-        subItemNo: item.subItemNo || "",
-        description: item.description,
-        taxCode: item.taxCode,
-        itemCategory: item.itemCategory === "disbursement" ? "disbursement" : (item.section === "fees" ? "fee" : "disbursement"),
+      ((quotation as any)?.items || []).map((item: any, idx: number): LocalItem => ({
+        id: String(item.id ?? idx),
+        section: String(item.section ?? ""),
+        category: decodeCategory(item.category ?? "").base ?? "",
+        itemNo: String(item.itemNo ?? ""),
+        subItemNo: String(item.subItemNo ?? ""),
+        description: String(item.description ?? ""),
+        taxCode: String(item.taxCode ?? ""),
+        itemCategory: item.itemCategory === "fee" ? "fee" : "disbursement",
         amountExclTax: Number(item.amountExclTax) || 0,
         taxRate: currentTaxRate,
         taxAmount: Number(item.taxAmount) || 0,
         amountInclTax: Number(item.amountInclTax) || 0,
+        quantity: decodeCategory(item.category ?? "").meta.quantity,
+        unitAmount: decodeCategory(item.category ?? "").meta.unitAmount,
+        remarks: decodeCategory(item.category ?? "").meta.remarks,
+        isCustom: (() => {
+          const sectionRaw = String(item.section ?? "");
+          if (sectionRaw === "disbursement") return Boolean(item.subItemNo);
+          if (sectionRaw === "fees" || sectionRaw === "fee") {
+            const n = Number.parseInt(String(item.itemNo ?? ""), 10);
+            return Number.isFinite(n) && n >= 27;
+          }
+          return false;
+        })(),
       }))
     );
     setIsEditing(true);
@@ -501,20 +497,34 @@ export default function QuotationDetail() {
     String((quotation as any).clientTin ?? "")
   );
 
-  const items = isEditing ? editItems : (quotation.items || []).map((item: any, idx: number) => ({
-    id: String(item.id || idx),
-    section: item.section,
-    category: item.category || "",
-    itemNo: item.itemNo || "",
-    subItemNo: item.subItemNo || "",
-    description: item.description,
-    taxCode: item.taxCode,
-    itemCategory: item.itemCategory === "disbursement" ? "disbursement" : (item.section === "fees" ? "fee" : "disbursement"),
-    amountExclTax: Number(item.amountExclTax) || 0,
-    taxRate: Number(item.taxRate) || effectiveTaxRate,
-    taxAmount: Number(item.taxAmount) || 0,
-    amountInclTax: Number(item.amountInclTax) || 0,
-  }));
+  const items: LocalItem[] = isEditing
+    ? editItems
+    : ((quotation as any)?.items || []).map((item: any, idx: number): LocalItem => ({
+        id: String(item.id ?? idx),
+        section: String(item.section ?? ""),
+        category: decodeCategory(item.category ?? "").base ?? "",
+        itemNo: String(item.itemNo ?? ""),
+        subItemNo: String(item.subItemNo ?? ""),
+        description: String(item.description ?? ""),
+        taxCode: String(item.taxCode ?? ""),
+        itemCategory: item.itemCategory === "fee" ? "fee" : "disbursement",
+        amountExclTax: Number(item.amountExclTax) || 0,
+        taxRate: Number(item.taxRate) || effectiveTaxRate,
+        taxAmount: Number(item.taxAmount) || 0,
+        amountInclTax: Number(item.amountInclTax) || 0,
+        quantity: decodeCategory(item.category ?? "").meta.quantity,
+        unitAmount: decodeCategory(item.category ?? "").meta.unitAmount,
+        remarks: decodeCategory(item.category ?? "").meta.remarks,
+        isCustom: (() => {
+          const sectionRaw = String(item.section ?? "");
+          if (sectionRaw === "disbursement") return Boolean(item.subItemNo);
+          if (sectionRaw === "fees" || sectionRaw === "fee") {
+            const n = Number.parseInt(String(item.itemNo ?? ""), 10);
+            return Number.isFinite(n) && n >= 27;
+          }
+          return false;
+        })(),
+      }));
 
   const disbursementItems = items.filter((i: LocalItem) => i.section === "disbursement");
   const feesItems = items.filter((i: LocalItem) => i.section === "fees");

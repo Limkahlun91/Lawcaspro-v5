@@ -1,4 +1,4 @@
-import { CaseMilestoneKey, MilestonePresence, getListCasesQueryKey, useListCases, useListProjects } from "@workspace/api-client-react";
+import { CaseMilestoneKey, MilestonePresence, getListCasesQueryKey, useListCases, useListProjects, getListProjectsQueryKey } from "@workspace/api-client-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Download, Plus, Search } from "lucide-react";
@@ -105,7 +105,7 @@ export default function CasesList() {
   }>({
     queryKey: ["case-notifications", "unread-counts"],
     enabled: Boolean(user),
-    queryFn: () => apiFetchJson("/case-notifications/unread-counts").catch(() => ({
+    queryFn: () => apiFetchJson<{ totalUnreadCount: number; pendingApprovalUnreadCount: number; amendUnreadCount: number; approvedUnreadCount: number }>("/case-notifications/unread-counts").catch(() => ({
       totalUnreadCount: 0,
       pendingApprovalUnreadCount: 0,
       amendUnreadCount: 0,
@@ -114,8 +114,11 @@ export default function CasesList() {
     refetchInterval: 30000,
     retry: false,
   });
+  const notifCounts = notificationCountsQuery.data as
+    | { totalUnreadCount: number; pendingApprovalUnreadCount: number; amendUnreadCount: number; approvedUnreadCount: number }
+    | undefined;
 
-  const markReadMutation = useMutation({
+  const markReadMutation = useMutation<unknown, Error, { types: string[] }>({
     mutationFn: async (vars: { types: string[] }) => {
       return await apiFetchJson("/case-notifications/mark-read", {
         method: "POST",
@@ -267,30 +270,29 @@ export default function CasesList() {
     setLocation,
   ]);
 
-  const approvedQuery = useListCases(
-    {
-      page,
-      limit,
-      search: search || undefined,
-      projectId: projectId !== "all" ? Number(projectId) : undefined,
-      assignedLawyerId: lawyerId !== "all" ? parseInt(lawyerId) : undefined,
-      assignedClerkId: clerkId !== "all" ? parseInt(clerkId) : undefined,
-      assignedToUserId: assignedToUserId !== "all" ? parseInt(assignedToUserId) : undefined,
-      spaStatus: spaStatus !== "all" ? spaStatus : undefined,
-      loanStatus: loanStatus !== "all" ? loanStatus : undefined,
-      purchaseMode: purchaseMode !== "all" ? purchaseMode : undefined,
-      titleType: titleType !== "all" ? titleType : undefined,
-      milestone: milestoneFilter !== "all" ? milestoneFilter : undefined,
-      milestonePresence: milestoneFilter !== "all" ? milestonePresence : undefined,
+  const listCasesParams = {
+    page,
+    limit,
+    search: search || undefined,
+    projectId: projectId !== "all" ? Number(projectId) : undefined,
+    assignedLawyerId: lawyerId !== "all" ? parseInt(lawyerId) : undefined,
+    assignedClerkId: clerkId !== "all" ? parseInt(clerkId) : undefined,
+    assignedToUserId: assignedToUserId !== "all" ? parseInt(assignedToUserId) : undefined,
+    spaStatus: spaStatus !== "all" ? spaStatus : undefined,
+    loanStatus: loanStatus !== "all" ? loanStatus : undefined,
+    purchaseMode: purchaseMode !== "all" ? purchaseMode : undefined,
+    titleType: titleType !== "all" ? titleType : undefined,
+    milestone: milestoneFilter !== "all" ? milestoneFilter : undefined,
+    milestonePresence: milestoneFilter !== "all" ? milestonePresence : undefined,
+  };
+  const approvedQuery = useListCases(listCasesParams, {
+    query: {
+      retry: false,
+      staleTime: 10_000,
+      placeholderData: (prev) => prev,
+      queryKey: getListCasesQueryKey(listCasesParams),
     },
-    {
-      query: {
-        retry: false,
-        staleTime: 10_000,
-        placeholderData: (prev) => prev,
-      },
-    },
-  );
+  });
 
   const approvalListQuery = useQuery<{
     data: any[];
@@ -310,7 +312,8 @@ export default function CasesList() {
   });
 
   useEffect(() => {
-    if (!notificationCountsQuery.data) return;
+    const counts = notifCounts;
+    if (!counts) return;
     const types =
       approvalStatus === "pending_approval"
         ? ["OPEN_FILE_PENDING_APPROVAL"]
@@ -319,16 +322,16 @@ export default function CasesList() {
           : ["CASE_APPROVED", "REFERENCE_NO_CHANGED"];
     const count =
       approvalStatus === "pending_approval"
-        ? notificationCountsQuery.data.pendingApprovalUnreadCount
+        ? counts.pendingApprovalUnreadCount
         : approvalStatus === "rejected"
-          ? notificationCountsQuery.data.amendUnreadCount
-          : notificationCountsQuery.data.approvedUnreadCount;
+          ? counts.amendUnreadCount
+          : counts.approvedUnreadCount;
     if (count <= 0) return;
     const ready = approvalStatus === "approved" ? approvedQuery.isSuccess : approvalListQuery.isSuccess;
     if (!ready) return;
     if (markReadMutation.isPending) return;
     markReadMutation.mutate({ types });
-  }, [approvalListQuery.isSuccess, approvalStatus, approvedQuery.isSuccess, markReadMutation, notificationCountsQuery.data]);
+  }, [approvalListQuery.isSuccess, approvalStatus, approvedQuery.isSuccess, markReadMutation, notifCounts]);
 
   type CaseFilterOptionsResponse = {
     spaStatuses?: string[];
@@ -361,7 +364,10 @@ export default function CasesList() {
   const clerks: Array<{ id: number; name: string }> = Array.isArray(filterOptions?.assignees?.clerks) ? filterOptions.assignees.clerks : [];
   const milestoneOptions: Array<{ key: CaseMilestoneKey; label: string }> = Array.isArray(filterOptions?.milestones) ? filterOptions.milestones : [];
 
-  const { data: projectsRes } = useListProjects({ page: 1, limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
+  const listProjectsParamsCases = { page: 1 as const, limit: 200 as const };
+  const { data: projectsRes } = useListProjects(listProjectsParamsCases, {
+    query: { staleTime: 5 * 60 * 1000, queryKey: getListProjectsQueryKey(listProjectsParamsCases) },
+  });
   const projects = Array.isArray((projectsRes as any)?.data) ? ((projectsRes as any).data as any[]) : [];
 
   const lastApprovedRef = useRef<{ data: any[]; total: number; page: number; limit: number } | null>(null);
@@ -761,9 +767,9 @@ export default function CasesList() {
           <TabsTrigger value="pending_approval">
             <span className="flex items-center gap-2">
               Pending Approval
-              {(notificationCountsQuery.data?.pendingApprovalUnreadCount ?? 0) > 0 ? (
+              {(notifCounts?.pendingApprovalUnreadCount ?? 0) > 0 ? (
                 <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
-                  {notificationCountsQuery.data?.pendingApprovalUnreadCount ?? 0}
+                  {notifCounts?.pendingApprovalUnreadCount ?? 0}
                 </span>
               ) : null}
             </span>
@@ -771,9 +777,9 @@ export default function CasesList() {
           <TabsTrigger value="approved">
             <span className="flex items-center gap-2">
               Approved Cases
-              {(notificationCountsQuery.data?.approvedUnreadCount ?? 0) > 0 ? (
+              {(notifCounts?.approvedUnreadCount ?? 0) > 0 ? (
                 <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
-                  {notificationCountsQuery.data?.approvedUnreadCount ?? 0}
+                  {notifCounts?.approvedUnreadCount ?? 0}
                 </span>
               ) : null}
             </span>
@@ -781,9 +787,9 @@ export default function CasesList() {
           <TabsTrigger value="rejected">
             <span className="flex items-center gap-2">
               Case Details to Amend
-              {(notificationCountsQuery.data?.amendUnreadCount ?? 0) > 0 ? (
+              {(notifCounts?.amendUnreadCount ?? 0) > 0 ? (
                 <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
-                  {notificationCountsQuery.data?.amendUnreadCount ?? 0}
+                  {notifCounts?.amendUnreadCount ?? 0}
                 </span>
               ) : null}
             </span>

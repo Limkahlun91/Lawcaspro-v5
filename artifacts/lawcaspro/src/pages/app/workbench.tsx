@@ -190,7 +190,7 @@ export default function Workbench() {
     queryFn: async ({ signal }) => {
       const endpoint = `/cases/milestones-summary?assignedToUserId=${encodeURIComponent(String(milestonesTargetUserId))}`;
       try {
-        return await apiFetchJson(endpoint, { signal, timeoutMs: 30000 }) as Promise<Record<string, unknown>>;
+        return (await apiFetchJson(endpoint, { signal, timeoutMs: 30000 })) as unknown as Record<string, unknown>;
       } catch (err) {
         logSectionError({ section: "milestones-summary", queryKey: ["cases", "milestones-summary", milestonesTargetUserId], endpoint, err });
         throw err;

@@ -253,6 +253,7 @@ export default function PlatformDocuments() {
   const [uploading, setUploading] = useState(false);
   const [form, setForm] = useState({ name: "", description: "", category: "general" });
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [textUploadContent, setTextUploadContent] = useState<string>("");
 
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
@@ -470,7 +471,7 @@ export default function PlatformDocuments() {
     onError: (e) => toastError(toast, e, "Save variable failed"),
   });
   const varGroups = (() => {
-    const vars = ensureArray(varGroupsQuery.data);
+    const vars = ensureArray<DocumentVariableDefinition>(varGroupsQuery.data);
     const byGroup: Record<string, { group: string; vars: { key: string; label: string }[] }> = {};
     for (const v of vars) {
       const g = v.category || "other";
@@ -1700,7 +1701,7 @@ export default function PlatformDocuments() {
                       </tr>
                     </thead>
                     <tbody className="divide-y">
-                      {ensureArray(platformVariablesQuery.data)
+                      {ensureArray<DocumentVariableDefinition>(platformVariablesQuery.data)
                         .filter((v) => {
                           const q = variableSearch.trim().toLowerCase();
                           if (!q) return true;
@@ -1748,7 +1749,7 @@ export default function PlatformDocuments() {
                             </td>
                           </tr>
                         ))}
-                      {ensureArray(platformVariablesQuery.data).length === 0 ? (
+                      {ensureArray<DocumentVariableDefinition>(platformVariablesQuery.data).length === 0 ? (
                         <tr>
                           <td colSpan={9} className="px-3 py-10 text-center text-slate-500">No variables found.</td>
                         </tr>
@@ -1929,7 +1930,7 @@ export default function PlatformDocuments() {
               <div className="text-slate-500 text-sm py-6">Loading clauses...</div>
             ) : (
               <div className="space-y-2">
-                {ensureArray(platformClausesQuery.data).map((c) => (
+                {ensureArray<PlatformClauseRow>(platformClausesQuery.data).map((c) => (
                   <div key={c.id} className="rounded border bg-white p-2">
                     <div className="flex items-start justify-between gap-2">
                       <div className="min-w-0">
@@ -1958,7 +1959,7 @@ export default function PlatformDocuments() {
                     </div>
                   </div>
                 ))}
-                {ensureArray(platformClausesQuery.data).length === 0 ? <div className="text-sm text-slate-500 py-6">No clauses.</div> : null}
+                {ensureArray<PlatformClauseRow>(platformClausesQuery.data).length === 0 ? <div className="text-sm text-slate-500 py-6">No clauses.</div> : null}
               </div>
             )}
           </div>

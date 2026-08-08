@@ -226,7 +226,7 @@ export default function AccountingFileListing() {
   }>({
     queryKey: ["case-notifications", "unread-counts"],
     enabled: Boolean(user),
-    queryFn: () => apiFetchJson("/case-notifications/unread-counts").catch(() => ({
+    queryFn: () => apiFetchJson<{ totalUnreadCount: number; pendingApprovalUnreadCount: number; amendUnreadCount: number; approvedUnreadCount: number }>("/case-notifications/unread-counts").catch(() => ({
       totalUnreadCount: 0,
       pendingApprovalUnreadCount: 0,
       amendUnreadCount: 0,
@@ -235,8 +235,11 @@ export default function AccountingFileListing() {
     refetchInterval: 30000,
     retry: false,
   });
+  const notifCounts = notificationCountsQuery.data as
+    | { totalUnreadCount: number; pendingApprovalUnreadCount: number; amendUnreadCount: number; approvedUnreadCount: number }
+    | undefined;
 
-  const markReadMutation = useMutation({
+  const markReadMutation = useMutation<unknown, Error, { types: string[] }>({
     mutationFn: async (vars: { types: string[] }) => {
       return await apiFetchJson("/case-notifications/mark-read", {
         method: "POST",
@@ -249,7 +252,8 @@ export default function AccountingFileListing() {
   });
 
   useEffect(() => {
-    if (!notificationCountsQuery.data) return;
+    const counts = notifCounts;
+    if (!counts) return;
     const types =
       status === "pending_approval"
         ? ["OPEN_FILE_PENDING_APPROVAL"]
@@ -258,16 +262,16 @@ export default function AccountingFileListing() {
           : ["CASE_APPROVED", "REFERENCE_NO_CHANGED"];
     const count =
       status === "pending_approval"
-        ? notificationCountsQuery.data.pendingApprovalUnreadCount
+        ? counts.pendingApprovalUnreadCount
         : status === "rejected"
-          ? notificationCountsQuery.data.amendUnreadCount
-          : notificationCountsQuery.data.approvedUnreadCount;
+          ? counts.amendUnreadCount
+          : counts.approvedUnreadCount;
     if (count <= 0) return;
     const ready = status === "approved" ? approvedFilesQuery.isSuccess : listQuery.isSuccess;
     if (!ready) return;
     if (markReadMutation.isPending) return;
     markReadMutation.mutate({ types });
-  }, [approvedFilesQuery.isSuccess, listQuery.isSuccess, markReadMutation, notificationCountsQuery.data, status]);
+  }, [approvedFilesQuery.isSuccess, listQuery.isSuccess, markReadMutation, notifCounts, status]);
 
   const debouncedReferenceNo = useDebouncedValue(reviewReferenceNo, 250).trim();
   const referenceSuggestionsQuery = useQuery<{
@@ -399,9 +403,9 @@ export default function AccountingFileListing() {
           <TabsTrigger value="pending_approval">
             <span className="flex items-center gap-2">
               Open File Pending Approval
-              {(notificationCountsQuery.data?.pendingApprovalUnreadCount ?? 0) > 0 ? (
+              {(notifCounts?.pendingApprovalUnreadCount ?? 0) > 0 ? (
                 <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
-                  {notificationCountsQuery.data?.pendingApprovalUnreadCount ?? 0}
+                  {notifCounts?.pendingApprovalUnreadCount ?? 0}
                 </span>
               ) : null}
             </span>
@@ -409,9 +413,9 @@ export default function AccountingFileListing() {
           <TabsTrigger value="rejected">
             <span className="flex items-center gap-2">
               Case Details to Amend
-              {(notificationCountsQuery.data?.amendUnreadCount ?? 0) > 0 ? (
+              {(notifCounts?.amendUnreadCount ?? 0) > 0 ? (
                 <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
-                  {notificationCountsQuery.data?.amendUnreadCount ?? 0}
+                  {notifCounts?.amendUnreadCount ?? 0}
                 </span>
               ) : null}
             </span>
@@ -419,9 +423,9 @@ export default function AccountingFileListing() {
           <TabsTrigger value="approved">
             <span className="flex items-center gap-2">
               Approved Files
-              {(notificationCountsQuery.data?.approvedUnreadCount ?? 0) > 0 ? (
+              {(notifCounts?.approvedUnreadCount ?? 0) > 0 ? (
                 <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
-                  {notificationCountsQuery.data?.approvedUnreadCount ?? 0}
+                  {notifCounts?.approvedUnreadCount ?? 0}
                 </span>
               ) : null}
             </span>

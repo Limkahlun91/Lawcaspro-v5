@@ -665,7 +665,7 @@ export default function EmailControlCenterPage() {
   }, [mailboxes, manualForm.mailboxId]);
 
   const manualEmailMutation = useMutation({
-    mutationFn: () => apiFetchJson("/communication/messages/manual-email", {
+    mutationFn: () => apiFetchJson<{ id: number }>("/communication/messages/manual-email", {
       method: "POST",
       body: {
         mailboxId: manualForm.mailboxId ? parseInt(manualForm.mailboxId, 10) : undefined,
@@ -684,7 +684,7 @@ export default function EmailControlCenterPage() {
           reviewerUserId: manualForm.reviewerUserId ? parseInt(manualForm.reviewerUserId, 10) : null,
           watcherUserIds: manualForm.watcherUserIds.map((v) => parseInt(v, 10)).filter((n) => Number.isFinite(n)),
         },
-      },
+      } as unknown as BodyInit,
     }),
     onSuccess: (created) => {
       setShowManualEmail(false);
@@ -712,7 +712,7 @@ export default function EmailControlCenterPage() {
   });
 
   const recordMessageOpenedMutation = useMutation({
-    mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/read`, { method: "POST", body: {} }),
+    mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/read`, { method: "POST", body: {} as unknown as BodyInit }),
     onSuccess: (_r, messageId) => {
       qc.invalidateQueries({ queryKey: ["communication", "messages"] });
       qc.invalidateQueries({ queryKey: ["communication", "message", messageId, "reads"] });
@@ -723,7 +723,7 @@ export default function EmailControlCenterPage() {
 
   const linkMessageCaseMutation = useMutation({
     mutationFn: (args: { messageId: number; caseId?: number | null; caseRef?: string | null }) =>
-      apiFetchJson(`/communication/messages/${args.messageId}/link-case`, { method: "PATCH", body: { caseId: args.caseId ?? null, caseRef: args.caseRef ?? null } }),
+      apiFetchJson(`/communication/messages/${args.messageId}/link-case`, { method: "PATCH", body: { caseId: args.caseId ?? null, caseRef: args.caseRef ?? null } as unknown as BodyInit }),
     onSuccess: (_r, args) => {
       setLinkCaseError("");
       setLinkCaseRef("");
@@ -752,7 +752,7 @@ export default function EmailControlCenterPage() {
 
   const archiveMessageMutation = useMutation({
     mutationFn: (args: { messageId: number; archived: boolean }) =>
-      apiFetchJson(`/communication/messages/${args.messageId}/archive`, { method: "PATCH", body: { archived: args.archived } }),
+      apiFetchJson(`/communication/messages/${args.messageId}/archive`, { method: "PATCH", body: { archived: args.archived } as unknown as BodyInit }),
     onSuccess: (_r, args) => {
       qc.invalidateQueries({ queryKey: ["communication", "messages"] });
       qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId] });
@@ -764,7 +764,7 @@ export default function EmailControlCenterPage() {
 
   const readStatusMutation = useMutation({
     mutationFn: (args: { messageId: number; isRead: boolean }) =>
-      apiFetchJson(`/communication/messages/${args.messageId}/read-status`, { method: "PATCH", body: { isRead: args.isRead } }),
+      apiFetchJson(`/communication/messages/${args.messageId}/read-status`, { method: "PATCH", body: { isRead: args.isRead } as unknown as BodyInit }),
     onMutate: async (args) => {
       setReadOverrides((prev) => ({ ...prev, [args.messageId]: args.isRead }));
       const previousQueries = qc.getQueriesData<MessageRow[]>({ queryKey: ["communication", "messages"] });
@@ -794,7 +794,7 @@ export default function EmailControlCenterPage() {
 
   const assigneesMutation = useMutation({
     mutationFn: (args: { messageId: number; userIds: number[] }) =>
-      apiFetchJson(`/communication/messages/${args.messageId}/assignees`, { method: "PATCH", body: { userIds: args.userIds } }),
+      apiFetchJson(`/communication/messages/${args.messageId}/assignees`, { method: "PATCH", body: { userIds: args.userIds } as unknown as BodyInit }),
     onSuccess: (_r, args) => {
       setAssigneesDialogOpen(false);
       qc.invalidateQueries({ queryKey: ["communication", "messages"] });
@@ -808,7 +808,7 @@ export default function EmailControlCenterPage() {
 
   const createRemarkMutation = useMutation({
     mutationFn: (args: { messageId: number; body: string }) =>
-      apiFetchJson(`/communication/messages/${args.messageId}/remarks`, { method: "POST", body: { body: args.body } }),
+      apiFetchJson(`/communication/messages/${args.messageId}/remarks`, { method: "POST", body: { body: args.body } as unknown as BodyInit }),
     onSuccess: (_r, args) => {
       setNewRemarkBody("");
       qc.invalidateQueries({ queryKey: ["communication", "message", args.messageId, "remarks"] });
@@ -819,7 +819,7 @@ export default function EmailControlCenterPage() {
 
   const updateRemarkMutation = useMutation({
     mutationFn: (args: { remarkId: number; body: string }) =>
-      apiFetchJson(`/communication/remarks/${args.remarkId}`, { method: "PATCH", body: { body: args.body } }),
+      apiFetchJson(`/communication/remarks/${args.remarkId}`, { method: "PATCH", body: { body: args.body } as unknown as BodyInit }),
     onSuccess: () => {
       setEditingRemarkId(null);
       setEditingRemarkBody("");
@@ -848,25 +848,25 @@ export default function EmailControlCenterPage() {
   });
 
   const taskAcknowledgeMutation = useMutation({
-    mutationFn: (taskId: number) => apiFetchJson(`/communication/tasks/${taskId}/acknowledge`, { method: "PATCH", body: {} }),
+    mutationFn: (taskId: number) => apiFetchJson(`/communication/tasks/${taskId}/acknowledge`, { method: "PATCH", body: {} as unknown as BodyInit }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "tasks"] }),
     onError: (e) => toastError(toast, e),
   });
 
   const taskStatusMutation = useMutation({
-    mutationFn: (args: { taskId: number; taskStatus: string }) => apiFetchJson(`/communication/tasks/${args.taskId}/status`, { method: "PATCH", body: { taskStatus: args.taskStatus } }),
+    mutationFn: (args: { taskId: number; taskStatus: string }) => apiFetchJson(`/communication/tasks/${args.taskId}/status`, { method: "PATCH", body: { taskStatus: args.taskStatus } as unknown as BodyInit }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "tasks"] }),
     onError: (e) => toastError(toast, e),
   });
 
   const taskReplyNoteMutation = useMutation({
-    mutationFn: (args: { taskId: number; replyNote: string }) => apiFetchJson(`/communication/tasks/${args.taskId}/reply-note`, { method: "PATCH", body: { replyNote: args.replyNote } }),
+    mutationFn: (args: { taskId: number; replyNote: string }) => apiFetchJson(`/communication/tasks/${args.taskId}/reply-note`, { method: "PATCH", body: { replyNote: args.replyNote } as unknown as BodyInit }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "tasks"] }),
     onError: (e) => toastError(toast, e),
   });
 
   const taskLinkCaseMutation = useMutation({
-    mutationFn: (args: { taskId: number; caseRef: string }) => apiFetchJson(`/communication/tasks/${args.taskId}/link-case`, { method: "PATCH", body: { caseRef: args.caseRef } }),
+    mutationFn: (args: { taskId: number; caseRef: string }) => apiFetchJson(`/communication/tasks/${args.taskId}/link-case`, { method: "PATCH", body: { caseRef: args.caseRef } as unknown as BodyInit }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "message", selectedMessageId, "tasks"] }),
     onError: (e) => toastError(toast, e),
   });
@@ -875,7 +875,7 @@ export default function EmailControlCenterPage() {
 
   const createDraftMutation = useMutation({
     mutationFn: (args: { type: "consolidated" | "partial"; parentMessageId: number; taskIds: number[]; to: string; cc: string; subject: string }) =>
-      apiFetchJson(`/communication/drafts/${args.type}`, {
+      apiFetchJson<{ id: number }>(`/communication/drafts/${args.type}`, {
         method: "POST",
         body: {
           parentMessageId: args.parentMessageId,
@@ -884,7 +884,7 @@ export default function EmailControlCenterPage() {
           cc: splitCommaList(args.cc),
           bcc: [],
           subject: args.subject,
-        },
+        } as unknown as BodyInit,
       }),
     onSuccess: async (draft) => {
       qc.invalidateQueries({ queryKey: ["communication", "drafts"] });
@@ -893,7 +893,7 @@ export default function EmailControlCenterPage() {
         setSelectedDraftId(draft.id);
         setView("drafts_pending_approval");
         try {
-          await apiFetchJson(`/communication/drafts/${draft.id}/submit-approval`, { method: "POST", body: {} });
+          await apiFetchJson(`/communication/drafts/${draft.id}/submit-approval`, { method: "POST", body: {} as unknown as BodyInit });
           qc.invalidateQueries({ queryKey: ["communication", "drafts", "pending"] });
           qc.invalidateQueries({ queryKey: ["communication", "draft", draft.id] });
         } catch (e) {
@@ -905,13 +905,13 @@ export default function EmailControlCenterPage() {
   });
 
   const submitDraftMutation = useMutation({
-    mutationFn: (draftId: number) => apiFetchJson(`/communication/drafts/${draftId}/submit-approval`, { method: "POST", body: {} }),
+    mutationFn: (draftId: number) => apiFetchJson(`/communication/drafts/${draftId}/submit-approval`, { method: "POST", body: {} as unknown as BodyInit }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "drafts"] }),
     onError: (e) => toastError(toast, e),
   });
 
   const approveDraftMutation = useMutation({
-    mutationFn: (draftId: number) => apiFetchJson(`/communication/drafts/${draftId}/approve`, { method: "POST", body: {} }),
+    mutationFn: (draftId: number) => apiFetchJson(`/communication/drafts/${draftId}/approve`, { method: "POST", body: {} as unknown as BodyInit }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["communication", "drafts"] });
       qc.invalidateQueries({ queryKey: ["communication", "drafts", "pending"] });
@@ -921,7 +921,7 @@ export default function EmailControlCenterPage() {
   });
 
   const markSentMutation = useMutation({
-    mutationFn: (draftId: number) => apiFetchJson(`/communication/drafts/${draftId}/mark-sent`, { method: "POST", body: {} }),
+    mutationFn: (draftId: number) => apiFetchJson(`/communication/drafts/${draftId}/mark-sent`, { method: "POST", body: {} as unknown as BodyInit }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["communication", "drafts"] });
       qc.invalidateQueries({ queryKey: ["communication", "drafts", "pending"] });
@@ -933,7 +933,7 @@ export default function EmailControlCenterPage() {
   });
 
   const cancelDraftMutation = useMutation({
-    mutationFn: (draftId: number) => apiFetchJson(`/communication/drafts/${draftId}/cancel`, { method: "POST", body: {} }),
+    mutationFn: (draftId: number) => apiFetchJson(`/communication/drafts/${draftId}/cancel`, { method: "POST", body: {} as unknown as BodyInit }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["communication", "drafts"] }),
     onError: (e) => toastError(toast, e),
   });
@@ -1031,7 +1031,7 @@ export default function EmailControlCenterPage() {
           cc: splitCommaList(draftEditForm.cc),
           subject: draftEditForm.subject,
           bodyText: draftEditForm.bodyText,
-        },
+        } as unknown as BodyInit,
       });
     },
     onSuccess: () => {

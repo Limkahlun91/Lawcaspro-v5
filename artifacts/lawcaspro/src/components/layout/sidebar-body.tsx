@@ -62,8 +62,7 @@ export function navGroupsForUser(): Array<{
       items: [
         { label: "Documents", href: "/app/documents", icon: FileText, perm: ["documents", "read"] as const },
         { label: "Doc Automation", href: "/app/documents/automation", icon: FileText, perm: ["documents", "read"] as const },
-        { label: "Variable Dictionary", href: "/app/documents/variables", icon: FileText, perm: ["documents", "read"] as const },
-        { label: "Custom Dictionary", href: "/app/documents/custom-variables", icon: FileText, perm: ["documents", "read"] as const },
+        { label: "Variables", href: "/app/documents/variables", icon: FileText, perm: ["documents", "read"] as const },
       ],
     },
     {
@@ -73,8 +72,7 @@ export function navGroupsForUser(): Array<{
         { label: "Settings", href: "/app/settings", icon: Settings, perm: ["settings", "read"] as const },
         { label: "Accounting Settings", href: "/app/settings/accounting", icon: Settings, perm: ["accounting", "read"] as const },
         { label: "Email Settings", href: "/app/settings/email", icon: Settings, perm: ["communications", "read"] as const },
-        { label: "Audit Logs", href: "/app/audit-logs", icon: ScrollText, perm: ["audit", "read"] as const },
-        { label: "Doc Gen Logs", href: "/app/documents/generation-logs", icon: ScrollText, perm: ["audit", "read"] as const },
+        { label: "Logs", href: "/app/settings/logs", icon: ScrollText, perm: ["audit", "read"] as const },
       ],
     },
   ];

@@ -1,4 +1,4 @@
-import { useListUsers } from "@workspace/api-client-react";
+import { useListUsers, getListUsersQueryKey } from "@workspace/api-client-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Plus, Search } from "lucide-react";
@@ -10,11 +10,10 @@ import { listItems } from "@/lib/list-items";
 export default function UsersList() {
   const [search, setSearch] = useState("");
   
-  const { data: response, isLoading } = useListUsers({ 
-    page: 1, 
-    limit: 50,
-    search: search || undefined
-  }, { query: { staleTime: 5 * 60 * 1000 } });
+  const listUsersParamsApp = { page: 1 as const, limit: 50 as const, search: search || undefined };
+  const { data: response, isLoading } = useListUsers(listUsersParamsApp, {
+    query: { staleTime: 5 * 60 * 1000, queryKey: getListUsersQueryKey(listUsersParamsApp) },
+  });
 
   const items = listItems<any>(response);
 

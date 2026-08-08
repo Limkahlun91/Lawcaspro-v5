@@ -778,28 +778,49 @@ function sanitizePathSegment(v: string): string {
   );
 }
 
+type DocGenLogAction =
+  | "download" | "print"
+  | "DOCUMENT_GENERATION_STARTED"
+  | "DOCUMENT_GENERATION_SUCCEEDED"
+  | "DOCUMENT_GENERATION_FAILED"
+  | "DOCUMENT_GENERATION_PARTIAL"
+  | "DOCUMENT_ZIP_CREATED"
+  | "DOCUMENT_ZIP_DOWNLOAD_SUCCEEDED"
+  | "DOCUMENT_ZIP_DOWNLOAD_FAILED"
+  | "DOCUMENT_SYSTEM_PRINT_PREPARED"
+  | "DOCUMENT_SYSTEM_PRINT_FAILED";
+
 async function writeDocumentGenerationLog(
   r: DbConn,
   args: {
     firmId: number;
     userId: number | null;
-    actionType: "download" | "print";
+    actionType: DocGenLogAction;
     caseIds: number[];
-    generatedFiles: Array<{
+    generatedFiles?: Array<{
       caseId: number;
       templateId: number;
       fileName: string;
       objectPath: string;
     }>;
+    fileNames?: string[];
+    jobId?: string | null;
+    errorCode?: string | null;
+    errorMessage?: string | null;
     printCopies?: number | null;
+    printSettings?: unknown;
     ipAddress?: string | undefined;
     userAgent?: string | undefined;
+    requestId?: string | null;
   },
 ): Promise<void> {
   try {
     const exists = await tableExists(r, "public.document_generation_logs");
     if (!exists) return;
-    const fileNames = args.generatedFiles.map((f) => f.fileName);
+    const generatedFiles = Array.isArray(args.generatedFiles) ? args.generatedFiles : [];
+    const fileNames = Array.isArray(args.fileNames) && args.fileNames.length
+      ? args.fileNames
+      : generatedFiles.map((f) => f.fileName);
     let rows: Record<string, unknown>[];
     try {
       rows = await queryRows(
@@ -808,7 +829,8 @@ async function writeDocumentGenerationLog(
         INSERT INTO document_generation_logs (
           firm_id, user_id, case_id, action_type, file_names,
           case_ids, generated_files, print_copies, ip_address, user_agent,
-          copies_configured, created_at
+          copies_configured, job_id, error_code, error_message,
+          print_settings, request_id, created_at
         )
         VALUES (
           ${args.firmId},
@@ -817,36 +839,70 @@ async function writeDocumentGenerationLog(
           ${args.actionType},
           ${fileNames as any},
           ${args.caseIds as any},
-          ${args.generatedFiles as any},
+          ${generatedFiles as any},
           ${args.printCopies ?? null},
           ${args.ipAddress ?? null},
           ${(args.userAgent ?? null) as any},
           ${args.printCopies ?? null},
+          ${args.jobId ?? null},
+          ${args.errorCode ?? null},
+          ${args.errorMessage ?? null},
+          ${args.printSettings != null ? (JSON.stringify(args.printSettings) as any) : null},
+          ${args.requestId ?? null},
           now()
         )
         RETURNING id
       `,
       );
     } catch {
-      rows = await queryRows(
-        r,
-        sql`
-        INSERT INTO document_generation_logs (
-          firm_id, user_id, case_id, action_type, file_names,
-          copies_configured, created_at
-        )
-        VALUES (
-          ${args.firmId},
-          ${args.userId ?? null},
-          ${args.caseIds.length === 1 ? args.caseIds[0] : null},
-          ${args.actionType},
-          ${fileNames as any},
-          ${args.printCopies ?? null},
-          now()
-        )
-        RETURNING id
-      `,
-      );
+      try {
+        rows = await queryRows(
+          r,
+          sql`
+          INSERT INTO document_generation_logs (
+            firm_id, user_id, case_id, action_type, file_names,
+            case_ids, generated_files, print_copies, ip_address, user_agent,
+            copies_configured, job_id, created_at
+          )
+          VALUES (
+            ${args.firmId},
+            ${args.userId ?? null},
+            ${args.caseIds.length === 1 ? args.caseIds[0] : null},
+            ${args.actionType},
+            ${fileNames as any},
+            ${args.caseIds as any},
+            ${generatedFiles as any},
+            ${args.printCopies ?? null},
+            ${args.ipAddress ?? null},
+            ${(args.userAgent ?? null) as any},
+            ${args.printCopies ?? null},
+            ${args.jobId ?? null},
+            now()
+          )
+          RETURNING id
+        `,
+        );
+      } catch {
+        rows = await queryRows(
+          r,
+          sql`
+          INSERT INTO document_generation_logs (
+            firm_id, user_id, case_id, action_type, file_names,
+            copies_configured, created_at
+          )
+          VALUES (
+            ${args.firmId},
+            ${args.userId ?? null},
+            ${args.caseIds.length === 1 ? args.caseIds[0] : null},
+            ${args.actionType},
+            ${fileNames as any},
+            ${args.printCopies ?? null},
+            now()
+          )
+          RETURNING id
+        `,
+        );
+      }
     }
     const logId =
       typeof (rows[0] as any)?.id === "number"
@@ -857,16 +913,17 @@ async function writeDocumentGenerationLog(
       r,
       "public.document_generation_log_cases",
     );
-    if (!casesExists) return;
-    for (const caseId of args.caseIds) {
-      await queryRows(
-        r,
-        sql`
-        INSERT INTO document_generation_log_cases (firm_id, log_id, case_id)
-        VALUES (${args.firmId}, ${logId}::bigint, ${caseId})
-        ON CONFLICT DO NOTHING
-      `,
-      );
+    if (casesExists) {
+      for (const caseId of args.caseIds) {
+        await queryRows(
+          r,
+          sql`
+          INSERT INTO document_generation_log_cases (firm_id, log_id, case_id)
+          VALUES (${args.firmId}, ${logId}::bigint, ${caseId})
+          ON CONFLICT DO NOTHING
+        `,
+        );
+      }
     }
   } catch (err) {
     logger.error(
@@ -875,6 +932,7 @@ async function writeDocumentGenerationLog(
         firmId: args.firmId,
         userId: args.userId,
         actionType: args.actionType,
+        jobId: args.jobId ?? null,
       },
       "[documents] document_generation_logs.write_failed",
     );
@@ -14644,6 +14702,24 @@ router.post(
       userAgent: req.headers["user-agent"],
     });
 
+    try {
+      await writeDocumentGenerationLog(r, {
+        firmId: req.firmId!,
+        userId: req.userId ?? null,
+        actionType: "DOCUMENT_GENERATION_STARTED",
+        caseIds,
+        jobId,
+        requestId:
+          one(req.headers["x-request-id"] as any) ||
+          one(req.headers["x-vercel-id"] as any) ||
+          undefined,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+    } catch {
+      // logging failure must not break enqueue
+    }
+
     res.status(202).json({
       ok: true,
       status: "queued",
@@ -16347,6 +16423,39 @@ async function finalizeDocGenJobIfDone(
     );
   }
 
+  {
+    const actionType: DocGenLogAction =
+      finalStatus === "completed"
+        ? "DOCUMENT_GENERATION_SUCCEEDED"
+        : finalStatus === "completed_with_errors"
+          ? "DOCUMENT_GENERATION_PARTIAL"
+          : "DOCUMENT_GENERATION_FAILED";
+    const caseIdsRaw = job?.case_ids;
+    const caseIds = Array.isArray(caseIdsRaw)
+      ? caseIdsRaw
+          .map((x) => (typeof x === "number" ? x : Number.parseInt(String(x ?? ""), 10)))
+          .filter((x) => Number.isFinite(x))
+          .map((x) => Math.trunc(x))
+          .filter((x) => x > 0)
+      : [];
+    const userId =
+      typeof (job as any)?.user_id === "number"
+        ? Number((job as any).user_id)
+        : null;
+    try {
+      await writeDocumentGenerationLog(r, {
+        firmId: args.firmId,
+        userId,
+        actionType,
+        caseIds,
+        jobId: args.jobId,
+        requestId: null,
+      });
+    } catch {
+      // logging failure must not break user-visible flow
+    }
+  }
+
   return {
     finalized: true,
     status: statusToSet,
@@ -16513,6 +16622,33 @@ async function ensureDocGenJobDownloadObject(
         "[documents] job print finalized",
       );
     } catch {}
+    {
+      const caseIdsRaw = job?.case_ids;
+      const caseIds = Array.isArray(caseIdsRaw)
+        ? caseIdsRaw
+            .map((x) => (typeof x === "number" ? x : Number.parseInt(String(x ?? ""), 10)))
+            .filter((x) => Number.isFinite(x))
+            .map((x) => Math.trunc(x))
+            .filter((x) => x > 0)
+        : [];
+      const userId =
+        typeof (job as any)?.user_id === "number"
+          ? Number((job as any).user_id)
+          : null;
+      try {
+        await writeDocumentGenerationLog(r, {
+          firmId: args.firmId,
+          userId,
+          actionType: "DOCUMENT_SYSTEM_PRINT_PREPARED",
+          caseIds,
+          jobId: args.jobId,
+          fileNames: [outName],
+          printCopies: 1,
+          printSettings: { merged: true, count: successItems.length },
+          requestId: null,
+        });
+      } catch {}
+    }
     return {
       downloadObjectPath: objectPath,
       downloadFileName: outName,
@@ -16766,6 +16902,32 @@ async function ensureDocGenJobDownloadObject(
       "[documents] job zip finalized",
     );
   } catch {}
+
+  {
+    const caseIdsRaw = job?.case_ids;
+    const caseIds = Array.isArray(caseIdsRaw)
+      ? caseIdsRaw
+          .map((x) => (typeof x === "number" ? x : Number.parseInt(String(x ?? ""), 10)))
+          .filter((x) => Number.isFinite(x))
+          .map((x) => Math.trunc(x))
+          .filter((x) => x > 0)
+      : [];
+    const userId =
+      typeof (job as any)?.user_id === "number"
+        ? Number((job as any).user_id)
+        : null;
+    try {
+      await writeDocumentGenerationLog(r, {
+        firmId: args.firmId,
+        userId,
+        actionType: "DOCUMENT_ZIP_CREATED",
+        caseIds,
+        jobId: args.jobId,
+        fileNames: [zipFileName],
+        requestId: null,
+      });
+    } catch {}
+  }
 
   return {
     downloadObjectPath: objectPath,
@@ -21883,13 +22045,58 @@ router.get(
         typeof (job as any).download_mime_type === "string"
           ? String((job as any).download_mime_type)
           : "application/zip";
-      await streamSupabasePrivateObjectToResponse({
-        objectPath,
-        res,
-        fileName,
-        fallbackContentType,
-        timeoutMs: 60_000,
-      });
+      const caseIdsRaw = (job as any).case_ids;
+      const caseIdsForLog: number[] = Array.isArray(caseIdsRaw)
+        ? caseIdsRaw
+            .map((x) => (typeof x === "number" ? x : Number.parseInt(String(x ?? ""), 10)))
+            .filter((x) => Number.isFinite(x))
+            .map((x) => Math.trunc(x))
+            .filter((x) => x > 0)
+        : [];
+      let downloadOk = false;
+      try {
+        await streamSupabasePrivateObjectToResponse({
+          objectPath,
+          res,
+          fileName,
+          fallbackContentType,
+          timeoutMs: 60_000,
+        });
+        downloadOk = true;
+      } catch (innerErr) {
+        try {
+          await writeDocumentGenerationLog(r, {
+            firmId: req.firmId!,
+            userId: req.userId ?? null,
+            actionType: "DOCUMENT_ZIP_DOWNLOAD_FAILED",
+            caseIds: caseIdsForLog,
+            jobId,
+            fileNames: [fileName],
+            errorCode: "STREAM_FAILED",
+            errorMessage:
+              innerErr instanceof Error ? innerErr.message : String(innerErr ?? ""),
+            ipAddress: req.ip,
+            userAgent: req.headers["user-agent"],
+            requestId,
+          });
+        } catch {}
+        throw innerErr;
+      }
+      if (downloadOk) {
+        try {
+          await writeDocumentGenerationLog(r, {
+            firmId: req.firmId!,
+            userId: req.userId ?? null,
+            actionType: "DOCUMENT_ZIP_DOWNLOAD_SUCCEEDED",
+            caseIds: caseIdsForLog,
+            jobId,
+            fileNames: [fileName],
+            ipAddress: req.ip,
+            userAgent: req.headers["user-agent"],
+            requestId,
+          });
+        } catch {}
+      }
       await writeAuditLog({
         firmId: req.firmId,
         actorId: req.userId,
@@ -21903,6 +22110,9 @@ router.get(
       });
       return;
     } catch (err) {
+      if (res.headersSent) {
+        return;
+      }
       const cfgErr = getSupabaseStorageConfigError(err);
       if (cfgErr) {
         res

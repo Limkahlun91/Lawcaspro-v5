@@ -71,6 +71,7 @@ import NewClient from "@/pages/app/clients/new";
 import ClientDetail from "@/pages/app/clients/detail";
 
 import AuditLogs from "@/pages/app/audit-logs";
+import UnifiedLogsPage from "@/pages/app/settings/logs";
 import FirmTemplatesSettingsPage from "@/pages/app/settings/templates";
 import ClausesSettingsPage from "@/pages/app/settings/clauses";
 import AccountingSettingsPage from "@/pages/app/settings/accounting";
@@ -346,11 +347,7 @@ function AppRoutes() {
           )} />
           
           <Route path="/app/settings/documents" component={() => <Redirect to="/app/documents" />} />
-          <Route path="/app/documents/generation-logs" component={() => (
-            <PermissionGuard module="audit" action="read">
-              <DocumentGenerationLogsPage />
-            </PermissionGuard>
-          )} />
+          <Route path="/app/documents/generation-logs" component={() => <Redirect to="/app/settings/logs" />} />
           <Route path="/app/documents/automation" component={() => (
             <PermissionGuard module="documents" action="read">
               <DocumentAutomationHub />
@@ -361,11 +358,7 @@ function AppRoutes() {
               <VariableDictionaryPage />
             </PermissionGuard>
           )} />
-          <Route path="/app/documents/custom-variables" component={() => (
-            <PermissionGuard module="documents" action="read">
-              <CustomVariablesPage />
-            </PermissionGuard>
-          )} />
+          <Route path="/app/documents/custom-variables" component={() => <Redirect to="/app/documents/variables#custom" />} />
           <Route path="/app/documents" component={() => (
             <PermissionGuard module="documents" action="read">
               <DocumentsPage />
@@ -426,11 +419,7 @@ function AppRoutes() {
               <Reports />
             </PermissionGuard>
           )} />
-          <Route path="/app/audit-logs" component={() => (
-            <PermissionGuard module="audit" action="read">
-              <AuditLogs />
-            </PermissionGuard>
-          )} />
+          <Route path="/app/audit-logs" component={() => <Redirect to="/app/settings/logs" />} />
           <Route path="/app/settings/templates" component={() => (
             <PermissionGuard module="documents" action="read">
               <FirmTemplatesSettingsPage />
@@ -444,6 +433,11 @@ function AppRoutes() {
           <Route path="/app/settings/accounting" component={() => (
             <PermissionGuard module="accounting" action="read">
               <AccountingSettingsPage />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/settings/logs" component={() => (
+            <PermissionGuard module="audit" action="read">
+              <UnifiedLogsPage />
             </PermissionGuard>
           )} />
           <Route path="/app/settings/email" component={() => (

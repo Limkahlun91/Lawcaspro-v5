@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useCreateProject, useListDevelopers } from "@workspace/api-client-react";
+import { useCreateProject, useListDevelopers, getListDevelopersQueryKey } from "@workspace/api-client-react";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -21,7 +21,10 @@ export default function NewProject() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
-  const { data: devsResponse } = useListDevelopers({ limit: 100 }, { query: { staleTime: 5 * 60 * 1000 } });
+  const listDevelopersParams2 = { limit: 100 };
+  const { data: devsResponse } = useListDevelopers(listDevelopersParams2, {
+    query: { staleTime: 5 * 60 * 1000, queryKey: getListDevelopersQueryKey(listDevelopersParams2) },
+  });
   const developers = devsResponse?.data || [];
   const createProjectMutation = useCreateProject();
 

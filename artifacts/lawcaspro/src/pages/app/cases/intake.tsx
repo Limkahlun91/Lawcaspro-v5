@@ -129,7 +129,10 @@ export default function CaseIntakeInboxPage() {
       setLoanAmount((v) => v || s((data as any).loanAmount).trim());
       setPropertyAddress((v) => v || s((data as any).propertyAddress).trim());
 
-      const warningText = warnings.map((w) => w?.message).filter((m): m is string => typeof m === "string" && m.trim()).join("\n");
+      const warningText = warnings
+        .map((w) => (w && typeof (w as any).message === "string" ? String((w as any).message) : ""))
+        .filter((m) => typeof m === "string" && m.trim())
+        .join("\n");
       toast({
         title: "Auto-extract completed",
         description: warningText || "Please verify and edit the extracted fields before promoting.",

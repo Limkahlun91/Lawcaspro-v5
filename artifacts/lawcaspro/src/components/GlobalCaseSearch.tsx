@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { apiFetchJson } from "@/lib/api-client";
@@ -27,7 +27,7 @@ function isEditableTarget(t: EventTarget | null): boolean {
   return Boolean(el.isContentEditable);
 }
 
-export function GlobalCaseSearch(): JSX.Element {
+export function GlobalCaseSearch(): React.ReactElement {
   const [, navigate] = useLocation();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");

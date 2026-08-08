@@ -31,16 +31,28 @@ import {
 } from "@/lib/document-generation-client";
 import {
   canDownloadNow,
+  canRetryDownload,
+  canRetryFailedItems,
+  canDownloadSuccessfulFiles,
+  canClearJob,
   extractErrorMessage,
   formatProcessingNotice,
+  getDisplayStatus,
+  getJobSummary,
+  getJobTitle,
   getProgress,
   isJobNotReadyForDownload,
   isProgressComplete,
+  type DocGenDisplayStatus,
 } from "./automation-guards";
 import { downloadBlob } from "@/lib/download";
 import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
-import { ChevronRight, FileText, Printer } from "lucide-react";
+import { ChevronRight, ChevronDown, FileText, Printer, AlertTriangle, CheckCircle2, XCircle, Loader2, Clock, FolderArchive } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { useAuth } from "@/lib/auth-context";
+import { hasPermission } from "@/lib/permissions";
 import JSZip from "jszip";
 
 type AutomationCaseRow = {
@@ -151,6 +163,7 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
 
 export default function DocumentAutomationHub() {
   const { toast } = useToast();
+  const { user } = useAuth();
   const queryClient = useQueryClient();
   const [caseSearchRaw, setCaseSearchRaw] = useState("");
   const caseSearch = useDebouncedValue(caseSearchRaw, 300).trim();
@@ -1961,6 +1974,69 @@ export default function DocumentAutomationHub() {
     );
   }
 
+  const canViewTechnicalDetails = (() => {
+    if (!user) return false;
+    if (user.userType === "founder") return true;
+    const rn = String((user as any)?.roleName ?? "").trim().toLowerCase();
+    if (rn.includes("partner")) return true;
+    if (rn === "admin" || rn.includes("admin")) return true;
+    if (hasPermission(user, "audit", "read")) return true;
+    return false;
+  })();
+
+  function mapFailureStage(phase: string | null | undefined, errorCode: string | null | undefined): string {
+    const p = String(phase ?? "").toLowerCase();
+    const c = String(errorCode ?? "").toUpperCase();
+    if (p.includes("case") || p.includes("context") || p.includes("data")) return "Case Data Load";
+    if (p.includes("template") || c.includes("TEMPLATE")) return "Template Load";
+    if (p.includes("variable") || p.includes("resolve") || c.includes("VARIABLE")) return "Variable Resolution";
+    if (p.includes("generat") || p.includes("render") || c.includes("DOCX") || c.includes("PDF")) return "Document Generation";
+    if (p.includes("storage") || p.includes("object") || p.includes("write") || c.includes("OUTPUT") || c.includes("STORAGE")) return "Storage Write";
+    if (p.includes("status") || p.includes("update") || p.includes("finaliz")) return "Job Status Update";
+    if (p.includes("zip") || p.includes("packag") || p.includes("assemble")) return "Package Assembly";
+    if (p) return p.charAt(0).toUpperCase() + p.slice(1);
+    return "Processing";
+  }
+
+  function mapHumanError(item: NormalizedGenerationJob["items"][number]): string {
+    const code = String(item?.errorCode ?? "").toUpperCase();
+    const msg = safeText(item?.errorMessage);
+    if (code.includes("TEMPLATE_FILE_MISSING") || code.includes("TEMPLATE_NOT_FOUND")) return "Template file is missing. Re-upload the template.";
+    if (code.includes("DOCX_TO_PDF_ENGINE_NOT_CONFIGURED")) return "PDF conversion is not configured for Word templates.";
+    if (code.includes("OUTPUT_MISSING")) return "Generation completed but no output file was produced.";
+    if (code.includes("VARIABLE") || msg.toLowerCase().includes("variable")) return msg || "A required variable could not be resolved.";
+    if (code.includes("CASE") || msg.toLowerCase().includes("case")) return msg || "Case data could not be loaded.";
+    if (code.includes("TIMEOUT") || msg.toLowerCase().includes("timeout")) return "Generation timed out. Try with fewer items.";
+    if (code.includes("PERMISSION") || code.includes("FORBIDDEN") || msg.toLowerCase().includes("permission")) return "You do not have permission to generate this document.";
+    if (code.includes("RLS") || code.includes("ROW LEVEL")) return "Access denied by tenant policy.";
+    if (msg) return msg;
+    return "Unknown generation error";
+  }
+
+  function StatusBadge({ status }: { status: DocGenDisplayStatus }) {
+    const map: Record<DocGenDisplayStatus, { label: string; className: string; icon: any }> = {
+      GENERATING: { label: "Generating", className: "bg-blue-50 text-blue-700 border-blue-200", icon: Loader2 },
+      COMPLETED: { label: "Completed", className: "bg-emerald-50 text-emerald-700 border-emerald-200", icon: CheckCircle2 },
+      PARTIALLY_COMPLETED: { label: "Partially completed", className: "bg-amber-50 text-amber-700 border-amber-200", icon: AlertTriangle },
+      FAILED: { label: "Failed", className: "bg-rose-50 text-rose-700 border-rose-200", icon: XCircle },
+      CANCELLED: { label: "Cancelled", className: "bg-slate-100 text-slate-700 border-slate-200", icon: XCircle },
+      GENERATED_DOWNLOAD_FAILED: { label: "Package not ready", className: "bg-violet-50 text-violet-700 border-violet-200", icon: FolderArchive },
+    };
+    const v = map[status];
+    const Icon = v.icon;
+    return (
+      <Badge variant="outline" className={`gap-1.5 inline-flex items-center ${v.className}`}>
+        <Icon className={`h-3 w-3 ${status === "GENERATING" ? "animate-spin" : ""}`} />
+        {v.label}
+      </Badge>
+    );
+  }
+
+  const displayStatus = job ? getDisplayStatus(job) : null;
+  const failedItems = job?.items?.filter((i) => String(i.status) === "failed") ?? [];
+  const successItems = job?.items?.filter((i) => String(i.status) === "success") ?? [];
+  const [failedOpen, setFailedOpen] = useState(true);
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-1">
@@ -2472,52 +2548,142 @@ export default function DocumentAutomationHub() {
                         Generates PDFs, applies naming rules, and exports a ZIP
                         with the required folder structure.
                       </div>
-                      {hasActiveJob && (
-                        <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                          <div className="font-medium">
-                            {jobStage === "creating"
-                              ? "Creating..."
-                              : jobStage === "generating"
-                                ? "Generating..."
-                                : jobStage === "finalizing"
-                                  ? "Finalizing..."
-                                  : jobStage === "preparing_download"
-                                    ? "Preparing download..."
-                                    : jobStage === "downloading"
-                                      ? "Downloading..."
-                                      : jobStage === "packaging"
-                                        ? "Packaging ZIP..."
-                                        : jobStage === "ready"
-                                          ? "Ready"
-                                          : jobStage === "error"
-                                            ? "Error"
-                                            : "Working..."}
-                          </div>
-                          <div className="mt-1 text-xs text-slate-600">
-                            {(() => {
-                              const expectedTotal =
-                                selectedCaseIds.length *
-                                (selectedTemplateIds.length +
-                                  selectedMasterDocIds.length);
-                              const p = getProgress(job);
-                              const done = p.success + p.failed;
-                              const total = p.total || expectedTotal || 0;
-                              const status = String(job?.status ?? "");
-                              const action = String(job?.nextAction ?? "");
-                              return `Job: ${activeJobId}  Status: ${status || "-"}  Next: ${action || "-"}  Progress: ${done}/${total} (success=${p.success}, failed=${p.failed}, pending=${p.pending}, running=${p.running})`;
-                            })()}
-                          </div>
-                          {runnerNotice && (
-                            <div className="mt-2 text-xs text-blue-700">
-                              {runnerNotice}
+                      {hasActiveJob && job && displayStatus && (
+                        <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+                          <div className="p-4 border-b bg-slate-50/50">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="space-y-1.5">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <StatusBadge status={displayStatus} />
+                                  <span className="text-[11px] text-slate-400 font-mono">
+                                    {activeJobId?.slice(0, 8)}…
+                                  </span>
+                                </div>
+                                <div className="text-base font-semibold text-slate-900 leading-tight">
+                                  {getJobTitle(job)}
+                                </div>
+                                <div className="text-sm text-slate-600">
+                                  {getJobSummary(job)}
+                                </div>
+                              </div>
                             </div>
-                          )}
-                          {jobError && (
-                            <div className="mt-2 text-xs text-red-700">
-                              {jobError}
+
+                            <div className="mt-3 grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
+                              <div className="rounded-md border border-slate-200 bg-white px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wider text-slate-500">Processed</div>
+                                <div className="mt-0.5 text-sm font-semibold text-slate-900">
+                                  {(getProgress(job).success + getProgress(job).failed)} / {getProgress(job).total || 0}
+                                </div>
+                              </div>
+                              <div className="rounded-md border border-emerald-200 bg-emerald-50/50 px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wider text-emerald-700">Succeeded</div>
+                                <div className="mt-0.5 text-sm font-semibold text-emerald-900">
+                                  {getProgress(job).success}
+                                </div>
+                              </div>
+                              <div className="rounded-md border border-rose-200 bg-rose-50/50 px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wider text-rose-700">Failed</div>
+                                <div className="mt-0.5 text-sm font-semibold text-rose-900">
+                                  {getProgress(job).failed}
+                                </div>
+                              </div>
+                              <div className="rounded-md border border-slate-200 bg-white px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wider text-slate-500">Pending</div>
+                                <div className="mt-0.5 text-sm font-semibold text-slate-900">
+                                  {getProgress(job).pending}
+                                </div>
+                              </div>
+                              <div className="rounded-md border border-slate-200 bg-white px-2.5 py-2">
+                                <div className="text-[10px] uppercase tracking-wider text-slate-500">Running</div>
+                                <div className="mt-0.5 text-sm font-semibold text-slate-900 flex items-center gap-1">
+                                  {getProgress(job).running ?? 0}
+                                  {(getProgress(job).running ?? 0) > 0 ? <Loader2 className="h-3 w-3 animate-spin text-blue-600" /> : null}
+                                </div>
+                              </div>
                             </div>
-                          )}
-                          <div className="mt-3 flex flex-wrap gap-2">
+
+                            {runnerNotice ? (
+                              <div className="mt-3 text-xs text-blue-700 bg-blue-50 border border-blue-100 rounded-md px-2.5 py-1.5">
+                                {runnerNotice}
+                              </div>
+                            ) : null}
+                            {jobError ? (
+                              <div className="mt-3 text-xs text-rose-700 bg-rose-50 border border-rose-100 rounded-md px-2.5 py-1.5">
+                                {jobError}
+                              </div>
+                            ) : null}
+                          </div>
+
+                          {failedItems.length > 0 ? (
+                            <Collapsible
+                              open={failedOpen}
+                              onOpenChange={setFailedOpen}
+                              className="border-b"
+                            >
+                              <CollapsibleTrigger asChild>
+                                <button
+                                  type="button"
+                                  className="w-full text-left px-4 py-2.5 flex items-center justify-between hover:bg-slate-50"
+                                >
+                                  <div className="flex items-center gap-2 text-sm">
+                                    <XCircle className="h-4 w-4 text-rose-600" />
+                                    <span className="font-medium text-slate-900">Failed items ({failedItems.length})</span>
+                                  </div>
+                                  <ChevronDown className={`h-4 w-4 text-slate-500 transition-transform ${failedOpen ? "rotate-180" : ""}`} />
+                                </button>
+                              </CollapsibleTrigger>
+                              <CollapsibleContent className="border-t bg-white">
+                                <ul className="divide-y max-h-72 overflow-auto">
+                                  {failedItems.map((item, idx) => {
+                                    const c = caseCacheById.get(item.caseId ?? 0);
+                                    const caseRef = c?.referenceNo || (item.caseId ? `Case #${item.caseId}` : "-");
+                                    const purchaser = c?.purchaserName ?? "-";
+                                    const stage = mapFailureStage((item as any).phase, item.errorCode);
+                                    const human = mapHumanError(item);
+                                    const templateName = safeText(item.templateName) || `Template #${item.templateId ?? "?"}`;
+                                    return (
+                                      <li key={item.id ?? idx} className="px-4 py-3">
+                                        <div className="flex items-start justify-between gap-3">
+                                          <div className="space-y-1 min-w-0 flex-1">
+                                            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                              <span className="text-xs font-mono text-slate-700 truncate max-w-[180px]">{caseRef}</span>
+                                              <span className="text-slate-300 text-xs">·</span>
+                                              <span className="text-xs text-slate-600 truncate max-w-[200px]">{purchaser}</span>
+                                              <span className="text-slate-300 text-xs">·</span>
+                                              <Badge variant="outline" className="text-[10px] font-normal">{templateName}</Badge>
+                                              <Badge variant="outline" className="text-[10px] font-normal border-rose-200 text-rose-700 bg-rose-50/50">{stage}</Badge>
+                                            </div>
+                                            <div className="text-sm text-rose-700 leading-snug">
+                                              {human}
+                                            </div>
+                                          </div>
+                                        </div>
+                                        {canViewTechnicalDetails && item.diagnostic ? (
+                                          <Collapsible className="mt-2">
+                                            <CollapsibleTrigger asChild>
+                                              <button type="button" className="text-[11px] text-slate-500 hover:text-slate-700 underline underline-offset-2">
+                                                View Technical Details
+                                              </button>
+                                            </CollapsibleTrigger>
+                                            <CollapsibleContent className="mt-2 rounded-md border border-slate-200 bg-slate-50 p-2.5 font-mono text-[10px] text-slate-700 whitespace-pre-wrap max-h-56 overflow-auto">
+{[
+  item.errorCode ? `error_code: ${item.errorCode}` : null,
+  item.errorMessage ? `message: ${item.errorMessage}` : null,
+  (item as any).phase ? `worker_stage: ${(item as any).phase}` : null,
+  `diagnostic: ${JSON.stringify(item.diagnostic, null, 2)}`,
+].filter(Boolean).join("\n")}
+                                            </CollapsibleContent>
+                                          </Collapsible>
+                                        ) : null}
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              </CollapsibleContent>
+                            </Collapsible>
+                          ) : null}
+
+                          <div className="p-3 flex flex-wrap gap-2">
                             <Button
                               type="button"
                               size="sm"
@@ -2548,14 +2714,7 @@ export default function DocumentAutomationHub() {
                             </Button>
                             {(() => {
                               const p = getProgress(job);
-                              const s = String(job?.status ?? "");
-                              const retryEnabled =
-                                Boolean(activeJobId) &&
-                                (job?.canDownload === true || canDownloadNow(job)) &&
-                                (isProgressComplete(job) ||
-                                  s === "completed" ||
-                                  s === "completed_with_errors");
-                              const showContinue = Boolean(activeJobId) && !retryEnabled && (p.pending > 0 || p.running > 0);
+                              const showContinue = Boolean(activeJobId) && (p.pending > 0 || p.running > 0) && !canRetryDownload(job);
                               if (showContinue) {
                                 return (
                                   <Button
@@ -2572,34 +2731,63 @@ export default function DocumentAutomationHub() {
                                   </Button>
                                 );
                               }
-                              return (
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="outline"
-                                  disabled={busy || !retryEnabled || !activeJobId}
-                                  onClick={() => {
-                                    if (!activeJobId) return;
-                                    void (async () => {
-                                      try {
-                                        await finalizeAndDownload(activeJobId, { force: true, snapshot: job });
-                                      } catch {}
-                                    })();
-                                  }}
-                                >
-                                  Retry Download
-                                </Button>
-                              );
+                              return null;
                             })()}
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              disabled={busy}
-                              onClick={() => clearActiveJob()}
-                            >
-                              Clear Job
-                            </Button>
+                            {canDownloadSuccessfulFiles(job) && displayStatus !== "GENERATED_DOWNLOAD_FAILED" ? (
+                              <Button
+                                type="button"
+                                size="sm"
+                                disabled={busy || !activeJobId}
+                                onClick={() => {
+                                  if (!activeJobId) return;
+                                  void (async () => {
+                                    try {
+                                      await finalizeAndDownload(activeJobId, { force: true, snapshot: job });
+                                    } catch {}
+                                  })();
+                                }}
+                              >
+                                {displayStatus === "COMPLETED" ? "Download ZIP" : "Download Successful Files"}
+                              </Button>
+                            ) : null}
+                            {canRetryDownload(job) ? (
+                              <Button
+                                type="button"
+                                size="sm"
+                                disabled={busy || !activeJobId}
+                                onClick={() => {
+                                  if (!activeJobId) return;
+                                  void (async () => {
+                                    try {
+                                      await finalizeAndDownload(activeJobId, { force: true, snapshot: job });
+                                    } catch {}
+                                  })();
+                                }}
+                              >
+                                Retry Download
+                              </Button>
+                            ) : null}
+                            {canRetryFailedItems(job) ? (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                disabled={busy || !activeJobId}
+                              >
+                                Retry Failed Items
+                              </Button>
+                            ) : null}
+                            {canClearJob(job) ? (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                disabled={busy}
+                                onClick={() => clearActiveJob()}
+                              >
+                                Clear Job
+                              </Button>
+                            ) : null}
                           </div>
                         </div>
                       )}

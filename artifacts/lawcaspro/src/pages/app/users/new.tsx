@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { useCreateUser, useListDevelopers, useListRoles } from "@workspace/api-client-react";
+import { useCreateUser, useListDevelopers, useListRoles, getListDevelopersQueryKey, getListRolesQueryKey } from "@workspace/api-client-react";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -34,7 +34,7 @@ export default function NewUser() {
   const queryClient = useQueryClient();
   const [initialsTouched, setInitialsTouched] = useState(false);
   
-  const rolesQuery = useListRoles();
+  const rolesQuery = useListRoles({ query: { queryKey: getListRolesQueryKey() } });
   const roles = rolesQuery.data ?? [];
 
   const form = useForm<FormValues>({
@@ -79,7 +79,10 @@ export default function NewUser() {
   const showProfessionalFields = selectedRole && (selectedRole.name === "Partner" || selectedRole.name === "Lawyer" || selectedRole.name === "Senior Lawyer");
   const showDeveloperField = selectedRole && selectedRole.name === "Developer_User";
 
-  const developersQuery = useListDevelopers({ page: 1, limit: 200 }, { query: { enabled: !!showDeveloperField, staleTime: 5 * 60 * 1000 } });
+  const listDevelopersParams = { page: 1 as const, limit: 200 as const };
+  const developersQuery = useListDevelopers(listDevelopersParams, {
+    query: { enabled: !!showDeveloperField, staleTime: 5 * 60 * 1000, queryKey: getListDevelopersQueryKey(listDevelopersParams) },
+  });
   const developers = developersQuery.data?.data ?? [];
 
   useEffect(() => {

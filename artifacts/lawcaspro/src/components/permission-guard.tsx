@@ -20,7 +20,7 @@ export function PermissionGuard(props: { module: string; action: string; childre
     if (perms.length !== 0) return;
     autoRetryRef.current = true;
     const t = setTimeout(() => {
-      try { retryPermissions(); } catch {}
+      try { retryPermissions?.(); } catch {}
       setCanForceRepair(true);
     }, 5000);
     return () => clearTimeout(t);
@@ -35,7 +35,7 @@ export function PermissionGuard(props: { module: string; action: string; childre
           <QueryFallback
             title="Permissions unavailable"
             error={new Error("Permissions endpoint is unavailable (404). Deploy the API hotfix and retry.")}
-            onRetry={retryPermissions}
+            onRetry={retryPermissions ? () => retryPermissions() : undefined}
             isRetrying={false}
           />
         </div>
@@ -47,7 +47,7 @@ export function PermissionGuard(props: { module: string; action: string; childre
           <QueryFallback
             title="Permissions unavailable"
             error={new Error("Failed to load permissions.")}
-            onRetry={retryPermissions}
+            onRetry={retryPermissions ? () => retryPermissions() : undefined}
             isRetrying={false}
           />
         </div>
@@ -64,7 +64,7 @@ export function PermissionGuard(props: { module: string; action: string; childre
             className="border-slate-200"
             disabled={!canForceRepair}
             onClick={() => {
-              try { retryPermissions(); } catch {}
+              try { retryPermissions?.(); } catch {}
             }}
           >
             強制修復

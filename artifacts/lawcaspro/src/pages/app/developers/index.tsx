@@ -1,4 +1,4 @@
-import { useListDevelopers } from "@workspace/api-client-react";
+import { useListDevelopers, getListDevelopersQueryKey } from "@workspace/api-client-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Plus, Search } from "lucide-react";
@@ -10,11 +10,10 @@ import { QueryFallback } from "@/components/query-fallback";
 export default function DevelopersList() {
   const [search, setSearch] = useState("");
   
-  const { data: response, isLoading, isError, error, refetch, isFetching } = useListDevelopers({ 
-    page: 1, 
-    limit: 50,
-    search: search || undefined
-  }, { query: { staleTime: 5 * 60 * 1000 } });
+  const listDevsParams = { page: 1 as const, limit: 50 as const, search: search || undefined };
+  const { data: response, isLoading, isError, error, refetch, isFetching } = useListDevelopers(listDevsParams, {
+    query: { staleTime: 5 * 60 * 1000, queryKey: getListDevelopersQueryKey(listDevsParams) },
+  });
   const developers = response?.data ?? [];
 
   return (

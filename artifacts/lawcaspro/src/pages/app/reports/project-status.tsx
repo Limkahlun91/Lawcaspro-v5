@@ -12,7 +12,7 @@ import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useListProjects, useListUsers } from "@workspace/api-client-react";
+import { useListProjects, useListUsers, getListProjectsQueryKey, getListUsersQueryKey } from "@workspace/api-client-react";
 import { exportElementToPdf } from "@/lib/pdf-export";
 
 type Stage = {
@@ -29,6 +29,7 @@ type Row = {
   currentStatus: string;
   milestoneStage: string;
   totalFeesRm: number;
+  collectedRm: number;
   amountPaidRm: number;
   balanceDueRm: number;
 };
@@ -70,8 +71,10 @@ export default function ProjectStatusReport() {
   const [aiHtml, setAiHtml] = useState<string>("");
   const [aiLoading, setAiLoading] = useState(false);
 
-  const projectsQuery = useListProjects({ page: 1, limit: 200 }, { query: { retry: false } });
-  const usersQuery = useListUsers({ page: 1, limit: 200 }, { query: { retry: false } });
+  const listProjectsParams = { page: 1 as const, limit: 200 as const };
+  const projectsQuery = useListProjects(listProjectsParams, { query: { retry: false, queryKey: getListProjectsQueryKey(listProjectsParams) } });
+  const listUsersParams = { page: 1 as const, limit: 200 as const };
+  const usersQuery = useListUsers(listUsersParams, { query: { retry: false, queryKey: getListUsersQueryKey(listUsersParams) } });
   const projects = projectsQuery.data?.data ?? [];
   const users = usersQuery.data?.data ?? [];
 

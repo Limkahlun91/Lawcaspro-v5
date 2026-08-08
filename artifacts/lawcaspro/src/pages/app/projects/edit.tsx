@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useParams, useLocation } from "wouter";
-import { useGetProject, getGetProjectQueryKey, useListDevelopers } from "@workspace/api-client-react";
+import { useGetProject, getGetProjectQueryKey, useListDevelopers, getListDevelopersQueryKey } from "@workspace/api-client-react";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,7 +29,10 @@ export default function EditProject() {
     query: { enabled: !!projectId, queryKey: getGetProjectQueryKey(projectId) },
   });
 
-  const { data: devsResponse } = useListDevelopers({ limit: 100 }, { query: { staleTime: 5 * 60 * 1000 } });
+  const listDevelopersParams1 = { limit: 100 };
+  const { data: devsResponse } = useListDevelopers(listDevelopersParams1, {
+    query: { staleTime: 5 * 60 * 1000, queryKey: getListDevelopersQueryKey(listDevelopersParams1) },
+  });
   const developers = devsResponse?.data || [];
 
   const [name, setName] = useState("");

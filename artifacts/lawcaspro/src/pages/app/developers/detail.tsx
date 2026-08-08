@@ -661,8 +661,8 @@ export default function DeveloperDetail() {
             </Button>
           </div>
 
-          {docsError && (
-            <QueryFallback title="Documents unavailable" error={docsError} onRetry={fetchDocuments} isRetrying={docsLoading} />
+          {!!docsError && (
+            <QueryFallback title="Documents unavailable" error={String(docsError)} onRetry={fetchDocuments} isRetrying={docsLoading} />
           )}
 
           <div className="border rounded-lg overflow-hidden">

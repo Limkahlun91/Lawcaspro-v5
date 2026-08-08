@@ -13,6 +13,7 @@ import { toastError } from "@/lib/toast-error";
 import { useToast } from "@/hooks/use-toast";
 import { ensureArray } from "@/lib/list-items";
 import { Trash2, Save, ChevronLeft, ChevronRight, AlignLeft, AlignCenter, AlignRight } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
@@ -242,7 +243,7 @@ export function TemplatePdfMappingEditor(props: Props) {
         }
       })();
       if (isLegacyGroups(data)) {
-        setVarGroups(data.map((g) => ({ group: g.group, vars: ensureArray(g.vars).map((v) => ({ key: v.key, label: v.label })) })));
+        setVarGroups(data.map((g) => ({ group: g.group, vars: ensureArray<{ key: string; label: string }>(g.vars).map((v: { key: string; label: string }) => ({ key: v.key, label: v.label })) })));
         return;
       }
       if (!isVariableDefs(data)) return;

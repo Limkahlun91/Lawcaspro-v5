@@ -3,7 +3,7 @@ import {
   useGetCase, getGetCaseQueryKey, 
   useGetCaseWorkflow, getGetCaseWorkflowQueryKey, 
   useUpdateWorkflowStep, 
-  useListUsers
+  useListUsers, getListUsersQueryKey
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -113,7 +113,7 @@ function CaseLedgerTab({ caseId }: { caseId: number }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [transactionDate, setTransactionDate] = useState<string | null>(null);
+  const [transactionDate, setTransactionDate] = useState<string>("");
   const [entryCategory, setEntryCategory] = useState<"office" | "client">("office");
   const [entryType, setEntryType] = useState<CaseLedgerEntry["entryType"]>("invoice_billed");
   const [description, setDescription] = useState("");
@@ -175,7 +175,7 @@ function CaseLedgerTab({ caseId }: { caseId: number }) {
     onSuccess: async () => {
       toast({ title: "Added" });
       setOpen(false);
-      setTransactionDate(null);
+      setTransactionDate("");
       setEntryCategory("office");
       setEntryType("invoice_billed");
       setDescription("");
@@ -238,7 +238,7 @@ function CaseLedgerTab({ caseId }: { caseId: number }) {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-1.5">
               <Label>Date</Label>
-              <DateOnlyInput value={transactionDate} onChange={setTransactionDate} />
+              <DateOnlyInput valueYmd={transactionDate ?? ""} onChangeYmd={setTransactionDate} />
             </div>
             <div className="space-y-1.5">
               <Label>Category</Label>
@@ -512,8 +512,10 @@ export default function CaseDetail() {
   });
   const outstandingAdvances = Number(advancesQuery.data?.outstanding_advances ?? 0);
 
-  const { data: usersRes } = useListUsers({ limit: 200 }, { query: { staleTime: 5 * 60 * 1000 } });
-  const users = usersRes?.data || [];
+  const usersResData = useListUsers({ limit: 200 }, { query: { staleTime: 5 * 60 * 1000, queryKey: getListUsersQueryKey({ limit: 200 }) } });
+  const usersRes = usersResData as unknown as { data?: unknown };
+  const usersList = ((usersRes?.data as any)?.data ?? (Array.isArray(usersRes?.data) ? usersRes.data : [])) as unknown[];
+  const users = Array.isArray(usersList) ? usersList as any[] : [];
   const lawyerOptions = users.filter((u) => ["Partner", "Senior Lawyer", "Lawyer"].includes(String(u.roleName ?? "").trim()));
   const clerkOptions = users.filter((u) => ["Senior Clerk", "Clerk"].includes(String(u.roleName ?? "").trim()));
   const currentLawyerIds = (Array.isArray((caseInfo as any)?.assignments) ? (caseInfo as any).assignments : [])
@@ -554,7 +556,7 @@ export default function CaseDetail() {
       queryClient.invalidateQueries({ queryKey: getGetCaseQueryKey(caseId) });
     },
     onError: (err) => {
-      toastError(toast, err, { fallback: "Failed to update case" });
+      toastError(toast, err, "Failed to update case");
     },
   });
 
@@ -568,7 +570,7 @@ export default function CaseDetail() {
       toast({ title: "Assignments updated" });
     },
     onError: (err) => {
-      toastError(toast, err, { fallback: "Failed to update assignments" });
+      toastError(toast, err, "Failed to update assignments");
     },
   });
 
@@ -796,6 +798,7 @@ export default function CaseDetail() {
     return next;
   })();
   const [activeTab, setActiveTab] = useState(initialActiveTab);
+  const [milestoneTab, setMilestoneTab] = useState<string>("");
 
   const canViewCaseMonitor = hasPermission(user, "case_monitor", "view");
   const canViewFileCustody = hasPermission(user, "accounting", "view") || hasPermission(user, "file_custody", "view");
@@ -1014,7 +1017,7 @@ export default function CaseDetail() {
       await queryClient.invalidateQueries({ queryKey: ["case-messages", caseId, interactionChannel] });
       await queryClient.invalidateQueries({ queryKey: ["case-messages-unread-count", caseId] });
     },
-    onError: (err) => toastError(toast, err, { fallback: "Failed to send message" }),
+    onError: (err) => toastError(toast, err, "Failed to send message"),
   });
 
   const printableQuery = useQuery<any[]>({
@@ -1041,8 +1044,10 @@ export default function CaseDetail() {
   const canPrint = (printKey: string, dateVal: string) => !printableQuery.isError && Boolean(dateVal) && printState(printKey)?.status === "configured";
   const templateIssuesCount = (printableConfig || []).filter((x) => x?.status && x.status !== "configured").length;
   const [savingScope, setSavingScope] = useState<string>("");
-  const [keyDatesDraft, setKeyDatesDraft] = useState<Record<string, string | boolean>>({});
+  const [keyDatesDraft, setKeyDatesDraft] = useState<Record<string, string>>({});
+  const [keyDatesBooleans, setKeyDatesBooleans] = useState<{ master_lu_exempted?: boolean; encumbrance_free_exempted?: boolean }>({});
   const [keyDatesBaseline, setKeyDatesBaseline] = useState<Record<string, string | boolean>>({});
+  const [keyDatesBooleanBaseline, setKeyDatesBooleanBaseline] = useState<Record<string, boolean>>({});
   const [keyDatesInitialized, setKeyDatesInitialized] = useState(false);
 
   const workflowFileInputRef = useRef<HTMLInputElement>(null);
@@ -1064,6 +1069,11 @@ export default function CaseDetail() {
     const consentChargeApproval =
       normalizeDateOnlyFromApi((src as any).consent_to_charge_approval)
       || normalizeDateOnlyFromApi((src as any).consent_to_charge_date);
+    const bools: { master_lu_exempted?: boolean; encumbrance_free_exempted?: boolean } = {
+      master_lu_exempted: Boolean((src as any).master_lu_exempted),
+      encumbrance_free_exempted: Boolean((src as any).encumbrance_free_exempted),
+    };
+    setKeyDatesBooleans((prev) => ({ ...prev, ...bools }));
 
     return {
       spa_signed_date: normalizeDateOnlyFromApi((src as any).spa_signed_date),
@@ -1090,8 +1100,6 @@ export default function CaseDetail() {
       bank_lu_forward_to_developer_on: normalizeDateOnlyFromApi((src as any).bank_lu_forward_to_developer_on),
       developer_lu_received_on: normalizeDateOnlyFromApi((src as any).developer_lu_received_on),
       developer_lu_dated: normalizeDateOnlyFromApi((src as any).developer_lu_dated),
-      master_lu_exempted: Boolean((src as any).master_lu_exempted),
-      encumbrance_free_exempted: Boolean((src as any).encumbrance_free_exempted),
       letter_disclaimer_received_on: normalizeDateOnlyFromApi((src as any).letter_disclaimer_received_on),
       letter_disclaimer_dated: normalizeDateOnlyFromApi((src as any).letter_disclaimer_dated),
       letter_disclaimer_reference_nos: typeof (src as any).letter_disclaimer_reference_nos === "string" ? String((src as any).letter_disclaimer_reference_nos) : "",
@@ -1225,7 +1233,9 @@ export default function CaseDetail() {
 
   const isDirtyScope = (scope: keyof typeof scopeKeys) => {
     for (const k of scopeKeys[scope]) {
-      if ((keyDatesDraft[k] ?? "") !== (keyDatesBaseline[k] ?? "")) return true;
+      if (k === "master_lu_exempted" || k === "encumbrance_free_exempted") {
+        if (Boolean(keyDatesBooleans[k as keyof typeof keyDatesBooleans]) !== Boolean(keyDatesBooleanBaseline[k])) return true;
+      } else if ((keyDatesDraft[k] ?? "") !== (String(keyDatesBaseline[k] ?? ""))) return true;
     }
     return false;
   };
@@ -1238,21 +1248,31 @@ export default function CaseDetail() {
   useEffect(() => {
     setKeyDatesInitialized(false);
     setKeyDatesDraft({});
+    setKeyDatesBooleans({});
     setKeyDatesBaseline({});
+    setKeyDatesBooleanBaseline({});
     setSavingScope("");
   }, [caseId]);
 
   useEffect(() => {
     const parsed = parseKeyDates(keyDates);
+    const bools = {
+      master_lu_exempted: Boolean((keyDates as any).master_lu_exempted),
+      encumbrance_free_exempted: Boolean((keyDates as any).encumbrance_free_exempted),
+    };
     if (!keyDatesInitialized) {
       setKeyDatesDraft(parsed);
+      setKeyDatesBooleans(bools);
       setKeyDatesBaseline(parsed);
+      setKeyDatesBooleanBaseline(bools);
       setKeyDatesInitialized(true);
       return;
     }
     if (!anyDirty) {
       setKeyDatesDraft(parsed);
+      setKeyDatesBooleans(bools);
       setKeyDatesBaseline(parsed);
+      setKeyDatesBooleanBaseline(bools);
     }
   }, [keyDates, keyDatesInitialized, anyDirty]);
 
@@ -1837,11 +1857,22 @@ export default function CaseDetail() {
     loanDetailsObj?.loanAmount ??
     loanDetailsObj?.loan_amount ??
     loanDetailsObj?.amount;
+  const financingSumIn = (() => {
+    if (financingSumRaw == null) return "";
+    if (typeof financingSumRaw === "number") return String(financingSumRaw);
+    if (typeof financingSumRaw === "string") return financingSumRaw;
+    return String(financingSumRaw);
+  })();
   const othersRaw = loanDetailsObj?.othersText ?? loanDetailsObj?.othersSum ?? loanDetailsObj?.otherCharges ?? loanDetailsObj?.other_charges;
+  const othersIn = (() => {
+    if (othersRaw == null) return "";
+    if (typeof othersRaw === "string") return othersRaw;
+    return String(othersRaw);
+  })();
   const totalLoanRaw = loanDetailsObj?.totalLoan ?? loanDetailsObj?.total_loan;
   const loanAmounts = calculateLoanAmounts({
-    financingSum: financingSumRaw,
-    others: typeof othersRaw === "string" ? othersRaw : othersRaw == null ? "" : String(othersRaw),
+    financingSum: financingSumIn,
+    others: othersIn,
   });
   const hasFinancingSum = financingSumRaw != null && String(financingSumRaw).trim() !== "";
   const hasOthersTotal = loanAmounts.othersTotal > 0;
@@ -1867,11 +1898,11 @@ export default function CaseDetail() {
     const payload: Record<string, unknown> = {};
     const booleanKeys = new Set(["master_lu_exempted", "encumbrance_free_exempted"]);
     for (const k of keys) {
-      const raw = keyDatesDraft[k];
       if (booleanKeys.has(k)) {
-        payload[k] = Boolean(raw);
+        payload[k] = Boolean(keyDatesBooleans[k as keyof typeof keyDatesBooleans]);
         continue;
       }
+      const raw = keyDatesDraft[k];
       const v = typeof raw === "string" ? raw : "";
       payload[k] = v ? v : null;
     }
@@ -2925,13 +2956,13 @@ export default function CaseDetail() {
                     Workflow: {workflowDone}/{workflowTotal}
                   </Badge>
                   <Badge variant="outline" className="border-slate-200 text-slate-700">
-                    SPA Date: {keyDatesDraft.spa_date ? formatYmdToDmy(keyDatesDraft.spa_date) : "—"}
+                    SPA Date: {String(keyDatesDraft.spa_date || "") ? formatYmdToDmy(String(keyDatesDraft.spa_date || "")) : "—"}
                   </Badge>
                   <Badge variant="outline" className="border-slate-200 text-slate-700">
-                    LO Date: {keyDatesDraft.letter_of_offer_date ? formatYmdToDmy(keyDatesDraft.letter_of_offer_date) : "—"}
+                    LO Date: {String(keyDatesDraft.letter_of_offer_date || "") ? formatYmdToDmy(String(keyDatesDraft.letter_of_offer_date || "")) : "—"}
                   </Badge>
                   <Badge variant="outline" className="border-slate-200 text-slate-700">
-                    Charge Stamped: {keyDatesDraft.charge_stamped ? formatYmdToDmy(keyDatesDraft.charge_stamped) : "—"}
+                    Charge Stamped: {String(keyDatesDraft.charge_stamped || "") ? formatYmdToDmy(String(keyDatesDraft.charge_stamped || "")) : "—"}
                   </Badge>
                 </div>
               </div>
@@ -3201,12 +3232,12 @@ export default function CaseDetail() {
                           <div className="flex items-center gap-2">
                             <Label className="text-xs text-slate-600">Exempted (Master LU)</Label>
                             <Checkbox
-                              checked={Boolean(keyDatesDraft.master_lu_exempted)}
+                              checked={Boolean(keyDatesBooleans.master_lu_exempted)}
                               onCheckedChange={(checked) => {
                                 const next = checked === true;
+                                setKeyDatesBooleans((p) => ({ ...p, master_lu_exempted: next }));
                                 setKeyDatesDraft((p) => ({
                                   ...p,
-                                  master_lu_exempted: next,
                                   bank_lu_dated: next ? "" : (p.bank_lu_dated || ""),
                                   bank_lu_received_date: next ? "" : (p.bank_lu_received_date || ""),
                                   bank_lu_forward_to_developer_on: next ? "" : (p.bank_lu_forward_to_developer_on || ""),
@@ -3218,11 +3249,11 @@ export default function CaseDetail() {
                           </div>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                          <FieldCard label="Bank's LU dated" value={keyDatesDraft.bank_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_dated: v }))} disabled={Boolean(keyDatesDraft.master_lu_exempted)} />
-                          <FieldCard label="Bank's LU received on" value={keyDatesDraft.bank_lu_received_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_received_date: v }))} disabled={Boolean(keyDatesDraft.master_lu_exempted)} />
-                          <FieldCard label="Bank's LU sent to developer ON" value={keyDatesDraft.bank_lu_forward_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_forward_to_developer_on: v }))} printerKey="letter_forward_bank_lu_to_dev" disabled={Boolean(keyDatesDraft.master_lu_exempted)} />
-                          <FieldCard label="DEV. LU RECEIVED ON" value={keyDatesDraft.developer_lu_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_received_on: v }))} disabled={Boolean(keyDatesDraft.master_lu_exempted)} />
-                          <FieldCard label="DEV. LU DATED" value={keyDatesDraft.developer_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_dated: v }))} disabled={Boolean(keyDatesDraft.master_lu_exempted)} />
+                          <FieldCard label="Bank's LU dated" value={keyDatesDraft.bank_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_dated: v }))} disabled={Boolean(keyDatesBooleans.master_lu_exempted)} />
+                          <FieldCard label="Bank's LU received on" value={keyDatesDraft.bank_lu_received_date || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_received_date: v }))} disabled={Boolean(keyDatesBooleans.master_lu_exempted)} />
+                          <FieldCard label="Bank's LU sent to developer ON" value={keyDatesDraft.bank_lu_forward_to_developer_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, bank_lu_forward_to_developer_on: v }))} printerKey="letter_forward_bank_lu_to_dev" disabled={Boolean(keyDatesBooleans.master_lu_exempted)} />
+                          <FieldCard label="DEV. LU RECEIVED ON" value={keyDatesDraft.developer_lu_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_received_on: v }))} disabled={Boolean(keyDatesBooleans.master_lu_exempted)} />
+                          <FieldCard label="DEV. LU DATED" value={keyDatesDraft.developer_lu_dated || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, developer_lu_dated: v }))} disabled={Boolean(keyDatesBooleans.master_lu_exempted)} />
                         </div>
                       </div>
 
@@ -3232,12 +3263,12 @@ export default function CaseDetail() {
                           <div className="flex items-center gap-2">
                             <Label className="text-xs text-slate-600">Exempted (Free from encumbrances)</Label>
                             <Checkbox
-                              checked={Boolean(keyDatesDraft.encumbrance_free_exempted)}
+                              checked={Boolean(keyDatesBooleans.encumbrance_free_exempted)}
                               onCheckedChange={(checked) => {
                                 const next = checked === true;
+                                setKeyDatesBooleans((p) => ({ ...p, encumbrance_free_exempted: next }));
                                 setKeyDatesDraft((p) => ({
                                   ...p,
-                                  encumbrance_free_exempted: next,
                                   letter_disclaimer_received_on: next ? "" : (p.letter_disclaimer_received_on || ""),
                                   letter_disclaimer_dated: next ? "" : (p.letter_disclaimer_dated || ""),
                                   letter_disclaimer_reference_nos: next ? "" : (p.letter_disclaimer_reference_nos || ""),
@@ -3247,9 +3278,9 @@ export default function CaseDetail() {
                           </div>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                          <FieldCard label="Disclaimer Letter receive on" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} disabled={Boolean(keyDatesDraft.encumbrance_free_exempted)} />
-                          <WorkflowFileCard label="Disclaimer Letter Dated" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" disabled={Boolean(keyDatesDraft.encumbrance_free_exempted)} />
-                          <FieldCard label="Disclaimer Lttr Ref. No" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} disabled={Boolean(keyDatesDraft.encumbrance_free_exempted)} />
+                          <FieldCard label="Disclaimer Letter receive on" value={keyDatesDraft.letter_disclaimer_received_on || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_received_on: v }))} disabled={Boolean(keyDatesBooleans.encumbrance_free_exempted)} />
+                          <WorkflowFileCard label="Disclaimer Letter Dated" docKey="letter_disclaimer" dateKey="letter_disclaimer_dated" disabled={Boolean(keyDatesBooleans.encumbrance_free_exempted)} />
+                          <FieldCard label="Disclaimer Lttr Ref. No" type="text" value={keyDatesDraft.letter_disclaimer_reference_nos || ""} onChange={(v) => setKeyDatesDraft((p) => ({ ...p, letter_disclaimer_reference_nos: v }))} disabled={Boolean(keyDatesBooleans.encumbrance_free_exempted)} />
                         </div>
                       </div>
 
@@ -3887,7 +3918,7 @@ export default function CaseDetail() {
                 <div className="flex items-center gap-2">
                   <CardTitle className="text-base flex items-center gap-2"><FolderKey className="w-4 h-4 text-amber-600" /> File Custody</CardTitle>
                   {!caseOpsCustodyQuery.isLoading && (caseOpsCustodyQuery.data?.total ?? 0) > 0 ? (
-                    <Badge variant="secondary" className="bg-slate-100 text-slate-700 text-xs">{caseOpsCustodyQuery.data.total} item{caseOpsCustodyQuery.data.total === 1 ? "" : "s"}</Badge>
+                    <Badge variant="secondary" className="bg-slate-100 text-slate-700 text-xs">{caseOpsCustodyQuery.data?.total ?? 0} item{(caseOpsCustodyQuery.data?.total ?? 0) === 1 ? "" : "s"}</Badge>
                   ) : null}
                 </div>
                 {canViewFileCustody ? (
@@ -4000,7 +4031,7 @@ export default function CaseDetail() {
                 <div className="flex items-center gap-2">
                   <CardTitle className="text-base flex items-center gap-2"><Activity className="w-4 h-4 text-rose-600" /> Bottlenecks</CardTitle>
                   {!caseOpsBottlenecksQuery.isLoading && (caseOpsBottlenecksQuery.data?.items?.length ?? 0) > 0 ? (
-                    <Badge variant="secondary" className="bg-slate-100 text-slate-700 text-xs">{caseOpsBottlenecksQuery.data.items.length} active</Badge>
+                    <Badge variant="secondary" className="bg-slate-100 text-slate-700 text-xs">{(caseOpsBottlenecksQuery.data?.items ?? []).length} active</Badge>
                   ) : null}
                 </div>
                 {canViewCaseMonitor ? (

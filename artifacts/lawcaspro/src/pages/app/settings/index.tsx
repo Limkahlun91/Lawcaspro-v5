@@ -1,5 +1,17 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { getListRolesQueryKey, getListUsersQueryKey, useDeleteUser, useListDevelopers, useListProjects, useListRoles, useListUsers, useUpdateRole, useUpdateUser } from "@workspace/api-client-react";
+import {
+  getListRolesQueryKey,
+  getListUsersQueryKey,
+  useDeleteUser,
+  useListDevelopers,
+  getListDevelopersQueryKey,
+  useListProjects,
+  getListProjectsQueryKey,
+  useListRoles,
+  useListUsers,
+  useUpdateRole,
+  useUpdateUser,
+} from "@workspace/api-client-react";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -943,8 +955,14 @@ function FirmInfoTab() {
 function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; canUpdate: boolean }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const projectsQuery = useListProjects({ page: 1, limit: 200 }, { query: { enabled: canRead, staleTime: 5 * 60 * 1000 } });
-  const developersQuery = useListDevelopers({ page: 1, limit: 200 }, { query: { enabled: canRead, staleTime: 5 * 60 * 1000 } });
+  const listProjectsParamsFr = { page: 1 as const, limit: 200 as const };
+  const projectsQuery = useListProjects(listProjectsParamsFr, {
+    query: { enabled: canRead, staleTime: 5 * 60 * 1000, queryKey: getListProjectsQueryKey(listProjectsParamsFr) },
+  });
+  const listDevelopersParamsFr = { page: 1 as const, limit: 200 as const };
+  const developersQuery = useListDevelopers(listDevelopersParamsFr, {
+    query: { enabled: canRead, staleTime: 5 * 60 * 1000, queryKey: getListDevelopersQueryKey(listDevelopersParamsFr) },
+  });
   const projects = Array.isArray((projectsQuery.data as any)?.data) ? ((projectsQuery.data as any).data as any[]) : [];
   const developers = Array.isArray((developersQuery.data as any)?.data) ? ((developersQuery.data as any).data as any[]) : [];
 
@@ -1465,10 +1483,14 @@ export default function Settings() {
   const [editRoleId, setEditRoleId] = useState("");
   const [editDeveloperId, setEditDeveloperId] = useState("");
 
-  const developersQuery = useListDevelopers(
-    { page: 1, limit: 200 },
-    { query: { enabled: canManageUsers && editUserOpen, staleTime: 5 * 60 * 1000 } }
-  );
+  const listDevelopersParamsSu = { page: 1 as const, limit: 200 as const };
+  const developersQuery = useListDevelopers(listDevelopersParamsSu, {
+    query: {
+      enabled: canManageUsers && editUserOpen,
+      staleTime: 5 * 60 * 1000,
+      queryKey: getListDevelopersQueryKey(listDevelopersParamsSu),
+    },
+  });
   const developers = developersQuery.data?.data ?? [];
 
   const [deleteUserOpen, setDeleteUserOpen] = useState(false);

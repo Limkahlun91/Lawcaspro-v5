@@ -20,7 +20,18 @@
   "crons": [
     {
       "path": "/api/cron/payment-voucher-sla",
-      "schedule": "0 * * * *"
+      "schedule": "0 * * * *",
+      "description": "Hourly Payment Voucher SLA engine: overdue PV / actions scan, responsible + partner escalation, next_notify_at 2-hour digest."
+    },
+    {
+      "path": "/api/cron/case-bottlenecks",
+      "schedule": "30 * * * *",
+      "description": "Hourly Case Bottleneck Monitor (h+30): no_movement / waiting / on_hold / pv_delay / approval_waiting + explicit severity escalations. Separate advisory lock from PV engine (G18 engine independence)."
+    },
+    {
+      "path": "/api/cron/notification-digest",
+      "schedule": "15 * * * *",
+      "description": "Hourly notification digest (h+15): bumps delivery_count + last_notified_at when next_notify_at <= now (2-hour repeat default for escalations). No external channel (Email Inbox DEFERRED_BY_USER §23)."
     }
   ]
 }

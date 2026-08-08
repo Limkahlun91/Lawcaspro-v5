@@ -4,6 +4,7 @@ import { paymentVouchersTable, paymentVoucherActionsTable, userNotificationsTabl
 import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { logger } from "../lib/logger.js";
 import { writeAuditLog } from "../lib/auth.js";
+import { tickAllFirms as tickCaseBottleneckAllFirms } from "../jobs/case-bottleneck-monitor.js";
 import {
   AccountingSettingsLoaderError,
   normalizeAccountingSettings,
@@ -54,16 +55,7 @@ const one = (v: unknown): string | undefined => {
 function getCronSecret(): string | undefined {
   const canonical = process.env.CRON_SECRET;
   if (canonical) return canonical;
-  const legacy = process.env.CRON_SHARED_SECRET || process.env.INTERNAL_CRON_TOKEN;
-  if (legacy) {
-    logger.warn({ event: "cron.auth.using_legacy_env" }, "CRON_SECRET is recommended; legacy CRON_SHARED_SECRET / INTERNAL_CRON_TOKEN detected");
-    return legacy;
-  }
   return undefined;
-}
-
-function getCronVercelSecret(): string | undefined {
-  return process.env.CRON_VERCEL_SECRET;
 }
 
 function requireCronAuth(req: express.Request, res: Response): boolean {
@@ -73,11 +65,8 @@ function requireCronAuth(req: express.Request, res: Response): boolean {
   const providedHeader = one(req.headers["x-cron-token"]);
   const vercelCronSig = one(req.headers["x-vercel-cron-secret"]);
   const expected = getCronSecret();
-  const vercelExpected = getCronVercelSecret();
-  const canonicalMatch = !!(expected && (providedBearer === expected || providedHeader === expected));
-  const vercelMatch = !!(vercelCronSig && vercelExpected && vercelCronSig === vercelExpected);
-  const match = canonicalMatch || vercelMatch;
-  if (!match) {
+  const canonicalMatch = !!(expected && (providedBearer === expected || providedHeader === expected || vercelCronSig === expected));
+  if (!canonicalMatch) {
     res.status(401).json({ error: "cron_auth_required" });
     return false;
   }
@@ -770,6 +759,87 @@ router.get("/cron/payment-voucher-sla", async (req: express.Request, res: Respon
     res.json(result);
   } catch (e) {
     logger.error({ err: e }, "cron.pv_sla.http_failed");
+    res.status(500).json({ error: "cron_failed", detail: (e as Error).message });
+  }
+});
+
+async function runCaseBottlenecksOnce(): Promise<Record<string, unknown>> {
+  const r = await tickCaseBottleneckAllFirms();
+  return typeof r === "object" && r ? (r as Record<string, unknown>) : { ok: true };
+}
+
+router.post("/cron/case-bottlenecks", async (req: express.Request, res: Response): Promise<void> => {
+  try {
+    if (!requireCronAuth(req, res)) return;
+    const result = await runCaseBottlenecksOnce();
+    res.json(result);
+  } catch (e) {
+    logger.error({ err: e }, "cron.case_bottlenecks.http_failed");
+    res.status(500).json({ error: "cron_failed", detail: (e as Error).message });
+  }
+});
+
+router.get("/cron/case-bottlenecks", async (req: express.Request, res: Response): Promise<void> => {
+  try {
+    if (!requireCronAuth(req, res)) return;
+    const result = await runCaseBottlenecksOnce();
+    res.json(result);
+  } catch (e) {
+    logger.error({ err: e }, "cron.case_bottlenecks.http_failed");
+    res.status(500).json({ error: "cron_failed", detail: (e as Error).message });
+  }
+});
+
+async function runNotificationDigestOnce(): Promise<Record<string, unknown>> {
+  const now = new Date();
+  let bumped = 0;
+  let eligible = 0;
+  const rows = await db
+    .select()
+    .from(userNotificationsTable)
+    .where(and(
+      inArray(userNotificationsTable.status, ACTIVE_STATUSES as unknown as string[]),
+      isNull(userNotificationsTable.acknowledgedAt),
+      ne(userNotificationsTable.status, "dismissed"),
+      ne(userNotificationsTable.status, "resolved"),
+    ));
+  for (const n of rows) {
+    if (!n.nextNotifyAt) continue;
+    eligible++;
+    const due = new Date(n.nextNotifyAt).getTime() <= now.getTime();
+    if (!due) continue;
+    const metaObj = typeof n.meta === "object" && n.meta ? (n.meta as Record<string, unknown>) : {};
+    const metaHours = Number((metaObj as any).repeatHours);
+    const repeat = Number.isFinite(metaHours) && metaHours > 0 ? metaHours : ESCALATION_DEFAULT_REPEAT_HOURS;
+    const newCount = (Number(n.deliveryCount) || 0) + 1;
+    await db.update(userNotificationsTable).set({
+      deliveryCount: newCount,
+      lastNotifiedAt: now,
+      nextNotifyAt: new Date(now.getTime() + repeat * 3600_000),
+    } as any).where(eq(userNotificationsTable.id, Number(n.id)));
+    bumped++;
+  }
+  return { eligible, bumped, at: now.toISOString() };
+}
+
+router.post("/cron/notification-digest", async (req: express.Request, res: Response): Promise<void> => {
+  try {
+    if (!requireCronAuth(req, res)) return;
+    const result = await runNotificationDigestOnce();
+    res.json(result);
+  } catch (e) {
+    logger.error({ err: e }, "cron.notification_digest.http_failed");
+    res.status(500).json({ error: "cron_failed", detail: (e as Error).message });
+  }
+});
+
+router.get("/cron/notification-digest", async (req: express.Request, res: Response): Promise<void> => {
+  try {
+    if (!requireCronAuth(req, res)) return;
+    const result = await runNotificationDigestOnce();
+    res.json(result);
+  } catch (e) {
+    logger.error({ err: e }, "cron.notification_digest.http_failed");
     res.status(500).json({ error: "cron_failed", detail: (e as Error).message });
   }
 });

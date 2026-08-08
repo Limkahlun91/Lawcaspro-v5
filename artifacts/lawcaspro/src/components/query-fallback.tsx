@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Spinner } from "@/components/ui/spinner";
@@ -9,12 +10,17 @@ export function QueryFallback({
   error,
   onRetry,
   isRetrying,
+  children,
 }: {
   title?: string;
   error?: unknown;
   onRetry?: () => void;
   isRetrying?: boolean;
+  children?: ReactNode;
 }) {
+  if (children) {
+    return <>{children}</>;
+  }
   const t = title ?? getFriendlyErrorTitle(error);
   const d = error ? getErrorMessage(error) : "Unable to load data";
 

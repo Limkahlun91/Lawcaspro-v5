@@ -340,7 +340,7 @@ export function EmailSettingsPanel() {
         username: imapForm.username,
         password: imapForm.password,
         useTls: imapForm.useTls,
-      },
+      } as unknown as BodyInit,
     }),
     onSuccess: () => toast({ title: "IMAP connection succeeded" }),
     onError: (e) => toastError(toast, e),
@@ -358,7 +358,7 @@ export function EmailSettingsPanel() {
         username: imapForm.username,
         password: imapForm.password,
         useTls: imapForm.useTls,
-      },
+      } as unknown as BodyInit,
     }),
     onSuccess: (result) => {
       setConnectDialogOpen(false);
@@ -372,7 +372,7 @@ export function EmailSettingsPanel() {
   });
 
   const syncFoldersMutation = useMutation({
-    mutationFn: (accountId: number) => apiFetchJson(`/communication/email/accounts/${accountId}/sync-folders`, { method: "POST", body: {} }),
+    mutationFn: (accountId: number) => apiFetchJson(`/communication/email/accounts/${accountId}/sync-folders`, { method: "POST", body: {} as unknown as BodyInit }),
     onSuccess: (_result, accountId) => {
       qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", accountId, "folders"] });
       qc.invalidateQueries({ queryKey: ["communication", "email", "accounts"] });
@@ -383,7 +383,7 @@ export function EmailSettingsPanel() {
 
   const toggleFolderSyncMutation = useMutation({
     mutationFn: (args: { folderId: number; syncEnabled: boolean }) =>
-      apiFetchJson(`/communication/email/folders/${args.folderId}`, { method: "PATCH", body: { syncEnabled: args.syncEnabled } }),
+      apiFetchJson(`/communication/email/folders/${args.folderId}`, { method: "PATCH", body: { syncEnabled: args.syncEnabled } as unknown as BodyInit }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["communication", "email", "accounts", selectedAccountId, "folders"] });
       toast({ title: "Folder sync updated" });
@@ -410,7 +410,7 @@ export function EmailSettingsPanel() {
           maxEmails: importMaxEmails,
           from: importRange === "custom" && customFrom ? new Date(customFrom).toISOString() : null,
           to: importRange === "custom" && customTo ? new Date(customTo).toISOString() : null,
-        },
+        } as unknown as BodyInit,
       }),
     onSuccess: (result, accountId) => {
       setCheckingImportAccountId((current) => (current === accountId ? null : current));
