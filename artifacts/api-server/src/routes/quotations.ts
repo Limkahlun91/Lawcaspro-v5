@@ -1,11 +1,41 @@
-import express, { type Router as ExpressRouter } from "express";
-import { eq, desc, and, count } from "drizzle-orm";
+import express, { type Router as ExpressRouter, type Response } from "express";
+import { eq, desc, and, count, inArray, isNull } from "drizzle-orm";
 import { db, quotationItemsTable, quotationsTable, regulatoryRuleSetsTable, regulatoryRuleVersionsTable, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { applyRule } from "./regulatory.js";
 import { logger } from "../lib/logger.js";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
+const ALLOWED_QUOTATION_STATUSES = ["draft", "sent", "accepted", "rejected"] as const;
+type AllowedQuotationStatus = typeof ALLOWED_QUOTATION_STATUSES[number];
+
+const REQUIRED_RULE_KEYS = ["SRO_SPA", "SRO_LOAN", "STAMP_DUTY_MOT", "STAMP_DUTY_LOAN"] as const;
+
+function parseIncludeItems(raw: string | undefined): boolean | { error: string } {
+  if (raw === undefined) return true;
+  const v = String(raw).trim().toLowerCase();
+  if (v === "true" || v === "1") return true;
+  if (v === "false" || v === "0") return false;
+  return { error: "invalid_include_items" };
+}
+
+function parseStatusCsv(raw: string | undefined): AllowedQuotationStatus[] | { error: string; unknown: string[] } {
+  if (!raw) return [];
+  const tokens = String(raw).split(",").map(s => s.trim()).filter(Boolean);
+  const allowed = new Set<string>(ALLOWED_QUOTATION_STATUSES);
+  const unknown: string[] = [];
+  const result: AllowedQuotationStatus[] = [];
+  for (const t of tokens) {
+    if (allowed.has(t)) {
+      result.push(t as AllowedQuotationStatus);
+    } else {
+      unknown.push(t);
+    }
+  }
+  if (unknown.length > 0) return { error: "invalid_status", unknown };
+  return result;
+}
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -92,47 +122,162 @@ function normalizeItem(item: any, quotationId: number, idx: number, defaultTaxRa
   };
 }
 
-router.get("/quotations", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
+async function fetchQuotationsWithAggregates(
+  firmId: number,
+  opts: {
+    caseId?: number;
+    statuses: AllowedQuotationStatus[];
+    includeItems: boolean;
+    limit: number;
+    offset: number;
+    q?: string;
+    allowDeleted?: boolean;
+  }
+) {
+  const { caseId, statuses, includeItems, limit, offset, q, allowDeleted } = opts;
+
+  const where = [eq(quotationsTable.firmId, firmId)];
+  if (!allowDeleted) where.push(isNull(quotationsTable.deletedAt));
+  if (caseId) where.push(eq(quotationsTable.caseId, caseId));
+  if (statuses.length > 0) where.push(inArray(quotationsTable.status, statuses));
+  if (q) {
+    const search = `%${q}%`;
+    where.push(sql`(${quotationsTable.referenceNo} ILIKE ${search} OR ${quotationsTable.clientName} ILIKE ${search})`);
+  }
+  const whereClause = where.length === 1 ? where[0]! : and(...where);
+
+  const totalResult = await db
+    .select({ value: count() })
+    .from(quotationsTable)
+    .where(whereClause);
+  const total = Number(totalResult[0]?.value ?? 0);
+
+  const rows = await db.select().from(quotationsTable)
+    .where(whereClause)
+    .orderBy(desc(quotationsTable.createdAt))
+    .limit(limit)
+    .offset(offset);
+
+  const qIds = rows.map(r => r.id);
+  const results: any[] = rows.map(q => ({
+    ...q,
+    purchasePrice: q.purchasePrice ? parseFloat(q.purchasePrice) : null,
+    taxRate: q.taxRate ? parseFloat(q.taxRate) : DEFAULT_TAX_RATE,
+    createdAt: q.createdAt.toISOString(),
+    updatedAt: q.updatedAt.toISOString(),
+    itemCount: 0,
+    totalExclTax: 0,
+    totalTax: 0,
+    totalInclTax: 0,
+  }));
+
+  if (includeItems && qIds.length > 0) {
+    const itemCountsRaw = await db
+      .select({ quotationId: quotationItemsTable.quotationId, count: count() })
+      .from(quotationItemsTable)
+      .where(inArray(quotationItemsTable.quotationId, qIds))
+      .groupBy(quotationItemsTable.quotationId);
+    const itemCountById = new Map<number, number>();
+    for (const r of itemCountsRaw) itemCountById.set(r.quotationId, Number(r.count || 0));
+
+    const allItems = await db.select().from(quotationItemsTable)
+      .where(inArray(quotationItemsTable.quotationId, qIds));
+    const itemsById = new Map<number, any[]>();
+    for (const it of allItems) {
+      if (!itemsById.has(it.quotationId)) itemsById.set(it.quotationId, []);
+      itemsById.get(it.quotationId)!.push(it);
+    }
+
+    for (const r of results) {
+      const items = itemsById.get(r.id) || [];
+      r.itemCount = itemCountById.get(r.id) || 0;
+      r.totalExclTax = items.reduce((s, i) => s + parseFloat(i.amountExclTax || "0"), 0);
+      r.totalTax = items.reduce((s, i) => s + parseFloat(i.taxAmount || "0"), 0);
+      r.totalInclTax = items.reduce((s, i) => s + parseFloat(i.amountInclTax || "0"), 0);
+    }
+  }
+
+  return { results, total };
+}
+
+router.get("/quotations", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const firmId = (req as AuthRequest).firmId!;
+    const firmId = req.firmId!;
     const caseIdStr = one((req.query as any)?.caseId);
     const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
     if (caseIdStr && (!Number.isInteger(caseId) || caseId <= 0)) {
       res.status(400).json({ error: "Invalid caseId" });
       return;
     }
-    const where = caseIdStr
-      ? and(eq(quotationsTable.firmId, firmId), eq(quotationsTable.caseId, caseId))
-      : eq(quotationsTable.firmId, firmId);
-    const rows = await db.select().from(quotationsTable)
-      .where(where)
-      .orderBy(desc(quotationsTable.createdAt));
+    const statusRaw = one((req.query as any)?.status);
+    const statusParse = parseStatusCsv(statusRaw);
+    if ("error" in statusParse) {
+      res.status(400).json({ error: statusParse.error, unknown: statusParse.unknown });
+      return;
+    }
+    const statuses = statusParse;
 
-    const results = await Promise.all(rows.map(async (q) => {
-      const [itemCount] = await db.select({ count: count() }).from(quotationItemsTable)
-        .where(eq(quotationItemsTable.quotationId, q.id));
+    const includeItemsRaw = one((req.query as any)?.includeItems);
+    const includeItemsParse = parseIncludeItems(includeItemsRaw);
+    if (typeof includeItemsParse === "object" && "error" in includeItemsParse) {
+      res.status(400).json({ error: includeItemsParse.error });
+      return;
+    }
+    const includeItems = includeItemsParse as boolean;
 
-      const items = await db.select().from(quotationItemsTable)
-        .where(eq(quotationItemsTable.quotationId, q.id));
+    const qRaw = one((req.query as any)?.q);
+    const q = qRaw ? String(qRaw).trim() : undefined;
 
-      const totalExclTax = items.reduce((sum, i) => sum + parseFloat(i.amountExclTax || "0"), 0);
-      const totalTax = items.reduce((sum, i) => sum + parseFloat(i.taxAmount || "0"), 0);
-      const totalInclTax = items.reduce((sum, i) => sum + parseFloat(i.amountInclTax || "0"), 0);
+    const paginatedRaw = one((req.query as any)?.paginated);
+    const paginated = paginatedRaw === "true" || paginatedRaw === "1";
 
-      return {
-        ...q,
-        purchasePrice: q.purchasePrice ? parseFloat(q.purchasePrice) : null,
-        taxRate: q.taxRate ? parseFloat(q.taxRate) : DEFAULT_TAX_RATE,
-        itemCount: itemCount?.count || 0,
-        totalExclTax,
-        totalTax,
-        totalInclTax,
-        createdAt: q.createdAt.toISOString(),
-        updatedAt: q.updatedAt.toISOString(),
-      };
-    }));
+    const limitRaw = one((req.query as any)?.limit);
+    const pageRaw = one((req.query as any)?.page);
+    const offsetRaw = one((req.query as any)?.offset);
 
-    res.json(results);
+    const limit = limitRaw ? parseInt(limitRaw, 10) : NaN;
+    const page = pageRaw ? parseInt(pageRaw, 10) : NaN;
+    const offset = offsetRaw ? parseInt(offsetRaw, 10) : NaN;
+
+    let finalLimit: number;
+    let finalOffset: number;
+
+    if (paginated) {
+      finalLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 200) : 30;
+      if (Number.isInteger(page) && page >= 1) {
+        finalOffset = (page - 1) * finalLimit;
+      } else {
+        finalOffset = Number.isInteger(offset) && offset >= 0 ? offset : 0;
+      }
+    } else {
+      finalLimit = Number.isInteger(limit) && limit > 0
+        ? Math.min(limit, 200)
+        : 30;
+      finalOffset = Number.isInteger(offset) && offset >= 0 ? offset : 0;
+    }
+
+    const { results, total } = await fetchQuotationsWithAggregates(firmId, {
+      caseId: caseIdStr ? caseId : undefined,
+      statuses,
+      includeItems,
+      limit: finalLimit,
+      offset: finalOffset,
+      q,
+    });
+
+    if (paginated) {
+      const currentPage = Number.isInteger(page) && page >= 1 ? page : Math.floor(finalOffset / finalLimit) + 1;
+      const hasMore = finalOffset + results.length < total;
+      res.json({
+        rows: results,
+        total,
+        page: currentPage,
+        limit: finalLimit,
+        hasMore,
+      });
+    } else {
+      res.json(results);
+    }
     return;
   } catch (err) {
     logger.error({ err, path: req.path }, "[quotations]");
@@ -141,10 +286,66 @@ router.get("/quotations", requireAuth, requireFirmUser, async (req, res): Promis
   }
 });
 
-router.post("/quotations", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
+router.get("/quotations/all", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const firmId = (req as AuthRequest).firmId!;
-    const userId = (req as AuthRequest).userId!;
+    const firmId = req.firmId!;
+    const caseIdStr = one((req.query as any)?.caseId);
+    const caseId = caseIdStr ? parseInt(caseIdStr, 10) : NaN;
+    if (caseIdStr && (!Number.isInteger(caseId) || caseId <= 0)) {
+      res.status(400).json({ error: "Invalid caseId" });
+      return;
+    }
+    const statusRaw = one((req.query as any)?.status);
+    const statusParse = parseStatusCsv(statusRaw);
+    if ("error" in statusParse) {
+      res.status(400).json({ error: statusParse.error, unknown: statusParse.unknown });
+      return;
+    }
+    const statuses = statusParse;
+
+    const includeItemsRaw = one((req.query as any)?.includeItems);
+    const includeItemsParse = parseIncludeItems(includeItemsRaw);
+    if (typeof includeItemsParse === "object" && "error" in includeItemsParse) {
+      res.status(400).json({ error: includeItemsParse.error });
+      return;
+    }
+    const includeItems = includeItemsParse as boolean;
+
+    const limitRaw = one((req.query as any)?.limit);
+    const offsetRaw = one((req.query as any)?.offset);
+    const limit = limitRaw ? parseInt(limitRaw, 10) : NaN;
+    const offset = offsetRaw ? parseInt(offsetRaw, 10) : NaN;
+    const finalLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 5000) : 5000;
+    const finalOffset = Number.isInteger(offset) && offset >= 0 ? offset : 0;
+
+    const { results, total } = await fetchQuotationsWithAggregates(firmId, {
+      caseId: caseIdStr ? caseId : undefined,
+      statuses,
+      includeItems,
+      limit: finalLimit,
+      offset: finalOffset,
+    });
+
+    const hasMore = finalOffset + results.length < total;
+    res.json({
+      rows: results,
+      total,
+      offset: finalOffset,
+      limit: finalLimit,
+      hasMore,
+    });
+    return;
+  } catch (err) {
+    logger.error({ err, path: req.path }, "[quotations/all]");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+});
+
+router.post("/quotations", requireAuth, requireFirmUser, requirePermission("accounting", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const firmId = req.firmId!;
+    const userId = req.userId!;
     const {
       items,
       taxRate,
@@ -197,6 +398,16 @@ router.post("/quotations", requireAuth, requireFirmUser, async (req, res): Promi
       };
     });
 
+    try {
+      await writeAuditLog({
+        firmId, actorId: userId, actorType: req.userType,
+        action: "accounting.quotation.create",
+        entityType: "quotation", entityId: result.id,
+        detail: `ref=${result.referenceNo ?? ""};client=${finalClientName};items=${result.items.length}`,
+        ipAddress: req.ip, userAgent: req.headers["user-agent"],
+      });
+    } catch (_) { /* audit failure should not block user response */ }
+
     res.status(201).json(result);
     return;
   } catch (err) {
@@ -206,7 +417,7 @@ router.post("/quotations", requireAuth, requireFirmUser, async (req, res): Promi
   }
 });
 
-router.get("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
+router.get("/quotations/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const firmId = (req as AuthRequest).firmId!;
     const idStr = one(req.params.id);
@@ -238,9 +449,10 @@ router.get("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Pr
   }
 });
 
-router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
+router.patch("/quotations/:id", requireAuth, requireFirmUser, requirePermission("accounting", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const firmId = (req as AuthRequest).firmId!;
+    const firmId = req.firmId!;
+    const userId = req.userId!;
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
@@ -301,6 +513,18 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): 
       };
     });
 
+    try {
+      const itemsDiff = items !== undefined ? `;items=${result.items.length}` : "";
+      const refChange = existing.referenceNo !== result.referenceNo ? `;ref=${existing.referenceNo ?? ""}→${result.referenceNo ?? ""}` : "";
+      await writeAuditLog({
+        firmId, actorId: userId, actorType: req.userType,
+        action: "accounting.quotation.update",
+        entityType: "quotation", entityId: id,
+        detail: `client=${result.clientName ?? ""}${refChange}${itemsDiff}`,
+        ipAddress: req.ip, userAgent: req.headers["user-agent"],
+      });
+    } catch (_) { /* audit failure should not block user response */ }
+
     res.json(result);
     return;
   } catch (err) {
@@ -310,9 +534,10 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, async (req, res): 
   }
 });
 
-router.delete("/quotations/:id", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
+router.delete("/quotations/:id", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const firmId = (req as AuthRequest).firmId!;
+    const firmId = req.firmId!;
+    const userId = req.userId!;
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
@@ -327,6 +552,16 @@ router.delete("/quotations/:id", requireAuth, requireFirmUser, async (req, res):
       await tx.delete(quotationsTable).where(eq(quotationsTable.id, id));
     });
 
+    try {
+      await writeAuditLog({
+        firmId, actorId: userId, actorType: req.userType,
+        action: "accounting.quotation.delete",
+        entityType: "quotation", entityId: id,
+        detail: `ref=${existing.referenceNo ?? ""};client=${existing.clientName ?? ""}`,
+        ipAddress: req.ip, userAgent: req.headers["user-agent"],
+      });
+    } catch (_) { /* audit failure should not block user response */ }
+
     res.json({ success: true });
     return;
   } catch (err) {
@@ -336,10 +571,10 @@ router.delete("/quotations/:id", requireAuth, requireFirmUser, async (req, res):
   }
 });
 
-router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (req, res): Promise<void> => {
+router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, requirePermission("accounting", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const firmId = (req as AuthRequest).firmId!;
-    const userId = (req as AuthRequest).userId!;
+    const firmId = req.firmId!;
+    const userId = req.userId!;
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
@@ -407,6 +642,16 @@ router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, async (re
       };
     });
 
+    try {
+      await writeAuditLog({
+        firmId, actorId: userId, actorType: req.userType,
+        action: "accounting.quotation.duplicate",
+        entityType: "quotation", entityId: result.id,
+        detail: `fromId=${id};fromRef=${original.referenceNo ?? ""};newRef=${result.referenceNo ?? ""};items=${result.items.length}`,
+        ipAddress: req.ip, userAgent: req.headers["user-agent"],
+      });
+    } catch (_) { /* audit failure should not block user response */ }
+
     res.status(201).json(result);
     return;
   } catch (err) {
@@ -426,7 +671,7 @@ async function getActiveRule(code: string, asOf: string) {
   return versions.find(v => v.effectiveFrom <= asOf && (!v.effectiveTo || v.effectiveTo >= asOf)) || null;
 }
 
-router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, async (req: AuthRequest, res): Promise<void> => {
+router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, requirePermission("accounting", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const quotationIdStr = one(req.params.id);
     const quotationId = quotationIdStr ? parseInt(quotationIdStr) : NaN;
@@ -440,13 +685,33 @@ router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, asyn
     const asOf = new Date().toISOString().slice(0, 10);
     const sstRate = 0.08;
 
-    // Fetch active rule versions
-    const [sroSpa, sroLoan, stampMot, stampLoan] = await Promise.all([
-      getActiveRule("SRO_SPA", asOf),
-      getActiveRule("SRO_LOAN", asOf),
-      getActiveRule("STAMP_DUTY_MOT", asOf),
-      getActiveRule("STAMP_DUTY_LOAN", asOf),
-    ]);
+    const ruleResult = await Promise.all(REQUIRED_RULE_KEYS.map(async (key) => ({
+      key,
+      rule: await getActiveRule(key, asOf),
+    })));
+
+    const missing: string[] = [];
+    const ruleMap: Record<string, any> = {};
+    for (const { key, rule } of ruleResult) {
+      if (!rule) {
+        missing.push(key);
+      } else {
+        ruleMap[key] = rule;
+      }
+    }
+    if (missing.length > 0) {
+      res.status(409).json({
+        error: "RULE_CONFIGURATION_MISSING",
+        missing,
+        message: `Required regulatory rules are not configured: ${missing.join(", ")}`,
+      });
+      return;
+    }
+
+    const sroSpa = ruleMap["SRO_SPA"];
+    const sroLoan = ruleMap["SRO_LOAN"];
+    const stampMot = ruleMap["STAMP_DUTY_MOT"];
+    const stampLoan = ruleMap["STAMP_DUTY_LOAN"];
 
     const systemItems: {
       section: string; description: string; taxCode: string;
@@ -554,7 +819,26 @@ router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, asyn
       grandTotal: allItems.reduce((s, i) => s + parseFloat(i.amountInclTax || "0"), 0),
     };
 
-    res.json({ items: allItems.map(formatItem), totals, breakdown: { purchasePrice, loanAmount } });
+    const generated = systemItems.length;
+    const emptyLegitimate = generated === 0 && (purchasePrice <= 0 || loanAmount <= 0);
+
+    try {
+      await writeAuditLog({
+        firmId: firmId, actorId: req.userId!, actorType: req.userType,
+        action: "accounting.quotation.auto_calculate",
+        entityType: "quotation", entityId: quotationId,
+        detail: `purchase=${purchasePrice.toFixed(2)};loan=${loanAmount.toFixed(2)};systemItems=${systemItems.length};items=${allItems.length};grand=${totals.grandTotal.toFixed(2)};emptyLegitimate=${emptyLegitimate}`,
+        ipAddress: req.ip, userAgent: req.headers["user-agent"],
+      });
+    } catch (_) { /* audit failure should not block user response */ }
+
+    res.json({
+      items: allItems.map(formatItem),
+      totals,
+      breakdown: { purchasePrice, loanAmount },
+      generated,
+      emptyLegitimate,
+    });
     return;
   } catch (err) {
     logger.error({ err, path: req.path }, "[quotations]");
@@ -577,3 +861,10 @@ function formatItem(item: typeof quotationItemsTable.$inferSelect) {
 const exportedRouter = expressRouter as unknown as ExpressRouter;
 export { exportedRouter as router };
 export default exportedRouter;
+
+export {
+  ALLOWED_QUOTATION_STATUSES,
+  REQUIRED_RULE_KEYS,
+  parseIncludeItems,
+  parseStatusCsv,
+};

@@ -22,6 +22,7 @@ export const permissionsTable = pgTable("permissions", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   roleIdIdx: index("idx_permissions_role").on(t.roleId),
+  roleModuleActionUnique: uniqueIndex("uq_permissions_role_module_action").on(t.roleId, t.module, t.action),
 }));
 
 export const sessionsTable = pgTable("sessions", {

@@ -70,6 +70,9 @@ export const CreatePaymentVoucherBody = z.object({
   purpose: z.string().trim().min(1),
   amount: z.number().finite().positive(),
   fundStatus: PaymentVoucherFundStatus.optional().default("client_paid"),
+  responsibleLawyerId: z.number().int().positive().nullable().optional(),
+  approvingPartnerId: z.number().int().positive().nullable().optional(),
+  quotationId: z.number().int().positive().nullable().optional(),
   items: z.array(PaymentVoucherItem).min(1).optional(),
   lineItems: z.array(PaymentVoucherLineItem).min(1).optional(),
   notes: z.string().trim().max(5000).nullable().optional(),
@@ -81,6 +84,13 @@ export const CreatePaymentVoucherBody = z.object({
   paymentMethod: PaymentVoucherPaymentMethod.optional(),
   bankAccountId: z.number().int().positive().nullable().optional(),
   accountType: z.enum(["office", "client", "trust", "balance_sheet"]).optional(),
+  acknowledgedUnclaimedItems: z.array(z.object({
+    item: z.string().trim().min(1).max(200),
+    pvId: z.number().int().positive().optional(),
+    caseId: z.number().int().positive().optional(),
+    userId: z.number().int().positive().optional(),
+    createdAt: z.string().datetime().optional(),
+  })).optional(),
 });
 export type CreatePaymentVoucherBody = z.infer<typeof CreatePaymentVoucherBody>;
 
@@ -90,6 +100,10 @@ export const PaymentVoucherTransitionBody = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("approve"),
     decision: PaymentVoucherApprovalStatus.optional().default("approved"),
+  }),
+  z.object({
+    action: z.literal("reject"),
+    reason: z.string().trim().min(3).max(2000),
   }),
   z.object({
     action: z.literal("received_by_accounts"),
@@ -119,6 +133,20 @@ export const PaymentVoucherTransitionBody = z.discriminatedUnion("action", [
     clerkActionExemptReason: z.string().trim().min(3).max(1000).optional(),
     lateCompletionReason: z.string().trim().max(2000).optional(),
   }),
+  z.object({
+    action: z.literal("mark_complete"),
+    remarks: z.string().trim().max(2000).optional(),
+  }),
 ]);
 export type PaymentVoucherTransitionBody = z.infer<typeof PaymentVoucherTransitionBody>;
+
+export const UnifiedNotificationStatus = z.enum([
+  "created", "unread", "read", "acknowledged", "escalated", "resolved", "auto_resolved",
+]);
+export type UnifiedNotificationStatus = z.infer<typeof UnifiedNotificationStatus>;
+
+export const UnifiedNotificationTargetScope = z.enum([
+  "user", "lawyer", "manager", "selected_partner", "all_partners", "role",
+]);
+export type UnifiedNotificationTargetScope = z.infer<typeof UnifiedNotificationTargetScope>;
 

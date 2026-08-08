@@ -200,6 +200,13 @@ export class PaymentVoucherStatusCheckFailedError extends Error {
   }
 }
 
+export class PaymentVoucherPreflightWarningShown extends Error {
+  constructor(message = "Unclaimed quotation item warnings shown") {
+    super(message);
+    this.name = "PaymentVoucherPreflightWarningShown";
+  }
+}
+
 export async function getPaymentVoucherCreateStatus(clientRequestId: string): Promise<PaymentVoucherCreateStatus> {
   try {
     const res = await apiRequest(`/payment-vouchers/by-client-request/${encodeURIComponent(clientRequestId)}`, {

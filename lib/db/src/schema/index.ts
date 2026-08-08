@@ -14,6 +14,8 @@ export * from "./developer-documents";
 export * from "./project-documents";
 export * from "./extractions";
 export * from "./dashboard-cache";
+export * from "./case-monitor";
+export * from "./file-custody";
 export * from "./firm-documents";
 export * from "./accounting";
 export * from "./platform-governance";
@@ -29,3 +31,8 @@ export * from "./time-tasks";
 export * from "./security";
 export * from "./compliance";
 export * from "./conflict";
+
+export * from "./hrms-core";
+export * from "./hrms-employees";
+export * from "./hrms-memberships";
+export * from "./hrms-approvals";

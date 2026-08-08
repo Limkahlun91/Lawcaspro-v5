@@ -5,6 +5,8 @@ import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 import { extractDbErrorInfo } from "../lib/db-error.js";
+import { queryOne } from "../lib/http.js";
+import { withDbStatementTimeout, type StatementTimeoutCategory } from "../modules/db/statement-timeout.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -15,6 +17,21 @@ const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 const rdb = (req: AuthRequest) => req.rlsDb ?? db;
 const one = (v: string | string[] | undefined): string | undefined => Array.isArray(v) ? v[0] : v;
+
+function parsePageLimit(
+  req: AuthRequest,
+  defaults: { defaultLimit: number; maxLimit: number } = { defaultLimit: 30, maxLimit: 200 },
+): { page: number; limit: number; offset: number } {
+  const pageRaw = queryOne(req.query, "page");
+  const limitRaw = queryOne(req.query, "limit");
+  let page = Number.parseInt(pageRaw ?? "1", 10);
+  if (!Number.isFinite(page) || page < 1) page = 1;
+  let limit = Number.parseInt(limitRaw ?? String(defaults.defaultLimit), 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = defaults.defaultLimit;
+  if (limit > defaults.maxLimit) limit = defaults.maxLimit;
+  const offset = (page - 1) * limit;
+  return { page, limit, offset };
+}
 
 function escapedLike(s: string): string {
   return s.replace(/[%_]/g, (c) => "\\" + c);
@@ -155,37 +172,97 @@ router.get("/payment-voucher-actions/my-work", requireAuth, requireFirmUser, asy
     res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" });
     return;
   }
+  const { page, limit, offset } = parsePageLimit(req, { defaultLimit: 30, maxLimit: 200 });
   const status = one((req.query as any).status);
   const conds = [eq(paymentVoucherActionsTable.firmId, req.firmId!), eq(paymentVoucherActionsTable.assignedUserId, userId)];
   if (status) conds.push(eq(paymentVoucherActionsTable.status, status));
-  const rows = await rdb(req)
-    .select({
-      id: paymentVoucherActionsTable.id,
-      paymentVoucherId: paymentVoucherActionsTable.paymentVoucherId,
-      caseId: paymentVoucherActionsTable.caseId,
-      actionType: paymentVoucherActionsTable.actionType,
-      customAction: paymentVoucherActionsTable.customAction,
-      status: paymentVoucherActionsTable.status,
-      priority: paymentVoucherActionsTable.priority,
-      assignedAt: paymentVoucherActionsTable.assignedAt,
-      acknowledgeDueAt: paymentVoucherActionsTable.acknowledgeDueAt,
-      acknowledgedAt: paymentVoucherActionsTable.acknowledgedAt,
-      completionDueAt: paymentVoucherActionsTable.completionDueAt,
-      completedAt: paymentVoucherActionsTable.completedAt,
-      voucherNo: paymentVouchersTable.voucherNo,
-      payeeName: paymentVouchersTable.payeeName,
-      nextActionRemarks: paymentVouchersTable.nextActionRemarks,
-      referenceNo: casesTable.referenceNo,
-    })
-    .from(paymentVoucherActionsTable)
-    .innerJoin(paymentVouchersTable, and(
-      eq(paymentVouchersTable.id, paymentVoucherActionsTable.paymentVoucherId),
-      eq(paymentVouchersTable.firmId, paymentVoucherActionsTable.firmId),
-    ))
-    .leftJoin(casesTable, and(eq(casesTable.id, paymentVoucherActionsTable.caseId), eq(casesTable.firmId, paymentVoucherActionsTable.firmId)))
-    .where(and(...conds))
-    .orderBy(desc(paymentVoucherActionsTable.createdAt));
-  res.json(rows);
+  const r = rdb(req);
+  const conn = req.rlsClient;
+  const category: StatementTimeoutCategory = "search";
+  const cond = and(...conds);
+  try {
+    const totalPromise = conn
+      ? withDbStatementTimeout(conn, category, () =>
+          (r as any).select({ value: count() }).from(paymentVoucherActionsTable).where(cond),
+          category,
+        )
+      : (r as any).select({ value: count() }).from(paymentVoucherActionsTable).where(cond);
+    const listPromise = conn
+      ? withDbStatementTimeout(conn, category, () =>
+          r
+            .select({
+              id: paymentVoucherActionsTable.id,
+              paymentVoucherId: paymentVoucherActionsTable.paymentVoucherId,
+              caseId: paymentVoucherActionsTable.caseId,
+              actionType: paymentVoucherActionsTable.actionType,
+              customAction: paymentVoucherActionsTable.customAction,
+              status: paymentVoucherActionsTable.status,
+              priority: paymentVoucherActionsTable.priority,
+              assignedAt: paymentVoucherActionsTable.assignedAt,
+              acknowledgeDueAt: paymentVoucherActionsTable.acknowledgeDueAt,
+              acknowledgedAt: paymentVoucherActionsTable.acknowledgedAt,
+              completionDueAt: paymentVoucherActionsTable.completionDueAt,
+              completedAt: paymentVoucherActionsTable.completedAt,
+              voucherNo: paymentVouchersTable.voucherNo,
+              payeeName: paymentVouchersTable.payeeName,
+              nextActionRemarks: paymentVouchersTable.nextActionRemarks,
+              referenceNo: casesTable.referenceNo,
+            })
+            .from(paymentVoucherActionsTable)
+            .innerJoin(paymentVouchersTable, and(
+              eq(paymentVouchersTable.id, paymentVoucherActionsTable.paymentVoucherId),
+              eq(paymentVouchersTable.firmId, paymentVoucherActionsTable.firmId),
+            ))
+            .leftJoin(casesTable, and(eq(casesTable.id, paymentVoucherActionsTable.caseId), eq(casesTable.firmId, paymentVoucherActionsTable.firmId)))
+            .where(cond)
+            .orderBy(desc(paymentVoucherActionsTable.createdAt))
+            .limit(limit)
+            .offset(offset),
+          category,
+        )
+      : r
+        .select({
+          id: paymentVoucherActionsTable.id,
+          paymentVoucherId: paymentVoucherActionsTable.paymentVoucherId,
+          caseId: paymentVoucherActionsTable.caseId,
+          actionType: paymentVoucherActionsTable.actionType,
+          customAction: paymentVoucherActionsTable.customAction,
+          status: paymentVoucherActionsTable.status,
+          priority: paymentVoucherActionsTable.priority,
+          assignedAt: paymentVoucherActionsTable.assignedAt,
+          acknowledgeDueAt: paymentVoucherActionsTable.acknowledgeDueAt,
+          acknowledgedAt: paymentVoucherActionsTable.acknowledgedAt,
+          completionDueAt: paymentVoucherActionsTable.completionDueAt,
+          completedAt: paymentVoucherActionsTable.completedAt,
+          voucherNo: paymentVouchersTable.voucherNo,
+          payeeName: paymentVouchersTable.payeeName,
+          nextActionRemarks: paymentVouchersTable.nextActionRemarks,
+          referenceNo: casesTable.referenceNo,
+        })
+        .from(paymentVoucherActionsTable)
+        .innerJoin(paymentVouchersTable, and(
+          eq(paymentVouchersTable.id, paymentVoucherActionsTable.paymentVoucherId),
+          eq(paymentVouchersTable.firmId, paymentVoucherActionsTable.firmId),
+        ))
+        .leftJoin(casesTable, and(eq(casesTable.id, paymentVoucherActionsTable.caseId), eq(casesTable.firmId, paymentVoucherActionsTable.firmId)))
+        .where(cond)
+        .orderBy(desc(paymentVoucherActionsTable.createdAt))
+        .limit(limit)
+        .offset(offset);
+    const [[{ value: totalRaw }], rows] = await Promise.all([totalPromise, listPromise]);
+    const totalCount = typeof totalRaw === "number" ? totalRaw : Number(totalRaw ?? 0);
+    res.setHeader("X-Total-Count", String(totalCount));
+    res.setHeader("X-Page", String(page));
+    res.setHeader("X-Limit", String(limit));
+    res.json(rows);
+  } catch (err) {
+    logger.error({ err, path: req.path }, "pv-actions.my-work.failed");
+    if (err instanceof Error && (err as any).code === "STATEMENT_TIMEOUT") {
+      res.status(504).json({ error: (err as Error).message });
+      return;
+    }
+    res.status(500).json({ error: "Failed to load my-work items" });
+  }
 });
 
 router.get("/payment-voucher-actions/my-work/overview", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {

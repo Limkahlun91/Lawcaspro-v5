@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Download, CheckCircle, XCircle, Plus, AlertCircle } from "lucide-react";
+import { ArrowLeft, Download, CheckCircle, XCircle, Plus, AlertCircle, FileText, RefreshCw, Send } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { DateOnlyInput } from "@/components/date-only-input";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -48,6 +49,61 @@ type InvoiceDetailResponse = {
   billToName?: string | null;
   billToAddress?: string | null;
   clientDetails?: Array<{ name: string; tin?: string }>;
+  einvoiceStatus?: string | null;
+  einvoiceExternalSubmissionId?: string | null;
+  einvoiceSubmittedAt?: string | null;
+  einvoiceLastCheckedAt?: string | null;
+  einvoiceErrorCode?: string | null;
+  einvoiceErrorMessage?: string | null;
+  einvoiceRetryCount?: number;
+  einvoiceClassification?: string | null;
+  einvoiceSourceInvoiceId?: number | null;
+};
+
+type EInvoiceStatusResponse = {
+  invoice: {
+    einvoiceStatus: string | null;
+    einvoiceExternalSubmissionId: string | null;
+    einvoiceSubmittedAt: string | null;
+    einvoiceLastCheckedAt: string | null;
+    einvoiceErrorCode: string | null;
+    einvoiceErrorMessage: string | null;
+    einvoiceRetryCount: number;
+    einvoiceClassification: string | null;
+    einvoiceSourceInvoiceId: number | null;
+  };
+  submissions: Array<{
+    id: number;
+    status: string;
+    externalSubmissionId?: string | null;
+    submittedAt?: string | null;
+    lastCheckedAt?: string | null;
+    errorCode?: string | null;
+    errorMessage?: string | null;
+    retryCount: number;
+    createdAt: string | null;
+  }>;
+};
+
+const EINVOICE_STATUS_COLORS: Record<string, string> = {
+  DRAFT: "bg-slate-100 text-slate-600",
+  READY: "bg-sky-100 text-sky-700",
+  SUBMITTING: "bg-amber-100 text-amber-700",
+  SUBMITTED: "bg-blue-100 text-blue-700",
+  VALID: "bg-green-100 text-green-700",
+  INVALID: "bg-red-100 text-red-700",
+  CANCELLED: "bg-slate-200 text-slate-600",
+  ERROR: "bg-red-100 text-red-600",
+  RETRY_PENDING: "bg-orange-100 text-orange-700",
+};
+
+const EINVOICE_CLASS_LABELS: Record<string, string> = {
+  OFFICE_INCOME: "Office Income (Professional Fee)",
+  TAXABLE_TRAVEL_MISC: "Taxable Travelling / Misc",
+  CLIENT_STAKEHOLDER_MONEY: "Stakeholder Money (Stamp / Reg, NOT firm income)",
+  REIMBURSEMENT: "Reimbursement",
+  DISBURSEMENT: "Disbursement",
+  OVERCOLLECT_TRANSFER: "Overcollect Transfer",
 };
 
 type ReceiptRow = {
@@ -145,6 +201,50 @@ export default function InvoiceDetail() {
     retry: false,
   });
   const { data: receiptsData } = receiptsQuery;
+
+  const einvQuery = useQuery<EInvoiceStatusResponse>({
+    queryKey: ["einvoice-status", id],
+    queryFn: () => apiFetchJson<EInvoiceStatusResponse>(`/invoices/${id}/einvoice`),
+    enabled: !!id,
+    retry: false,
+    staleTime: 15_000,
+    refetchInterval: (q) => {
+      const s = String(q.state.data?.invoice.einvoiceStatus ?? "");
+      return s === "SUBMITTING" || s === "SUBMITTED" ? 5000 : false;
+    },
+  });
+
+  const einvPrepareMut = useMutation({
+    mutationFn: () => apiFetchJson(`/invoices/${id}/einvoice/prepare`, { method: "POST" }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["einvoice-status", id] }); qc.invalidateQueries({ queryKey: ["invoice", id] }); toast({ title: "e-Invoice prepared", description: "Classification computed. Ready to submit." }); },
+    onError: (e) => toastError(toast, e, "Prepare failed"),
+  });
+
+  const einvSubmitMut = useMutation({
+    mutationFn: () => apiFetchJson(`/invoices/${id}/einvoice/submit`, { method: "POST" }),
+    onSuccess: (r: any) => {
+      qc.invalidateQueries({ queryKey: ["einvoice-status", id] });
+      qc.invalidateQueries({ queryKey: ["invoice", id] });
+      if (r?.skippedDueToDuplicateSourceLink) {
+        toast({ title: "Submit skipped (double invoice guard)", description: r?.errorMessage ?? "Source already linked to VALID submission." });
+      } else if (r?.status === "VALID" || r?.status === "SUBMITTED") {
+        toast({ title: "e-Invoice submitted", description: `Status: ${r?.status}${r?.externalSubmissionId ? " · " + r.externalSubmissionId : ""}` });
+      } else {
+        toast({ title: "Submit finished", description: `Status: ${r?.status ?? "unknown"}` });
+      }
+    },
+    onError: (e: any) => {
+      const detail = e?.responseJson ?? (typeof e?.message === "string" ? e.message : undefined);
+      if (detail === "EINVOICE_SANDBOX_DISABLED") toast({ variant: "destructive", title: "Sandbox disabled", description: "Set EINVOICE_SANDBOX=1 on server to enable test-mode submit. Production submit is NOT allowed." });
+      else toastError(toast, e, "Submit failed");
+    },
+  });
+
+  const einvRetryMut = useMutation({
+    mutationFn: () => apiFetchJson(`/invoices/${id}/einvoice/retry`, { method: "POST" }),
+    onSuccess: (r: any) => { qc.invalidateQueries({ queryKey: ["einvoice-status", id] }); qc.invalidateQueries({ queryKey: ["invoice", id] }); toast({ title: "e-Invoice retried", description: `Status: ${r?.status ?? "unknown"}` }); },
+    onError: (e) => toastError(toast, e, "Retry failed"),
+  });
 
   const issueMut = useMutation({
     mutationFn: () => apiFetchJson(`/invoices/${id}/issue`, { method: "POST" }),
@@ -322,6 +422,132 @@ export default function InvoiceDetail() {
           </CardContent>
         </Card>
       </div>
+
+      {/* e-Invoice Status card */}
+      <Card className="print:hidden pdf-hide border-indigo-100 bg-indigo-50/40">
+        <CardHeader className="flex flex-row items-start justify-between gap-4 pb-2">
+          <div>
+            <CardTitle className="text-base flex items-center gap-2">
+              <FileText className="w-4 h-4 text-indigo-600" /> e-Invoice Status (MyInvois · Sandbox)
+            </CardTitle>
+            <CardDescription className="text-xs mt-1">
+              Sandbox mode only. Production submit is NOT enabled. Set <code className="bg-slate-100 px-1 rounded">EINVOICE_SANDBOX=1</code> server-side to submit.
+            </CardDescription>
+          </div>
+          {(einvQuery.data || inv.einvoiceStatus) ? (
+            <Badge className={cn("text-xs font-medium", EINVOICE_STATUS_COLORS[String(einvQuery.data?.invoice.einvoiceStatus ?? inv.einvoiceStatus ?? "DRAFT")] ?? "bg-slate-100 text-slate-600")}>
+              {String(einvQuery.data?.invoice.einvoiceStatus ?? inv.einvoiceStatus ?? "DRAFT")}
+            </Badge>
+          ) : null}
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          {einvQuery.isLoading ? (
+            <div className="text-slate-400 text-xs">Loading status…</div>
+          ) : einvQuery.isError ? (
+            <div className="text-xs text-red-500">Failed to load e-Invoice status</div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                <div>
+                  <div className="text-slate-500">Classification</div>
+                  <div className="font-medium text-slate-800 mt-0.5">
+                    {EINVOICE_CLASS_LABELS[String(einvQuery.data?.invoice.einvoiceClassification ?? inv.einvoiceClassification ?? "")] ??
+                      (einvQuery.data?.invoice.einvoiceClassification ?? inv.einvoiceClassification) ??
+                      <span className="text-slate-400">—</span>}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-slate-500">Last Submitted</div>
+                  <div className="font-mono text-slate-800 mt-0.5">
+                    {String(einvQuery.data?.invoice.einvoiceSubmittedAt ?? inv.einvoiceSubmittedAt ?? "").slice(0, 16).replace("T", " ") || <span className="text-slate-400">—</span>}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-slate-500">Retry Count</div>
+                  <div className="font-medium text-slate-800 mt-0.5">{Number(einvQuery.data?.invoice.einvoiceRetryCount ?? inv.einvoiceRetryCount ?? 0)}</div>
+                </div>
+                <div>
+                  <div className="text-slate-500">External Submission ID</div>
+                  <div className="font-mono text-xs text-slate-800 mt-0.5 break-all">
+                    {einvQuery.data?.invoice.einvoiceExternalSubmissionId ?? inv.einvoiceExternalSubmissionId ?? <span className="text-slate-400">—</span>}
+                  </div>
+                </div>
+              </div>
+
+              {(einvQuery.data?.invoice.einvoiceErrorMessage ?? inv.einvoiceErrorMessage) && (
+                <div className="rounded-md border border-red-200 bg-red-50 p-3 text-xs space-y-1">
+                  <div className="font-medium text-red-700 flex items-center gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5" /> Error
+                    {einvQuery.data?.invoice.einvoiceErrorCode ?? inv.einvoiceErrorCode ? (
+                      <code className="ml-2 bg-white px-1 rounded">{einvQuery.data?.invoice.einvoiceErrorCode ?? inv.einvoiceErrorCode}</code>
+                    ) : null}
+                  </div>
+                  <div className="text-red-600 whitespace-pre-wrap">{einvQuery.data?.invoice.einvoiceErrorMessage ?? inv.einvoiceErrorMessage}</div>
+                </div>
+              )}
+
+              {Array.isArray(einvQuery.data?.submissions) && einvQuery.data!.submissions.length > 0 && (
+                <details className="text-xs">
+                  <summary className="cursor-pointer text-slate-500 hover:text-slate-700 select-none">
+                    Submission history ({einvQuery.data!.submissions.length})
+                  </summary>
+                  <div className="mt-2 space-y-2 max-h-64 overflow-auto rounded-md border border-slate-200 bg-white p-2">
+                    {einvQuery.data!.submissions.map((s) => (
+                      <div key={s.id} className="border-b border-slate-100 last:border-b-0 py-1.5 grid grid-cols-4 gap-2">
+                        <div className="col-span-1"><Badge className="text-[10px]">{s.status}</Badge></div>
+                        <div className="col-span-1 text-slate-500 font-mono text-[10px]">{String(s.createdAt ?? "").slice(0,16).replace("T"," ") || "—"}</div>
+                        <div className="col-span-1 text-slate-500 text-[10px]">retries: {s.retryCount}</div>
+                        <div className="col-span-1 text-[10px] font-mono text-slate-600 truncate" title={s.externalSubmissionId ?? undefined}>
+                          {s.externalSubmissionId ?? "—"}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </details>
+              )}
+            </>
+          )}
+
+          <div className="flex flex-wrap gap-2 pt-1">
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5 text-xs h-8"
+              onClick={() => einvPrepareMut.mutate()}
+              disabled={einvPrepareMut.isPending || einvSubmitMut.isPending || einvRetryMut.isPending}
+            >
+              <RefreshCw className={cn("w-3.5 h-3.5", einvPrepareMut.isPending ? "animate-spin" : "")} />
+              Prepare / Classify
+            </Button>
+            <Button
+              size="sm"
+              className="gap-1.5 text-xs h-8 bg-indigo-600 hover:bg-indigo-700 text-white"
+              onClick={() => einvSubmitMut.mutate()}
+              disabled={einvPrepareMut.isPending || einvSubmitMut.isPending || einvRetryMut.isPending}
+            >
+              <Send className="w-3.5 h-3.5" />
+              {einvSubmitMut.isPending ? "Submitting…" : "Submit (Sandbox)"}
+            </Button>
+            {(() => {
+              const st = String(einvQuery.data?.invoice.einvoiceStatus ?? inv.einvoiceStatus ?? "DRAFT");
+              const canRetry = st === "ERROR" || st === "RETRY_PENDING" || st === "INVALID";
+              return (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className={cn("gap-1.5 text-xs h-8", canRetry ? "text-amber-700 border-amber-200 hover:bg-amber-50" : "opacity-50 cursor-not-allowed")}
+                  onClick={() => canRetry && einvRetryMut.mutate()}
+                  disabled={!canRetry || einvPrepareMut.isPending || einvSubmitMut.isPending || einvRetryMut.isPending}
+                  title={canRetry ? "Retry submission" : "Retry only allowed for ERROR / RETRY_PENDING / INVALID"}
+                >
+                  <RefreshCw className={cn("w-3.5 h-3.5", einvRetryMut.isPending ? "animate-spin" : "")} />
+                  Retry
+                </Button>
+              );
+            })()}
+          </div>
+        </CardContent>
+      </Card>
 
       <div ref={pdfRef} className="space-y-6 print-doc print:space-y-3">
       <Card className="print:shadow-none print:border-none print:bg-transparent print:rounded-none">

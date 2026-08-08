@@ -1,5 +1,5 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, count } from "drizzle-orm";
 import {
   db, invoicesTable, invoiceItemsTable, quotationsTable, quotationItemsTable,
   casesTable, clientsTable, casePurchasersTable, ledgerEntriesTable, caseLedgersTable,
@@ -9,6 +9,8 @@ import { requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requi
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { one, queryOne } from "../lib/http.js";
 import { syncCaseFinancialTotals } from "../lib/caseFinancialSync.js";
+import { nextInvoiceNo } from "../modules/accounting/firm-sequence-numbers.js";
+import { withDbStatementTimeout, type StatementTimeoutCategory } from "../modules/db/statement-timeout.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -25,17 +27,26 @@ function firmGuard(req: AuthRequest, firmId: number): boolean {
   return req.firmId === firmId;
 }
 
-async function nextInvoiceNo(r: DbConn, firmId: number): Promise<string> {
-  const [row] = await r.select({ c: sql<number>`COUNT(*)` }).from(invoicesTable).where(eq(invoicesTable.firmId, firmId));
-  const seq = (Number(row?.c ?? 0) + 1).toString().padStart(4, "0");
-  const yr = new Date().getFullYear();
-  return `INV-${yr}-${seq}`;
+export function parsePageLimit(
+  req: { query?: Record<string, any> },
+  defaults: { defaultLimit: number; maxLimit: number } = { defaultLimit: 30, maxLimit: 200 },
+): { page: number; limit: number; offset: number } {
+  const pageRaw = queryOne(req.query, "page");
+  const limitRaw = queryOne(req.query, "limit");
+  let page = Number.parseInt(pageRaw ?? "1", 10);
+  if (!Number.isFinite(page) || page < 1) page = 1;
+  let limit = Number.parseInt(limitRaw ?? String(defaults.defaultLimit), 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = defaults.defaultLimit;
+  if (limit > defaults.maxLimit) limit = defaults.maxLimit;
+  const offset = (page - 1) * limit;
+  return { page, limit, offset };
 }
 
-// List
 router.get("/invoices", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const r = rdb(req);
+    const conn = req.rlsClient;
+    const { page, limit, offset } = parsePageLimit(req, { defaultLimit: 30, maxLimit: 200 });
     const caseIdStr = queryOne(req.query, "caseId");
     const status = queryOne(req.query, "status");
     const caseId = caseIdStr ? Number.parseInt(caseIdStr, 10) : undefined;
@@ -43,13 +54,38 @@ router.get("/invoices", requireAuth, requireFirmUser, requirePermission("account
       res.status(400).json({ error: "Invalid caseId" });
       return;
     }
-    let query = r.select().from(invoicesTable).where(eq(invoicesTable.firmId, req.firmId!)).$dynamic();
-    if (caseId) query = query.where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.caseId, caseId)));
-    if (status) query = query.where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.status, status)));
-    const rows = await query.orderBy(desc(invoicesTable.createdAt));
+    const baseWhere = [eq(invoicesTable.firmId, req.firmId!)];
+    if (caseId) baseWhere.push(eq(invoicesTable.caseId, caseId));
+    if (status) baseWhere.push(eq(invoicesTable.status, status));
+    const cond = and(...baseWhere);
+    const category: StatementTimeoutCategory = "search";
+
+    const totalPromise = conn
+      ? withDbStatementTimeout(conn, category, () =>
+          (r as any).select({ value: count() }).from(invoicesTable).where(cond),
+          category,
+        )
+      : (r as any).select({ value: count() }).from(invoicesTable).where(cond);
+
+    const listPromise = conn
+      ? withDbStatementTimeout(conn, category, () =>
+          r.select().from(invoicesTable).where(cond).orderBy(desc(invoicesTable.createdAt)).limit(limit).offset(offset),
+          category,
+        )
+      : r.select().from(invoicesTable).where(cond).orderBy(desc(invoicesTable.createdAt)).limit(limit).offset(offset);
+
+    const [[{ value: totalRaw }], rows] = await Promise.all([totalPromise, listPromise]);
+    const totalCount = typeof totalRaw === "number" ? totalRaw : Number(totalRaw ?? 0);
+    res.setHeader("X-Total-Count", String(totalCount));
+    res.setHeader("X-Page", String(page));
+    res.setHeader("X-Limit", String(limit));
     res.json(rows.map((inv) => (String((inv as any).status ?? "") === "void" ? { ...inv, amountDue: "0.00" } : inv)));
   } catch (err) {
     req.log.error({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "invoices.list_failed");
+    if (err instanceof Error && (err as any).code === "STATEMENT_TIMEOUT") {
+      res.status(504).json({ error: (err as Error).message });
+      return;
+    }
     res.status(500).json({ error: "Failed to load invoices" });
   }
 });

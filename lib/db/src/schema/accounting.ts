@@ -1,4 +1,6 @@
-import { pgTable, serial, text, integer, numeric, boolean, date, timestamp, index, uniqueIndex, uuid, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, numeric, boolean, date, timestamp, index, uniqueIndex, uuid, jsonb, primaryKey } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { firmsTable } from "./firms";
 
 export const caseBillingEntriesTable = pgTable("case_billing_entries", {
   id:          serial("id").primaryKey(),
@@ -38,10 +40,22 @@ export const invoicesTable = pgTable("invoices", {
   createdBy:     integer("created_by"),
   createdAt:     timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt:     timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+  einvoiceStatus: text("einvoice_status").notNull().default("DRAFT"),
+  einvoiceExternalSubmissionId: text("einvoice_external_submission_id"),
+  einvoiceSubmittedAt: timestamp("einvoice_submitted_at", { withTimezone: true }),
+  einvoiceLastCheckedAt: timestamp("einvoice_last_checked_at", { withTimezone: true }),
+  einvoiceErrorCode: text("einvoice_error_code"),
+  einvoiceErrorMessage: text("einvoice_error_message"),
+  einvoiceRetryCount: integer("einvoice_retry_count").notNull().default(0),
+  einvoiceClassification: text("einvoice_classification"),
+  einvoiceSourceInvoiceId: integer("einvoice_source_invoice_id").references((): any => invoicesTable.id, { onDelete: "set null" }),
 }, (t) => ({
   firmStatusIdx: index("idx_invoices_firm_status").on(t.firmId, t.status),
   dueDateIdx:    index("idx_invoices_due_date").on(t.dueDate),
   statusIdx:     index("idx_invoices_status").on(t.status),
+  firmInvoiceNoUnique: uniqueIndex("uq_invoices_firm_invoice_no").on(t.firmId, t.invoiceNo),
+  einvoiceStatusIdx: index("idx_invoices_einvoice_status").on(t.firmId, t.einvoiceStatus),
+  einvoiceSourceIdx: index("idx_invoices_einvoice_source").on(t.einvoiceSourceInvoiceId),
 }));
 
 export const invoiceItemsTable = pgTable("invoice_items", {
@@ -80,6 +94,7 @@ export const receiptsTable = pgTable("receipts", {
 }, (t) => ({
   receivedDateIdx: index("idx_receipts_received_date").on(t.receivedDate),
   accountTypeIdx:  index("idx_receipts_account_type").on(t.firmId, t.accountType),
+  firmReceiptNoUnique: uniqueIndex("uq_receipts_firm_receipt_no").on(t.firmId, t.receiptNo),
 }));
 
 export const receiptAllocationsTable = pgTable("receipt_allocations", {
@@ -118,6 +133,10 @@ export const paymentVouchersTable = pgTable("payment_vouchers", {
   bankChequeRefNo:    text("bank_cheque_ref_no"),
   amount:             numeric("amount", { precision: 18, scale: 2 }).notNull(),
   purpose:            text("purpose").notNull(),
+  responsibleLawyerId: integer("responsible_lawyer_id"),
+  approvingPartnerId: integer("approving_partner_id"),
+  quotationId:        integer("quotation_id"),
+  quotationClaimWarning: text("quotation_claim_warning"),
   preparedBy:         integer("prepared_by"),
   preparedAt:         timestamp("prepared_at", { withTimezone: true }),
   lawyerApprovedBy:   integer("lawyer_approved_by"),
@@ -132,6 +151,10 @@ export const paymentVouchersTable = pgTable("payment_vouchers", {
   dueSoonNotifiedAt:  timestamp("due_soon_notified_at", { withTimezone: true }),
   overdueNotifiedAt:  timestamp("overdue_notified_at", { withTimezone: true }),
   breachedAt:         timestamp("breached_at", { withTimezone: true }),
+  lastEscalationNotifiedAt: timestamp("last_escalation_notified_at", { withTimezone: true }),
+  escalationRepeatCount: integer("escalation_repeat_count").notNull().default(0),
+  escalationResolvedAt: timestamp("escalation_resolved_at", { withTimezone: true }),
+  escalationResolvedBy: integer("escalation_resolved_by"),
   deadlineOverrideReason: text("deadline_override_reason"),
   deadlineOverriddenBy: integer("deadline_overridden_by"),
   deadlineOverriddenAt: timestamp("deadline_overridden_at", { withTimezone: true }),
@@ -145,6 +168,12 @@ export const paymentVouchersTable = pgTable("payment_vouchers", {
   lateCompletionReason: text("late_completion_reason"),
   paidAt:             timestamp("paid_at", { withTimezone: true }),
   paidBy:             integer("paid_by"),
+  rejectedBy:         integer("rejected_by"),
+  rejectedAt:         timestamp("rejected_at", { withTimezone: true }),
+  rejectionReason:    text("rejection_reason"),
+  completedBy:        integer("completed_by"),
+  completedAt:        timestamp("completed_at", { withTimezone: true }),
+  completionRemarks:  text("completion_remarks"),
   notes:              text("notes"),
   version:            integer("version").notNull().default(0),
   isReversed:         boolean("is_reversed").notNull().default(false),
@@ -158,6 +187,10 @@ export const paymentVouchersTable = pgTable("payment_vouchers", {
   firmDueAtIdx: index("idx_pvouchers_firm_due_at").on(t.firmId, t.paymentDueAt),
   firmReceivedAtIdx: index("idx_pvouchers_firm_received_at").on(t.firmId, t.receivedAt),
   firmAssignedClerkIdx: index("idx_pvouchers_firm_assigned_clerk").on(t.firmId, t.assignedClerkUserId, t.status),
+  firmResponsibleLawyerIdx: index("idx_pvouchers_firm_responsible_lawyer").on(t.firmId, t.responsibleLawyerId),
+  firmApprovingPartnerIdx: index("idx_pvouchers_firm_approving_partner").on(t.firmId, t.approvingPartnerId),
+  firmQuotationIdx: index("idx_pvouchers_firm_quotation_id").on(t.firmId, t.quotationId),
+  firmLastEscalationIdx: index("idx_pvouchers_firm_last_escalation").on(t.firmId, t.lastEscalationNotifiedAt, t.status),
 }));
 
 export const accountingSettingsTable = pgTable("accounting_settings", {
@@ -229,11 +262,50 @@ export const userNotificationsTable = pgTable("user_notifications", {
   meta: jsonb("meta").$type<Record<string, unknown> | null>(),
   isRead: boolean("is_read").notNull().default(false),
   readAt: timestamp("read_at", { withTimezone: true }),
+  status: text("status").notNull().default("unread"),
+  acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true }),
+  acknowledgedBy: integer("acknowledged_by"),
+  escalatedAt: timestamp("escalated_at", { withTimezone: true }),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  resolvedBy: integer("resolved_by"),
+  autoResolvedAt: timestamp("auto_resolved_at", { withTimezone: true }),
+  targetScope: text("target_scope"),
+  targetRoleId: integer("target_role_id"),
+  dismissible: boolean("dismissible").notNull().default(true),
+  severity: text("severity").notNull().default("normal"),
+  statusSetAt: timestamp("status_set_at", { withTimezone: true }),
+  escalatedReason: text("escalated_reason"),
+  resolvedReason: text("resolved_reason"),
+  ipAddress: text("ip_address"),
+  userAgent: text("user_agent"),
+  acknowledgementDueAt: timestamp("acknowledgement_due_at", { withTimezone: true }),
+  resolutionSlaDueAt: timestamp("resolution_sla_due_at", { withTimezone: true }),
+  resolutionMode: text("resolution_mode").notNull().default("MANUAL_ALLOWED"),
+  ruleCode: text("rule_code"),
+  correlationId: text("correlation_id"),
+  entityType: text("entity_type"),
+  entityId: integer("entity_id"),
+  lastNotifiedAt: timestamp("last_notified_at", { withTimezone: true }),
+  nextNotifyAt: timestamp("next_notify_at", { withTimezone: true }),
+  deliveryCount: integer("delivery_count").notNull().default(1),
+  eventResolvedAt: timestamp("event_resolved_at", { withTimezone: true }),
+  eventAutoResolvedAt: timestamp("event_auto_resolved_at", { withTimezone: true }),
+  eventEscalatedAt: timestamp("event_escalated_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   firmUserUnreadIdx: index("idx_user_notifications_firm_user_unread").on(t.firmId, t.userId, t.isRead, t.createdAt),
   firmUserTypeIdx: index("idx_user_notifications_firm_user_type").on(t.firmId, t.userId, t.notificationType, t.isRead),
   firmCaseIdx: index("idx_user_notifications_firm_case").on(t.firmId, t.caseId),
+  firmUserStatusIdx: index("idx_user_notifications_firm_user_status").on(t.firmId, t.userId, t.status, t.createdAt),
+  targetScopeIdx: index("idx_user_notifications_target_scope").on(t.firmId, t.targetScope, t.createdAt),
+  severityIdx: index("idx_user_notifications_severity").on(t.firmId, t.userId, t.severity, t.status),
+  firmStatusSeverityCreatedIdx: index("idx_user_notifications_firm_status_severity_created").on(t.firmId, t.status, t.severity, sql`created_at DESC`),
+  firmTargetScopeCreatedIdx: index("idx_user_notifications_firm_target_scope_created").on(t.firmId, t.targetScope, sql`created_at DESC`),
+  firmOverdueIdx: index("idx_user_notifications_firm_overdue").on(t.firmId, t.acknowledgementDueAt, t.resolutionSlaDueAt).where(sql`status IN ('unread','read','acknowledged','escalated')`),
+  firmCorrelationIdx: index("idx_user_notifications_firm_correlation").on(t.firmId, t.correlationId).where(sql`correlation_id IS NOT NULL`),
+  firmRuleCodeIdx: index("idx_user_notifications_firm_rule_code").on(t.firmId, t.ruleCode, t.userId, sql`created_at DESC`).where(sql`rule_code IS NOT NULL`),
+  firmNextNotifyIdx: index("idx_user_notifications_firm_next_notify").on(t.firmId, t.nextNotifyAt, t.status).where(sql`next_notify_at IS NOT NULL AND status IN ('unread','read','acknowledged','escalated')`),
 }));
 
 export const paymentVoucherItemsTable = pgTable("payment_voucher_items", {
@@ -341,4 +413,37 @@ export const caseLedgersTable = pgTable("case_ledgers", {
 }, (t) => ({
   firmCaseIdx: index("idx_case_ledgers_firm_case").on(t.firmId, t.caseId, t.transactionDate),
   firmCaseSourceIdx: index("idx_case_ledgers_source").on(t.firmId, t.caseId, t.sourceType, t.sourceId),
+}));
+
+export const firmNumberSequencesTable = pgTable("firm_number_sequences", {
+  firmId: integer("firm_id").notNull().references(() => firmsTable.id, { onDelete: "cascade" }),
+  seqName: text("seq_name").notNull(),
+  nextValue: integer("next_value").notNull().default(1),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
+  lastPrefix: text("last_prefix"),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.firmId, t.seqName] }),
+  updatedAtIdx: index("idx_firm_number_sequences_updated_at").on(t.updatedAt),
+}));
+
+export const eInvoiceSubmissionsTable = pgTable("einvoice_submissions", {
+  id: serial("id").primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  invoiceId: integer("invoice_id").notNull(),
+  submissionIdempotencyKey: text("submission_idempotency_key").notNull(),
+  status: text("status").notNull().default("SUBMITTING"),
+  externalSubmissionId: text("external_submission_id"),
+  payloadJson: jsonb("payload_json").$type<Record<string, unknown> | null>(),
+  responseJson: jsonb("response_json").$type<Record<string, unknown> | null>(),
+  submittedAt: timestamp("submitted_at", { withTimezone: true }),
+  lastCheckedAt: timestamp("last_checked_at", { withTimezone: true }),
+  errorCode: text("error_code"),
+  errorMessage: text("error_message"),
+  retryCount: integer("retry_count").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  firmInvoiceIdx: index("idx_einvoice_submissions_firm_invoice").on(t.firmId, t.invoiceId),
+  idempotencyUniqueIdx: uniqueIndex("uq_einvoice_submissions_idempotency_key").on(t.submissionIdempotencyKey),
+  statusIdx: index("idx_einvoice_submissions_status").on(t.firmId, t.status),
+  externalIdx: index("idx_einvoice_submissions_external").on(t.externalSubmissionId),
 }));

@@ -24,6 +24,13 @@ export interface AuthRequest extends Request {
    * Phase 2+ route handlers must use this instead of the global db.
    */
   rlsDb?: RlsDb;
+  /**
+   * The underlying PoolClient that rlsDb is bound to.
+   * Set alongside rlsDb by requireFirmUser so that route handlers can
+   * apply `SET LOCAL statement_timeout` (transaction-scoped) without
+   * opening a separate transaction.
+   */
+  rlsClient?: PoolClient;
 }
 
 const getReqId = (req: unknown): string | undefined => {
@@ -954,6 +961,7 @@ export async function requireFirmUser(
     await client.query("BEGIN");
     await setTenantContext(client, req.firmId, req.userId ?? undefined);
     req.rlsDb = makeRlsDb(client);
+    req.rlsClient = client;
     if (req.timing) req.timing.sections.tenantContextMs = Date.now() - tenantContextStartedAt;
   } catch (err) {
     try {
@@ -1340,8 +1348,15 @@ async function ensureBaselinePermissions(
       FROM (
         VALUES
           ('dashboard','read'),
+          ('case_monitor','view'),
+          ('file_custody','view'),
+          ('file_custody','release'),
+          ('file_custody','receive'),
+          ('file_custody','return'),
+          ('file_custody','manage'),
           ('cases','read'),('cases','create'),('cases','update'),('cases','delete'),
           ('cases','assign_any'),
+          ('case_reference','view'),('case_reference','change'),
           ('projects','read'),('projects','create'),('projects','update'),('projects','delete'),
           ('developers','read'),('developers','create'),('developers','update'),('developers','delete'),
           ('documents','read'),('documents','create'),('documents','update'),('documents','delete'),('documents','generate'),('documents','export'),
@@ -1391,6 +1406,7 @@ async function ensureBaselinePermissions(
       VALUES
         ('dashboard','read'),
         ('cases','read'),('cases','create'),('cases','update'),
+        ('case_reference','view'),
         ('projects','read'),('projects','create'),('projects','update'),
         ('developers','read'),('developers','create'),('developers','update'),
         ('documents','read'),('documents','export'),

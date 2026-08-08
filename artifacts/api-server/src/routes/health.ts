@@ -304,7 +304,8 @@ routerInternal.get("/healthz/schema", async (_req: ReqLike, res: ResLike) => {
   }
   const client = await pool.connect();
   try {
-    await client.query("SET statement_timeout = '3000ms'");
+    await client.query("BEGIN");
+    await client.query("SET LOCAL statement_timeout = '3000ms'");
 
     const existsRow = await client.query<{
       case_key_dates: boolean;
@@ -346,15 +347,14 @@ routerInternal.get("/healthz/schema", async (_req: ReqLike, res: ResLike) => {
     if (exists.case_billing_entries) await trySelect("case_billing_entries");
     if (exists.case_communications) await trySelect("case_communications");
 
+    await client.query("COMMIT");
     res.json({ status: "ok", schema: results });
   } catch (err) {
+    try { await client.query("ROLLBACK"); } catch {
+    }
     const message = err instanceof Error ? err.message : "Schema check failed";
     res.status(500).json({ status: "error", schema: "error", error: message });
   } finally {
-    try {
-      await client.query("RESET statement_timeout");
-    } catch {
-    }
     client.release();
   }
 });

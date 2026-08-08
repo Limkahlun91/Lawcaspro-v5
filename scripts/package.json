@@ -7,6 +7,8 @@
     "hello": "tsx ./src/hello.ts",
     "platform:documents:e2e": "tsx ./src/platform-documents-e2e.ts",
     "smoke:production": "tsx ./src/smoke-production.ts",
+    "validate:hrms:blockers": "node ./validate-hrms-blocker-register.mjs",
+    "validate:migration:sequence": "node ./validate-migration-sequence.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
@@ -15,6 +17,7 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "tsx": "catalog:"
+    "tsx": "catalog:",
+    "vercel": "58.7.1"
   }
 }

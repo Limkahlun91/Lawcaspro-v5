@@ -1,6 +1,6 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import ExcelJS from "exceljs";
-import { eq, and, desc, isNull, inArray, sql } from "drizzle-orm";
+import { eq, and, desc, isNull, inArray, sql, count } from "drizzle-orm";
 import {
   caseAssignmentsTable,
   caseNotesTable,
@@ -17,6 +17,16 @@ import {
   usersTable,
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
+import { queryOne } from "../lib/http.js";
+import {
+  parseLedgerAmount,
+  parseLedgerAmountToNumber,
+  type LedgerBadRowInfo,
+} from "../modules/accounting/ledger-money.js";
+import { withDbStatementTimeout, type StatementTimeoutCategory } from "../modules/db/statement-timeout.js";
+import pino from "pino";
+
+const cl = pino({ name: "compliance-reports" });
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -40,11 +50,6 @@ const toYmd = (v: unknown): string | null => {
   if (typeof v === "string") return v.slice(0, 10);
   if (v instanceof Date) return v.toISOString().slice(0, 10);
   return String(v).slice(0, 10);
-};
-
-const num = (v: unknown): number => {
-  const n = typeof v === "number" ? v : Number(v);
-  return Number.isFinite(n) ? n : 0;
 };
 
 const ACCOUNTING_FMT = `_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)`;
@@ -73,6 +78,11 @@ function setNumberCell(ws: ExcelJS.Worksheet, row: number, col: number, value: n
 function setDateCell(ws: ExcelJS.Worksheet, row: number, col: number, ymd: string | null) {
   ws.getRow(row).getCell(col).value = ymd ?? "";
   ws.getRow(row).getCell(col).alignment = { horizontal: "center", vertical: "middle" };
+}
+
+function num(v: any): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
 }
 
 function setRight(ws: ExcelJS.Worksheet, row: number, col: number) {
@@ -381,189 +391,342 @@ router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, requir
 // ── Client Account Statement (Trust) ──────────────────────────────────────────
 router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb;
+  const conn = req.rlsClient;
   if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
   const caseId = one((req.query as any).caseId);
   const format = one((req.query as any).format);
+  const category: StatementTimeoutCategory = "report";
+
   let cond = and(eq(ledgerEntriesTable.firmId, req.firmId!), sql`${ledgerEntriesTable.accountType} IN ('client','trust')`);
   if (caseId) {
     const cid = parseInt(caseId, 10);
     if (Number.isNaN(cid)) { res.status(400).json({ error: "Invalid case ID" }); return; }
     cond = and(cond, eq(ledgerEntriesTable.caseId, cid)) as any;
   }
-  const entries = await r
-    .select({
-      id: ledgerEntriesTable.id,
-      firmId: ledgerEntriesTable.firmId,
-      caseId: ledgerEntriesTable.caseId,
-      entryDate: ledgerEntriesTable.entryDate,
-      entryType: ledgerEntriesTable.entryType,
-      accountType: ledgerEntriesTable.accountType,
-      debit: ledgerEntriesTable.debit,
-      credit: ledgerEntriesTable.credit,
-      balanceAfter: ledgerEntriesTable.balanceAfter,
-      description: ledgerEntriesTable.description,
-      referenceNo: ledgerEntriesTable.referenceNo,
-      sourceType: ledgerEntriesTable.sourceType,
-      sourceId: ledgerEntriesTable.sourceId,
-      createdAt: ledgerEntriesTable.createdAt,
-    })
-    .from(ledgerEntriesTable)
-    .where(cond)
-    .orderBy(ledgerEntriesTable.entryDate, ledgerEntriesTable.createdAt);
 
-  const voucherIds = Array.from(
-    new Set(
-      entries
-        .filter((e) => String(e.sourceType ?? "") === "payment_voucher" && typeof e.sourceId === "number")
-        .map((e) => e.sourceId as number)
-    )
-  );
-  const vouchers = voucherIds.length
-    ? await r
-        .select({
-          id: paymentVouchersTable.id,
-          status: paymentVouchersTable.status,
-          paymentMethod: paymentVouchersTable.paymentMethod,
-          bankChequeRefNo: paymentVouchersTable.bankChequeRefNo,
-        })
-        .from(paymentVouchersTable)
-        .where(and(eq(paymentVouchersTable.firmId, req.firmId!), inArray(paymentVouchersTable.id, voucherIds)))
-    : [];
-  const voucherById = new Map<number, { status: string; paymentMethod: string | null; bankChequeRefNo: string | null }>();
-  for (const v of vouchers as any[]) {
-    voucherById.set(Number(v.id), {
-      status: String(v.status ?? ""),
-      paymentMethod: typeof v.paymentMethod === "string" ? v.paymentMethod : null,
-      bankChequeRefNo: typeof v.bankChequeRefNo === "string" ? v.bankChequeRefNo : null,
+  try {
+    const problemRows: LedgerBadRowInfo[] = [];
+    const badRowCb: (info: LedgerBadRowInfo) => void = (info) => { problemRows.push(info); };
+
+    const fetchChunked = async (maxRows = 50_000, chunkSize = 1000) => {
+      const acc: any[] = [];
+      let lastId: number | null = null;
+      for (let round = 0; round < Math.ceil(maxRows / chunkSize); round++) {
+        const where = lastId != null
+          ? and(cond, sql`${ledgerEntriesTable.id} > ${lastId}`)
+          : cond;
+        const chunk: any[] = conn
+          ? await withDbStatementTimeout(conn, category, () =>
+              (r as any)
+                .select({
+                  id: ledgerEntriesTable.id,
+                  firmId: ledgerEntriesTable.firmId,
+                  caseId: ledgerEntriesTable.caseId,
+                  entryDate: ledgerEntriesTable.entryDate,
+                  entryType: ledgerEntriesTable.entryType,
+                  accountType: ledgerEntriesTable.accountType,
+                  debit: ledgerEntriesTable.debit,
+                  credit: ledgerEntriesTable.credit,
+                  balanceAfter: ledgerEntriesTable.balanceAfter,
+                  description: ledgerEntriesTable.description,
+                  referenceNo: ledgerEntriesTable.referenceNo,
+                  sourceType: ledgerEntriesTable.sourceType,
+                  sourceId: ledgerEntriesTable.sourceId,
+                  createdAt: ledgerEntriesTable.createdAt,
+                })
+                .from(ledgerEntriesTable)
+                .where(where)
+                .orderBy(ledgerEntriesTable.id)
+                .limit(chunkSize),
+              category,
+            )
+          : await (r as any)
+              .select({
+                id: ledgerEntriesTable.id,
+                firmId: ledgerEntriesTable.firmId,
+                caseId: ledgerEntriesTable.caseId,
+                entryDate: ledgerEntriesTable.entryDate,
+                entryType: ledgerEntriesTable.entryType,
+                accountType: ledgerEntriesTable.accountType,
+                debit: ledgerEntriesTable.debit,
+                credit: ledgerEntriesTable.credit,
+                balanceAfter: ledgerEntriesTable.balanceAfter,
+                description: ledgerEntriesTable.description,
+                referenceNo: ledgerEntriesTable.referenceNo,
+                sourceType: ledgerEntriesTable.sourceType,
+                sourceId: ledgerEntriesTable.sourceId,
+                createdAt: ledgerEntriesTable.createdAt,
+              })
+              .from(ledgerEntriesTable)
+              .where(where)
+              .orderBy(ledgerEntriesTable.id)
+              .limit(chunkSize);
+        if (!chunk.length) break;
+        acc.push(...chunk);
+        lastId = (chunk[chunk.length - 1] as any).id;
+        if (chunk.length < chunkSize) break;
+      }
+      return acc;
+    };
+
+    const entries = await fetchChunked();
+
+    const voucherIds = Array.from(
+      new Set(
+        entries
+          .filter((e) => String(e.sourceType ?? "") === "payment_voucher" && typeof e.sourceId === "number")
+          .map((e) => e.sourceId as number)
+      )
+    );
+    const vouchers = voucherIds.length
+      ? await r
+          .select({
+            id: paymentVouchersTable.id,
+            status: paymentVouchersTable.status,
+            paymentMethod: paymentVouchersTable.paymentMethod,
+            bankChequeRefNo: paymentVouchersTable.bankChequeRefNo,
+          })
+          .from(paymentVouchersTable)
+          .where(and(eq(paymentVouchersTable.firmId, req.firmId!), inArray(paymentVouchersTable.id, voucherIds)))
+      : [];
+    const voucherById = new Map<number, { status: string; paymentMethod: string | null; bankChequeRefNo: string | null }>();
+    for (const v of vouchers as any[]) {
+      voucherById.set(Number(v.id), {
+        status: String(v.status ?? ""),
+        paymentMethod: typeof v.paymentMethod === "string" ? v.paymentMethod : null,
+        bankChequeRefNo: typeof v.bankChequeRefNo === "string" ? v.bankChequeRefNo : null,
+      });
+    }
+
+    const entriesWithCheque = entries.map((e) => {
+      const voucher = typeof e.sourceId === "number" ? voucherById.get(e.sourceId) : undefined;
+      const isCheque = Boolean(voucher && ((voucher.paymentMethod ?? "").toLowerCase().includes("cheque") || (voucher.bankChequeRefNo ?? "").trim()));
+      const chequeStatus: "issued" | "cleared" | "unpresented" | null = (() => {
+        if (!isCheque) return null;
+        if (voucher?.status === "completed") return "cleared";
+        if (voucher?.status === "paid_pending_collection") return "unpresented";
+        return "issued";
+      })();
+      return { ...e, chequeStatus };
     });
-  }
 
-  const entriesWithCheque = entries.map((e) => {
-    const voucher = typeof e.sourceId === "number" ? voucherById.get(e.sourceId) : undefined;
-    const isCheque = Boolean(voucher && ((voucher.paymentMethod ?? "").toLowerCase().includes("cheque") || (voucher.bankChequeRefNo ?? "").trim()));
-    const chequeStatus: "issued" | "cleared" | "unpresented" | null = (() => {
-      if (!isCheque) return null;
-      if (voucher?.status === "completed") return "cleared";
-      if (voucher?.status === "paid_pending_collection") return "unpresented";
-      return "issued";
-    })();
-    return { ...e, chequeStatus };
-  });
-
-  const ledgerBookBalance = entriesWithCheque.reduce((s, e) => s + num(e.credit) - num(e.debit), 0);
-  const unpresentedTotal = entriesWithCheque.reduce((s, e: any) => s + (e.chequeStatus === "unpresented" ? num(e.debit) : 0), 0);
-  const availableBalance = ledgerBookBalance - unpresentedTotal;
-  if (format === "csv") {
-    const lines: string[] = [];
-    lines.push(["entry_date", "entry_type", "reference_no", "description", "debit", "credit", "balance_after", "cheque_status"].join(","));
+    let ledgerBookBalance = 0;
+    let unpresentedTotal = 0;
     for (const e of entriesWithCheque as any[]) {
-      lines.push([
-        csvCell(e.entryDate),
-        csvCell(e.entryType),
-        csvCell(e.referenceNo),
-        csvCell(e.description),
-        csvCell(e.debit),
-        csvCell(e.credit),
-        csvCell(e.balanceAfter),
-        csvCell(e.chequeStatus),
-      ].join(","));
+      const cr = parseLedgerAmountToNumber(e.credit, badRowCb, { rowId: e.id, column: "credit", table: "ledger_entries" });
+      const dr = parseLedgerAmountToNumber(e.debit, badRowCb, { rowId: e.id, column: "debit", table: "ledger_entries" });
+      ledgerBookBalance += cr - dr;
+      if (e.chequeStatus === "unpresented") unpresentedTotal += dr;
     }
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="trust-account-statement${caseId ? `_${caseId}` : ""}.csv"`);
-    res.send("\ufeff" + lines.join("\n"));
-    return;
+    const availableBalance = ledgerBookBalance - unpresentedTotal;
+
+    if (format === "csv") {
+      const lines: string[] = [];
+      lines.push(["entry_date", "entry_type", "reference_no", "description", "debit", "credit", "balance_after", "cheque_status"].join(","));
+      let lineNumber = 1;
+      for (const e of entriesWithCheque as any[]) {
+        lineNumber++;
+        const rowBadBeforeFilter = problemRows.length;
+        const debit = parseLedgerAmountToNumber(e.debit, badRowCb, { rowId: e.id, lineNumber, column: "debit", table: "ledger_entries" });
+        const credit = parseLedgerAmountToNumber(e.credit, badRowCb, { rowId: e.id, lineNumber, column: "credit", table: "ledger_entries" });
+        const balanceAfter = parseLedgerAmountToNumber(e.balanceAfter, badRowCb, { rowId: e.id, lineNumber, column: "balance", table: "ledger_entries" });
+        const isBadRow = problemRows.length > rowBadBeforeFilter;
+        const desc = isBadRow && typeof e.description === "string"
+          ? `[Malformed amount reported to admin] ${e.description}`
+          : e.description;
+        lines.push([
+          csvCell(e.entryDate),
+          csvCell(e.entryType),
+          csvCell(e.referenceNo),
+          csvCell(desc),
+          csvCell(debit.toFixed(2)),
+          csvCell(credit.toFixed(2)),
+          csvCell(balanceAfter.toFixed(2)),
+          csvCell(e.chequeStatus),
+        ].join(","));
+      }
+      if (problemRows.length > 0) {
+        lines.push("");
+        lines.push("# WARNING: Malformed monetary amounts detected. The following ledger row IDs were zeroed. Report to admin for review.");
+        lines.push("# " + problemRows.map((r: any) => `rowId=${String(r.rowId ?? "?")} col=${r.column ?? "?"}`).join(" | "));
+      }
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="trust-account-statement${caseId ? `_${caseId}` : ""}.csv"`);
+      res.send("\ufeff" + lines.join("\n"));
+      return;
+    }
+
+    if (format === "xlsx") {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet("Client Account Statement");
+      ws.properties.defaultRowHeight = 16;
+      ws.getColumn(1).width = 14;
+      ws.getColumn(2).width = 10;
+      ws.getColumn(3).width = 18;
+      ws.getColumn(4).width = 50;
+      ws.getColumn(5).width = 16;
+      ws.getColumn(6).width = 16;
+      ws.getColumn(7).width = 18;
+      ws.getColumn(8).width = 14;
+
+      setHeaderRow(ws, 4, ["Date", "Case", "Ref", "Description", "Debit", "Credit", "Balance After", "Cheque Status"]);
+
+      let row = 5;
+      for (const e of entriesWithCheque as any[]) {
+        const lineNumber = row;
+        const rowBadBefore = problemRows.length;
+        const debit = parseLedgerAmountToNumber(e.debit, badRowCb, { rowId: e.id, lineNumber, column: "debit", table: "ledger_entries" });
+        const credit = parseLedgerAmountToNumber(e.credit, badRowCb, { rowId: e.id, lineNumber, column: "credit", table: "ledger_entries" });
+        const balanceAfter = parseLedgerAmountToNumber(e.balanceAfter, badRowCb, { rowId: e.id, lineNumber, column: "balance", table: "ledger_entries" });
+        const isBadRow = problemRows.length > rowBadBefore;
+        setDateCell(ws, row, 1, toYmd(e.entryDate));
+        setCell(ws, row, 2, e.caseId ?? "");
+        setCell(ws, row, 3, String(e.referenceNo ?? ""));
+        const descText = isBadRow && typeof e.description === "string"
+          ? `[Malformed amount reported to admin] ${e.description}`
+          : String(e.description ?? "");
+        setCell(ws, row, 4, descText);
+        setNumberCell(ws, row, 5, debit);
+        setNumberCell(ws, row, 6, credit);
+        setNumberCell(ws, row, 7, balanceAfter);
+        setCell(ws, row, 8, e.chequeStatus ?? "");
+
+        if (isBadRow) {
+          for (const c of [5, 6, 7]) {
+            try { ws.getRow(row).getCell(c).note = "Malformed amount reported to admin — value zeroed for export."; } catch {
+            }
+          }
+        }
+
+        setCenter(ws, row, 2);
+        setCenter(ws, row, 3);
+        setLeft(ws, row, 4);
+        for (const c of [5, 6, 7]) setRight(ws, row, c);
+        setCenter(ws, row, 8);
+        row++;
+      }
+
+      const lastDataRow = row - 1;
+      const totalsRow = row;
+      ws.getRow(totalsRow).font = { bold: true };
+      setCell(ws, totalsRow, 1, "Totals");
+      ws.mergeCells(totalsRow, 1, totalsRow, 4);
+      setRight(ws, totalsRow, 4);
+      const sum = (col: number) => ({ formula: `SUM(${ws.getColumn(col).letter}5:${ws.getColumn(col).letter}${lastDataRow})` });
+      setCell(ws, totalsRow, 5, sum(5));
+      setCell(ws, totalsRow, 6, sum(6));
+      for (const c of [5, 6]) {
+        ws.getRow(totalsRow).getCell(c).numFmt = ACCOUNTING_FMT;
+        setRight(ws, totalsRow, c);
+      }
+      setCell(ws, totalsRow, 7, { formula: `${ws.getColumn(6).letter}${totalsRow}-${ws.getColumn(5).letter}${totalsRow}` });
+      ws.getRow(totalsRow).getCell(7).numFmt = ACCOUNTING_FMT;
+      setRight(ws, totalsRow, 7);
+
+      if (lastDataRow >= 5) applyZebra(ws, 5, lastDataRow, 8);
+      styleTotalsRow(ws, totalsRow, 8);
+
+      const metaRow = totalsRow + 2;
+      ws.getRow(metaRow).getCell(1).value = "Ledger Book Balance";
+      ws.getRow(metaRow).getCell(2).value = ledgerBookBalance;
+      ws.getRow(metaRow).getCell(2).numFmt = ACCOUNTING_FMT;
+      ws.getRow(metaRow + 1).getCell(1).value = "Available Balance";
+      ws.getRow(metaRow + 1).getCell(2).value = availableBalance;
+      ws.getRow(metaRow + 1).getCell(2).numFmt = ACCOUNTING_FMT;
+
+      if (problemRows.length > 0) {
+        const errWs = wb.addWorksheet("error_markers");
+        errWs.getColumn(1).width = 14;
+        errWs.getColumn(2).width = 14;
+        errWs.getColumn(3).width = 18;
+        errWs.getColumn(4).width = 14;
+        errWs.getColumn(5).width = 50;
+        errWs.getColumn(6).width = 24;
+        setHeaderRow(errWs, 1, ["Row ID (ledger_entries)", "Line Number", "Column", "Table", "Raw Value", "Reason"]);
+        let rIdx = 2;
+        for (const bad of problemRows) {
+          setCell(errWs, rIdx, 1, typeof bad.rowId === "number" || typeof bad.rowId === "string" ? String(bad.rowId) : "");
+          setCell(errWs, rIdx, 2, typeof bad.lineNumber === "number" ? String(bad.lineNumber) : "");
+          setCell(errWs, rIdx, 3, String(bad.column ?? ""));
+          setCell(errWs, rIdx, 4, String(bad.table ?? ""));
+          setCell(errWs, rIdx, 5, JSON.stringify(bad.rawValue ?? ""));
+          setCell(errWs, rIdx, 6, String(bad.reason ?? "malformed_amount"));
+          rIdx++;
+        }
+      }
+
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="trust-account-statement${caseId ? `_${caseId}` : ""}.xlsx"`);
+      const buf = await wb.xlsx.writeBuffer();
+      res.send(Buffer.from(buf as ArrayBuffer));
+      return;
+    }
+
+    res.json({
+      entries: entriesWithCheque,
+      ledgerBookBalance: Number(ledgerBookBalance.toFixed(2)),
+      availableBalance: Number(availableBalance.toFixed(2)),
+      balance: Number(ledgerBookBalance.toFixed(2)),
+      problem_rows: problemRows,
+    });
+  } catch (err) {
+    cl.error({ err, path: req.path, firmId: req.firmId }, "trust_account_statement.failed");
+    if (err instanceof Error && (err as any).code === "STATEMENT_TIMEOUT") {
+      res.status(504).json({ error: (err as Error).message });
+      return;
+    }
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to build trust account statement" });
   }
-
-  if (format === "xlsx") {
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet("Client Account Statement");
-    ws.properties.defaultRowHeight = 16;
-    ws.getColumn(1).width = 14;
-    ws.getColumn(2).width = 10;
-    ws.getColumn(3).width = 18;
-    ws.getColumn(4).width = 50;
-    ws.getColumn(5).width = 16;
-    ws.getColumn(6).width = 16;
-    ws.getColumn(7).width = 18;
-    ws.getColumn(8).width = 14;
-
-    setHeaderRow(ws, 4, ["Date", "Case", "Ref", "Description", "Debit", "Credit", "Balance After", "Cheque Status"]);
-
-    let row = 5;
-    for (const e of entriesWithCheque as any[]) {
-      setDateCell(ws, row, 1, toYmd(e.entryDate));
-      setCell(ws, row, 2, e.caseId ?? "");
-      setCell(ws, row, 3, String(e.referenceNo ?? ""));
-      setCell(ws, row, 4, String(e.description ?? ""));
-      setNumberCell(ws, row, 5, num(e.debit));
-      setNumberCell(ws, row, 6, num(e.credit));
-      setNumberCell(ws, row, 7, num(e.balanceAfter));
-      setCell(ws, row, 8, e.chequeStatus ?? "");
-
-      setCenter(ws, row, 2);
-      setCenter(ws, row, 3);
-      setLeft(ws, row, 4);
-      for (const c of [5, 6, 7]) setRight(ws, row, c);
-      setCenter(ws, row, 8);
-      row++;
-    }
-
-    const lastDataRow = row - 1;
-    const totalsRow = row;
-    ws.getRow(totalsRow).font = { bold: true };
-    setCell(ws, totalsRow, 1, "Totals");
-    ws.mergeCells(totalsRow, 1, totalsRow, 4);
-    setRight(ws, totalsRow, 4);
-    const sum = (col: number) => ({ formula: `SUM(${ws.getColumn(col).letter}5:${ws.getColumn(col).letter}${lastDataRow})` });
-    setCell(ws, totalsRow, 5, sum(5));
-    setCell(ws, totalsRow, 6, sum(6));
-    for (const c of [5, 6]) {
-      ws.getRow(totalsRow).getCell(c).numFmt = ACCOUNTING_FMT;
-      setRight(ws, totalsRow, c);
-    }
-    setCell(ws, totalsRow, 7, { formula: `${ws.getColumn(6).letter}${totalsRow}-${ws.getColumn(5).letter}${totalsRow}` });
-    ws.getRow(totalsRow).getCell(7).numFmt = ACCOUNTING_FMT;
-    setRight(ws, totalsRow, 7);
-
-    if (lastDataRow >= 5) applyZebra(ws, 5, lastDataRow, 8);
-    styleTotalsRow(ws, totalsRow, 8);
-
-    const metaRow = totalsRow + 2;
-    ws.getRow(metaRow).getCell(1).value = "Ledger Book Balance";
-    ws.getRow(metaRow).getCell(2).value = ledgerBookBalance;
-    ws.getRow(metaRow).getCell(2).numFmt = ACCOUNTING_FMT;
-    ws.getRow(metaRow + 1).getCell(1).value = "Available Balance";
-    ws.getRow(metaRow + 1).getCell(2).value = availableBalance;
-    ws.getRow(metaRow + 1).getCell(2).numFmt = ACCOUNTING_FMT;
-
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition", `attachment; filename="trust-account-statement${caseId ? `_${caseId}` : ""}.xlsx"`);
-    const buf = await wb.xlsx.writeBuffer();
-    res.send(Buffer.from(buf as ArrayBuffer));
-    return;
-  }
-
-  res.json({
-    entries: entriesWithCheque,
-    ledgerBookBalance: Number(ledgerBookBalance.toFixed(2)),
-    availableBalance: Number(availableBalance.toFixed(2)),
-    balance: Number(ledgerBookBalance.toFixed(2)),
-  });
 });
 
-// ── Client Account Statement ──────────────────────────────────────────────────
 router.get("/reports/client-account-statement", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb ?? db;
+  const conn = req.rlsClient;
   const caseId = one((req.query as any).caseId);
+  const category: StatementTimeoutCategory = "report";
   let cond = and(eq(ledgerEntriesTable.firmId, req.firmId!), eq(ledgerEntriesTable.accountType, "client"));
   if (caseId) {
     const cid = parseInt(caseId, 10);
     if (Number.isNaN(cid)) { res.status(400).json({ error: "Invalid case ID" }); return; }
     cond = and(cond, eq(ledgerEntriesTable.caseId, cid)) as any;
   }
-  const entries = await r.select().from(ledgerEntriesTable).where(cond).orderBy(ledgerEntriesTable.entryDate, ledgerEntriesTable.createdAt);
-  const balance = entries.reduce((s, e) => s + Number(e.credit) - Number(e.debit), 0);
-  res.json({ entries, balance: balance.toFixed(2) });
+  try {
+    const problemRows: LedgerBadRowInfo[] = [];
+    const badRowCb: any = (info: LedgerBadRowInfo) => { problemRows.push(info); };
+    const chunkSize = 1000;
+    const maxRows = 50_000;
+    let lastId: number | null = null;
+    const entries: any[] = [];
+    for (let round = 0; round < Math.ceil(maxRows / chunkSize); round++) {
+      const where = lastId != null
+        ? and(cond as any, sql`${ledgerEntriesTable.id} > ${lastId}`)
+        : cond;
+      const chunk: any[] = conn
+        ? await withDbStatementTimeout(conn, category, () =>
+            (r as any).select().from(ledgerEntriesTable).where(where).orderBy(ledgerEntriesTable.id).limit(chunkSize),
+            category,
+          )
+        : await (r as any).select().from(ledgerEntriesTable).where(where).orderBy(ledgerEntriesTable.id).limit(chunkSize);
+      if (!chunk.length) break;
+      entries.push(...chunk);
+      lastId = (chunk[chunk.length - 1] as any).id;
+      if (chunk.length < chunkSize) break;
+    }
+    let balance = 0;
+    for (const e of entries as any[]) {
+      const cr = parseLedgerAmountToNumber(e.credit, badRowCb, { rowId: e.id, column: "credit", table: "ledger_entries" });
+      const dr = parseLedgerAmountToNumber(e.debit, badRowCb, { rowId: e.id, column: "debit", table: "ledger_entries" });
+      balance += cr - dr;
+    }
+    res.json({ entries, balance: balance.toFixed(2), problem_rows: problemRows });
+  } catch (err) {
+    cl.error({ err, path: req.path, firmId: req.firmId }, "client_account_statement.failed");
+    if (err instanceof Error && (err as any).code === "STATEMENT_TIMEOUT") {
+      res.status(504).json({ error: (err as Error).message });
+      return;
+    }
+    res.status(500).json({ error: "Failed to build client account statement" });
+  }
 });
 
 // ── Matter Aging Report ───────────────────────────────────────────────────────

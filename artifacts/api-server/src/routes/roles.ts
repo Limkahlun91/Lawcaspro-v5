@@ -83,10 +83,11 @@ type TransactionCapable = {
 };
 const asTransactionCapable = (conn: DbConn): TransactionCapable => conn as unknown as TransactionCapable;
 
-const standardRoleNames = ["Partner", "Account Admin", "Account Manager", "Senior Lawyer", "Lawyer", "Senior Clerk", "Clerk", "Staff", "Manager", "Admin", "Viewer", "Developer_User"] as const;
+const standardRoleNames = ["Partner", "Account Admin", "Account Manager", "Senior Lawyer", "Lawyer", "Senior Clerk", "Clerk", "Staff", "Manager", "Admin", "Viewer", "Developer_User", "HR Manager", "HR Admin", "HR Employee"] as const;
 
 const shouldAutoGrantRoleByName = (name: string): boolean => {
   const n = name.trim().toLowerCase();
+  if (n === "hr manager" || n === "hr admin" || n === "hr employee") return true;
   return n.includes("partner") || n.includes("lawyer") || n.includes("clerk") || n === "staff" || (n.includes("account") && (n.includes("admin") || n.includes("manager")));
 };
 

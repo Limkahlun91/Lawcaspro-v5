@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,6 +8,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { QueryFallback } from "@/components/query-fallback";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchJson } from "@/lib/api-client";
@@ -15,8 +17,47 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
 import { getListCasesQueryKey } from "@workspace/api-client-react";
+import { formatRMAmount } from "@/lib/money";
 
 type ApprovalStatus = "pending_approval" | "rejected" | "approved";
+
+export type ApproveRequestInput = {
+  caseId: number;
+  referenceNo: string;
+  approvalNote: string;
+  changeReason: string;
+};
+
+export type RejectRequestInput = {
+  caseId: number;
+  approvalNote: string;
+};
+
+export type JsonRequestSpec = {
+  url: string;
+  method: "POST";
+  body: string;
+};
+
+export function buildApproveRequestSpec(input: ApproveRequestInput): JsonRequestSpec {
+  const referenceNo = input.referenceNo.trim();
+  const approvalNote = input.approvalNote.trim() ? input.approvalNote.trim() : null;
+  const changeReason = input.changeReason.trim() ? input.changeReason.trim() : null;
+  return {
+    url: `/cases/${encodeURIComponent(String(input.caseId))}/approve`,
+    method: "POST",
+    body: JSON.stringify({ referenceNo, approvalNote, changeReason }),
+  };
+}
+
+export function buildRejectRequestSpec(input: RejectRequestInput): JsonRequestSpec {
+  const approvalNote = input.approvalNote.trim();
+  return {
+    url: `/cases/${encodeURIComponent(String(input.caseId))}/reject`,
+    method: "POST",
+    body: JSON.stringify({ approvalNote }),
+  };
+}
 
 function useDebouncedValue<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -156,6 +197,15 @@ export default function AccountingFileListing() {
   const [reviewReferenceNo, setReviewReferenceNo] = useState("");
   const [reviewNote, setReviewNote] = useState("");
   const [reviewChangeReason, setReviewChangeReason] = useState("");
+  const [reviewSubmittedAt, setReviewSubmittedAt] = useState<string | null>(null);
+  const [reviewSubmittedByName, setReviewSubmittedByName] = useState<string | null>(null);
+
+  const reviewSummaryQuery = useQuery<any>({
+    queryKey: ["accounting", "case-summary", reviewCaseId],
+    enabled: reviewOpen && reviewCaseId != null,
+    queryFn: ({ signal }) => apiFetchJson(`/accounting/cases/${encodeURIComponent(String(reviewCaseId))}/summary`, { signal }),
+    retry: false,
+  });
 
   const isPendingTab = status === "pending_approval";
 
@@ -255,13 +305,15 @@ export default function AccountingFileListing() {
 
   const approveMutation = useMutation({
     mutationFn: async (vars: { caseId: number; referenceNo: string; approvalNote: string; changeReason: string }) => {
-      return await apiFetchJson(`/cases/${vars.caseId}/approve`, {
-        method: "POST",
-        body: JSON.stringify({
-          referenceNo: vars.referenceNo.trim(),
-          approvalNote: vars.approvalNote.trim() ? vars.approvalNote.trim() : null,
-          changeReason: vars.changeReason.trim() ? vars.changeReason.trim() : null,
-        }),
+      const spec = buildApproveRequestSpec({
+        caseId: vars.caseId,
+        referenceNo: vars.referenceNo,
+        approvalNote: vars.approvalNote,
+        changeReason: vars.changeReason,
+      });
+      return await apiFetchJson(spec.url, {
+        method: spec.method,
+        body: spec.body,
       });
     },
     onSuccess: async () => {
@@ -286,9 +338,13 @@ export default function AccountingFileListing() {
 
   const rejectMutation = useMutation({
     mutationFn: async (vars: { caseId: number; approvalNote: string }) => {
-      return await apiFetchJson(`/cases/${vars.caseId}/reject`, {
-        method: "POST",
-        body: JSON.stringify({ approvalNote: vars.approvalNote.trim() }),
+      const spec = buildRejectRequestSpec({
+        caseId: vars.caseId,
+        approvalNote: vars.approvalNote,
+      });
+      return await apiFetchJson(spec.url, {
+        method: spec.method,
+        body: spec.body,
       });
     },
     onSuccess: async () => {
@@ -456,6 +512,9 @@ export default function AccountingFileListing() {
                                 setReviewReferenceNo(proposed);
                                 setReviewNote(String((c as any).approvalNote ?? ""));
                                 setReviewChangeReason("");
+                                setReviewSubmittedAt((c as any).submittedAt ?? null);
+                                setReviewSubmittedByName((c as any).submittedByName ?? (c as any).submittedBy ?? null);
+                                void reviewSummaryQuery.refetch().catch(() => undefined);
                                 setReviewOpen(true);
                               }}
                             >
@@ -489,82 +548,239 @@ export default function AccountingFileListing() {
           setReviewReferenceNo("");
           setReviewNote("");
           setReviewChangeReason("");
+          setReviewSubmittedAt(null);
+          setReviewSubmittedByName(null);
         }
       }}>
-        <DialogContent className="max-w-[900px] w-[95vw]">
+        <DialogContent
+          className="max-w-[900px] w-[95vw]"
+          onInteractOutside={(e) => e.preventDefault()}
+          aria-modal="true"
+        >
           <DialogHeader>
             <DialogTitle>Open File Review</DialogTitle>
             <DialogDescription>Review the case submission and approve or return for amendment.</DialogDescription>
           </DialogHeader>
-          <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-            <div className="md:col-span-12 space-y-1.5">
-              <Label>Proposed Reference No.</Label>
-              <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-900 break-words">
-                {reviewProposedReferenceNo.trim() || "—"}
+
+          <div className="space-y-5">
+            <div className="rounded-lg border border-slate-200 bg-slate-50/60">
+              <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+                <div className="text-sm font-semibold text-slate-900">Case Summary</div>
+                <div className="text-xs text-slate-500">Read-only</div>
               </div>
-              <div className="text-xs text-slate-500">This is a proposed reference number. Final reference number will be confirmed upon approval.</div>
-            </div>
-            <div className="md:col-span-12 space-y-1.5">
-              <Label>Final Approved Reference No. *</Label>
-              <Input
-                value={reviewReferenceNo}
-                onChange={(e) => setReviewReferenceNo(e.target.value)}
-                disabled={!isPendingTab || approveMutation.isPending || rejectMutation.isPending}
-                placeholder="Enter Reference Number"
-                list="case-reference-suggestions"
-              />
-              <datalist id="case-reference-suggestions">
-                {suggestedReference ? <option value={suggestedReference} /> : null}
-                {previousReferenceSuggestions.map((r) => (
-                  <option key={r} value={r} />
-                ))}
-              </datalist>
-              {isPendingTab ? (
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-xs text-slate-500">
-                    {referenceSuggestionsQuery.isLoading ? "Loading suggestions…" : suggestedReference ? `Suggested: ${suggestedReference}` : "Suggested: —"}
+              <div className="p-4">
+                {reviewSummaryQuery.isError ? (
+                  <Alert variant="destructive">
+                    <AlertTitle>Case summary unavailable</AlertTitle>
+                    <AlertDescription className="flex flex-col sm:flex-row sm:items-center gap-3">
+                      <span>We could not load the case summary. You may continue approving using the fields below.</span>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => { void reviewSummaryQuery.refetch().catch(() => undefined); }}
+                        disabled={reviewSummaryQuery.isFetching}
+                      >
+                        {reviewSummaryQuery.isFetching ? "Retrying…" : "Retry"}
+                      </Button>
+                    </AlertDescription>
+                  </Alert>
+                ) : reviewSummaryQuery.isLoading || !reviewSummaryQuery.data ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-28" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-24" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-28" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-20" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-16" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-24" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
+                    <div className="space-y-1.5 md:col-span-2">
+                      <Skeleton className="h-3 w-20" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-24" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-24" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-28" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-28" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-24" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Skeleton className="h-3 w-24" />
+                      <Skeleton className="h-5 w-full" />
+                    </div>
                   </div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={!suggestedReference || !isPendingTab || approveMutation.isPending || rejectMutation.isPending || reviewReferenceNo.trim() === suggestedReference}
-                    onClick={() => setReviewReferenceNo(suggestedReference)}
-                  >
-                    Use Suggested Reference
-                  </Button>
-                </div>
-              ) : null}
-              {isPendingTab && duplicateWarning?.isDuplicate ? (
-                <div className="text-xs text-amber-700">
-                  Warning: This Reference Number already exists in this firm. Please change it before approving.
-                </div>
-              ) : null}
-              {isPendingTab && sequenceWarning ? (
-                <div className="text-xs text-amber-700">
-                  {sequenceWarning}
-                </div>
-              ) : null}
-              {!isPendingTab ? <div className="text-xs text-slate-500">Reference Number can only be set while Open File Pending Approval.</div> : null}
+                ) : (
+                  (() => {
+                    const payload = (reviewSummaryQuery.data ?? {}) as any;
+                    const c = payload.case ?? {};
+                    const parties = payload.parties ?? {};
+                    const purchasers = Array.isArray(parties.purchasers) ? parties.purchasers : [];
+                    const borrowers = Array.isArray(parties.borrowers) ? parties.borrowers : [];
+                    const purchasePriceRaw = c.spaPrice;
+                    const hasPurchasePrice = purchasePriceRaw != null && String(purchasePriceRaw).trim() !== "";
+                    const loanAmountRaw = c.loanAmountNum;
+                    const hasLoanAmount = loanAmountRaw != null && String(loanAmountRaw).trim() !== "";
+                    return (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                        <div className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="text-xs text-slate-500 mb-1">Proposed Reference</div>
+                          <div className="font-medium text-slate-900 break-words">{showCell(reviewProposedReferenceNo)}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="text-xs text-slate-500 mb-1">Case Type</div>
+                          <div className="font-medium text-slate-900">{caseTypeLabel(c.caseType)}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="text-xs text-slate-500 mb-1">Client / Purchaser</div>
+                          <div className="text-slate-900">{purchasers.length > 0 ? purchasers.join(", ") : "—"}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="text-xs text-slate-500 mb-1">Borrower</div>
+                          <div className="text-slate-900">{borrowers.length > 0 ? borrowers.join(", ") : "—"}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-white p-3 md:col-span-2">
+                          <div className="text-xs text-slate-500 mb-1">Property</div>
+                          <div className="text-slate-900 break-words">{showCell(c.parcelNo)}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="text-xs text-slate-500 mb-1">Project</div>
+                          <div className="text-slate-900">{showCell(c.projectName)}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="text-xs text-slate-500 mb-1">Developer</div>
+                          <div className="text-slate-900">{showCell(c.developerName)}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="text-xs text-slate-500 mb-1">Purchase Price</div>
+                          <div className="font-medium text-slate-900">{hasPurchasePrice ? formatRMAmount(purchasePriceRaw) : "—"}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="text-xs text-slate-500 mb-1">Loan Amount</div>
+                          <div className="font-medium text-slate-900">{hasLoanAmount ? formatRMAmount(loanAmountRaw) : "—"}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="text-xs text-slate-500 mb-1">Responsible Lawyer</div>
+                          <div className="text-slate-900">{showCell(c.responsibleLawyer)}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="text-xs text-slate-500 mb-1">Assigned Clerk</div>
+                          <div className="text-slate-900">{showCell(c.assignedClerk)}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="text-xs text-slate-500 mb-1">Submission Date</div>
+                          <div className="text-slate-900">{fmtIsoToYmd(reviewSubmittedAt)}</div>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-white p-3">
+                          <div className="text-xs text-slate-500 mb-1">Submitted By</div>
+                          <div className="text-slate-900">{showCell(reviewSubmittedByName)}</div>
+                        </div>
+                      </div>
+                    );
+                  })()
+                )}
+              </div>
             </div>
-            {isPendingTab && reviewProposedReferenceNo.trim() && reviewReferenceNo.trim() && reviewReferenceNo.trim() !== reviewProposedReferenceNo.trim() ? (
+
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
               <div className="md:col-span-12 space-y-1.5">
-                <Label>Change Reason (optional)</Label>
+                <Label>Proposed Reference No.</Label>
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm text-slate-900 break-words">
+                  {reviewProposedReferenceNo.trim() || "—"}
+                </div>
+                <div className="text-xs text-slate-500">This is a proposed reference number. Final reference number will be confirmed upon approval.</div>
+              </div>
+              <div className="md:col-span-12 space-y-1.5">
+                <Label>Final Approved Reference No. *</Label>
                 <Input
-                  value={reviewChangeReason}
-                  onChange={(e) => setReviewChangeReason(e.target.value)}
+                  value={reviewReferenceNo}
+                  onChange={(e) => setReviewReferenceNo(e.target.value)}
                   disabled={!isPendingTab || approveMutation.isPending || rejectMutation.isPending}
-                  placeholder="Optional reason for changing reference number"
+                  placeholder="Enter Reference Number"
+                  list="case-reference-suggestions"
+                />
+                <datalist id="case-reference-suggestions">
+                  {suggestedReference ? <option value={suggestedReference} /> : null}
+                  {previousReferenceSuggestions.map((r) => (
+                    <option key={r} value={r} />
+                  ))}
+                </datalist>
+                {isPendingTab ? (
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="text-xs text-slate-500">
+                      {referenceSuggestionsQuery.isLoading ? "Loading suggestions…" : suggestedReference ? `Suggested: ${suggestedReference}` : "Suggested: —"}
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={!suggestedReference || !isPendingTab || approveMutation.isPending || rejectMutation.isPending || reviewReferenceNo.trim() === suggestedReference}
+                      onClick={() => setReviewReferenceNo(suggestedReference)}
+                    >
+                      Use Suggested Reference
+                    </Button>
+                  </div>
+                ) : null}
+                {isPendingTab && duplicateWarning?.isDuplicate ? (
+                  <div className="text-xs text-amber-700">
+                    Warning: This Reference Number already exists in this firm. Please change it before approving.
+                  </div>
+                ) : null}
+                {isPendingTab && sequenceWarning ? (
+                  <div className="text-xs text-amber-700">
+                    {sequenceWarning}
+                  </div>
+                ) : null}
+                {!isPendingTab ? <div className="text-xs text-slate-500">Reference Number can only be set while Open File Pending Approval.</div> : null}
+              </div>
+              {isPendingTab && reviewProposedReferenceNo.trim() && reviewReferenceNo.trim() && reviewReferenceNo.trim() !== reviewProposedReferenceNo.trim() ? (
+                <div className="md:col-span-12 space-y-1.5">
+                  <Label>Change Reason (optional)</Label>
+                  <Input
+                    value={reviewChangeReason}
+                    onChange={(e) => setReviewChangeReason(e.target.value)}
+                    disabled={!isPendingTab || approveMutation.isPending || rejectMutation.isPending}
+                    placeholder="Optional reason for changing reference number"
+                  />
+                </div>
+              ) : null}
+              <div className="md:col-span-12 space-y-1.5">
+                <Label>Amendment Notes</Label>
+                <Textarea
+                  value={reviewNote}
+                  onChange={(e) => setReviewNote(e.target.value)}
+                  disabled={!isPendingTab || approveMutation.isPending || rejectMutation.isPending}
+                  placeholder="Optional notes (required to return for amendment)"
                 />
               </div>
-            ) : null}
-            <div className="md:col-span-12 space-y-1.5">
-              <Label>Amendment Notes</Label>
-              <Textarea
-                value={reviewNote}
-                onChange={(e) => setReviewNote(e.target.value)}
-                disabled={!isPendingTab || approveMutation.isPending || rejectMutation.isPending}
-                placeholder="Optional notes (required to return for amendment)"
-              />
             </div>
           </div>
           <DialogFooter className="gap-2">

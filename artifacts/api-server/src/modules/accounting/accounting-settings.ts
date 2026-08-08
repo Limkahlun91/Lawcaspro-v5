@@ -174,6 +174,8 @@ export type AccountingPaymentVoucherSla = {
   notifyAssignedAccountUser: boolean;
   notifyAccountManager: boolean;
   notifyPartnerOnOverdue: boolean;
+  escalationGraceHours: number;
+  escalationRepeatHours: number;
 };
 
 export type AccountingClerkActionSla = {
@@ -270,6 +272,8 @@ export function getDefaultAccountingSettings(firmId: number): AccountingSettings
       notifyAssignedAccountUser: true,
       notifyAccountManager: true,
       notifyPartnerOnOverdue: true,
+      escalationGraceHours: 1,
+      escalationRepeatHours: 2,
     },
     clerkActionSla: {
       acknowledgeHours: 4,
@@ -359,6 +363,8 @@ export function normalizeAccountingSettings(
       notifyAssignedAccountUser: toBool(paymentSlaRaw.notifyAssignedAccountUser, defaults.paymentVoucherSla.notifyAssignedAccountUser),
       notifyAccountManager: toBool(paymentSlaRaw.notifyAccountManager, defaults.paymentVoucherSla.notifyAccountManager),
       notifyPartnerOnOverdue: toBool(paymentSlaRaw.notifyPartnerOnOverdue, defaults.paymentVoucherSla.notifyPartnerOnOverdue),
+      escalationGraceHours: toNum(paymentSlaRaw.escalationGraceHours, defaults.paymentVoucherSla.escalationGraceHours),
+      escalationRepeatHours: toNum(paymentSlaRaw.escalationRepeatHours, defaults.paymentVoucherSla.escalationRepeatHours),
     },
     clerkActionSla: {
       acknowledgeHours: toNum(clerkSlaRaw.acknowledgeHours, defaults.clerkActionSla.acknowledgeHours),

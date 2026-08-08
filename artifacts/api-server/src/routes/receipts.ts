@@ -1,11 +1,32 @@
-import express, { type Router as ExpressRouter } from "express";
-import { eq, and, desc } from "drizzle-orm";
+import express, { type Response, type Router as ExpressRouter } from "express";
+import { eq, and, desc, count } from "drizzle-orm";
 import { db, firmBankAccountsTable, invoicesTable, ledgerEntriesTable, receiptAllocationsTable, receiptsTable, sql, quotationsTable, clientsTable, casePurchasersTable, caseLedgersTable, casesTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { syncCaseFinancialTotals } from "../lib/caseFinancialSync.js";
+import { nextReceiptNo } from "../modules/accounting/firm-sequence-numbers.js";
+import { queryOne } from "../lib/http.js";
+import { withDbStatementTimeout, type StatementTimeoutCategory } from "../modules/db/statement-timeout.js";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+function parsePageLimit(
+  req: AuthRequest,
+  defaults: { defaultLimit: number; maxLimit: number } = { defaultLimit: 30, maxLimit: 200 },
+): { page: number; limit: number; offset: number } {
+  const pageRaw = queryOne(req.query, "page");
+  const limitRaw = queryOne(req.query, "limit");
+  let page = Number.parseInt(pageRaw ?? "1", 10);
+  if (!Number.isFinite(page) || page < 1) page = 1;
+  let limit = Number.parseInt(limitRaw ?? String(defaults.defaultLimit), 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = defaults.defaultLimit;
+  if (limit > defaults.maxLimit) limit = defaults.maxLimit;
+  const offset = (page - 1) * limit;
+  return { page, limit, offset };
+}
 
 function normalizeLedgerAccountType(v: unknown): "client" | "office" | "balance_sheet" {
   const s = typeof v === "string" ? v.trim().toLowerCase() : "";
@@ -63,20 +84,21 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
-async function nextReceiptNo(firmId: number): Promise<string> {
-  const [row] = await db.select({ c: sql<number>`COUNT(*)` }).from(receiptsTable).where(eq(receiptsTable.firmId, firmId));
-  const seq = (Number(row?.c ?? 0) + 1).toString().padStart(4, "0");
-  const yr = new Date().getFullYear();
-  return `REC-${yr}-${seq}`;
-}
-
-async function updateInvoicePaymentStatus(invoiceId: number, firmId: number) {
+async function updateInvoicePaymentStatus(
+  invoiceId: number,
+  firmId: number,
+  opts: { actorUserId?: number; context?: string } = {},
+) {
   const [inv] = await db.select().from(invoicesTable).where(and(eq(invoicesTable.id, invoiceId), eq(invoicesTable.firmId, firmId)));
   if (!inv) return;
+  const oldStatus = inv.status;
+  const oldAmountPaid = String(inv.amountPaid ?? "0.00");
+  const oldAmountDue = String(inv.amountDue ?? "0.00");
   const [allocSum] = await db.select({ total: sql<string>`COALESCE(SUM(amount), 0)` })
     .from(receiptAllocationsTable).where(eq(receiptAllocationsTable.invoiceId, invoiceId));
   const paid = Number(allocSum?.total ?? 0);
   const grandTotal = Number(inv.grandTotal);
+  let status = inv.status;
   if (inv.status === "void") {
     await db.update(invoicesTable).set({
       amountPaid: paid.toFixed(2),
@@ -84,17 +106,42 @@ async function updateInvoicePaymentStatus(invoiceId: number, firmId: number) {
       status: "void",
       updatedAt: new Date(),
     }).where(eq(invoicesTable.id, invoiceId));
+    if (opts.actorUserId && (oldAmountPaid !== paid.toFixed(2))) {
+      await writeAuditLog({
+        firmId,
+        actorId: opts.actorUserId,
+        entityType: "invoice",
+        entityId: invoiceId,
+        action: "payment_updated",
+        before: { status: oldStatus, amountPaid: oldAmountPaid, amountDue: oldAmountDue },
+        after: { status: "void", amountPaid: paid.toFixed(2), amountDue: "0.00" },
+        detail: opts.context ? `[alloc change] ${opts.context}` : "[alloc change]",
+      });
+    }
     return;
   }
-  let status = inv.status;
   if (paid >= grandTotal) status = "paid";
   else if (paid > 0) status = "partially_paid";
   else if (inv.status === "paid" || inv.status === "partially_paid") status = "issued";
+  const newAmountPaid = paid.toFixed(2);
+  const newAmountDue = Math.max(0, grandTotal - paid).toFixed(2);
   await db.update(invoicesTable).set({
-    amountPaid: paid.toFixed(2),
-    amountDue: Math.max(0, grandTotal - paid).toFixed(2),
+    amountPaid: newAmountPaid,
+    amountDue: newAmountDue,
     status, updatedAt: new Date()
   }).where(eq(invoicesTable.id, invoiceId));
+  if (opts.actorUserId && (oldStatus !== status || oldAmountPaid !== newAmountPaid)) {
+    await writeAuditLog({
+      firmId,
+      actorId: opts.actorUserId,
+      entityType: "invoice",
+      entityId: invoiceId,
+      action: "payment_status_changed",
+      before: { status: oldStatus, amountPaid: oldAmountPaid, amountDue: oldAmountDue },
+      after: { status, amountPaid: newAmountPaid, amountDue: newAmountDue },
+      detail: opts.context ? `[alloc change] ${opts.context}` : "[alloc change]",
+    });
+  }
 }
 
 async function postLedger(firmId: number, caseId: number | null, opts: {
@@ -123,13 +170,45 @@ async function postLedger(firmId: number, caseId: number | null, opts: {
   });
 }
 
-// List
-router.get("/receipts", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res): Promise<void> => {
+router.get("/receipts", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = rdb(req);
+  const conn = req.rlsClient;
+  const { page, limit, offset } = parsePageLimit(req, { defaultLimit: 30, maxLimit: 200 });
   const caseId = one((req.query as { caseId?: string | string[] }).caseId);
   const conds = [eq(receiptsTable.firmId, req.firmId!)];
-  if (caseId) conds.push(eq(receiptsTable.caseId, parseInt(caseId, 10)));
-  const rows = await db.select().from(receiptsTable).where(and(...conds)).orderBy(desc(receiptsTable.createdAt));
-  res.json(rows);
+  if (caseId) {
+    const caseIdNum = parseInt(caseId, 10);
+    if (Number.isFinite(caseIdNum)) conds.push(eq(receiptsTable.caseId, caseIdNum));
+  }
+  const cond = and(...conds);
+  const category: StatementTimeoutCategory = "search";
+  try {
+    const totalPromise = conn
+      ? withDbStatementTimeout(conn, category, () =>
+          (r as any).select({ value: count() }).from(receiptsTable).where(cond),
+          category,
+        )
+      : (r as any).select({ value: count() }).from(receiptsTable).where(cond);
+    const listPromise = conn
+      ? withDbStatementTimeout(conn, category, () =>
+          r.select().from(receiptsTable).where(cond).orderBy(desc(receiptsTable.createdAt)).limit(limit).offset(offset),
+          category,
+        )
+      : r.select().from(receiptsTable).where(cond).orderBy(desc(receiptsTable.createdAt)).limit(limit).offset(offset);
+    const [[{ value: totalRaw }], rows] = await Promise.all([totalPromise, listPromise]);
+    const totalCount = typeof totalRaw === "number" ? totalRaw : Number(totalRaw ?? 0);
+    res.setHeader("X-Total-Count", String(totalCount));
+    res.setHeader("X-Page", String(page));
+    res.setHeader("X-Limit", String(limit));
+    res.json(rows);
+  } catch (err) {
+    req.log.error({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "receipts.list_failed");
+    if (err instanceof Error && (err as any).code === "STATEMENT_TIMEOUT") {
+      res.status(504).json({ error: (err as Error).message });
+      return;
+    }
+    res.status(500).json({ error: "Failed to load receipts" });
+  }
 });
 
 // Detail
@@ -238,7 +317,7 @@ router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, req
       if (!c) return { kind: "case_not_found" as const };
     }
 
-    const receiptNo = await nextReceiptNo(req.firmId!);
+    const receiptNo = await nextReceiptNo(tx, req.firmId!);
     const [rec] = await tx.insert(receiptsTable).values({
       firmId: req.firmId!,
       caseId: effectiveCaseId,
@@ -339,7 +418,7 @@ router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireF
   const reversed = await (db as any).transaction(async (tx: typeof db) => {
     await tx.update(receiptsTable).set({ isReversed: true, reversedBy: req.userId!, reversedAt: new Date() }).where(eq(receiptsTable.id, id));
     const allocs = await tx.select().from(receiptAllocationsTable).where(eq(receiptAllocationsTable.receiptId, id));
-    for (const a of allocs) { if (a.invoiceId) await updateInvoicePaymentStatus(a.invoiceId, req.firmId!); }
+    for (const a of allocs) { if (a.invoiceId) await updateInvoicePaymentStatus(a.invoiceId, req.firmId!, { actorUserId: req.userId!, context: `reverse:receipt:${String(rec.receiptNo ?? id)}` }); }
 
     await postLedger(req.firmId!, rec.caseId, {
       entryDate: new Date().toISOString().slice(0, 10), entryType: "reversal",
