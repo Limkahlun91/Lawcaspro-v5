@@ -18,6 +18,7 @@ import {
   firmFileRefSettingsTable,
   permissionsTable,
   caseNotificationsTable,
+  caseReferenceHistoryTable,
   sql,
 } from "@workspace/db";
 import {
@@ -488,20 +489,15 @@ async function buildSmartNamingContext(r: DbConn, firmId: number, caseId: number
     const borrowerNames = (() => {
       const partyType = String((base as any)?.loanPartyType ?? "");
       if (partyType === "1st_party") return purchaserNameList.join(", ");
-      const fromColumn = (base as any)?.borrowers;
-      if (Array.isArray(fromColumn)) {
-        return fromColumn.map((b: any) => (typeof b?.name === "string" ? b.name.trim() : "")).filter(Boolean).join(", ");
-      }
-      const raw = base?.loanDetails ? String(base.loanDetails) : "";
-      if (!raw) return "";
-      try {
-        const obj = JSON.parse(raw) as Record<string, unknown>;
-        const b1 = typeof (obj as any)?.borrower1Name === "string" ? String((obj as any).borrower1Name).trim() : "";
-        const b2 = typeof (obj as any)?.borrower2Name === "string" ? String((obj as any).borrower2Name).trim() : "";
-        return [b1, b2].filter(Boolean).join(", ");
-      } catch {
-        return "";
-      }
+      const loanDetailsObj = (() => {
+        const ld = (base as any)?.loanDetails;
+        if (!ld) return null;
+        if (typeof ld === "object") return ld;
+        try { return JSON.parse(String(ld)); } catch { return null; }
+      })();
+      const resolved = resolveCanonicalBorrowersForRead((base as any)?.borrowers, loanDetailsObj);
+      if (resolved.length > 0) return resolved.map((b) => b.name.trim()).filter(Boolean).join(", ");
+      return "";
     })();
 
     const loanBank = (() => {
@@ -746,6 +742,133 @@ function keyDatePatchFromWorkflow(field: KeyDateField, ymd: string): Partial<Cas
   }
 }
 
+type CanonicalBorrower = {
+  name: string;
+  ic?: string | null;
+  tin?: string | null;
+  hp?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  address: string;
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  addressLine3?: string | null;
+  addressLine4?: string | null;
+  addressLine5?: string | null;
+  postcode?: string | null;
+  city?: string | null;
+  state?: string | null;
+};
+
+function normalizeCanonicalBorrowers(raw: unknown): CanonicalBorrower[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CanonicalBorrower[] = [];
+  for (const v of raw) {
+    if (!v || typeof v !== "object") continue;
+    const name = String((v as any).name ?? "").trim();
+    if (!name) continue;
+    const getOpt = (k: string): string | null => {
+      const val = (v as any)[k];
+      if (val === null || val === undefined) return null;
+      const s = String(val).trim();
+      return s ? s : null;
+    };
+    const addressLine1 = getOpt("addressLine1") ?? getOpt("address_lines?.line1") ?? null;
+    const addressLine2 = getOpt("addressLine2") ?? null;
+    const addressLine3 = getOpt("addressLine3") ?? null;
+    const addressLine4 = getOpt("addressLine4") ?? null;
+    const addressLine5 = getOpt("addressLine5") ?? null;
+    const composedLines: string[] = [
+      addressLine1, addressLine2, addressLine3, addressLine4, addressLine5,
+    ].filter((x): x is string => Boolean(x && x.trim()));
+    const postcode = getOpt("postcode");
+    const city = getOpt("city");
+    const state = getOpt("state");
+    const tailParts: string[] = [];
+    if (postcode && city) tailParts.push(`${postcode} ${city}`);
+    else if (postcode) tailParts.push(postcode);
+    else if (city) tailParts.push(city);
+    if (state) tailParts.push(state);
+    const composedFromStructured = [...composedLines, ...tailParts].join(", ");
+    const rawAddress = getOpt("address");
+    const address = (rawAddress && rawAddress.trim()) ? rawAddress.trim() : composedFromStructured;
+    const borrower: CanonicalBorrower = {
+      name,
+      address,
+    };
+    const ic = getOpt("ic");
+    if (ic) borrower.ic = ic;
+    const tin = getOpt("tin");
+    if (tin) borrower.tin = tin;
+    const hp = getOpt("hp") ?? getOpt("phone");
+    if (hp) { borrower.hp = hp; borrower.phone = hp; }
+    const email = getOpt("email");
+    if (email) borrower.email = email;
+    if (addressLine1) borrower.addressLine1 = addressLine1;
+    if (addressLine2) borrower.addressLine2 = addressLine2;
+    if (addressLine3) borrower.addressLine3 = addressLine3;
+    if (addressLine4) borrower.addressLine4 = addressLine4;
+    if (addressLine5) borrower.addressLine5 = addressLine5;
+    if (postcode) borrower.postcode = postcode;
+    if (city) borrower.city = city;
+    if (state) borrower.state = state;
+    out.push(borrower);
+  }
+  return out;
+}
+
+function mirrorCanonicalToLoanBorrowers(canonical: CanonicalBorrower[]): Array<Record<string, unknown>> {
+  return canonical.map((b) => {
+    const m: Record<string, unknown> = { name: b.name, address: b.address };
+    if (b.ic) m.ic = b.ic;
+    if (b.tin) m.tin = b.tin;
+    if (b.hp) m.hp = b.hp;
+    if (b.email) m.email = b.email;
+    if (b.addressLine1) m.addressLine1 = b.addressLine1;
+    if (b.addressLine2) m.addressLine2 = b.addressLine2;
+    if (b.addressLine3) m.addressLine3 = b.addressLine3;
+    if (b.addressLine4) m.addressLine4 = b.addressLine4;
+    if (b.addressLine5) m.addressLine5 = b.addressLine5;
+    if (b.postcode) m.postcode = b.postcode;
+    if (b.city) m.city = b.city;
+    if (b.state) m.state = b.state;
+    return m;
+  });
+}
+
+function resolveCanonicalBorrowersForRead(
+  casesBorrowersRaw: unknown,
+  loanDetailsRaw: unknown,
+): CanonicalBorrower[] {
+  if (Array.isArray(casesBorrowersRaw) && casesBorrowersRaw.length > 0) {
+    return normalizeCanonicalBorrowers(casesBorrowersRaw);
+  }
+  const ld = loanDetailsRaw && typeof loanDetailsRaw === "object" && !Array.isArray(loanDetailsRaw)
+    ? (loanDetailsRaw as Record<string, unknown>)
+    : null;
+  if (ld && Array.isArray(ld.borrowers) && ld.borrowers.length > 0) {
+    return normalizeCanonicalBorrowers(ld.borrowers);
+  }
+  const legacyFromLd: CanonicalBorrower[] = [];
+  if (ld) {
+    const name1 = typeof ld.borrower1Name === "string" ? ld.borrower1Name.trim() : "";
+    const ic1 = typeof ld.borrower1Ic === "string" ? ld.borrower1Ic.trim() : "";
+    if (name1) {
+      const b: CanonicalBorrower = { name: name1, address: "" };
+      if (ic1) b.ic = ic1;
+      legacyFromLd.push(b);
+    }
+    const name2 = typeof ld.borrower2Name === "string" ? ld.borrower2Name.trim() : "";
+    const ic2 = typeof ld.borrower2Ic === "string" ? ld.borrower2Ic.trim() : "";
+    if (name2) {
+      const b: CanonicalBorrower = { name: name2, address: "" };
+      if (ic2) b.ic = ic2;
+      legacyFromLd.push(b);
+    }
+  }
+  return legacyFromLd;
+}
+
 async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
   const proj = await (async () => {
     try {
@@ -909,7 +1032,7 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
     spaDetails,
     propertyDetails,
     loanDetails,
-    borrowers: (c as any).borrowers ?? [],
+    borrowers: resolveCanonicalBorrowersForRead((c as any).borrowers, loanDetails),
     companyDetails,
     keyDates: kd ? {
       spa_signed_date: pickDateString(kd, "spaSignedDate", "spa_signed_date"),
@@ -3507,6 +3630,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       borrowers: z.array(z.object({
         name: z.string(),
         ic: z.string().nullish(),
+        tin: z.string().nullish(),
         hp: z.string().nullish(),
         email: z.string().nullish(),
         address: z.string().nullish().transform((v) => (typeof v === "string" ? v : "")).transform((v) => v.trim()),
@@ -3889,31 +4013,6 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       }
     }
 
-    const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; tin?: string; hp?: string; email?: string; address: string }> => {
-      if (!Array.isArray(raw)) return [];
-      const out: Array<{ name: string; ic?: string; tin?: string; hp?: string; email?: string; address: string }> = [];
-      for (const v of raw) {
-        const name = typeof (v as any)?.name === "string" ? String((v as any).name).trim() : "";
-        if (!name) continue;
-        const icRaw = (v as any)?.ic;
-        const ic = typeof icRaw === "string" ? icRaw.trim() : "";
-        const tinRaw = (v as any)?.tin;
-        const tin = typeof tinRaw === "string" ? tinRaw.trim() : "";
-        const hpRaw = (v as any)?.hp;
-        const hp = typeof hpRaw === "string" ? hpRaw.trim() : "";
-        const emailRaw = (v as any)?.email;
-        const email = typeof emailRaw === "string" ? emailRaw.trim() : "";
-        const addressRaw = (v as any)?.address;
-        const address = typeof addressRaw === "string" ? addressRaw.trim() : "";
-        const base = ic ? { name, ic, address } : { name, address };
-        if (tin) (base as any).tin = tin;
-        if (hp) (base as any).hp = hp;
-        if (email) (base as any).email = email;
-        out.push(base as any);
-      }
-      return out;
-    };
-
     const borrowerPayloadRaw = (
       Array.isArray(requestedBorrowers) && requestedBorrowers.length > 0
         ? requestedBorrowers
@@ -3921,17 +4020,17 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
           ? (loanDetailsRaw as any).borrowers
           : []
     );
-    const normalizedBorrowerPayload = normalizeBorrowers(borrowerPayloadRaw);
+    const normalizedBorrowerPayload = normalizeCanonicalBorrowers(borrowerPayloadRaw);
     const isLoan = purchaseMode === "loan";
     const effectiveLoanPartyType: "1st_party" | "3rd_party" = isLoan ? (loanPartyType ?? "1st_party") : "1st_party";
-    let borrowersToStore: Array<{ name: string; ic?: string; tin?: string; hp?: string; email?: string; address: string }> = [];
+    let canonicalBorrowers: CanonicalBorrower[] = [];
 
     if (isLoan) {
       if (effectiveLoanPartyType === "1st_party") {
         if (normalizedBorrowerPayload.length > 0) {
-          borrowersToStore = normalizedBorrowerPayload;
+          canonicalBorrowers = normalizedBorrowerPayload;
         } else if (resolvedPurchaserIds.length === 0) {
-          borrowersToStore = [];
+          canonicalBorrowers = [];
         } else {
         const rows = await r
           .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, tin: clientsTable.tin, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
@@ -3939,35 +4038,37 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
           .where(and(eq(clientsTable.firmId, req.firmId!), inArray(clientsTable.id, resolvedPurchaserIds)));
         const byId = new Map<number, { name: string; ic: string | null; tin: string | null; phone: string | null; email: string | null; address: string | null }>();
         for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, tin: (row as any).tin ?? null, phone: row.phone ?? null, email: row.email ?? null, address: row.address ?? null });
-        borrowersToStore = resolvedPurchaserIds
-          .map((id) => {
+        canonicalBorrowers = resolvedPurchaserIds
+          .map((id): CanonicalBorrower | null => {
             const v = byId.get(id);
             const name = v?.name?.trim() ?? "";
-            const ic = v?.ic ? String(v.ic).trim() : "";
-            const tin = v?.tin ? String(v.tin).trim() : "";
-            const hp = v?.phone ? String(v.phone).trim() : "";
-            const email = v?.email ? String(v.email).trim() : "";
+            if (!name) return null;
+            const ic = v?.ic ? String(v.ic).trim() : null;
+            const tin = v?.tin ? String(v.tin).trim() : null;
+            const hp = v?.phone ? String(v.phone).trim() : null;
+            const email = v?.email ? String(v.email).trim() : null;
             const address = v?.address ? String(v.address).trim() : "";
-            const base = ic ? { name, ic, address } : { name, address };
-            if (tin) (base as any).tin = tin;
-            if (hp) (base as any).hp = hp;
-            if (email) (base as any).email = email;
-            return base as any;
+            const out: CanonicalBorrower = { name, address };
+            if (ic) out.ic = ic;
+            if (tin) out.tin = tin;
+            if (hp) { out.hp = hp; out.phone = hp; }
+            if (email) out.email = email;
+            return out;
           })
-          .filter((b) => b.name.trim().length > 0);
+          .filter((b): b is CanonicalBorrower => b !== null);
         }
       } else {
-        borrowersToStore = normalizedBorrowerPayload;
-        if (borrowersToStore.length === 0 && loanDetailsRaw && typeof loanDetailsRaw === "object") {
+        canonicalBorrowers = normalizedBorrowerPayload;
+        if (canonicalBorrowers.length === 0 && loanDetailsRaw && typeof loanDetailsRaw === "object") {
           const ld: any = loanDetailsRaw as any;
           const b1 = typeof ld.borrower1Name === "string" ? ld.borrower1Name.trim() : "";
           const i1 = typeof ld.borrower1Ic === "string" ? ld.borrower1Ic.trim() : "";
           const b2 = typeof ld.borrower2Name === "string" ? ld.borrower2Name.trim() : "";
           const i2 = typeof ld.borrower2Ic === "string" ? ld.borrower2Ic.trim() : "";
-          const fallback: Array<{ name: string; ic?: string; address: string }> = [];
+          const fallback: CanonicalBorrower[] = [];
           if (b1) fallback.push(i1 ? { name: b1, ic: i1, address: "" } : { name: b1, address: "" });
           if (b2) fallback.push(i2 ? { name: b2, ic: i2, address: "" } : { name: b2, address: "" });
-          borrowersToStore = fallback;
+          canonicalBorrowers = fallback;
         }
       }
     }
@@ -3981,9 +4082,14 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       return base;
     })();
 
-    const normalizedLoanDetails = (loanDetailsRaw && typeof loanDetailsRaw === "object" && !Array.isArray(loanDetailsRaw))
-      ? (loanDetailsRaw as Record<string, unknown>)
-      : null;
+    const incomingLoanDetails = (loanDetailsRaw && typeof loanDetailsRaw === "object" && !Array.isArray(loanDetailsRaw))
+      ? { ...(loanDetailsRaw as Record<string, unknown>) }
+      : {};
+    const mirroredLoanBorrowers = mirrorCanonicalToLoanBorrowers(canonicalBorrowers);
+    if (mirroredLoanBorrowers.length > 0 || canonicalBorrowers.length > 0) {
+      incomingLoanDetails.borrowers = mirroredLoanBorrowers;
+    }
+    const normalizedLoanDetails = Object.keys(incomingLoanDetails).length > 0 ? incomingLoanDetails : null;
 
     const spaPriceToInsert = spaPrice !== undefined && spaPrice !== null ? String(spaPrice) : null;
     const apdlPriceToInsert = apdlPrice !== undefined && apdlPrice !== null ? String(apdlPrice) : null;
@@ -4010,7 +4116,7 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       propertyDetails: normalizedPropertyDetails,
       loanDetails: normalizedLoanDetails,
       loanPartyType: purchaseMode === "loan" ? (loanPartyType ?? "1st_party") : "1st_party",
-      borrowers: borrowersToStore,
+      borrowers: canonicalBorrowers,
       companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
       createdBy: req.userId ?? null,
       approvalStatus: "pending_approval",
@@ -5973,6 +6079,70 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
   } : {});
 }));
 
+router.get("/cases/:caseId/reference-history", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
+  const r = req.rlsDb;
+  if (!r) {
+    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    res.status(500).json({ error: "Internal Server Error" });
+    return;
+  }
+  const params = GetCaseParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: params.error.message });
+    return;
+  }
+  const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
+  if (!ok) return;
+
+  const canViewRef = await hasRolePermission(r, req.firmId!, req.roleId ?? null, "case_reference", "view");
+  if (!canViewRef) {
+    const ok2 = await enforcePermission(req, res, "case_reference", "view");
+    if (!ok2) return;
+  }
+
+  const exists = await tableExists(r, "public.case_reference_history");
+  if (!exists) {
+    res.json([]);
+    return;
+  }
+
+  const rows = await r
+    .select({
+      id: caseReferenceHistoryTable.id,
+      caseId: caseReferenceHistoryTable.caseId,
+      previousReferenceNo: caseReferenceHistoryTable.previousReferenceNo,
+      newReferenceNo: caseReferenceHistoryTable.newReferenceNo,
+      changeType: caseReferenceHistoryTable.changeType,
+      actorUserId: caseReferenceHistoryTable.actorUserId,
+      actorName: usersTable.name,
+      changedAt: caseReferenceHistoryTable.changedAt,
+      reason: caseReferenceHistoryTable.reason,
+      source: caseReferenceHistoryTable.source,
+      createdAt: caseReferenceHistoryTable.createdAt,
+    })
+    .from(caseReferenceHistoryTable)
+    .leftJoin(usersTable, eq(usersTable.id, caseReferenceHistoryTable.actorUserId))
+    .where(and(
+      eq(caseReferenceHistoryTable.caseId, params.data.caseId),
+      eq(caseReferenceHistoryTable.firmId, req.firmId!),
+    ))
+    .orderBy(desc(caseReferenceHistoryTable.createdAt));
+
+  res.json(rows.map((r) => ({
+    id: r.id,
+    caseId: r.caseId,
+    previousReferenceNo: r.previousReferenceNo ?? null,
+    newReferenceNo: r.newReferenceNo,
+    changeType: r.changeType,
+    actorUserId: r.actorUserId ?? null,
+    actorName: r.actorName ?? null,
+    changedAt: r.changedAt ? r.changedAt.toISOString() : null,
+    reason: r.reason ?? null,
+    source: r.source,
+    createdAt: r.createdAt ? r.createdAt.toISOString() : null,
+  })));
+}));
+
 router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
   try {
     const r = req.rlsDb;
@@ -6091,6 +6261,9 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
         apdlPrice: casesTable.apdlPrice,
         developerDiscount: casesTable.developerDiscount,
         bumiputraDiscount: casesTable.bumiputraDiscount,
+        referenceNo: casesTable.referenceNo,
+        proposedReferenceNo: casesTable.proposedReferenceNo,
+        createdBy: casesTable.createdBy,
       })
       .from(casesTable)
       .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
@@ -6100,18 +6273,56 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
       return;
     }
 
+    const patchRef: { oldVal: string | null; newVal: string | null; reason: string | null } = {
+      oldVal: existingCase.referenceNo ? String(existingCase.referenceNo).trim() : null,
+      newVal: null,
+      reason: null,
+    };
+
     const updates: Record<string, unknown> = {};
     if (parsed.data.status !== undefined && parsed.data.status !== null) {
       const v = String(parsed.data.status ?? "").trim();
       if (v) updates.status = v;
     }
     if (parsed.data.referenceNo !== undefined && parsed.data.referenceNo !== null) {
-      const v = String(parsed.data.referenceNo ?? "").trim();
-      if (!v) {
+      const newRef = String(parsed.data.referenceNo ?? "").trim();
+      if (!newRef) {
         res.status(400).json({ error: "Invalid referenceNo" });
         return;
       }
-      updates.referenceNo = v;
+      const oldRef = patchRef.oldVal;
+      if (newRef !== oldRef) {
+        const canChangeRef = await enforcePermission(req, res, "case_reference", "change");
+        if (!canChangeRef) return;
+
+        const rawReason = (bodyRec.referenceNoChangeReason !== undefined) ? bodyRec.referenceNoChangeReason
+          : (bodyRec.changeReason !== undefined) ? bodyRec.changeReason : null;
+        const reasonText = typeof rawReason === "string" && rawReason.trim() ? rawReason.trim() : null;
+        if (!reasonText || reasonText.length < 8) {
+          res.status(400).json({ error: "referenceNoChangeReason must be at least 8 characters", code: "REFERENCE_CHANGE_REASON_TOO_SHORT" });
+          return;
+        }
+
+        const [dup] = await r.select({ id: casesTable.id }).from(casesTable)
+          .where(and(
+            eq(casesTable.firmId, req.firmId!),
+            eq(casesTable.referenceNo, newRef),
+            sql`${casesTable.deletedAt} IS NULL`,
+            sql`${casesTable.id} <> ${params.data.caseId}`,
+          )).limit(1);
+        if (dup) {
+          res.status(409).json({ error: "Reference Number already exists in this firm", code: "DUPLICATE_REFERENCE_NO" });
+          return;
+        }
+        patchRef.newVal = newRef;
+        patchRef.reason = reasonText;
+        updates.referenceNo = newRef;
+        updates.referenceNoChangedBy = req.userId ?? null;
+        updates.referenceNoChangedAt = new Date();
+        updates.referenceNoChangeReason = reasonText;
+      } else {
+        updates.referenceNo = newRef;
+      }
     }
     if (parsed.data.projectId !== undefined && parsed.data.projectId !== null) {
       const [project] = await r.select().from(projectsTable).where(and(eq(projectsTable.id, parsed.data.projectId), eq(projectsTable.firmId, req.firmId!))).limit(1);
@@ -6322,36 +6533,13 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
       }
     }
 
-    const normalizeBorrowers = (raw: unknown): Array<{ name: string; ic?: string; tin?: string; hp?: string; email?: string; address: string }> => {
-      if (!Array.isArray(raw)) return [];
-      const out: Array<{ name: string; ic?: string; tin?: string; hp?: string; email?: string; address: string }> = [];
-      for (const v of raw) {
-        const name = typeof (v as any)?.name === "string" ? String((v as any).name).trim() : "";
-        if (!name) continue;
-        const icRaw = (v as any)?.ic;
-        const ic = typeof icRaw === "string" ? icRaw.trim() : "";
-        const tinRaw = (v as any)?.tin;
-        const tin = typeof tinRaw === "string" ? tinRaw.trim() : "";
-        const hpRaw = (v as any)?.hp;
-        const hp = typeof hpRaw === "string" ? hpRaw.trim() : "";
-        const emailRaw = (v as any)?.email;
-        const email = typeof emailRaw === "string" ? emailRaw.trim() : "";
-        const addressRaw = (v as any)?.address;
-        const address = typeof addressRaw === "string" ? addressRaw.trim() : "";
-        const base = ic ? { name, ic, address } : { name, address };
-        if (tin) (base as any).tin = tin;
-        if (hp) (base as any).hp = hp;
-        if (email) (base as any).email = email;
-        out.push(base as any);
-      }
-      return out;
-    };
-
     const effectivePurchaseMode = parsed.data.purchaseMode !== undefined ? parsed.data.purchaseMode : String(existingCase.purchaseMode ?? "");
     const effectiveLoanPartyType = parsed.data.loanPartyType !== undefined
       ? parsed.data.loanPartyType
       : (String(existingCase.loanPartyType ?? "") === "3rd_party" ? "3rd_party" : "1st_party");
     if (parsed.data.loanPartyType !== undefined) updates.loanPartyType = parsed.data.loanPartyType;
+
+    let canonicalBorrowersForPatch: CanonicalBorrower[] | null = null;
 
     if (effectivePurchaseMode === "loan") {
       if (effectiveLoanPartyType === "1st_party") {
@@ -6363,33 +6551,44 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
             .where(and(eq(clientsTable.firmId, req.firmId!), inArray(clientsTable.id, ids)));
           const byId = new Map<number, { name: string; ic: string | null; tin: string | null; phone: string | null; email: string | null; address: string | null }>();
           for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, tin: row.tin ?? null, phone: row.phone ?? null, email: row.email ?? null, address: row.address ?? null });
-          const borrowersToStore = ids
-            .map((id) => {
+          canonicalBorrowersForPatch = ids
+            .map((id): CanonicalBorrower | null => {
               const v = byId.get(id);
               const name = v?.name?.trim() ?? "";
-              const ic = v?.ic ? String(v.ic).trim() : "";
-              const tin = v?.tin ? String(v.tin).trim() : "";
-              const hp = v?.phone ? String(v.phone).trim() : "";
-              const email = v?.email ? String(v.email).trim() : "";
+              if (!name) return null;
+              const ic = v?.ic ? String(v.ic).trim() : null;
+              const tin = v?.tin ? String(v.tin).trim() : null;
+              const hp = v?.phone ? String(v.phone).trim() : null;
+              const email = v?.email ? String(v.email).trim() : null;
               const address = v?.address ? String(v.address).trim() : "";
-              const base = ic ? { name, ic, address } : { name, address };
-              if (tin) (base as any).tin = tin;
-              if (hp) (base as any).hp = hp;
-              if (email) (base as any).email = email;
-              return base as any;
+              const out: CanonicalBorrower = { name, address };
+              if (ic) out.ic = ic;
+              if (tin) out.tin = tin;
+              if (hp) { out.hp = hp; out.phone = hp; }
+              if (email) out.email = email;
+              return out;
             })
-            .filter((b) => b.name.trim().length > 0);
-          updates.borrowers = borrowersToStore;
+            .filter((b): b is CanonicalBorrower => b !== null);
+          updates.borrowers = canonicalBorrowersForPatch;
         }
       } else {
         if (parsed.data.borrowers !== undefined) {
-          updates.borrowers = normalizeBorrowers(parsed.data.borrowers);
+          canonicalBorrowersForPatch = normalizeCanonicalBorrowers(parsed.data.borrowers);
+          updates.borrowers = canonicalBorrowersForPatch;
         }
       }
     } else {
       if (parsed.data.borrowers !== undefined) {
-        updates.borrowers = normalizeBorrowers(parsed.data.borrowers);
+        canonicalBorrowersForPatch = normalizeCanonicalBorrowers(parsed.data.borrowers);
+        updates.borrowers = canonicalBorrowersForPatch;
       }
+    }
+
+    if (canonicalBorrowersForPatch !== null) {
+      const mirrored = mirrorCanonicalToLoanBorrowers(canonicalBorrowersForPatch);
+      const ldBase = parseJsonObj(existingCase.loanDetails);
+      ldBase.borrowers = mirrored;
+      updates.loanDetails = ldBase;
     }
 
     if (Object.keys(updates).length === 0 && !wantsUpdatePurchasers && !wantsAssignLawyer && !wantsAssignClerk) {
@@ -6469,6 +6668,56 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
         }),
       });
 
+      const didRefChange = patchRef.newVal !== null && patchRef.newVal !== patchRef.oldVal;
+      if (didRefChange) {
+        const prev = patchRef.oldVal ?? null;
+        const next = patchRef.newVal!;
+        const reason = patchRef.reason;
+        const hadProposed = existingCase.proposedReferenceNo && String(existingCase.proposedReferenceNo).trim() !== "";
+        const changeType: "PROPOSED_TO_FINAL" | "MANUAL_CHANGE" =
+          (prev === null || prev === "") && hadProposed ? "PROPOSED_TO_FINAL" : "MANUAL_CHANGE";
+
+        await tx.insert(caseReferenceHistoryTable).values({
+          firmId: req.firmId!,
+          caseId: params.data.caseId,
+          previousReferenceNo: prev,
+          newReferenceNo: next,
+          changeType,
+          actorUserId: req.userId ?? null,
+          changedAt: new Date(),
+          reason: reason ?? null,
+          source: "CASE_EDIT",
+        });
+
+        await tx.insert(auditLogsTable).values({
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: "firm_user",
+          action: "cases.reference_no_changed",
+          entityType: "case",
+          entityId: c.id,
+          detail: `proposed=${prev ?? ""};final=${next}${reason ? `;reason=${reason}` : ""}`,
+          ipAddress: typeof (req as any).ip === "string" ? (req as any).ip : undefined,
+          userAgent: Array.isArray(req.headers["user-agent"])
+            ? req.headers["user-agent"][0]
+            : req.headers["user-agent"],
+        });
+
+        const creatorId = Number.isFinite(existingCase.createdBy) ? Number(existingCase.createdBy) : null;
+        if (creatorId && creatorId !== req.userId) {
+          await insertCaseNotifications(tx, {
+            firmId: req.firmId!,
+            caseId: params.data.caseId,
+            recipientUserIds: [creatorId],
+            actorUserId: req.userId ?? null,
+            type: "REFERENCE_NO_CHANGED",
+            title: "Reference number changed",
+            message: `Previous: ${prev ?? ""}\nFinal: ${next}`,
+            meta: { caseId: params.data.caseId, previous: prev, final: next, reason },
+          });
+        }
+      }
+
       return await formatCaseDetail(tx, c);
     });
 
@@ -6476,6 +6725,7 @@ router.patch("/cases/:caseId", requireAuthHandler, requireFirmUserHandler, requi
       res.status(404).json({ error: "Case not found" });
       return;
     }
+
     res.json(result);
   } catch (err) {
     logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] update_failed");

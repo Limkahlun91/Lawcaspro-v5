@@ -7,7 +7,7 @@ import {
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, Minus, X, MoreHorizontal, Share2, AlertTriangle, Loader2 } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, Minus, X, MoreHorizontal, Share2, AlertTriangle, Loader2, Activity, FolderKey, ChevronRight } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -351,6 +351,130 @@ function CaseLedgerTab({ caseId }: { caseId: number }) {
   );
 }
 
+type ReferenceHistoryRow = {
+  id: number;
+  caseId: number;
+  previousReferenceNo: string | null;
+  newReferenceNo: string;
+  changeType: string;
+  actorUserId: number | null;
+  actorName: string | null;
+  changedAt: string | null;
+  reason: string | null;
+  source: string;
+  createdAt: string | null;
+};
+
+function changeTypeBadge(t: string) {
+  switch (t) {
+    case "MANUAL_CHANGE":
+      return <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">Manual Change</Badge>;
+    case "PROPOSED_TO_FINAL":
+      return <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200">Proposed → Final</Badge>;
+    case "REAPPROVAL_CHANGE":
+      return <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">Reapproval</Badge>;
+    case "SYSTEM_ASSIGNMENT":
+      return <Badge variant="outline" className="bg-sky-50 text-sky-700 border-sky-200">System</Badge>;
+    case "BACKFILLED_FROM_CASE_SNAPSHOT":
+      return <Badge variant="outline" className="bg-slate-50 text-slate-700 border-slate-200">Backfilled</Badge>;
+    default:
+      return <Badge variant="outline">{t}</Badge>;
+  }
+}
+
+function ReferenceHistoryPanel({ caseId }: { caseId: number }) {
+  const { user } = useAuth();
+  const canView = hasPermission(user, "case_reference", "view") || hasPermission(user, "cases", "read");
+
+  const q = useQuery<ReferenceHistoryRow[]>({
+    queryKey: ["case-reference-history", caseId],
+    queryFn: ({ signal }) => apiFetchJson(`/cases/${caseId}/reference-history`, { signal }),
+    enabled: !!caseId && caseId > 0,
+    retry: false,
+  });
+
+  if (!canView) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Reference Number History</CardTitle>
+        </CardHeader>
+        <CardContent className="text-sm text-slate-600">
+          You do not have permission to view reference change history.
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const rows = Array.isArray(q.data) ? q.data : [];
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <CardTitle className="text-base sm:text-lg">Reference Number History</CardTitle>
+          <div className="text-xs text-slate-500">
+            {rows.length} change{rows.length === 1 ? "" : "s"}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {q.isLoading && (
+          <div className="flex items-center gap-2 text-sm text-slate-500 py-4">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading...
+          </div>
+        )}
+        {!q.isLoading && rows.length === 0 && (
+          <div className="text-sm text-slate-500 py-8 text-center">
+            No reference number changes recorded for this case.
+          </div>
+        )}
+        <ol className="relative border-l border-slate-200 ml-2 space-y-5">
+          {rows.map((r) => (
+            <li key={r.id} className="ml-5">
+              <span className="absolute -left-[7px] mt-1.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-slate-800 ring-4 ring-white" />
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2 flex-wrap">
+                  {changeTypeBadge(r.changeType)}
+                  <span className="text-xs text-slate-500">
+                    {r.changedAt ? new Date(r.changedAt).toLocaleString() : r.createdAt ? new Date(r.createdAt).toLocaleString() : ""}
+                  </span>
+                  {r.actorName && (
+                    <span className="inline-flex items-center gap-1 text-xs text-slate-600">
+                      <User className="h-3 w-3" />
+                      {r.actorName}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 flex-wrap font-mono text-sm">
+                  <span className={cn(
+                    "px-2 py-0.5 rounded border",
+                    r.previousReferenceNo ? "bg-slate-100 text-slate-700 border-slate-200 line-through" : "text-slate-400"
+                  )}>
+                    {r.previousReferenceNo ?? "—"}
+                  </span>
+                  <span className="text-slate-400">→</span>
+                  <span className="px-2 py-0.5 rounded border bg-emerald-50 text-emerald-800 border-emerald-200 font-semibold">
+                    {r.newReferenceNo}
+                  </span>
+                </div>
+                {r.reason && (
+                  <p className="text-sm text-slate-700 bg-slate-50 border border-slate-200 rounded-md px-3 py-2 whitespace-pre-wrap break-words">
+                    {r.reason}
+                  </p>
+                )}
+                {!r.reason && (
+                  <p className="text-xs text-slate-400 italic">No reason recorded.</p>
+                )}
+              </div>
+            </li>
+          ))}
+        </ol>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function CaseDetail() {
   const SHOW_COMPLIANCE_TAB = false;
   const { id } = useParams<{ id: string }>();
@@ -663,6 +787,8 @@ export default function CaseDetail() {
       "communications",
       "communication-timeline",
       "client-interaction",
+      "reference-history",
+      "operations",
       ...(SHOW_COMPLIANCE_TAB ? (["compliance"] as const) : []),
     ]);
     const next = allowed.has(tabFromUrlRaw) ? tabFromUrlRaw : "overview";
@@ -670,6 +796,55 @@ export default function CaseDetail() {
     return next;
   })();
   const [activeTab, setActiveTab] = useState(initialActiveTab);
+
+  const canViewCaseMonitor = hasPermission(user, "case_monitor", "view");
+  const canViewFileCustody = hasPermission(user, "accounting", "view") || hasPermission(user, "file_custody", "view");
+
+  const caseOpsCustodyQuery = useQuery({
+    queryKey: ["case-ops", "file-custody", caseId],
+    queryFn: ({ signal }) =>
+      apiFetchJson(`/file-custody/items?case_id=${encodeURIComponent(String(caseId))}&limit=20`, { signal, timeoutMs: 12_000 }) as Promise<{
+        total: number; offset: number; limit: number;
+        items: Array<{
+          id: number; fileReferenceNo: string; fileTitle: string; category: string; physicalOrDigital: string;
+          lifecycleStatus: string; currentHolderName?: string | null; holderName?: string | null;
+          currentHolderFirmExternal?: string | null; currentHolderContact?: string | null;
+          acknowledgedAt?: string | null; acknowledgeDueAt?: string | null; expectedReturnAt?: string | null;
+          isReturnOverdue?: boolean | null; isAcknowledgementOverdue?: boolean | null;
+          lastMovementId?: number | null; createdAt: string; updatedAt: string;
+        }>;
+      }>,
+    enabled: canViewFileCustody && Number.isFinite(caseId) && caseId > 0,
+    staleTime: 30_000,
+    retry: 0,
+  });
+
+  const caseOpsBottlenecksQuery = useQuery({
+    queryKey: ["case-ops", "bottlenecks", caseId],
+    queryFn: ({ signal }) =>
+      apiFetchJson(`/case-monitor/bottlenecks?case_id=${encodeURIComponent(String(caseId))}&limit=20`, { signal, timeoutMs: 12_000 }) as Promise<{
+        items: Array<{
+          id: number; monitorKind: string; severity: string; daysStuck: number; title: string; detail: string;
+          escalatedToPartner: boolean; createdAt: string;
+        }>;
+        limit: number; offset: number;
+      }>,
+    enabled: canViewCaseMonitor && Number.isFinite(caseId) && caseId > 0,
+    staleTime: 30_000,
+    retry: 0,
+  });
+
+  const formatHoldDuration = (iso: string | null | undefined): string => {
+    if (!iso) return "—";
+    const ms = Date.now() - new Date(iso).getTime();
+    if (!Number.isFinite(ms) || ms < 0) return "—";
+    const mins = Math.floor(ms / 60000);
+    if (mins < 60) return `${mins}m`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 48) return `${hrs}h ${mins % 60}m`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ${hrs % 24}h`;
+  };
 
   const keyDatesQuery = useQuery<Record<string, unknown>>({
     queryKey: ["case-key-dates", caseId],
@@ -2414,6 +2589,14 @@ export default function CaseDetail() {
           {SHOW_COMPLIANCE_TAB && (
             <TabsTrigger value="compliance">Compliance</TabsTrigger>
           )}
+          <TabsTrigger value="reference-history" className="gap-2">
+            <Tag className="h-4 w-4" />
+            <span>Ref History</span>
+          </TabsTrigger>
+          <TabsTrigger value="operations" className="gap-2">
+            <Activity className="h-4 w-4" />
+            <span>Operations</span>
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
@@ -3692,6 +3875,231 @@ export default function CaseDetail() {
             </Card>
           </TabsContent>
         )}
+
+        <TabsContent value="reference-history" className="space-y-4">
+          <ReferenceHistoryPanel caseId={caseId} />
+        </TabsContent>
+
+        <TabsContent value="operations" className="space-y-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <Card className={((caseOpsCustodyQuery.data?.total ?? 0) > 0 && ((caseOpsCustodyQuery.data?.items ?? []).some((i:any) => i.isReturnOverdue || i.isAcknowledgementOverdue)) ) ? "border-rose-200 bg-rose-50/30" : undefined}>
+              <CardHeader className="flex flex-row items-center justify-between pb-2">
+                <div className="flex items-center gap-2">
+                  <CardTitle className="text-base flex items-center gap-2"><FolderKey className="w-4 h-4 text-amber-600" /> File Custody</CardTitle>
+                  {!caseOpsCustodyQuery.isLoading && (caseOpsCustodyQuery.data?.total ?? 0) > 0 ? (
+                    <Badge variant="secondary" className="bg-slate-100 text-slate-700 text-xs">{caseOpsCustodyQuery.data.total} item{caseOpsCustodyQuery.data.total === 1 ? "" : "s"}</Badge>
+                  ) : null}
+                </div>
+                {canViewFileCustody ? (
+                  <Link
+                    className="text-xs text-amber-600 hover:text-amber-700 flex items-center gap-1"
+                    href={`/app/accounting?tab=file-custody&case_id=${encodeURIComponent(String(caseId))}`}
+                  >
+                    Open Custody <ChevronRight className="w-3 h-3" />
+                  </Link>
+                ) : null}
+              </CardHeader>
+              <CardContent>
+                {!canViewFileCustody ? (
+                  <div className="text-xs text-slate-500 italic py-4 text-center">File custody is not available for your role</div>
+                ) : caseOpsCustodyQuery.isLoading ? (
+                  <div className="space-y-2">
+                    {Array.from({ length: 2 }).map((_, i) => (
+                      <div key={i} className="animate-pulse h-14 rounded bg-slate-100" />
+                    ))}
+                  </div>
+                ) : caseOpsCustodyQuery.error ? (
+                  <div className="text-xs text-slate-500 italic py-4 text-center">File custody unavailable right now</div>
+                ) : (() => {
+                  const items = caseOpsCustodyQuery.data?.items ?? [];
+                  const total = caseOpsCustodyQuery.data?.total ?? 0;
+                  const outCount = items.filter((i:any) => i.lifecycleStatus && i.lifecycleStatus !== "in_office" && i.lifecycleStatus !== "returned" && i.lifecycleStatus !== "archived").length;
+                  const overdueReturn = items.filter((i:any) => !!i.isReturnOverdue).length;
+                  const ackOverdue = items.filter((i:any) => !!i.isAcknowledgementOverdue).length;
+                  if (total === 0) {
+                    return (
+                      <div className="text-sm text-slate-500 py-6 text-center flex flex-col items-center gap-2">
+                        <CheckCircle2 className="w-6 h-6 text-emerald-500" />
+                        <div className="font-medium text-emerald-700">No custody items for this case</div>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                        <div className="rounded-md border border-slate-200 bg-white p-2.5">
+                          <div className="text-[11px] uppercase text-slate-500 font-medium tracking-wider">Total</div>
+                          <div className="text-lg font-bold text-slate-900 mt-0.5">{total}</div>
+                        </div>
+                        <div className="rounded-md border border-amber-200 bg-amber-50/60 p-2.5">
+                          <div className="text-[11px] uppercase text-amber-700 font-medium tracking-wider">Out</div>
+                          <div className="text-lg font-bold text-amber-800 mt-0.5">{outCount}</div>
+                        </div>
+                        <div className={`rounded-md border p-2.5 ${overdueReturn > 0 ? "border-orange-300 bg-orange-50/60" : "border-slate-200 bg-white"}`}>
+                          <div className={`text-[11px] uppercase font-medium tracking-wider ${overdueReturn > 0 ? "text-orange-700" : "text-slate-500"}`}>Return overdue</div>
+                          <div className={`text-lg font-bold mt-0.5 ${overdueReturn > 0 ? "text-orange-800" : "text-slate-900"}`}>{overdueReturn}</div>
+                        </div>
+                        <div className={`rounded-md border p-2.5 ${ackOverdue > 0 ? "border-rose-300 bg-rose-50/60" : "border-slate-200 bg-white"}`}>
+                          <div className={`text-[11px] uppercase font-medium tracking-wider ${ackOverdue > 0 ? "text-rose-700" : "text-slate-500"}`}>Ack overdue</div>
+                          <div className={`text-lg font-bold mt-0.5 ${ackOverdue > 0 ? "text-rose-800" : "text-slate-900"}`}>{ackOverdue}</div>
+                        </div>
+                      </div>
+                      <ul className="divide-y divide-slate-100 rounded-md border border-slate-200 overflow-hidden">
+                        {items.slice(0, 8).map((it:any) => {
+                          const who = it.currentHolderName || it.holderName || (it.currentHolderFirmExternal ? `${it.currentHolderFirmExternal}` : "in office");
+                          const whoContact = it.currentHolderContact && it.currentHolderName ? ` <${it.currentHolderContact}>` : "";
+                          const holdAnchor = it.updatedAt || it.createdAt;
+                          const holdDuration = formatHoldDuration(holdAnchor);
+                          const ackBadge = it.acknowledgedAt
+                            ? <Badge variant="default" className="bg-emerald-600 text-[10px]">ACKED</Badge>
+                            : it.isAcknowledgementOverdue
+                              ? <Badge variant="destructive" className="text-[10px]">NOT ACK</Badge>
+                              : <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200">PENDING ACK</Badge>;
+                          const returnBadge = it.isReturnOverdue
+                            ? <Badge variant="destructive" className="text-[10px]">OVERDUE</Badge>
+                            : it.expectedReturnAt
+                              ? <Badge variant="outline" className="text-[10px] bg-sky-50 text-sky-700 border-sky-200">Due {new Date(it.expectedReturnAt).toLocaleDateString("en-MY")}</Badge>
+                              : null;
+                          return (
+                            <li key={String(it.id)} className="p-3 first:pt-3 last:pb-3 bg-white">
+                              <div className="flex items-start gap-3">
+                                <span className="inline-flex items-center gap-1 mt-0.5 text-[11px] font-medium text-slate-500 shrink-0 min-w-[72px]">
+                                  <Clock className="w-3 h-3" /> {holdDuration}
+                                </span>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="text-sm font-semibold text-slate-800 truncate inline-flex items-center gap-1">
+                                      <span className="text-slate-400">#{String(it.fileReferenceNo ?? it.id)}</span>
+                                      <span>{String(it.fileTitle ?? "Untitled")}</span>
+                                    </span>
+                                    <Badge variant="secondary" className="text-[10px]">{String(it.category ?? "other").replace(/_/g," ")}</Badge>
+                                    <Badge variant="outline" className="text-[10px] uppercase">{String(it.physicalOrDigital ?? "digital")}</Badge>
+                                  </div>
+                                  <div className="mt-1 text-xs text-slate-600">
+                                    Holder: <span className="font-medium text-slate-800">{who}{whoContact}</span>
+                                  </div>
+                                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                                    {ackBadge}
+                                    {returnBadge}
+                                    {it.lifecycleStatus ? <Badge variant="outline" className="text-[10px]">{String(it.lifecycleStatus).replace(/_/g," ")}</Badge> : null}
+                                  </div>
+                                </div>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  );
+                })()}
+              </CardContent>
+            </Card>
+
+            <Card className={(caseOpsBottlenecksQuery.data?.items ?? []).some((b:any) => b.severity === "critical" || b.severity === "urgent") ? "border-red-200 bg-red-50/20" : undefined}>
+              <CardHeader className="flex flex-row items-center justify-between pb-2">
+                <div className="flex items-center gap-2">
+                  <CardTitle className="text-base flex items-center gap-2"><Activity className="w-4 h-4 text-rose-600" /> Bottlenecks</CardTitle>
+                  {!caseOpsBottlenecksQuery.isLoading && (caseOpsBottlenecksQuery.data?.items?.length ?? 0) > 0 ? (
+                    <Badge variant="secondary" className="bg-slate-100 text-slate-700 text-xs">{caseOpsBottlenecksQuery.data.items.length} active</Badge>
+                  ) : null}
+                </div>
+                {canViewCaseMonitor ? (
+                  <Link
+                    className="text-xs text-rose-600 hover:text-rose-700 flex items-center gap-1"
+                    href={`/app/accounting?tab=monitor&case_id=${encodeURIComponent(String(caseId))}`}
+                  >
+                    Open Monitor <ChevronRight className="w-3 h-3" />
+                  </Link>
+                ) : null}
+              </CardHeader>
+              <CardContent>
+                {!canViewCaseMonitor ? (
+                  <div className="text-xs text-slate-500 italic py-4 text-center">Case monitor is not available for your role</div>
+                ) : caseOpsBottlenecksQuery.isLoading ? (
+                  <div className="space-y-2">
+                    {Array.from({ length: 2 }).map((_, i) => (
+                      <div key={i} className="animate-pulse h-12 rounded bg-slate-100" />
+                    ))}
+                  </div>
+                ) : caseOpsBottlenecksQuery.error ? (
+                  <div className="text-xs text-slate-500 italic py-4 text-center">Case monitor unavailable right now</div>
+                ) : (() => {
+                  const items = caseOpsBottlenecksQuery.data?.items ?? [];
+                  const critical = items.filter((b:any) => b.severity === "critical").length;
+                  const urgent = items.filter((b:any) => b.severity === "urgent").length;
+                  const attention = items.filter((b:any) => b.severity === "attention").length;
+                  if (items.length === 0) {
+                    return (
+                      <div className="text-sm text-slate-500 py-6 text-center flex flex-col items-center gap-2">
+                        <CheckCircle2 className="w-6 h-6 text-emerald-500" />
+                        <div className="font-medium text-emerald-700">All caught up — no active bottlenecks</div>
+                      </div>
+                    );
+                  }
+                  const kindLabel = (k:string) => {
+                    if (k === "case_no_movement") return "Case stuck";
+                    if (k === "case_waiting") return "Waiting";
+                    if (k === "case_on_hold") return "On hold";
+                    if (k === "pv_delay") return "PV overdue";
+                    if (k === "approval_waiting") return "Approval pending";
+                    return k;
+                  };
+                  return (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                        <div className="rounded-md border border-slate-200 bg-white p-2.5">
+                          <div className="text-[11px] uppercase text-slate-500 font-medium tracking-wider">Active</div>
+                          <div className="text-lg font-bold text-slate-900 mt-0.5">{items.length}</div>
+                        </div>
+                        <div className={`rounded-md border p-2.5 ${critical > 0 ? "border-red-300 bg-red-50/60" : "border-slate-200 bg-white"}`}>
+                          <div className={`text-[11px] uppercase font-medium tracking-wider ${critical > 0 ? "text-red-700" : "text-slate-500"}`}>Critical</div>
+                          <div className={`text-lg font-bold mt-0.5 ${critical > 0 ? "text-red-800" : "text-slate-900"}`}>{critical}</div>
+                        </div>
+                        <div className={`rounded-md border p-2.5 ${urgent > 0 ? "border-amber-300 bg-amber-50/60" : "border-slate-200 bg-white"}`}>
+                          <div className={`text-[11px] uppercase font-medium tracking-wider ${urgent > 0 ? "text-amber-700" : "text-slate-500"}`}>Urgent</div>
+                          <div className={`text-lg font-bold mt-0.5 ${urgent > 0 ? "text-amber-800" : "text-slate-900"}`}>{urgent}</div>
+                        </div>
+                        <div className={`rounded-md border p-2.5 ${attention > 0 ? "border-sky-300 bg-sky-50/60" : "border-slate-200 bg-white"}`}>
+                          <div className={`text-[11px] uppercase font-medium tracking-wider ${attention > 0 ? "text-sky-700" : "text-slate-500"}`}>Attention</div>
+                          <div className={`text-lg font-bold mt-0.5 ${attention > 0 ? "text-sky-800" : "text-slate-900"}`}>{attention}</div>
+                        </div>
+                      </div>
+                      <ul className="divide-y divide-slate-100 rounded-md border border-slate-200 overflow-hidden bg-white">
+                        {items.slice(0, 8).map((b:any) => {
+                          const sevDot = b.severity === "critical" ? "bg-red-500" : b.severity === "urgent" ? "bg-amber-500" : b.severity === "attention" ? "bg-sky-500" : "bg-slate-400";
+                          const sevBadge = b.severity === "critical"
+                            ? <Badge variant="destructive" className="text-[10px]">CRITICAL</Badge>
+                            : b.severity === "urgent"
+                              ? <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-800 border-amber-200">URGENT</Badge>
+                              : b.severity === "attention"
+                                ? <Badge variant="outline" className="text-[10px] bg-sky-50 text-sky-800 border-sky-200">ATTENTION</Badge>
+                                : <Badge variant="secondary" className="text-[10px]">{String(b.severity ?? "info").toUpperCase()}</Badge>;
+                          return (
+                            <li key={String(b.id)} className="p-3 flex items-start gap-3">
+                              <span className={`mt-1.5 w-2.5 h-2.5 rounded-full shrink-0 ${sevDot}`} />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  {sevBadge}
+                                  <Badge variant="outline" className="bg-slate-50 text-slate-600 border-slate-200 text-[10px]">{kindLabel(String(b.monitorKind))}</Badge>
+                                  <span className="text-[11px] text-slate-500">{b.daysStuck ?? 0}d stuck</span>
+                                  {b.escalatedToPartner ? (
+                                    <Badge variant="destructive" className="bg-red-50 text-red-700 border-red-200 hover:bg-red-50 text-[10px]">ESCALATED</Badge>
+                                  ) : null}
+                                </div>
+                                <div className="mt-1 text-sm font-medium text-slate-800 truncate">{String(b.title ?? "")}</div>
+                                {b.detail ? <div className="mt-0.5 text-xs text-slate-500 line-clamp-2">{String(b.detail)}</div> : null}
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  );
+                })()}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
       </Tabs>
     </div>
   );

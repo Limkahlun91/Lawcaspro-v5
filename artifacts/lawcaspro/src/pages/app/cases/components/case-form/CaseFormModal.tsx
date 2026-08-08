@@ -55,20 +55,38 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
     address: String(p?.address ?? ""),
   }));
 
-  const borrowers = Array.isArray((loanDetails as any)?.borrowers) ? (loanDetails as any).borrowers : [];
-  const mappedBorrowers = borrowers.length ? borrowers.map((b: any) => ({
-    id: crypto.randomUUID(),
-    name: String(b?.name ?? ""),
-    ic: String(b?.ic ?? ""),
-    tin: String(b?.tin ?? ""),
-    hp: String(b?.hp ?? ""),
-    email: String(b?.email ?? ""),
-    postcode: "",
-    city: "",
-    state: "",
-    addressLines: splitAddressToLines(String(b?.address ?? "")),
-    address: String(b?.address ?? ""),
-  })) : [v.borrowers[0]];
+  const canonicalBorrowers = Array.isArray((caseInfo as any)?.borrowers) ? (caseInfo as any).borrowers : null;
+  const loanBorrowers = Array.isArray((loanDetails as any)?.borrowers) ? (loanDetails as any).borrowers : [];
+  const borrowers = canonicalBorrowers && canonicalBorrowers.length > 0 ? canonicalBorrowers : loanBorrowers;
+  const mappedBorrowers = borrowers.length ? borrowers.map((b: any) => {
+    const lines = {
+      line1: String(b?.addressLine1 ?? b?.addressLines?.line1 ?? ""),
+      line2: String(b?.addressLine2 ?? b?.addressLines?.line2 ?? ""),
+      line3: String(b?.addressLine3 ?? b?.addressLines?.line3 ?? ""),
+      line4: String(b?.addressLine4 ?? b?.addressLines?.line4 ?? ""),
+      line5: String(b?.addressLine5 ?? b?.addressLines?.line5 ?? ""),
+    };
+    const anyLineNonEmpty = lines.line1 || lines.line2 || lines.line3 || lines.line4 || lines.line5;
+    const finalLines = anyLineNonEmpty ? lines : splitAddressToLines(String(b?.address ?? ""));
+    return {
+      id: crypto.randomUUID(),
+      name: String(b?.name ?? ""),
+      ic: String(b?.ic ?? ""),
+      tin: String(b?.tin ?? ""),
+      hp: String(b?.hp ?? b?.phone ?? ""),
+      email: String(b?.email ?? ""),
+      postcode: String(b?.postcode ?? ""),
+      city: String(b?.city ?? ""),
+      state: String(b?.state ?? ""),
+      addressLines: finalLines,
+      addressLine1: finalLines.line1,
+      addressLine2: finalLines.line2,
+      addressLine3: finalLines.line3,
+      addressLine4: finalLines.line4,
+      addressLine5: finalLines.line5,
+      address: String(b?.address ?? ""),
+    };
+  }) : [v.borrowers[0]];
 
   const caseTypeRaw = String(caseInfo?.caseType ?? "").trim().toLowerCase();
   const caseType: CaseType | "" = caseTypeRaw === "subsale" ? "subsale" : caseTypeRaw === "perfection" ? "perfection" : caseTypeRaw === "developer_sales" ? "developer_sales" : "";
@@ -124,6 +142,12 @@ export function mapCaseToFormValues(caseInfo: any): CaseFormValues {
       daerah: String((propertyDetails as any)?.daerah ?? ""),
       negeri: String((propertyDetails as any)?.negeri ?? ""),
       postcode: String((propertyDetails as any)?.postcode ?? ""),
+      progressPayment: (() => {
+        const stored = (propertyDetails as any)?.progressPayment;
+        if (stored === null || stored === undefined || stored === "") return "";
+        const n = Number(stored);
+        return Number.isFinite(n) ? String(n) : String(stored);
+      })(),
       propertyAddress: String((propertyDetails as any)?.propertyAddress ?? ""),
       propertyAddressLines: { line1: "", line2: "", line3: "", line4: "", line5: "" },
     },
@@ -179,18 +203,42 @@ export function buildCasePayloadFromFormValues(values: CaseFormValues, opts?: { 
     .filter((p) => p.name.length > 0);
 
   const borrowers = values.borrowers
-    .map((b) => ({
-      name: b.name.trim(),
-      ic: b.ic.trim() ? b.ic.trim() : null,
-      tin: b.tin.trim() ? b.tin.trim() : null,
-      hp: b.hp.trim() ? b.hp.trim() : null,
-      email: b.email.trim() ? b.email.trim() : null,
-      address: (() => {
-        const composed = joinAddressLines(b.addressLines);
-        return (b.address.trim() ? b.address.trim() : composed).trim() || null;
-      })(),
-    }))
-    .filter((b) => b.name.length > 0);
+    .map((b) => {
+      const al = b.addressLines ?? { line1: "", line2: "", line3: "", line4: "", line5: "" };
+      const addressLine1 = al.line1?.trim() ?? "";
+      const addressLine2 = al.line2?.trim() ?? "";
+      const addressLine3 = al.line3?.trim() ?? "";
+      const addressLine4 = al.line4?.trim() ?? "";
+      const addressLine5 = al.line5?.trim() ?? "";
+      const postcode = b.postcode?.trim() ?? "";
+      const city = b.city?.trim() ?? "";
+      const state = b.state?.trim() ?? "";
+      const composed = composeMalaysiaAddress({
+        lines: { line1: addressLine1, line2: addressLine2, line3: addressLine3, line4: addressLine4, line5: addressLine5 },
+        postcode,
+        city,
+        state,
+      });
+      const addressStr = (b.address?.trim() ? b.address.trim() : String(composed.address ?? "").trim()).trim() || null;
+      const out: Record<string, unknown> = {
+        name: b.name.trim(),
+        address: addressStr ?? "",
+      };
+      if (b.ic.trim()) out.ic = b.ic.trim();
+      if (b.tin.trim()) out.tin = b.tin.trim();
+      if (b.hp.trim()) { out.hp = b.hp.trim(); out.phone = b.hp.trim(); }
+      if (b.email.trim()) out.email = b.email.trim();
+      if (addressLine1) out.addressLine1 = addressLine1;
+      if (addressLine2) out.addressLine2 = addressLine2;
+      if (addressLine3) out.addressLine3 = addressLine3;
+      if (addressLine4) out.addressLine4 = addressLine4;
+      if (addressLine5) out.addressLine5 = addressLine5;
+      if (postcode) out.postcode = postcode;
+      if (city) out.city = city;
+      if (state) out.state = state;
+      return out;
+    })
+    .filter((b) => (b.name as string).length > 0);
 
   const titleType = values.titleCategory;
   const propertyAddressComposed = (() => {
@@ -226,6 +274,12 @@ export function buildCasePayloadFromFormValues(values: CaseFormValues, opts?: { 
     daerah: values.property.daerah.trim() || undefined,
     negeri: values.property.negeri.trim() || undefined,
     postcode: values.property.postcode.trim() || undefined,
+    progressPayment: (() => {
+      const raw = values.property.progressPayment.trim();
+      if (!raw) return undefined;
+      const n = Number(raw);
+      return Number.isFinite(n) ? n : undefined;
+    })(),
     propertyAddress: propertyAddressComposed || undefined,
   };
 

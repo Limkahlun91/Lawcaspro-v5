@@ -523,6 +523,48 @@ export function resolveVariablesForTemplate(params: {
     if (b3n) out.push(b3n);
     return formatNameInlineList(out);
   })();
+
+  const borrowerStructuredList = Array.isArray((params.caseContext as any)?.borrowers)
+    ? ((params.caseContext as any).borrowers as any[]).filter((b) => b && typeof b === "object" && typeof b.name === "string" && String(b.name).trim() !== "")
+    : [];
+  for (let i = 0; i < Math.max(2, borrowerStructuredList.length); i++) {
+    const b = borrowerStructuredList[i];
+    const idxOne = i + 1;
+    const rawPhone = b ? (b.hp ?? b.phone ?? b.tel ?? b.handphone ?? null) : null;
+    const normPhone = rawPhone && typeof String(rawPhone).trim() === "string" && String(rawPhone).trim() !== "" ? String(rawPhone).trim() : null;
+    const icVal = b ? (b.ic ?? b.icNo ?? b.ic_no ?? b.nric ?? b.passportNo ?? null) : null;
+    const normIc = icVal && typeof String(icVal).trim() === "string" && String(icVal).trim() !== "" ? String(icVal).trim() : null;
+    const emailVal = b ? (b.email ?? b.eMail ?? null) : null;
+    const normEmail = emailVal && typeof String(emailVal).trim() === "string" && String(emailVal).trim() !== "" ? String(emailVal).trim() : null;
+    const tinVal = b ? (b.tin ?? b.tinNo ?? b.tin_no ?? null) : null;
+    const normTin = tinVal && typeof String(tinVal).trim() === "string" && String(tinVal).trim() !== "" ? String(tinVal).trim() : null;
+    const addrVal = b ? (b.address ?? b.addr ?? null) : null;
+    const normAddr = addrVal && typeof String(addrVal).trim() === "string" && String(addrVal).trim() !== "" ? String(addrVal).trim() : null;
+    const nameVal = b ? (b.name ?? null) : null;
+    const normName = nameVal && typeof String(nameVal).trim() === "string" && String(nameVal).trim() !== "" ? String(nameVal).trim() : null;
+    const keySets = [
+      { prefix: `borrower_${idxOne}_`, legacyPrefix: `borrower${idxOne}_` },
+    ];
+    for (const ks of keySets) {
+      const setField = (suffix: string, val: string | null) => {
+        const keyA = `${ks.prefix}${suffix}`;
+        if (isEmptyValue((resolved as any)[keyA]) && val !== null) (resolved as any)[keyA] = val;
+        const keyB = `${ks.legacyPrefix}${suffix}`;
+        if (isEmptyValue((resolved as any)[keyB]) && val !== null) (resolved as any)[keyB] = val;
+      };
+      setField("name", normName);
+      setField("ic", normIc);
+      setField("nric", normIc);
+      setField("passport", normIc);
+      setField("phone", normPhone);
+      setField("hp", normPhone);
+      setField("handphone", normPhone);
+      setField("email", normEmail);
+      setField("tin", normTin);
+      setField("address", normAddr);
+    }
+  }
+
   const borrowerAddresses = (() => {
     const arr = Array.isArray((params.caseContext as any)?.borrowers) ? (params.caseContext as any).borrowers : null;
     if (arr) {

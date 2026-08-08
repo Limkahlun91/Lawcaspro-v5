@@ -1,8 +1,24 @@
-import { pgTable, serial, text, integer, numeric, timestamp, index, uniqueIndex, date, boolean, jsonb, uuid } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, numeric, timestamp, index, uniqueIndex, date, boolean, jsonb, uuid, bigserial } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
-export type CaseBorrower = { name: string; ic?: string | null; tin?: string | null; address: string };
+export type CaseBorrower = {
+  name: string;
+  ic?: string | null;
+  tin?: string | null;
+  hp?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  address: string;
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  addressLine3?: string | null;
+  addressLine4?: string | null;
+  addressLine5?: string | null;
+  postcode?: string | null;
+  city?: string | null;
+  state?: string | null;
+};
 
 export type CasePropertyDetails = {
   propertyAddress?: string;
@@ -34,7 +50,22 @@ export type CasePropertyDetails = {
   [k: string]: unknown;
 };
 
-export type CaseLoanBorrower = { name: string; ic?: string | null; tin?: string | null; hp?: string; email?: string; address?: string };
+export type CaseLoanBorrower = {
+  name: string;
+  ic?: string | null;
+  tin?: string | null;
+  hp?: string;
+  email?: string;
+  address?: string;
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  addressLine3?: string | null;
+  addressLine4?: string | null;
+  addressLine5?: string | null;
+  postcode?: string | null;
+  city?: string | null;
+  state?: string | null;
+};
 export type CaseLoanDetails = {
   loanPartyType?: "1st Party" | "3rd Party" | "1st_party" | "3rd_party";
   borrowers?: CaseLoanBorrower[];
@@ -92,6 +123,14 @@ export const CaseLoanBorrowerSchema = z.object({
   hp: z.string().optional(),
   email: z.string().optional(),
   address: z.string().optional(),
+  addressLine1: z.string().nullish(),
+  addressLine2: z.string().nullish(),
+  addressLine3: z.string().nullish(),
+  addressLine4: z.string().nullish(),
+  addressLine5: z.string().nullish(),
+  postcode: z.string().nullish(),
+  city: z.string().nullish(),
+  state: z.string().nullish(),
 }).passthrough();
 
 export const CaseLoanDetailsSchema = z.object({
@@ -154,7 +193,7 @@ export const casesTable = pgTable("cases", {
   spaDetails: text("spa_details"),
   propertyDetails: jsonb("property_details").$type<CasePropertyDetails>(),
   loanDetails: jsonb("loan_details").$type<CaseLoanDetails>(),
-  borrowers: jsonb("borrowers").notNull().default([]),
+  borrowers: jsonb("borrowers").notNull().default([]).$type<CaseBorrower[]>(),
   loanPartyType: text("loan_party_type").notNull().default("1st_party"),
   companyDetails: text("company_details"),
   createdBy: integer("created_by"),
@@ -415,6 +454,38 @@ export const caseNotificationsTable = pgTable("case_notifications", {
   firmRecipientTypeUnreadIdx: index("idx_case_notifications_firm_recipient_type_unread").on(t.firmId, t.recipientUserId, t.type, t.isRead),
   firmCaseIdx: index("idx_case_notifications_firm_case").on(t.firmId, t.caseId),
 }));
+
+export const caseReferenceHistoryTable = pgTable("case_reference_history", {
+  id: bigserial("id", { mode: "number" }).primaryKey(),
+  firmId: integer("firm_id").notNull(),
+  caseId: integer("case_id").notNull(),
+  previousReferenceNo: text("previous_reference_no"),
+  newReferenceNo: text("new_reference_no").notNull(),
+  changeType: text("change_type").notNull(),
+  actorUserId: integer("actor_user_id"),
+  changedAt: timestamp("changed_at", { withTimezone: true }).notNull().defaultNow(),
+  reason: text("reason"),
+  source: text("source").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  idempotencyKey: text("idempotency_key").unique(),
+}, (t) => ({
+  caseCreatedIdx: index("idx_case_reference_history_case_created").on(t.caseId, t.createdAt),
+  firmIdx: index("idx_case_reference_history_firm").on(t.firmId),
+  actorIdx: index("idx_case_reference_history_actor").on(t.actorUserId),
+}));
+
+export type CaseReferenceHistoryChangeType =
+  | "PROPOSED_TO_FINAL"
+  | "MANUAL_CHANGE"
+  | "REAPPROVAL_CHANGE"
+  | "SYSTEM_ASSIGNMENT"
+  | "BACKFILLED_FROM_CASE_SNAPSHOT";
+
+export type CaseReferenceHistorySource =
+  | "APPROVAL"
+  | "CASE_EDIT"
+  | "SYSTEM"
+  | "BACKFILL";
 
 export const insertCaseSchema = createInsertSchema(casesTable).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertCase = z.infer<typeof insertCaseSchema>;

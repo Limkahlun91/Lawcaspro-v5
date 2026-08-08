@@ -34,6 +34,14 @@ const MALAYSIA_STATE_OPTIONS = [
   "Sarawak",
 ] as const;
 
+const PROGRESSIVE_PAYMENT_PRESETS = [2.5, 5, 7.5, 10, 15, 17.5] as const;
+
+function formatProgressPaymentDisplay(value: string | number): string {
+  const n = typeof value === "number" ? value : Number(String(value ?? "").trim());
+  if (!Number.isFinite(n)) return "";
+  return `${n.toFixed(2)}%`;
+}
+
 function newPurchaser(): PurchaserForm {
   return {
     id: crypto.randomUUID(),
@@ -110,6 +118,7 @@ export function createDefaultCaseFormValues(): CaseFormValues {
       daerah: "",
       negeri: "",
       postcode: "",
+      progressPayment: "",
       propertyAddressLines: emptyAddressLines(),
       propertyAddress: "",
     },
@@ -259,10 +268,19 @@ export function CaseForm(props: {
         city: p.city,
         state: p.state,
         addressLines: p.addressLines,
+        addressLine1: p.addressLines.line1,
+        addressLine2: p.addressLines.line2,
+        addressLine3: p.addressLines.line3,
+        addressLine4: p.addressLines.line4,
+        addressLine5: p.addressLines.line5,
         address: p.address,
       })),
     });
-  }, [v.purchaseMode, v.loanPartyType]);
+  }, [
+    v.purchaseMode,
+    v.loanPartyType,
+    v.purchasers.map((p) => `${p.name}|${p.icOrCompanyNo}|${p.tin}|${p.tel}|${p.email}|${p.postcode}|${p.city}|${p.state}|${p.addressLines.line1}|${p.addressLines.line2}|${p.addressLines.line3}|${p.addressLines.line4}|${p.addressLines.line5}|${p.address}`).join("|||"),
+  ]);
 
   const loanAmounts = useMemo(() => calculateLoanAmounts({
     financingSum: v.financingSum,
@@ -617,62 +635,156 @@ export function CaseForm(props: {
               </div>
 
               <div className="space-y-4">
-                {v.borrowers.map((b, idx) => (
-                  <div key={b.id} className="rounded-lg border p-3 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="text-sm font-semibold text-slate-900">Borrower {idx + 1}</div>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => set({ ...v, borrowers: v.borrowers.filter((x) => x.id !== b.id) })}
-                        disabled={submitting || v.borrowers.length <= 1}
-                      >
-                        <Trash2 className="h-4 w-4 mr-2" />Remove
-                      </Button>
-                    </div>
+                {(() => {
+                  const isFirstParty = v.purchaseMode === "loan" && v.loanPartyType === "1st_party";
+                  return v.borrowers.map((b, idx) => (
+                    <div key={b.id} className={`rounded-lg border p-3 space-y-3 ${isFirstParty ? "bg-slate-50 border-slate-200" : ""}`}>
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div className="flex items-center gap-2">
+                          <div className="text-sm font-semibold text-slate-900">Borrower {idx + 1}</div>
+                          {isFirstParty ? (
+                            <span className="inline-flex items-center gap-1 text-xs font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded">
+                              Linked to Purchaser · Synced from Purchaser
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {isFirstParty ? (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                setActiveTab("spa");
+                              }}
+                              disabled={submitting}
+                            >
+                              Edit Purchaser to update
+                            </Button>
+                          ) : null}
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => set({ ...v, borrowers: v.borrowers.filter((x) => x.id !== b.id) })}
+                            disabled={submitting || v.borrowers.length <= 1 || isFirstParty}
+                          >
+                            <Trash2 className="h-4 w-4 mr-2" />Remove
+                          </Button>
+                        </div>
+                      </div>
 
-                    <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-                      <div className="md:col-span-6 space-y-1.5">
-                        <Label>Name</Label>
-                        <Input value={b.name} onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, name: e.target.value } : x) })} disabled={submitting} />
+                      <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                        <div className="md:col-span-6 space-y-1.5">
+                          <Label>Name</Label>
+                          <Input
+                            value={b.name}
+                            onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, name: e.target.value } : x) })}
+                            disabled={submitting || isFirstParty}
+                          />
+                        </div>
+                        <div className="md:col-span-3 space-y-1.5">
+                          <Label>IC</Label>
+                          <Input
+                            value={b.ic}
+                            onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, ic: e.target.value } : x) })}
+                            disabled={submitting || isFirstParty}
+                          />
+                        </div>
+                        <div className="md:col-span-3 space-y-1.5">
+                          <Label>TIN</Label>
+                          <Input
+                            value={b.tin}
+                            onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, tin: e.target.value } : x) })}
+                            disabled={submitting || isFirstParty}
+                          />
+                        </div>
                       </div>
-                      <div className="md:col-span-3 space-y-1.5">
-                        <Label>IC</Label>
-                        <Input value={b.ic} onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, ic: e.target.value } : x) })} disabled={submitting} />
+                      <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                        <div className="md:col-span-4 space-y-1.5">
+                          <Label>HP</Label>
+                          <Input
+                            value={b.hp}
+                            onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, hp: e.target.value } : x) })}
+                            disabled={submitting || isFirstParty}
+                          />
+                        </div>
+                        <div className="md:col-span-4 space-y-1.5">
+                          <Label>Email</Label>
+                          <Input
+                            type="email"
+                            value={b.email}
+                            onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, email: e.target.value } : x) })}
+                            disabled={submitting || isFirstParty}
+                          />
+                        </div>
+                        <div className="md:col-span-4 space-y-1.5">
+                          <Label>Composed Address</Label>
+                          <Input value={b.address} readOnly />
+                        </div>
                       </div>
-                      <div className="md:col-span-3 space-y-1.5">
-                        <Label>TIN</Label>
-                        <Input value={b.tin} onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, tin: e.target.value } : x) })} disabled={submitting} />
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
-                      <div className="md:col-span-4 space-y-1.5">
-                        <Label>HP</Label>
-                        <Input value={b.hp} onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, hp: e.target.value } : x) })} disabled={submitting} />
-                      </div>
-                      <div className="md:col-span-4 space-y-1.5">
-                        <Label>Email</Label>
-                        <Input type="email" value={b.email} onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, email: e.target.value } : x) })} disabled={submitting} />
-                      </div>
-                      <div className="md:col-span-4 space-y-1.5">
-                        <Label>Composed Address</Label>
-                        <Input value={b.address} readOnly />
-                      </div>
-                    </div>
 
-                    <AddressLinesFields
-                      label="Address"
-                      value={b.addressLines}
-                      onChange={(next) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, addressLines: next } : x) })}
-                      onBlurCompose={() => onComposeBorrowerAddress(b.id)}
-                      normalize={normalizeAddressText}
-                      historyKeyPrefix="borrower.address"
-                      disabled={submitting}
-                      maxLines={5}
-                    />
-                  </div>
-                ))}
+                      <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+                        <div className="md:col-span-3 space-y-1.5">
+                          <Label>Postcode</Label>
+                          <Input
+                            value={b.postcode}
+                            onChange={(e) => {
+                              const next = normalizeMalaysiaPostcodeInput(e.target.value);
+                              const derived = next.length === 5 ? getStateFromPostcode(next) : null;
+                              set({
+                                ...v,
+                                borrowers: v.borrowers.map((x) => x.id === b.id ? {
+                                  ...x,
+                                  postcode: next,
+                                  state: derived ?? x.state,
+                                } : x),
+                              });
+                            }}
+                            disabled={submitting || isFirstParty}
+                            inputMode="numeric"
+                          />
+                        </div>
+                        <div className="md:col-span-4 space-y-1.5">
+                          <Label>City</Label>
+                          <Input
+                            value={b.city}
+                            onChange={(e) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, city: e.target.value } : x) })}
+                            disabled={submitting || isFirstParty}
+                          />
+                        </div>
+                        <div className="md:col-span-5 space-y-1.5">
+                          <Label>State</Label>
+                          <Select
+                            value={b.state}
+                            onValueChange={(next) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, state: next } : x) })}
+                            disabled={submitting || isFirstParty}
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select state" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {MALAYSIA_STATE_OPTIONS.map((s) => (
+                                <SelectItem key={s} value={s}>{s}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+
+                      <AddressLinesFields
+                        label="Address"
+                        value={b.addressLines}
+                        onChange={(next) => set({ ...v, borrowers: v.borrowers.map((x) => x.id === b.id ? { ...x, addressLines: next, addressLine1: next.line1, addressLine2: next.line2, addressLine3: next.line3, addressLine4: next.line4, addressLine5: next.line5 } : x) })}
+                        onBlurCompose={() => onComposeBorrowerAddress(b.id)}
+                        normalize={normalizeAddressText}
+                        historyKeyPrefix="borrower.address"
+                        disabled={submitting || isFirstParty}
+                        maxLines={5}
+                      />
+                    </div>
+                  ));
+                })()}
               </div>
 
               <Separator />
@@ -913,6 +1025,44 @@ export function CaseForm(props: {
                 {postcodeWarnings["property"] ? (
                   <div className="text-xs text-amber-700 mt-1">{postcodeWarnings["property"]}</div>
                 ) : null}
+              </div>
+              <div className="md:col-span-4 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <Label>Progressive Payment % (if under construction)</Label>
+                  {v.property.progressPayment.trim() ? (
+                    <span className="text-xs font-medium text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
+                      {formatProgressPaymentDisplay(v.property.progressPayment)}
+                    </span>
+                  ) : null}
+                </div>
+                <Input
+                  value={v.property.progressPayment}
+                  onChange={(e) => {
+                    const raw = e.target.value.replace(/[^0-9.]/g, "");
+                    set({ ...v, property: { ...v.property, progressPayment: raw } });
+                  }}
+                  disabled={submitting}
+                  inputMode="decimal"
+                  placeholder="e.g. 35.5"
+                />
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {PROGRESSIVE_PAYMENT_PRESETS.map((pct) => {
+                    const isActive = v.property.progressPayment.trim() !== "" && Number(v.property.progressPayment) === pct;
+                    return (
+                      <Button
+                        key={pct}
+                        type="button"
+                        size="sm"
+                        variant={isActive ? "default" : "outline"}
+                        disabled={submitting}
+                        className="h-7 px-2 text-xs"
+                        onClick={() => set({ ...v, property: { ...v.property, progressPayment: String(pct) } })}
+                      >
+                        {pct.toFixed(2)}%
+                      </Button>
+                    );
+                  })}
+                </div>
               </div>
               <div className="md:col-span-12 space-y-1.5">
                 <Label>Composed Property Address</Label>

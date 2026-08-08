@@ -1,11 +1,22 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Briefcase, Users, Building2, HardHat, MessageSquare, ArrowRight } from "lucide-react";
+import { Briefcase, Users, Building2, HardHat, MessageSquare, ArrowRight, AlertTriangle, Activity, Clock, CheckCircle, ChevronRight, XCircle, FolderKey } from "lucide-react";
 import { useLocation } from "wouter";
 import { apiFetchJson } from "@/lib/api-client";
 import { QueryFallback } from "@/components/query-fallback";
 import { useAuth } from "@/lib/auth-context";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+import { hasPermission } from "@/lib/permissions";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Badge } from "@/components/ui/badge";
 
 const STATUS_SHORT: Record<string, string> = {
   "File Opened / SPA Pending Signing": "SPA Pending",
@@ -53,6 +64,83 @@ export default function AppDashboard() {
     const v = raw.trim().toLowerCase();
     return v === "1" || v === "true" || v === "yes";
   })();
+
+  const queryClient = useQueryClient();
+  const canViewCaseMonitor = hasPermission(user, "case_monitor", "view") || canApproveCases;
+
+  const [resolveOpen, setResolveOpen] = useState(false);
+  const [resolveTargetId, setResolveTargetId] = useState<number | null>(null);
+  const [resolveNote, setResolveNote] = useState("");
+
+  const monitorSummary = useQuery({
+    queryKey: ["case-monitor", "summary", firmId],
+    queryFn: ({ signal }) =>
+      apiFetchJson("/case-monitor/summary", { signal, timeoutMs: 12_000 }) as Promise<{
+        total: number;
+        bySeverity: Record<string, number>;
+        byKind: Record<string, number>;
+        byLawyer: Array<{ userId: number; userName: string; count: number }>;
+        pvDelays: number;
+        urgentCount: number;
+        attentionCount: number;
+        criticalCount: number;
+      }>,
+    enabled: canViewCaseMonitor && Number.isFinite(firmId) && Number(firmId) > 0,
+    staleTime: 60_000,
+    retry: 0,
+  });
+
+  const monitorBottlenecks = useQuery({
+    queryKey: ["case-monitor", "bottlenecks", firmId],
+    queryFn: ({ signal }) =>
+      apiFetchJson("/case-monitor/bottlenecks?onlyEscalated=0&limit=6", { signal, timeoutMs: 15_000 }) as Promise<{
+        items: Array<{
+          id: number; monitorKind: string; severity: string; daysStuck: number; title: string; detail: string;
+          escalatedToPartner: boolean; caseId: number | null; caseReferenceNo: string | null; paymentVoucherId: number | null;
+          voucherNo: string | null; lawyerName: string | null; createdAt: string;
+        }>;
+        limit: number; offset: number;
+      }>,
+    enabled: canViewCaseMonitor && Number.isFinite(firmId) && Number(firmId) > 0,
+    staleTime: 60_000,
+    retry: 0,
+  });
+
+  const canViewFileCustody = hasPermission(user, "accounting", "view") || hasPermission(user, "file_custody", "view");
+  const custodySummary = useQuery({
+    queryKey: ["file-custody", "summary", firmId],
+    queryFn: ({ signal }) =>
+      apiFetchJson("/file-custody/items/summary", { signal, timeoutMs: 12_000 }) as Promise<{
+        total: number; out: number; overdueReturn: number; unacknowledgedOverdue: number;
+        byStatus: Record<string, number>; byCategory: Record<string, number>;
+      }>,
+    enabled: canViewFileCustody && Number.isFinite(firmId) && Number(firmId) > 0,
+    staleTime: 30_000,
+    retry: 0,
+  });
+
+  const resolveMut = useMutation({
+    mutationFn: async ({ id, note }: { id: number; note: string }) => {
+      return apiFetchJson(`/case-monitor/bottlenecks/${id}/resolve`, {
+        method: "POST",
+        timeoutMs: 15_000,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note }),
+      }) as Promise<{ ok: true; resolvedAt: string }>;
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["case-monitor"] });
+      setResolveOpen(false);
+      setResolveTargetId(null);
+      setResolveNote("");
+    },
+  });
+
+  const openResolve = (id: number) => {
+    setResolveTargetId(id);
+    setResolveNote("");
+    setResolveOpen(true);
+  };
 
   useEffect(() => {
     if (!refresh) return;
@@ -356,6 +444,253 @@ export default function AppDashboard() {
         </Card>
       </div>
 
+      {canViewCaseMonitor ? (
+        <>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Card
+              className={(monitorSummary.data?.total ?? 0) > 0 ? "cursor-pointer hover:shadow-md transition-shadow border-rose-200 bg-rose-50/40" : "cursor-pointer hover:shadow-md transition-shadow"}
+              onClick={() => setLocation("/app/accounting?tab=monitor")}
+            >
+              <CardContent className="pt-5 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-rose-50 text-rose-600">
+                    <AlertTriangle className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">ACTIVE BOTTLENECKS</div>
+                    <div className="text-2xl font-bold text-slate-900 leading-tight">
+                      {monitorSummary.isLoading ? "…" : String(monitorSummary.data?.total ?? 0)}
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">Case 3d no-move + PV overdue</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card
+              className={(monitorSummary.data?.criticalCount ?? 0) > 0 ? "cursor-pointer hover:shadow-md transition-shadow border-red-300 bg-red-50/60" : "cursor-pointer hover:shadow-md transition-shadow"}
+              onClick={() => setLocation("/app/accounting?tab=monitor&severity=critical")}
+            >
+              <CardContent className="pt-5 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-red-50 text-red-600">
+                    <XCircle className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">CRITICAL</div>
+                    <div className="text-2xl font-bold text-slate-900 leading-tight">
+                      {monitorSummary.isLoading ? "…" : String(monitorSummary.data?.criticalCount ?? 0)}
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">≥7d / ≥96h overdue</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card
+              className={(monitorSummary.data?.urgentCount ?? 0) > 0 ? "cursor-pointer hover:shadow-md transition-shadow border-amber-300 bg-amber-50/60" : "cursor-pointer hover:shadow-md transition-shadow"}
+              onClick={() => setLocation("/app/accounting?tab=monitor&severity=urgent")}
+            >
+              <CardContent className="pt-5 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-amber-50 text-amber-600">
+                    <Activity className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">URGENT</div>
+                    <div className="text-2xl font-bold text-slate-900 leading-tight">
+                      {monitorSummary.isLoading ? "…" : String(monitorSummary.data?.urgentCount ?? 0)}
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">≥5d / ≥72h overdue</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+            <Card
+              className={(monitorSummary.data?.pvDelays ?? 0) > 0 ? "cursor-pointer hover:shadow-md transition-shadow border-orange-200 bg-orange-50/50" : "cursor-pointer hover:shadow-md transition-shadow"}
+              onClick={() => setLocation("/app/accounting?tab=monitor&kind=pv_delay")}
+            >
+              <CardContent className="pt-5 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg flex items-center justify-center bg-orange-50 text-orange-600">
+                    <Clock className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-xs text-slate-500">PV DELAYS</div>
+                    <div className="text-2xl font-bold text-slate-900 leading-tight">
+                      {monitorSummary.isLoading ? "…" : String(monitorSummary.data?.pvDelays ?? 0)}
+                    </div>
+                    <div className="text-xs text-slate-400 mt-0.5">Payment overdue &gt;48h</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card className={(monitorSummary.data?.criticalCount ?? 0) > 0 ? "border-red-200 bg-red-50/20" : undefined}>
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <div className="flex items-center gap-2">
+                <CardTitle className="text-base">Partner Bottleneck Monitor</CardTitle>
+                {!monitorSummary.isLoading && (
+                  ((monitorBottlenecks.data?.items?.length ?? 0) > 0) ? (
+                    <Badge variant="secondary" className="bg-slate-100 text-slate-700 text-xs">Top {monitorBottlenecks.data.items.length}</Badge>
+                  ) : null
+                )}
+              </div>
+              <button
+                className="text-xs text-amber-600 hover:text-amber-700 flex items-center gap-1"
+                onClick={() => setLocation("/app/accounting?tab=monitor")}
+              >
+                Open Monitor <ChevronRight className="w-3 h-3" />
+              </button>
+            </CardHeader>
+            <CardContent>
+              {monitorBottlenecks.isLoading || monitorSummary.isLoading ? (
+                <div className="space-y-2">
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <div key={i} className="animate-pulse h-12 rounded bg-slate-100" />
+                  ))}
+                </div>
+              ) : monitorBottlenecks.error || monitorSummary.error ? (
+                <div className="text-xs text-slate-500 italic py-4 text-center">Case monitor unavailable right now</div>
+              ) : !monitorBottlenecks.data?.items || monitorBottlenecks.data.items.length === 0 ? (
+                <div className="text-sm text-slate-500 py-6 text-center flex flex-col items-center gap-2">
+                  <CheckCircle className="w-6 h-6 text-emerald-500" />
+                  <div className="font-medium text-emerald-700">All caught up — no active bottlenecks</div>
+                </div>
+              ) : (
+                <ul className="divide-y divide-slate-100">
+                  {monitorBottlenecks.data.items.map((b) => {
+                    const sevBg =
+                      b.severity === "critical"
+                        ? "bg-red-500"
+                        : b.severity === "urgent"
+                          ? "bg-amber-500"
+                          : b.severity === "attention"
+                            ? "bg-sky-500"
+                            : "bg-slate-400";
+                    const badgeBg =
+                      b.severity === "critical"
+                        ? "bg-red-100 text-red-700 border border-red-200"
+                        : b.severity === "urgent"
+                          ? "bg-amber-100 text-amber-800 border border-amber-200"
+                          : b.severity === "attention"
+                            ? "bg-sky-100 text-sky-700 border border-sky-200"
+                            : "bg-slate-100 text-slate-700";
+                    const kindLabel =
+                      b.monitorKind === "case_no_movement"
+                        ? "Case stuck"
+                        : b.monitorKind === "pv_delay"
+                          ? "PV overdue"
+                          : String(b.monitorKind);
+                    return (
+                      <li key={String(b.id)} className="py-3 first:pt-0 last:pb-0 flex items-start gap-3">
+                        <span className={`mt-1.5 w-2.5 h-2.5 rounded-full shrink-0 ${sevBg}`} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant="outline" className={badgeBg}>{b.severity.toUpperCase()}</Badge>
+                            <Badge variant="outline" className="bg-slate-50 text-slate-600 border-slate-200">{kindLabel}</Badge>
+                            <span className="text-xs text-slate-500">{b.daysStuck}d stuck</span>
+                            {b.escalatedToPartner ? (
+                              <Badge variant="destructive" className="bg-red-50 text-red-700 border border-red-200 hover:bg-red-50">ESCALATED</Badge>
+                            ) : null}
+                          </div>
+                          <button
+                            className="mt-1 font-medium text-sm text-slate-800 hover:text-slate-900 truncate block text-left w-full"
+                            onClick={() => {
+                              if (b.caseId) setLocation(`/app/cases/${b.caseId}?returnTo=${encodeURIComponent("/app/dashboard")}`);
+                              else if (b.paymentVoucherId) setLocation(`/app/accounting?pv=${b.paymentVoucherId}&returnTo=${encodeURIComponent("/app/dashboard")}`);
+                            }}
+                          >
+                            {b.title}
+                          </button>
+                          <div className="text-xs text-slate-500 mt-0.5 line-clamp-2">{b.detail}</div>
+                          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+                            {b.lawyerName ? <span>Assigned: <span className="font-medium text-slate-700">{b.lawyerName}</span></span> : null}
+                            {b.caseReferenceNo ? <span>Case ref: <span className="font-medium text-slate-700">{b.caseReferenceNo}</span></span> : null}
+                            {b.voucherNo ? <span>PV: <span className="font-medium text-slate-700">{b.voucherNo}</span></span> : null}
+                          </div>
+                        </div>
+                        <div className="shrink-0 flex items-center gap-2">
+                          <Button size="sm" variant="secondary" onClick={() => openResolve(b.id)} disabled={resolveMut.isPending}>
+                            Resolve
+                          </Button>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+        </>
+      ) : null}
+
+      {canViewFileCustody ? (
+        <Card className={(custodySummary.data?.overdueReturn ?? 0) > 0 || (custodySummary.data?.unacknowledgedOverdue ?? 0) > 0 ? "border-orange-200 bg-orange-50/30" : undefined}>
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <div className="flex items-center gap-2">
+              <CardTitle className="text-base flex items-center gap-2"><FolderKey className="w-4 h-4 text-amber-600" /> File Custody Escalation</CardTitle>
+              {!custodySummary.isLoading && (custodySummary.data?.out ?? 0) > 0 ? (
+                <Badge variant="secondary" className="bg-slate-100 text-slate-700 text-xs">{custodySummary.data.out} out</Badge>
+              ) : null}
+            </div>
+            <button
+              className="text-xs text-amber-600 hover:text-amber-700 flex items-center gap-1"
+              onClick={() => setLocation("/app/accounting?tab=file-custody&only_out=1")}
+            >
+              Open Custody <ChevronRight className="w-3 h-3" />
+            </button>
+          </CardHeader>
+          <CardContent>
+            {custodySummary.isLoading ? (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <div key={i} className="animate-pulse h-16 rounded-md bg-slate-100" />
+                ))}
+              </div>
+            ) : custodySummary.error ? (
+              <div className="text-xs text-slate-500 italic py-4 text-center">File custody unavailable right now</div>
+            ) : (() => {
+              const total = custodySummary.data?.total ?? 0;
+              const out = custodySummary.data?.out ?? 0;
+              const overdueReturn = custodySummary.data?.overdueReturn ?? 0;
+              const unack = custodySummary.data?.unacknowledgedOverdue ?? 0;
+              if (total === 0 && out === 0) {
+                return (
+                  <div className="text-sm text-slate-500 py-6 text-center flex flex-col items-center gap-2">
+                    <CheckCircle className="w-6 h-6 text-emerald-500" />
+                    <div className="font-medium text-emerald-700">No custody items — all files in office</div>
+                  </div>
+                );
+              }
+              return (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                  <div className="rounded-md border border-slate-200 bg-white p-3">
+                    <div className="text-[11px] uppercase text-slate-500 font-medium tracking-wider">Total files</div>
+                    <div className="text-2xl font-bold text-slate-900 mt-1">{total}</div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">Registered custody</div>
+                  </div>
+                  <div className="rounded-md border border-amber-200 bg-amber-50/60 p-3">
+                    <div className="text-[11px] uppercase text-amber-700 font-medium tracking-wider">Currently out</div>
+                    <div className="text-2xl font-bold text-amber-800 mt-1">{out}</div>
+                    <div className="text-[11px] text-amber-600/80 mt-0.5">With holders</div>
+                  </div>
+                  <div className={`rounded-md border p-3 ${overdueReturn > 0 ? "border-orange-300 bg-orange-50/60" : "border-slate-200 bg-white"}`}>
+                    <div className={`text-[11px] uppercase font-medium tracking-wider ${overdueReturn > 0 ? "text-orange-700" : "text-slate-500"}`}>Return overdue</div>
+                    <div className={`text-2xl font-bold mt-1 ${overdueReturn > 0 ? "text-orange-800" : "text-slate-900"}`}>{overdueReturn}</div>
+                    <div className={`text-[11px] mt-0.5 ${overdueReturn > 0 ? "text-orange-700" : "text-slate-400"}`}>Past due date</div>
+                  </div>
+                  <div className={`rounded-md border p-3 ${unack > 0 ? "border-rose-300 bg-rose-50/60" : "border-slate-200 bg-white"}`}>
+                    <div className={`text-[11px] uppercase font-medium tracking-wider ${unack > 0 ? "text-rose-700" : "text-slate-500"}`}>Ack overdue</div>
+                    <div className={`text-2xl font-bold mt-1 ${unack > 0 ? "text-rose-800" : "text-slate-900"}`}>{unack}</div>
+                    <div className={`text-[11px] mt-0.5 ${unack > 0 ? "text-rose-700" : "text-slate-400"}`}>Receipt not confirmed</div>
+                  </div>
+                </div>
+              );
+            })()}
+          </CardContent>
+        </Card>
+      ) : null}
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {Array.isArray((resolvedStats as any).completionSlaOverdue) && (resolvedStats as any).completionSlaOverdue.length > 0 ? (
           <Card className="md:col-span-2 border-red-200 bg-red-50/40">
@@ -476,6 +811,44 @@ export default function AppDashboard() {
           </CardContent>
         </Card>
       </div>
+
+      <Dialog open={resolveOpen} onOpenChange={(o) => { if (!o) { setResolveOpen(false); setResolveTargetId(null); setResolveNote(""); } }}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Resolve Bottleneck #{resolveTargetId ?? "—"}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="text-xs text-slate-500">
+              Mark this item as resolved. A note is required to record the reason/next step.
+            </div>
+            <Textarea
+              rows={4}
+              value={resolveNote}
+              onChange={(e) => setResolveNote(e.target.value)}
+              placeholder="e.g. Reassigned the file to another clerk; Milestone step progressed today."
+            />
+            {resolveMut.error ? (
+              <div className="text-xs text-red-600">
+                Failed to resolve: {String((resolveMut.error as any)?.message ?? (resolveMut.error as any) ?? "unknown")}
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="secondary" onClick={() => { setResolveOpen(false); setResolveTargetId(null); setResolveNote(""); }}>
+              Cancel
+            </Button>
+            <Button
+              disabled={!Number.isFinite(resolveTargetId) || resolveNote.trim().length < 3 || resolveMut.isPending}
+              onClick={() => {
+                if (!Number.isFinite(resolveTargetId)) return;
+                void resolveMut.mutateAsync({ id: resolveTargetId as number, note: resolveNote });
+              }}
+            >
+              {resolveMut.isPending ? "Resolving..." : "Confirm Resolve"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

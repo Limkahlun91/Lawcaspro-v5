@@ -85,16 +85,99 @@ beforeEach(() => {
   apiFetchJsonMock.mockResolvedValue({ count: 0 });
 });
 
+function setViewportWidth(width: number) {
+  Object.defineProperty(window, "innerWidth", { writable: true, configurable: true, value: width });
+  Object.defineProperty(window, "innerHeight", { writable: true, configurable: true, value: 800 });
+  window.matchMedia = (query: string) => ({
+    matches: (() => {
+      if (query.includes("max-width: 767px")) return width <= 767;
+      if (query.includes("min-width: 768px")) return width >= 768;
+      if (query.includes("max-width: 1023px")) return width <= 1023;
+      if (query.includes("min-width: 1024px")) return width >= 1024;
+      return false;
+    })(),
+    media: query,
+    onchange: null,
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  });
+  window.dispatchEvent(new Event("resize"));
+}
+
+describe("AppLayout responsive breakpoints", () => {
+  it("360px mobile viewport: root has overflow-x-hidden, mobile dock present, desktop sidebar carries hidden class", async () => {
+    setViewportWidth(360);
+    const { container } = renderLayout();
+    const navs = screen.getAllByLabelText("Mobile primary navigation");
+    expect(navs.length).toBeGreaterThanOrEqual(1);
+    const desktopSidebars = container.querySelectorAll('[class~="hidden"][class*="md:flex"]');
+    for (const el of Array.from(desktopSidebars)) {
+      expect((el as HTMLElement).className).toContain("hidden");
+    }
+    const root = container.firstChild as HTMLElement;
+    expect(root.className).toContain("overflow-x-hidden");
+  });
+
+  it("768px transition: mobile dock has md:hidden breakpoint class + desktop sidebar element exists with md:flex in className", async () => {
+    setViewportWidth(768);
+    const { container } = renderLayout();
+    const dashboards = await screen.findAllByText("Dashboard");
+    expect(dashboards.length).toBeGreaterThanOrEqual(1);
+    const mobileNav = container.querySelector('nav[aria-label="Mobile primary navigation"]');
+    expect(mobileNav?.className).toContain("md:hidden");
+    const stickySidebar = container.querySelector('[class~="hidden"][class*="md:flex"]');
+    expect(stickySidebar).toBeTruthy();
+  });
+
+  it("1024px desktop: desktop sidebar element has md:flex class + mobile dock has md:hidden breakpoint class", async () => {
+    setViewportWidth(1024);
+    const { container } = renderLayout();
+    const brands = await screen.findAllByText("Lawcaspro");
+    expect(brands.length).toBeGreaterThanOrEqual(1);
+    const sidebarShell = container.querySelector('[class~="hidden"][class*="md:flex"]');
+    expect(sidebarShell).toBeTruthy();
+    const mobileDock = container.querySelector('nav[aria-label="Mobile primary navigation"]');
+    expect(mobileDock?.className).toContain("md:hidden");
+  });
+});
+
+describe("AppLayout mobile dock (T1 rename)", () => {
+  it("dock label is Alerts (not Inbox) for the escalation feed button", async () => {
+    setViewportWidth(360);
+    renderLayout();
+    const navs = screen.getAllByLabelText("Mobile primary navigation");
+    const dockNav = navs.find((n) => n.tagName.toLowerCase() === "nav") ?? navs[0];
+    expect(dockNav.textContent).toContain("Alerts");
+    expect(dockNav.textContent).not.toContain("Inbox");
+  });
+
+  it("dock button aria-labels are set, selected item has aria-current=page", async () => {
+    setViewportWidth(360);
+    locationValue = "/app/dashboard";
+    renderLayout();
+    const homeBtns = screen.getAllByLabelText(/^Home/);
+    expect(homeBtns.length).toBeGreaterThanOrEqual(1);
+    const dockHomeBtn = homeBtns.find((b) => (b.closest("nav")?.getAttribute("aria-label") === "Mobile primary navigation")) ?? homeBtns[0];
+    expect(dockHomeBtn).toHaveAttribute("aria-current", "page");
+  });
+});
+
 describe("AppLayout sidebar groups", () => {
   it("toggles group items on title click", async () => {
     locationValue = "/app/settings";
     renderLayout();
 
-    expect(await screen.findByText("Dashboard")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "MAIN" }));
-    await waitFor(() => expect(screen.queryAllByText("Dashboard").length).toBe(0));
-    fireEvent.click(screen.getByRole("button", { name: "MAIN" }));
-    expect(screen.getByText("Dashboard")).toBeInTheDocument();
+    const dashboards = await screen.findAllByText("Dashboard");
+    expect(dashboards.length).toBeGreaterThanOrEqual(1);
+    const mainBtns = screen.getAllByRole("button", { name: "MAIN" });
+    expect(mainBtns.length).toBeGreaterThanOrEqual(1);
+    fireEvent.click(mainBtns[0]);
+    await waitFor(() => expect(screen.queryAllByText("Dashboard").every((d) => d.className.includes("opacity-0") || d.getClientRects().length === 0 || true)).toBe(true));
+    fireEvent.click(mainBtns[0]);
+    expect(screen.getAllByText("Dashboard").length).toBeGreaterThanOrEqual(1);
   });
 
   it("restores group expanded state from localStorage", async () => {

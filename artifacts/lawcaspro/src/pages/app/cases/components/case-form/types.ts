@@ -42,6 +42,11 @@ export type BorrowerForm = {
   state: string;
   addressLines: AddressLines;
   address: string;
+  addressLine1?: string;
+  addressLine2?: string;
+  addressLine3?: string;
+  addressLine4?: string;
+  addressLine5?: string;
 };
 
 export type CaseFormValues = {
@@ -89,6 +94,7 @@ export type CaseFormValues = {
     daerah: string;
     negeri: string;
     postcode: string;
+    progressPayment: string;
     propertyAddressLines: AddressLines;
     propertyAddress: string;
   };
