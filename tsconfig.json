@@ -14,12 +14,6 @@
     },
     {
       "path": "./lib/api-zod"
-    },
-    {
-      "path": "./artifacts/api-server"
-    },
-    {
-      "path": "./api"
     }
   ]
 }
