@@ -6,7 +6,7 @@
   "scripts": {
     "preinstall": "node preinstall.mjs",
     "build": "pnpm run typecheck && pnpm -C artifacts/api-server run build && pnpm -C artifacts/lawcaspro run build",
-    "typecheck:libs": "pnpm -C lib/db run build && pnpm -C lib/documents-registry run build && pnpm -C lib/api-client-react run build && pnpm -C lib/api-zod run build",
+    "typecheck:libs": "echo '[DIAG] typecheck:libs START (cwd='$(pwd)')' && ls -la lib/db/ 2>&1 | head -5 && echo '[DIAG] BEFORE lib/db build: dist exists? ' && (ls -la lib/db/dist/ 2>&1 | head -3 || echo '  no dist') && echo '[DIAG] Building lib/db...' && pnpm -C lib/db run build && echo '[DIAG] AFTER lib/db: ' && (ls lib/db/dist/ 2>&1 | head -3 || echo '  FAIL') && echo '[DIAG] Building lib/documents-registry...' && pnpm -C lib/documents-registry run build && echo '[DIAG] AFTER doc-registry: ' && (ls lib/documents-registry/dist/ 2>&1 | head -3 || echo '  FAIL') && echo '[DIAG] Building lib/api-client-react...' && pnpm -C lib/api-client-react run build && echo '[DIAG] AFTER api-client-react: ' && (ls lib/api-client-react/dist/ 2>&1 | head -3 || echo '  FAIL') && echo '[DIAG] Building lib/api-zod...' && pnpm -C lib/api-zod run build && echo '[DIAG] AFTER api-zod: ' && (ls lib/api-zod/dist/ 2>&1 | head -3 || echo '  FAIL') && echo '[DIAG] VERIFY via api-server workspace link: ' && (ls artifacts/api-server/node_modules/@workspace/db/dist/ 2>&1 | head -3 || echo '  workspace link MISSING!') && echo '[DIAG] typecheck:libs DONE'",
     "typecheck": "pnpm run typecheck:libs && pnpm -r --filter \"./artifacts/**\" --filter \"./scripts\" --filter \"!@workspace/lawcaspro\" --filter \"!@workspace/lawcaspro-mobile\" --if-present run typecheck"
   },
   "private": true,
