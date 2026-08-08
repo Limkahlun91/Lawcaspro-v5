@@ -38,6 +38,8 @@ const TAB_KEYS: Record<string, Tab> = {
 
 const PERMISSION_CATALOG: Array<{ module: string; actions: string[] }> = [
   { module: "dashboard", actions: ["read"] },
+  { module: "case_monitor", actions: ["view"] },
+  { module: "file_custody", actions: ["view", "release", "receive", "archive"] },
   { module: "cases", actions: ["read", "create", "update", "delete", "assign_any"] },
   { module: "projects", actions: ["read", "create", "update", "delete"] },
   { module: "developers", actions: ["read", "create", "update", "delete"] },

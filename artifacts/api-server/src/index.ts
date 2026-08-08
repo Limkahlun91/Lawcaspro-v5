@@ -5,6 +5,7 @@ import { startSnapshotScheduler } from "./jobs/snapshot-scheduler";
 import { startSnapshotRetentionCleanup } from "./jobs/snapshot-retention";
 import { startCompletionSlaMonitor } from "./jobs/completion-sla-monitor";
 import { startPaymentVoucherSlaMonitor } from "./jobs/payment-voucher-sla-monitor";
+import { startCaseBottleneckMonitor } from "./jobs/case-bottleneck-monitor";
 
 console.log("!!! VERSION_CHECK: 43ca81e_DEB_LOG !!!");
 
@@ -34,6 +35,7 @@ startSnapshotScheduler();
 startSnapshotRetentionCleanup();
 startCompletionSlaMonitor();
 startPaymentVoucherSlaMonitor();
+startCaseBottleneckMonitor();
 
 server.on("error", (err) => {
   logger.error({ err }, "Error listening on port");

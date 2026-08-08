@@ -1,0 +1,99 @@
+{
+  "generated_at": "2026-08-08T11:32:00.490Z",
+  "mode": "check",
+  "baseUrl": "http://127.0.0.1:3001",
+  "environment": "LOCAL_DEVELOPMENT_ONLY",
+  "disclaimer": "These measurements are LOCAL ONLY. DO NOT REPORT AS 'PREVIEW P95' or any Preview number.",
+  "endpoints": [
+    {
+      "endpoint": "auth/me",
+      "method": "GET",
+      "path": "/api/auth/me",
+      "cold_ms": null,
+      "warm_avg_ms": null,
+      "n_warm": 0,
+      "status": "NOT_RUN (use PERF_MODE=collect)"
+    },
+    {
+      "endpoint": "accounting_summary",
+      "method": "GET",
+      "path": "/api/accounting/summary",
+      "cold_ms": null,
+      "warm_avg_ms": null,
+      "n_warm": 0,
+      "status": "NOT_RUN (use PERF_MODE=collect)"
+    },
+    {
+      "endpoint": "invoices_list",
+      "method": "GET",
+      "path": "/api/invoices?limit=50",
+      "cold_ms": null,
+      "warm_avg_ms": null,
+      "n_warm": 0,
+      "status": "NOT_RUN (use PERF_MODE=collect)"
+    },
+    {
+      "endpoint": "receipts_list",
+      "method": "GET",
+      "path": "/api/receipts?limit=50",
+      "cold_ms": null,
+      "warm_avg_ms": null,
+      "n_warm": 0,
+      "status": "NOT_RUN (use PERF_MODE=collect)"
+    },
+    {
+      "endpoint": "pv_dashboard",
+      "method": "GET",
+      "path": "/api/payment-voucher-actions/my-work/overview",
+      "cold_ms": null,
+      "warm_avg_ms": null,
+      "n_warm": 0,
+      "status": "NOT_RUN (use PERF_MODE=collect)"
+    },
+    {
+      "endpoint": "pv_list",
+      "method": "GET",
+      "path": "/api/payment-vouchers?limit=50",
+      "cold_ms": null,
+      "warm_avg_ms": null,
+      "n_warm": 0,
+      "status": "NOT_RUN (use PERF_MODE=collect)"
+    },
+    {
+      "endpoint": "reference_search",
+      "method": "GET",
+      "path": "/api/cases/ref-search?projectId=1&limit=10",
+      "cold_ms": null,
+      "warm_avg_ms": null,
+      "n_warm": 0,
+      "status": "NOT_RUN (use PERF_MODE=collect)"
+    },
+    {
+      "endpoint": "my_work",
+      "method": "GET",
+      "path": "/api/payment-voucher-actions/my-work?status=pending_approval&limit=50",
+      "cold_ms": null,
+      "warm_avg_ms": null,
+      "n_warm": 0,
+      "status": "NOT_RUN (use PERF_MODE=collect)"
+    },
+    {
+      "endpoint": "ledger_list",
+      "method": "GET",
+      "path": "/api/ledger?limit=200",
+      "cold_ms": null,
+      "warm_avg_ms": null,
+      "n_warm": 0,
+      "status": "NOT_RUN (use PERF_MODE=collect)"
+    },
+    {
+      "endpoint": "quotations_list",
+      "method": "GET",
+      "path": "/api/quotations?limit=200",
+      "cold_ms": null,
+      "warm_avg_ms": null,
+      "n_warm": 0,
+      "status": "NOT_RUN (use PERF_MODE=collect)"
+    }
+  ]
+}

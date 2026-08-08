@@ -16,7 +16,7 @@ import { GlobalCaseSearch } from "@/components/GlobalCaseSearch";
 import { getApiOrigin } from "@/lib/api-base";
 import { getStoredAuthToken } from "@/lib/auth-token";
 import { DeveloperGuard } from "@/components/developer-guard";
-import { isEmailControlEnabled, isEmailSettingsEnabled, isWhatsAppInboxEnabled, PHASE2_NOTICE } from "@/lib/feature-flags";
+import { isEmailControlEnabled, isEmailSettingsEnabled, isWhatsAppInboxEnabled, isHRModuleEnabled, PHASE2_NOTICE, HR_DISABLED_NOTICE } from "@/lib/feature-flags";
 import { useEffect, type ReactNode } from "react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -86,6 +86,7 @@ import AccountingFileListing from "@/pages/app/accounting/file-listing";
 import BankReconciliationPage from "@/pages/app/accounting/bank-reconciliation";
 import InvoiceDetail from "@/pages/app/accounting/invoices/detail";
 import ReceiptDetail from "@/pages/app/accounting/receipts/detail";
+import FileCustodyPage from "@/pages/app/file-custody";
 import Reports from "@/pages/app/reports";
 import BillsDeliveredBook from "@/pages/app/reports/bills-delivered-book";
 import MatterAging from "@/pages/app/reports/matter-aging";
@@ -125,6 +126,28 @@ const queryClient = new QueryClient({
   },
 });
 
+export function ModuleRedirectGuard({
+  enabled,
+  notice,
+  fallback = "/app/dashboard",
+  children,
+}: {
+  enabled: boolean;
+  notice: string;
+  fallback?: "/app/dashboard" | "/app/workbench";
+  children: ReactNode;
+}) {
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  useEffect(() => {
+    if (enabled) return;
+    toast({ title: notice, variant: "default" });
+    setLocation(fallback, { replace: true });
+  }, [enabled, notice, fallback, setLocation, toast]);
+  if (enabled) return <>{children}</>;
+  return null;
+}
+
 function Phase2RedirectGuard({
   enabled,
   fallback = "/app/dashboard",
@@ -134,15 +157,28 @@ function Phase2RedirectGuard({
   fallback?: "/app/dashboard" | "/app/workbench";
   children: ReactNode;
 }) {
-  const [, setLocation] = useLocation();
-  const { toast } = useToast();
-  useEffect(() => {
-    if (enabled) return;
-    toast({ title: PHASE2_NOTICE, variant: "default" });
-    setLocation(fallback, { replace: true });
-  }, [enabled, fallback, setLocation, toast]);
-  if (enabled) return <>{children}</>;
-  return null;
+  return (
+    <ModuleRedirectGuard enabled={enabled} notice={PHASE2_NOTICE} fallback={fallback}>
+      {children}
+    </ModuleRedirectGuard>
+  );
+}
+
+function HRRedirectGuard({
+  fallback = "/app/dashboard",
+  children,
+  extraEnabled = true,
+}: {
+  fallback?: "/app/dashboard" | "/app/workbench";
+  children: ReactNode;
+  extraEnabled?: boolean;
+}) {
+  const enabled = isHRModuleEnabled() && extraEnabled;
+  return (
+    <ModuleRedirectGuard enabled={enabled} notice={HR_DISABLED_NOTICE} fallback={fallback}>
+      {children}
+    </ModuleRedirectGuard>
+  );
 }
 
 function PlatformRoutes() {
@@ -358,6 +394,11 @@ function AppRoutes() {
           <Route path="/app/accounting" component={() => (
             <PermissionGuard module="accounting" action="read">
               <Accounting />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/file-custody" component={() => (
+            <PermissionGuard module="file_custody" action="view">
+              <FileCustodyPage />
             </PermissionGuard>
           )} />
           <Route path="/app/reports/bills-delivered-book" component={() => (
