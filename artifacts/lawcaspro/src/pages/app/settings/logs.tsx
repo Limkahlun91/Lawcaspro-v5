@@ -318,8 +318,29 @@ export default function UnifiedLogsPage() {
       const cat = inferCategory(rawAction, entityType);
       const caseRef = typeof detail.referenceNo === "string" && detail.referenceNo.trim() ? detail.referenceNo.trim() : (entityType === "case" && entityId ? `Case #${entityId}` : null);
       const eventId = typeof (row as any).event_id === "string" ? (row as any).event_id : null;
+      const sourceRecordId = typeof (row as any).source_record_id === "string" ? (row as any).source_record_id : (id ? `aid-${id}` : null);
       const correlationId = typeof (row as any).correlation_id === "string" ? (row as any).correlation_id : (typeof detail.jobId === "string" ? detail.jobId : null);
-      const dedupeKey = eventId || [correlationId || requestId || `aid-${id}`, rawAction, entityType || "", entityId || "", actorName || actorEmail || ""].join("::");
+      // §11 Correct dedupe tiers:
+      //  Tier 1 = database PK / event_id
+      //  Tier 2 = source_record_id (or id-based fallback source)
+      //  Tier 3 = legacy strict fallback (request_id + action + entity + 10s bucket + actor)
+      // correlationId is NEVER used for dedupe (only for GROUPing downstream)
+      let dedupeKey: string;
+      if (eventId) {
+        dedupeKey = `pk::${eventId}`;
+      } else if (sourceRecordId) {
+        dedupeKey = `src::${sourceRecordId}`;
+      } else {
+        const tsBucket = Number.isFinite(ts) ? Math.floor(ts / 10000) : 0;
+        dedupeKey = [
+          requestId || `req-${id}`,
+          rawAction,
+          entityType || "",
+          entityId || "",
+          `tsb-${tsBucket}`,
+          actorName || actorEmail || "",
+        ].join("::");
+      }
       const status = statusKindFor(rawAction, detail);
       normalized.push({
         dedupeKey,
@@ -362,7 +383,24 @@ export default function UnifiedLogsPage() {
       const ids = asNumberArray(row.caseIds);
       const files = asStringArray(row.fileNames);
       const cat = inferCategory(raw, "document");
-      const dedupeKey = [row.jobId || row.requestId || `dg-${row.id}`, raw, row.jobId || "", ids.join(","), files.slice(0, 3).join("|")].join("::");
+      // §11 Correct dedupe tiers for doc-gen rows:
+      //  Tier 1 = dg row PK (always present via row.id)
+      //  Tier 2 = (none for doc-gen; PK always present)
+      // correlationId / jobId is NEVER used inside dedupeKey
+      let dedupeKey: string;
+      if (typeof row.id === "number" && Number.isFinite(row.id)) {
+        dedupeKey = `pk::dg-${row.id}`;
+      } else {
+        const tsBucket = Number.isFinite(ts) ? Math.floor(ts / 10000) : 0;
+        dedupeKey = [
+          row.requestId || `req-dg-${row.id ?? "x"}`,
+          raw,
+          "document",
+          "",
+          `tsb-${tsBucket}`,
+          actor,
+        ].join("::");
+      }
       const status = statusKindFor(raw);
       normalized.push({
         dedupeKey,

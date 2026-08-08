@@ -137,6 +137,30 @@ export default function VariableDictionaryPage() {
   const lastAbortRef = useRef<AbortController | null>(null);
   const lastGoodByCaseIdRef = useRef<Map<number, VariablesPreviewResponse>>(new Map());
 
+  const [tabsValue, setTabsValue] = useState<string>(() => {
+    if (typeof window === "undefined") return "system";
+    const h = String(window.location.hash || "").replace(/^#/, "");
+    if (h === "custom") return "custom";
+    return "system";
+  });
+
+  useEffect(() => {
+    const onHash = () => {
+      const h = String(window.location.hash || "").replace(/^#/, "");
+      setTabsValue((prev) => (h === "custom" ? "custom" : "system"));
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  const setTabsValueWithHash = (v: string) => {
+    setTabsValue(v);
+    const target = v === "custom" ? "#custom" : "#system";
+    if (String(window.location.hash || "") !== target) {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}${target}`);
+    }
+  };
+
   useEffect(() => {
     if (!caseOpen) {
       lastAbortRef.current?.abort();
@@ -242,7 +266,7 @@ export default function VariableDictionaryPage() {
         <p className="text-slate-500">Browse system variables or manage custom firm-level dictionaries.</p>
       </div>
 
-      <Tabs defaultValue="system" className="space-y-6">
+      <Tabs value={tabsValue} onValueChange={setTabsValueWithHash} className="space-y-6">
         <TabsList className="grid w-full grid-cols-2 max-w-md">
           <TabsTrigger value="system">System Variables</TabsTrigger>
           <TabsTrigger value="custom">Custom Variables</TabsTrigger>

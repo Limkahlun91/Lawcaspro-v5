@@ -57,6 +57,10 @@ export default defineConfig({
         "src/__tests__/f7-file-custody-targeted.unit.test.ts",
         "src/__tests__/f8-f9-f10-case-reference.unit.test.ts",
         "src/__tests__/quotation-extended.unit.test.ts",
+        "src/__tests__/docgen-classify.targeted.unit.test.ts",
+        "src/__tests__/docgen-finalize-status.targeted.unit.test.ts",
+        "src/__tests__/docgen-logging.targeted.unit.test.ts",
+        "src/__tests__/audit-redact.targeted.unit.test.ts",
       ],
     pool: "forks",
     forks: {

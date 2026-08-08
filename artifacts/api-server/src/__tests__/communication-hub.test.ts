@@ -6,7 +6,7 @@ type WorkspaceDb = typeof import("@workspace/db");
 type DrizzleOps = typeof import("drizzle-orm");
 
 const skipDb = process.env.VITEST_SKIP_DB === "1" || !process.env.DATABASE_URL;
-const suite = describe.skip; // DEFERRED_BY_USER (§22 frozen module: Email Inbox / Communication Hub)
+const suite = skipDb ? describe.skip : describe; // DB-gated regression tests (Email module frozen = no runtime edits; tests conditional-run only)
 
 let db: WorkspaceDb["db"];
 let firmsTable: WorkspaceDb["firmsTable"];

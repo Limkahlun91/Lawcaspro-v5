@@ -21,6 +21,62 @@ async function queryRows(executor: DbExec, query: ReturnType<typeof sql>): Promi
   return [];
 }
 
+type TechnicalAuditContext = { hasTechnicalAudit: boolean; roleName: string | null };
+
+async function resolveTechnicalAuditContext(req: AuthRequest): Promise<TechnicalAuditContext> {
+  if (req.userType === "founder") return { hasTechnicalAudit: true, roleName: "founder" };
+  const firmId = typeof req.firmId === "number" ? req.firmId : null;
+  const roleId = typeof req.roleId === "number" ? req.roleId : null;
+  if (!firmId || !roleId) return { hasTechnicalAudit: false, roleName: null };
+  try {
+    const executor = req.rlsDb ?? db;
+    const roleRows = await queryRows(executor, sql`SELECT name FROM roles WHERE id = ${roleId} AND firm_id = ${firmId} LIMIT 1`);
+    const name = typeof roleRows[0]?.name === "string" ? String(roleRows[0].name) : "";
+    const lowered = name.toLowerCase();
+    const elevated = lowered.includes("partner") || lowered.includes("admin") || lowered.includes("founder");
+    if (elevated) return { hasTechnicalAudit: true, roleName: name };
+    const permRows = await queryRows(executor, sql`
+      SELECT 1 AS hit FROM permissions
+      WHERE firm_id = ${firmId} AND role_id = ${roleId}
+        AND module = 'audit' AND action = 'view_details'
+      LIMIT 1
+    `);
+    if (permRows.length > 0) return { hasTechnicalAudit: true, roleName: name };
+    return { hasTechnicalAudit: false, roleName: name };
+  } catch {
+    return { hasTechnicalAudit: false, roleName: null };
+  }
+}
+
+function redactAuditRow(row: Record<string, unknown>, ctx: TechnicalAuditContext): Record<string, unknown> {
+  if (ctx.hasTechnicalAudit) return row;
+  const safe = { ...row };
+  safe.ip_address = null;
+  safe.user_agent = null;
+  const rawDetail = safe.detail;
+  if (rawDetail == null) {
+    safe.detail = rawDetail;
+    return safe;
+  }
+  const parsed = typeof rawDetail === "string"
+    ? (() => {
+        try { return JSON.parse(rawDetail); } catch { return { raw: true }; }
+      })()
+    : (typeof rawDetail === "object" ? rawDetail : { value: true });
+  if (parsed && typeof parsed === "object") {
+    const stripped: Record<string, unknown> = {};
+    for (const k of Object.keys(parsed)) {
+      const key = String(k).toLowerCase();
+      if (["diagnostic", "diagnostics", "stack", "stacktrace", "stack_trace", "trace", "raw", "sqlstate", "errorcode", "error_code", "technical_code"].includes(key)) continue;
+      stripped[k] = (parsed as Record<string, unknown>)[k];
+    }
+    safe.detail = JSON.stringify(stripped);
+  } else {
+    safe.detail = null;
+  }
+  return safe;
+}
+
 router.get(
   "/audit-logs",
   requireAuth,
@@ -104,8 +160,11 @@ router.get(
       ${actorId ? sql`AND al.actor_id = ${actorId}` : sql``}
     `);
 
+    const techCtx = await resolveTechnicalAuditContext(req);
+    const safeRows = rows.map((r) => redactAuditRow(r, techCtx));
+
     sendOk(res, {
-      data: rows,
+      data: safeRows,
       total: Number(countRows[0]?.total ?? 0),
       pagination: { limit, offset },
       filters_applied: { action: action ?? null, entityType: entityType ?? null, actorId },
@@ -262,3 +321,6 @@ router.get("/platform/audit-logs", requireAuth, requireFounder, async (req: Auth
 
 const exportedRouter = expressRouter as unknown as ExpressRouter;
 export default exportedRouter;
+
+export type { TechnicalAuditContext };
+export { resolveTechnicalAuditContext, redactAuditRow };
