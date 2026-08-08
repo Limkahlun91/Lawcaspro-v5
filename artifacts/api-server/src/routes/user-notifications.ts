@@ -3,6 +3,7 @@ import { z } from "zod";
 import { and, asc, count, desc, eq, gte, inArray, isNull, lte, ne, sql } from "drizzle-orm";
 import { db, paymentVouchersTable, permissionsTable, rolesTable, userNotificationsTable, usersTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { extractDbErrorInfo } from "../lib/db-error.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -38,6 +39,50 @@ const asBoolean = (v: string | undefined): boolean | undefined => {
 
 const ACTIVE_STATUSES = ["unread", "read", "acknowledged", "escalated"] as const;
 const SEVERITY_ORDER: Record<string, number> = { critical: 4, urgent: 3, high: 2, normal: 1, info: 0 };
+
+type NotifErrorClass = "NOTIFICATION_QUERY_FAILED" | "NOTIFICATION_SCHEMA_MISMATCH" | "NOTIFICATION_PERMISSION" | "NOTIFICATION_MUTATION_FAILED";
+
+function emitNotifQueryErrorLog(
+  req: AuthRequest,
+  route: string,
+  err: unknown,
+  errorClass: NotifErrorClass = "NOTIFICATION_QUERY_FAILED",
+): { errorCode: NotifErrorClass; sqlState: string | null | undefined; schemaObject: { table?: string | null; column?: string | null; constraint?: string | null } } {
+  const info = extractDbErrorInfo(err);
+  const sqlState = info.sqlstate ?? info.sqlState ?? null;
+  const schemaObject = {
+    table: info.table ?? null,
+    column: info.column ?? null,
+    constraint: info.constraint ?? null,
+  };
+  let resolvedClass: NotifErrorClass = errorClass;
+  if (sqlState === "42703" || sqlState === "42P01" || sqlState === "42804" || schemaObject.table || schemaObject.column) {
+    resolvedClass = "NOTIFICATION_SCHEMA_MISMATCH";
+  } else if (sqlState === "42501") {
+    resolvedClass = "NOTIFICATION_PERMISSION";
+  }
+  const payload: Record<string, unknown> = {
+    event: "user_notifications_query_failed",
+    route,
+    firmId: req.firmId ?? null,
+    userId: req.userId ?? null,
+    requestId: (req as any).id ?? (req as any).requestId ?? null,
+    sqlState,
+    errorCode: resolvedClass,
+    schemaObject,
+  };
+  try {
+    const logFn: any = (req as any).log ?? console;
+    if (logFn && typeof logFn.error === "function") {
+      logFn.error({ err, ...payload }, "user_notifications_query_failed");
+    } else {
+      console.error("[user_notifications_query_failed]", JSON.stringify(payload));
+    }
+  } catch {
+    console.error("[user_notifications_query_failed]", JSON.stringify(payload));
+  }
+  return { errorCode: resolvedClass, sqlState, schemaObject };
+}
 
 const UN_PERM_CACHE_KEY = Symbol.for("user_notifications_perm_cache");
 type UnPermRow = { module: string; action: string; allowed: boolean };
@@ -88,7 +133,14 @@ router.get("/user-notifications/unread-count", requireAuth, requireFirmUser, asy
       ));
     res.json({ count: Number(countRow?.[0]?.count ?? 0) });
   } catch (e) {
-    res.status(500).json({ error: "unread_count_unavailable", detail: (e as Error).message });
+    const diag = emitNotifQueryErrorLog(req, "/user-notifications/unread-count", e);
+    res.status(diag.errorCode === "NOTIFICATION_SCHEMA_MISMATCH" ? 503 : 500).json({
+      error: diag.errorCode,
+      errorClass: "NOTIFICATION_SCHEMA_MISMATCH" === diag.errorCode ? "schema" : "query",
+      sqlState: diag.sqlState ?? undefined,
+      schemaObject: diag.schemaObject.table || diag.schemaObject.column || diag.schemaObject.constraint ? diag.schemaObject : undefined,
+      message: "unread_count_unavailable",
+    });
   }
 });
 
@@ -134,7 +186,14 @@ router.get("/user-notifications/summary", requireAuth, requireFirmUser, async (r
       byTargetScope: Object.fromEntries(byScopeRows.map(r => [r.targetScope ?? "user", Number(r.count)])),
     });
   } catch (e) {
-    res.status(500).json({ error: "summary_unavailable", detail: (e as Error).message });
+    const diag = emitNotifQueryErrorLog(req, "/user-notifications/summary", e);
+    res.status(diag.errorCode === "NOTIFICATION_SCHEMA_MISMATCH" ? 503 : 500).json({
+      error: diag.errorCode,
+      errorClass: diag.errorCode === "NOTIFICATION_SCHEMA_MISMATCH" ? "schema" : "query",
+      sqlState: diag.sqlState ?? undefined,
+      schemaObject: diag.schemaObject.table || diag.schemaObject.column || diag.schemaObject.constraint ? diag.schemaObject : undefined,
+      message: "summary_unavailable",
+    });
   }
 });
 

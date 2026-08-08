@@ -3,6 +3,7 @@ import { z } from "zod";
 import { and, asc, count, desc, eq, gte, inArray, isNull, lte, ne, sql } from "drizzle-orm";
 import { db, casesTable, fileCustodyItemsTable, fileCustodyMovementsTable, permissionsTable, rolesTable, userNotificationsTable, usersTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { extractDbErrorInfo } from "../lib/db-error.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -87,6 +88,50 @@ const PatchItemSchema = z.object({
   archivedByUserId: z.coerce.number().int().positive().optional(),
   meta: z.record(z.string().min(1), z.any()).optional(),
 });
+
+type FileCustodyErrorClass =
+  | "FILE_CUSTODY_QUERY_FAILED"
+  | "FILE_CUSTODY_SCHEMA_MISMATCH"
+  | "FILE_CUSTODY_PERMISSION"
+  | "FILE_CUSTODY_MUTATION_FAILED";
+
+function emitFileCustodyErrorLog(
+  req: AuthRequest,
+  route: string,
+  err: unknown,
+  defaultClass: FileCustodyErrorClass = "FILE_CUSTODY_QUERY_FAILED",
+): { errorCode: FileCustodyErrorClass; sqlState: string | null | undefined; schemaObject: { table?: string | null; column?: string | null; constraint?: string | null } } {
+  const info = extractDbErrorInfo(err);
+  const sqlState = info.sqlstate ?? info.sqlState ?? null;
+  const schemaObject = { table: info.table ?? null, column: info.column ?? null, constraint: info.constraint ?? null };
+  let resolvedClass: FileCustodyErrorClass = defaultClass;
+  if (sqlState === "42P01" || sqlState === "42703" || sqlState === "42804" || schemaObject.table || schemaObject.column) {
+    resolvedClass = "FILE_CUSTODY_SCHEMA_MISMATCH";
+  } else if (sqlState === "42501") {
+    resolvedClass = "FILE_CUSTODY_PERMISSION";
+  }
+  const payload: Record<string, unknown> = {
+    event: "file_custody_query_failed",
+    route,
+    firmId: req.firmId ?? null,
+    userId: req.userId ?? null,
+    requestId: (req as any).id ?? (req as any).requestId ?? null,
+    sqlState,
+    errorCode: resolvedClass,
+    schemaObject,
+  };
+  try {
+    const logFn: any = (req as any).log ?? console;
+    if (logFn && typeof logFn.error === "function") {
+      logFn.error({ err, ...payload }, "file_custody_query_failed");
+    } else {
+      console.error("[file_custody_query_failed]", JSON.stringify(payload));
+    }
+  } catch {
+    console.error("[file_custody_query_failed]", JSON.stringify(payload));
+  }
+  return { errorCode: resolvedClass, sqlState, schemaObject };
+}
 
 const MovementReleaseSchema = z.object({
   custodyItemId: z.coerce.number().int().positive(),
@@ -263,7 +308,13 @@ router.get("/file-custody/items", requireAuth, requireFirmUser, async (req: Auth
     });
     res.json({ total: Number(countRow?.count ?? 0), offset, limit, items: enriched });
   } catch (e) {
-    res.status(500).json({ error: "list_unavailable", detail: (e as Error).message });
+    const diag = emitFileCustodyErrorLog(req, "/file-custody/items", e, "FILE_CUSTODY_QUERY_FAILED");
+    res.status(diag.errorCode === "FILE_CUSTODY_SCHEMA_MISMATCH" ? 503 : 500).json({
+      error: diag.errorCode,
+      sqlState: diag.sqlState ?? undefined,
+      schemaObject: diag.schemaObject.table || diag.schemaObject.column || diag.schemaObject.constraint ? diag.schemaObject : undefined,
+      message: "list_unavailable",
+    });
   }
 });
 
@@ -290,7 +341,13 @@ router.get("/file-custody/items/summary", requireAuth, requireFirmUser, async (r
       byCategory: Object.fromEntries(byCategory.map(r => [r.category ?? "other", Number(r.count)])),
     });
   } catch (e) {
-    res.status(500).json({ error: "summary_unavailable", detail: (e as Error).message });
+    const diag = emitFileCustodyErrorLog(req, "/file-custody/items/summary", e, "FILE_CUSTODY_QUERY_FAILED");
+    res.status(diag.errorCode === "FILE_CUSTODY_SCHEMA_MISMATCH" ? 503 : 500).json({
+      error: diag.errorCode,
+      sqlState: diag.sqlState ?? undefined,
+      schemaObject: diag.schemaObject.table || diag.schemaObject.column || diag.schemaObject.constraint ? diag.schemaObject : undefined,
+      message: "summary_unavailable",
+    });
   }
 });
 
@@ -372,7 +429,13 @@ router.get("/file-custody/items/:id", requireAuth, requireFirmUser, async (req: 
       .limit(100);
     res.json({ item: row, movements });
   } catch (e) {
-    res.status(500).json({ error: "fetch_failed", detail: (e as Error).message });
+    const diag = emitFileCustodyErrorLog(req, "/file-custody/items/:id", e, "FILE_CUSTODY_QUERY_FAILED");
+    res.status(diag.errorCode === "FILE_CUSTODY_SCHEMA_MISMATCH" ? 503 : 500).json({
+      error: diag.errorCode,
+      sqlState: diag.sqlState ?? undefined,
+      schemaObject: diag.schemaObject.table || diag.schemaObject.column || diag.schemaObject.constraint ? diag.schemaObject : undefined,
+      message: "fetch_failed",
+    });
   }
 });
 

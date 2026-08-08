@@ -11,6 +11,7 @@ import { one, queryOne } from "../lib/http.js";
 import { syncCaseFinancialTotals } from "../lib/caseFinancialSync.js";
 import { nextInvoiceNo } from "../modules/accounting/firm-sequence-numbers.js";
 import { withDbStatementTimeout, type StatementTimeoutCategory } from "../modules/db/statement-timeout.js";
+import { extractDbErrorInfo } from "../lib/db-error.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -40,6 +41,53 @@ export function parsePageLimit(
   if (limit > defaults.maxLimit) limit = defaults.maxLimit;
   const offset = (page - 1) * limit;
   return { page, limit, offset };
+}
+
+type InvoiceErrorClass =
+  | "INVOICE_QUERY_FAILED"
+  | "INVOICE_SCHEMA_MISMATCH"
+  | "INVOICE_PERMISSION"
+  | "INVOICE_MUTATION_FAILED"
+  | "INVOICE_TIMEOUT";
+
+function emitInvoiceErrorLog(
+  req: AuthRequest,
+  route: string,
+  err: unknown,
+  defaultClass: InvoiceErrorClass = "INVOICE_QUERY_FAILED",
+): { errorCode: InvoiceErrorClass; sqlState: string | null | undefined; schemaObject: { table?: string | null; column?: string | null; constraint?: string | null } } {
+  const info = extractDbErrorInfo(err);
+  const sqlState = info.sqlstate ?? info.sqlState ?? null;
+  const schemaObject = { table: info.table ?? null, column: info.column ?? null, constraint: info.constraint ?? null };
+  let resolvedClass: InvoiceErrorClass = defaultClass;
+  if (err instanceof Error && (err as any).code === "STATEMENT_TIMEOUT") {
+    resolvedClass = "INVOICE_TIMEOUT";
+  } else if (sqlState === "42P01" || sqlState === "42703" || sqlState === "42804" || schemaObject.table || schemaObject.column) {
+    resolvedClass = "INVOICE_SCHEMA_MISMATCH";
+  } else if (sqlState === "42501") {
+    resolvedClass = "INVOICE_PERMISSION";
+  }
+  const payload: Record<string, unknown> = {
+    event: "invoices_query_failed",
+    route,
+    firmId: req.firmId ?? null,
+    userId: req.userId ?? null,
+    requestId: (req as any).id ?? (req as any).requestId ?? null,
+    sqlState,
+    errorCode: resolvedClass,
+    schemaObject,
+  };
+  try {
+    const logFn: any = (req as any).log ?? console;
+    if (logFn && typeof logFn.error === "function") {
+      logFn.error({ err, ...payload }, "invoices_query_failed");
+    } else {
+      console.error("[invoices_query_failed]", JSON.stringify(payload));
+    }
+  } catch {
+    console.error("[invoices_query_failed]", JSON.stringify(payload));
+  }
+  return { errorCode: resolvedClass, sqlState, schemaObject };
 }
 
 router.get("/invoices", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
@@ -81,12 +129,18 @@ router.get("/invoices", requireAuth, requireFirmUser, requirePermission("account
     res.setHeader("X-Limit", String(limit));
     res.json(rows.map((inv) => (String((inv as any).status ?? "") === "void" ? { ...inv, amountDue: "0.00" } : inv)));
   } catch (err) {
-    req.log.error({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "invoices.list_failed");
-    if (err instanceof Error && (err as any).code === "STATEMENT_TIMEOUT") {
-      res.status(504).json({ error: (err as Error).message });
+    const diag = emitInvoiceErrorLog(req, "/invoices", err, "INVOICE_QUERY_FAILED");
+    if (diag.errorCode === "INVOICE_TIMEOUT") {
+      res.status(504).json({ error: diag.errorCode, sqlState: diag.sqlState ?? undefined });
       return;
     }
-    res.status(500).json({ error: "Failed to load invoices" });
+    const httpStatus = diag.errorCode === "INVOICE_SCHEMA_MISMATCH" ? 503 : 500;
+    res.status(httpStatus).json({
+      error: diag.errorCode,
+      sqlState: diag.sqlState ?? undefined,
+      schemaObject: diag.schemaObject.table || diag.schemaObject.column || diag.schemaObject.constraint ? diag.schemaObject : undefined,
+      message: "Failed to load invoices",
+    });
   }
 });
 
@@ -144,8 +198,14 @@ router.get("/invoices/:id", requireAuth, requireFirmUser, requirePermission("acc
     })();
     res.json({ ...inv, items, ...billTo });
   } catch (err) {
-    req.log.error({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "invoices.detail_failed");
-    res.status(500).json({ error: "Failed to load invoice" });
+    const diag = emitInvoiceErrorLog(req, "/invoices/:id", err, "INVOICE_QUERY_FAILED");
+    const httpStatus = diag.errorCode === "INVOICE_SCHEMA_MISMATCH" ? 503 : 500;
+    res.status(httpStatus).json({
+      error: diag.errorCode,
+      sqlState: diag.sqlState ?? undefined,
+      schemaObject: diag.schemaObject.table || diag.schemaObject.column || diag.schemaObject.constraint ? diag.schemaObject : undefined,
+      message: "Failed to load invoice",
+    });
   }
 });
 

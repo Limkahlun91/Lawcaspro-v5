@@ -105,6 +105,21 @@ type SupabaseStorageConfig = {
   storageUrl: string;
 };
 
+export class StorageConfigurationError extends Error {
+  override name = "StorageConfigurationError";
+  constructor(
+    readonly configurationErrorCode: string,
+    readonly variableName: string,
+    readonly protocol?: string,
+    message?: string,
+  ) {
+    super(message ?? `Storage configuration error (${configurationErrorCode}) for ${variableName}`);
+    Object.setPrototypeOf(this, StorageConfigurationError.prototype);
+  }
+}
+
+const CONFIG_INVALID_SUPABASE_HTTP_URL = "CONFIG_INVALID_SUPABASE_HTTP_URL";
+
 function pickFirstNonEmpty(...values: Array<string | undefined | null>): string | "" {
   for (const v of values) {
     if (typeof v === "string") {
@@ -115,12 +130,80 @@ function pickFirstNonEmpty(...values: Array<string | undefined | null>): string 
   return "";
 }
 
+function assertSupabaseHttpUrl(rawValue: string, variableName: string): void {
+  try {
+    const parsed = new URL(rawValue);
+    const protocol = parsed.protocol;
+    if (protocol === "https:") return;
+    if (protocol === "postgres:" || protocol === "postgresql:") {
+      try {
+        console.error("[supabase_storage_config]", {
+          event: "storage_config_url_invalid",
+          variableName,
+          protocol,
+          configurationErrorCode: CONFIG_INVALID_SUPABASE_HTTP_URL,
+        });
+      } catch {
+        // ignore secondary logging failure
+      }
+      throw new StorageConfigurationError(
+        CONFIG_INVALID_SUPABASE_HTTP_URL,
+        variableName,
+        protocol,
+        `${variableName} uses postgres protocol; Supabase HTTP/Storage URL must be https:`,
+      );
+    }
+    try {
+      console.error("[supabase_storage_config]", {
+        event: "storage_config_url_invalid",
+        variableName,
+        protocol,
+        configurationErrorCode: CONFIG_INVALID_SUPABASE_HTTP_URL,
+      });
+    } catch {
+      // ignore secondary logging failure
+    }
+    throw new StorageConfigurationError(
+      CONFIG_INVALID_SUPABASE_HTTP_URL,
+      variableName,
+      protocol,
+      `${variableName} must use https: protocol for Supabase HTTP/Storage`,
+    );
+  } catch (err) {
+    if (err instanceof StorageConfigurationError) throw err;
+    try {
+      console.error("[supabase_storage_config]", {
+        event: "storage_config_url_invalid",
+        variableName,
+        protocol: "",
+        configurationErrorCode: CONFIG_INVALID_SUPABASE_HTTP_URL,
+      });
+    } catch {
+      // ignore secondary logging failure
+    }
+    throw new StorageConfigurationError(
+      CONFIG_INVALID_SUPABASE_HTTP_URL,
+      variableName,
+      undefined,
+      `${variableName} could not be parsed as a valid URL for Supabase HTTP/Storage`,
+    );
+  }
+}
+
 function getSupabaseStorageConfig(): SupabaseStorageConfig {
-  const supabaseUrl = pickFirstNonEmpty(
+  const supabaseUrlRaw = pickFirstNonEmpty(
     process.env.SUPABASE_URL,
     process.env.VITE_SUPABASE_URL,
     process.env.NEXT_PUBLIC_SUPABASE_URL,
   );
+  const supabaseUrlVariable =
+    !!process.env.SUPABASE_URL?.trim()
+      ? "SUPABASE_URL"
+      : !!process.env.VITE_SUPABASE_URL?.trim()
+        ? "VITE_SUPABASE_URL"
+        : !!process.env.NEXT_PUBLIC_SUPABASE_URL?.trim()
+          ? "NEXT_PUBLIC_SUPABASE_URL"
+          : "SUPABASE_URL";
 
   const serviceRoleKey = pickFirstNonEmpty(
     process.env.SUPABASE_SERVICE_ROLE_KEY,
@@ -138,14 +221,16 @@ function getSupabaseStorageConfig(): SupabaseStorageConfig {
   );
 
   const missing: string[] = [];
-  if (!supabaseUrl) missing.push("SUPABASE_URL");
+  if (!supabaseUrlRaw) missing.push("SUPABASE_URL");
   if (!serviceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY");
   if (missing.length) {
     throw new Error(`Supabase storage not configured: missing ${missing.join(", ")}`);
   }
 
+  assertSupabaseHttpUrl(supabaseUrlRaw, supabaseUrlVariable);
+
   const effectiveBucketPrivate = bucketPrivate || "lawcaspro-private";
-  const normalized = supabaseUrl.replace(/\/+$/, "");
+  const normalized = supabaseUrlRaw.replace(/\/+$/, "");
   const storageUrl = `${normalized}/storage/v1`;
 
   return { supabaseUrl: normalized, serviceRoleKey, bucketPrivate: effectiveBucketPrivate, storageUrl };
@@ -153,7 +238,17 @@ function getSupabaseStorageConfig(): SupabaseStorageConfig {
 
 export function getSupabaseStorageConfigError(
   err: unknown
-): { statusCode: number; code: string; error: string; missing?: string[] } | null {
+): { statusCode: number; code: string; error: string; missing?: string[]; variableName?: string; protocol?: string; configurationErrorCode?: string } | null {
+  if (err instanceof StorageConfigurationError) {
+    return {
+      statusCode: 503,
+      code: err.configurationErrorCode ?? "STORAGE_BASE_URL_INVALID",
+      configurationErrorCode: err.configurationErrorCode,
+      variableName: err.variableName,
+      protocol: err.protocol,
+      error: err.message,
+    };
+  }
   const message = err instanceof Error ? err.message : "";
   if (!message) return null;
 
