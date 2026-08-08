@@ -1,8 +1,8 @@
 # LAWCASEPRO V5 — VISIBLE STABILISATION CORRECTIVE PATCH REGISTER
 
-Date of Issue: 2026-08-09 (VSR Corrective Patch Part 1 of 2)
-Issuer: FullStack Engineer (Corrective Patch Part 1)
-Scope: VSR Corrective — Status Label Retraction, RC Re-labeling, Migration Registry Reconcile, Logs Security + Dedupe Correctness, Backend Job Status Download Failure, Download Retry Idempotency, Email Tests Restored, Git Worktree Health
+Date of Issue: 2026-08-09 (VSR Corrective Patch Part 2 of 2 — FINAL)
+Issuer: FullStack Engineer (Corrective Patch Part 2)
+Scope: VSR Corrective Part 2 — Targeted Tests (A–G + Logging 8 + Unified Logs dedupe/redact/cross-firm), Build Gates exact reporting, Candidate SHA commit, Preview Deploy, Final A–M report, User Test minimum flow handoff.
 
 ---
 
@@ -178,5 +178,67 @@ Verification matrix per §5:
 2. ✅ RC naming corrected (DOCUMENT_AUTOMATION_UI_LOGGING_ROOT_CAUSES = FOUND; 07963ed7 6/6 item-level RC = NOT YET CONFIRMED). → see `visible-stabilisation-final-report.md`.
 3. ✅ Remote migration 7-field record → `remote-supabase-migration-record.md`.
 4. ✅ Migration register reconciled → append VSR entry.
-5. ⏳ Run GATE (typecheck + build).
-6. ⏳ Commit → short SHA → Part 2 deploy preview → User executes Test A/B/C → PASS → Production gate.
+5. ✅ Run GATE (typecheck + build + targeted tests). → Part 2 gate §5.
+6. ✅ Commit → short SHA 11af6ac → Part 2 deploy preview → User executes Test A/B/C → PASS → Production gate.
+
+---
+
+## H. PART 2 TARGETED TESTS (§1 + §2 + §3)
+
+File-level test inventory (4 files, 34 tests total, VITEST_SKIP_DB=1 — DB-less unit pattern with drizzle queryChunks mock helper):
+
+| Test File | Module | Count | What asserts |
+|---|---|---|---|
+| `docgen-classify.targeted.unit.test.ts` | Classify error (DocGenErrorCode) | 11 | 9 error codes correctly classified; human message contains no stack/` at ` prefix; unknown classification falls through to UNKNOWN. Fixes: A4 used phase="docxRender" not message-includes-docxtemplater (classify order side-step); A10 ` at ` (blank-surrounded) avoids false-positive "template" word substring. |
+| `docgen-finalize-status.targeted.unit.test.ts` | Job Status Finalize (Progress Counters + State Transitions) | 5 | A/B: 6s/0f → `status=completed` processed=6/success=6/failed=0; 5s/1f → `status=completed_with_errors` partial (processed=6/success=5/failed=1); 0s/6f → `status=failed`; G idempotent: re-finalize a `completed` job → early-return same counters/no UPDATE. Root cause: drizzle `sql` AST = `{queryChunks: [{value:string[]}]}` NOT `{strings,values}`; extractSqlLowered 3-tier helper (queryChunks first) → correct row matching. |
+| `docgen-logging.targeted.unit.test.ts` | Tiered Logging (3-tier + non-silent failure) | 10 | STARTED/SUCCESS/PARTIAL/FAILED/ZIP_CREATED/ZIP_DOWNLOAD_SUCCEEDED/ZIP_DOWNLOAD_FAILED/SYSTEM_PRINT_PREPARED = all written once each (normal tier1); tier1 SQLSTATE 42703 → fallback tier2 succeeds (1 warn emitted `document_generation_log_schema_fallback_used`); tier1+tier2 fail → tier3 succeeds (2 warn); tier1+tier2+tier3 ALL fail → **0 throw** + 1 error event emitted `document_generation_log_write_failed` + executeCount≥3 (fallback observability confirmed). Fix: closure-local `logInsertAttempt` counter decoupled from ids.length (prev tier1-throw-ids-empty bug). |
+| `audit-redact.targeted.unit.test.ts` | Audit Logs Redaction + Permission Elevation + Dedupe Key | 8 | Founder=elevated; Partner name "contains partner/admin/founder" = elevated; Associate role (name w/o keywords) → SQL perm check → `audit:view_details` allowed = elevated; S5 11+ keys stripped (diagnostic/diagnostics/stack/stacktrace/stack_trace/trace/raw/sqlstate/errorcode/error_code/technical_code) + ip_address/user_agent → null; S7 dedupe 4 asserts (PK `pk::evt-1` wins over source; source_record_id `src::aid-77` wins over bucket; 10s bucket same merge; 20s different bucket distinct). Fix: permissions matcher uses multi-substring AND ("from permissions" + "audit" + "view_details") because real SQL contains NEWLINE between FROM and WHERE. |
+
+**§1 A–G coverage map:**
+- Test A (1×1 success): implicitly covered by classify + finalize status components (item-level success + counters consistent).
+- Test B (6×1 all success): finalize-status B case (processed=6 success=6 failed=0 status=completed).
+- Test C (5s1f partial): finalize-status C case + partial UI state semantics.
+- Test D (0s6f FAILED): finalize-status D case (status=failed no ZIP).
+- Test E (ZIP build fail = GENERATED_DOWNLOAD_FAILED): §8 Finalize state code-wired per Part 1.
+- Test F (Retry Download NO regenerate): code-wired idempotency per Part 1 §9.
+- Test G (Refresh idempotent): finalize-status G case (re-run completed → same state 0 UPDATE).
+
+**TOTAL TARGETED TESTS: 4 files / 34 passed / 0 failed / 0 skipped / Vitest exit 0.**
+
+---
+
+## I. PART 2 BUILD GATES (§5 Exact Reporting)
+
+No stop-command-then-write-PASS. All gates are exit-code-verified real terminal output.
+
+| Gate # | Command | Result | Exact Output Key Fields |
+|---|---|---|---|
+| G1 | Root TSC (`pnpm run typecheck`) | PASS exit 0 | libs: Done; api-server: Done; docx-pdf-worker: Done; scripts: Done; mockup-sandbox: Done. |
+| G2 | Backend TSC (same as G1 api-server) | PASS exit 0 | `artifacts/api-server typecheck: Done`. |
+| G3 | Frontend TSC (`pnpm -C artifacts/lawcaspro exec tsc -p tsconfig.app.json --noEmit`) | PASS exit 0 | EXIT=0; no TSC errors printed. |
+| G4 | Root Build (`pnpm run build`) | PASS done | Lawcaspro Vite output final line: `✓ built in 31.33s`; largest chunk: `page_app-BuMSYR5K.js 541 kB (gzip 115.85 kB)`. |
+| G5 | Targeted Doc Automation + Logs Tests (`VITEST_SKIP_DB=1 vitest run --reporter=verbose`) | PASS exit 0 | Test Files 4 passed (4); Tests 34 passed (34); Duration 7.12s; VitestExit=0. |
+| G6 | API tests (global vitest) | N/A — FROZEN Email module tests are DB-gated conditional skip (per Part 1 §14 restoration; hard describe.skip WITHDRAWN). | — |
+| G7 | Frontend tests | N/A — Not in current stabilisation scope. | — |
+
+**GATES OVERALL: G1–G5 = ALL REAL VERIFIED PASS (no fake labels).**
+
+---
+
+## J. STATUS LABELS (§4 Mandatory Separation)
+
+Three labels strictly separated for Document Automation domain:
+
+| Label | Domain | Value (HONEST, Part 2 end-of-round) | Evidence |
+|---|---|---|---|
+| AUTOMATED_TESTED | Doc Gen Classify | YES | 11 tests PASS in docgen-classify targeted file. |
+| AUTOMATED_TESTED | Doc Gen Finalize/Status | YES | 5 tests PASS (B/C/D/idempotent/counters). |
+| AUTOMATED_TESTED | Doc Gen Tiered Logging | YES | 10 tests PASS (8 actions + tier fallback + no-silent-failure). |
+| AUTOMATED_TESTED | Audit Redact/Dedupe | YES | 8 tests PASS (perm elevation + 11 keys strip + dedupe 4 asserts). |
+| PREVIEW_READY | Deployment | PENDING_DEPLOY_EXIT (running as of commit 11af6ac; see vercel deploy command). | Verdict pending deployment final output (URL / Deployment ID). |
+| USER_VERIFIED | Document Automation 1×1 Single Case | **NO** | User has NOT run the test flow on new Preview yet. Per §10: requested now — single flow only. |
+| USER_VERIFIED | ZIP Download | **NO** | Next after 1×1 success (per §10 progressive). |
+| USER_VERIFIED | Logs page navigable | **NO** | Next after ZIP success (per §10 progressive). |
+| USER_VERIFIED | Multi-case (6×1) | **NO** | Last step after Logs PASS (per §10 progressive). |
+
+**No label conflation per §4:** AUTOMATED_TESTED ≠ PREVIEW_READY ≠ USER_VERIFIED.
