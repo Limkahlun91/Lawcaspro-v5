@@ -96,6 +96,14 @@ describe("Login flow", () => {
       firmId: 1,
       roleId: 1,
       roleName: "Partner",
+      roleGroup: "management",
+      defaultRouteHint: "/app/dashboard",
+      accessScope: {
+        canAccessFirmDashboard: true,
+        hasFirmwideCaseScope: true,
+        isAccountingPrivileged: false,
+        isHrPrivileged: false,
+      },
     };
     apiFetchJsonMock.mockResolvedValue({ user: loginUser, token: "t" });
     apiRequestMock.mockResolvedValue(createResponse(200, { ok: true, data: meUser, meta: { request_id: "r", timestamp: "t", duration_ms: 1 } }));
@@ -188,6 +196,14 @@ describe("Login flow", () => {
       firmId: 1,
       roleId: 1,
       roleName: "Partner",
+      roleGroup: "management",
+      defaultRouteHint: "/app/dashboard",
+      accessScope: {
+        canAccessFirmDashboard: true,
+        hasFirmwideCaseScope: true,
+        isAccountingPrivileged: false,
+        isHrPrivileged: false,
+      },
     };
     apiFetchJsonMock.mockResolvedValue(loginUser);
     apiRequestMock.mockImplementation(async (path: string) => {

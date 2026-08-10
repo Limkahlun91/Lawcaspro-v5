@@ -14,7 +14,7 @@ vi.mock("../lib/auth.js", () => {
     requireFirmUser: (req: any, _res: any, next: any) => {
       let i = 0;
       req.rlsDb = {
-        all: async (_: unknown) => {
+        execute: async (_: unknown) => {
           i += 1;
           if (i === 1) return { rows: [{ c: 5 }] };
           if (i === 2) return { rows: [{ c: 3 }] };

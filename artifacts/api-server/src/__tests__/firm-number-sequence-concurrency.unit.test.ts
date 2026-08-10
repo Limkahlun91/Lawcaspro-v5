@@ -187,18 +187,22 @@ function createFakeDb(opts: FakeDbOpts = {}) {
             db.callStats.retriesFrom23505++;
             continue;
           }
-          throw Object.assign(new Error("duplicate key"), { code: "23505" });
+          break;
         }
         if (result.kind === "retry") {
           if (attempt < 2) {
             db.callStats.retriesFromRetry++;
             continue;
           }
+          break;
         }
       } catch (e) {
-        if (e && String((e as any).code) === "23505" && attempt < 2) {
-          db.callStats.retriesFrom23505++;
-          continue;
+        if (e && String((e as any).code) === "23505") {
+          if (attempt < 2) {
+            db.callStats.retriesFrom23505++;
+            continue;
+          }
+          break;
         }
         throw e;
       }
