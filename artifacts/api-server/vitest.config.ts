@@ -61,6 +61,7 @@ export default defineConfig({
         "src/__tests__/docgen-finalize-status.targeted.unit.test.ts",
         "src/__tests__/docgen-logging.targeted.unit.test.ts",
         "src/__tests__/audit-redact.targeted.unit.test.ts",
+        "src/__tests__/p0-runtime-addendum-regression.test.ts",
       ],
     pool: "forks",
     forks: {

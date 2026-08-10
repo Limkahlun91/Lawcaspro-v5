@@ -182,7 +182,7 @@ describe("AppLayout sidebar groups", () => {
 
   it("restores group expanded state from localStorage", async () => {
     const view = renderLayout();
-    expect((await screen.findAllByText("Variable Dictionary")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Variables")).length).toBeGreaterThan(0);
     for (const btn of screen.getAllByRole("button", { name: "DOCUMENTS" })) fireEvent.click(btn);
     await waitFor(() => {
       const raw = localStorage.getItem("lawcaspro.sidebar.groups:1:1");
@@ -208,6 +208,6 @@ describe("AppLayout sidebar groups", () => {
     locationValue = "/app/documents/variables";
 
     renderLayout();
-    expect((await screen.findAllByText("Variable Dictionary")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("Variables")).length).toBeGreaterThan(0);
   });
 });

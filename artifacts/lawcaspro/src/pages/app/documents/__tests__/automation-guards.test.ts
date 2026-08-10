@@ -45,7 +45,7 @@ describe("Doc Automation guards", () => {
   it("formats processing notice for 11/15 pending 4", () => {
     const s = job({ total: 15, success: 11, failed: 0, pending: 4, running: 0 });
     expect(formatProcessingNotice(s)).toBe(
-      "Generation is still processing. Completed 11/15. Pending 4. Please wait.",
+      "Generation is still processing. Processed 11/15. Pending 4. Please wait.",
     );
   });
 
