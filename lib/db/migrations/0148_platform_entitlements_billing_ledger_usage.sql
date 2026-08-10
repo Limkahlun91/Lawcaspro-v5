@@ -201,37 +201,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_firm_entitlement_permanent
   WHERE (override_kind = 'permanent');
 
 -- UNIQUENESS 2 — Temporary: NO OVERLAPPING date ranges per (firm, feature).
--- Deterministic GiST exclusion using btree_gist + tstzrange overlap operator &&.
--- Any two rows of kind=temporary for same firm+feature whose ranges touch or
--- overlap will be deterministically rejected at insert/update time, regardless
--- of wall clock — this is purely about the *stored* ranges themselves.
-DO $$ BEGIN
-  CREATE EXTENSION IF NOT EXISTS btree_gist;
-EXCEPTION WHEN OTHERS THEN
-  RAISE NOTICE 'btree_gist create skipped (may already exist or unavailable): %', SQLERRM;
-END $$;
+-- Authoritative concurrency-safety guarantee (G8): btree_gist extension +
+-- GiST EXCLUSION constraint.  This is the STRONG guarantee.  The trigger
+-- below remains only as defense-in-depth and MUST NOT be the sole guarantee.
+--
+-- If btree_gist is unavailable this migration FAILS LOUDLY — a weak fallback
+-- (e.g. trigger-only) is explicitly unacceptable because it cannot prevent
+-- overlapping rows written inside simultaneous transactions.
+CREATE EXTENSION IF NOT EXISTS btree_gist;
 
-DO $$ BEGIN
-  ALTER TABLE firm_entitlement_overrides
-    ADD CONSTRAINT ex_firm_entitlement_temp_no_overlap
-    EXCLUDE USING gist (
-      firm_id         WITH =,
-      feature_key     WITH =,
-      tstzrange(
-        COALESCE(effective_from, '-infinity'::timestamptz),
-        COALESCE(expires_at,     'infinity'::timestamptz),
-        '[)'
-      ) WITH &&
-    )
-    WHERE (override_kind = 'temporary');
-EXCEPTION
-  WHEN undefined_object THEN
-    RAISE NOTICE 'GiST exclusion not added (btree_gist unavailable); using trigger-based overlap guard as fallback.';
-  WHEN feature_not_supported THEN
-    RAISE NOTICE 'GiST exclusion not added (feature not supported); using trigger-based overlap guard as fallback.';
-  WHEN OTHERS THEN
-    RAISE NOTICE 'GiST exclusion skipped: %; using trigger-based overlap guard.', SQLERRM;
-END $$;
+ALTER TABLE firm_entitlement_overrides
+  ADD CONSTRAINT ex_firm_entitlement_temp_no_overlap
+  EXCLUDE USING gist (
+    firm_id         WITH =,
+    feature_key     WITH =,
+    tstzrange(
+      COALESCE(effective_from, '-infinity'::timestamptz),
+      COALESCE(expires_at,     'infinity'::timestamptz),
+      '[)'
+    ) WITH &&
+  )
+  WHERE (override_kind = 'temporary');
 
 -- FALLBACK guard for temporary range overlap if GiST exclusion could not be added.
 -- This is ALWAYS present as a belt-and-suspenders check even when GiST is used.
@@ -293,9 +283,9 @@ CREATE INDEX IF NOT EXISTS idx_firm_entitlement_kind
 -- RLS
 ALTER TABLE firm_entitlement_overrides ENABLE ROW LEVEL SECURITY;
 
-DO $$ BEGIN
-  ALTER TABLE firm_entitlement_overrides FORCE ROW LEVEL SECURITY;
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+-- REQUIRED security DDL.  FORCE ROW LEVEL SECURITY is idempotent in
+-- modern Postgres; there is never a reason to swallow this failure.
+ALTER TABLE firm_entitlement_overrides FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation ON firm_entitlement_overrides;
 CREATE POLICY tenant_isolation ON firm_entitlement_overrides FOR ALL TO PUBLIC
@@ -335,9 +325,7 @@ CREATE INDEX IF NOT EXISTS idx_subscription_history_created
 
 ALTER TABLE subscription_history ENABLE ROW LEVEL SECURITY;
 
-DO $$ BEGIN
-  ALTER TABLE subscription_history FORCE ROW LEVEL SECURITY;
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+ALTER TABLE subscription_history FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation ON subscription_history;
 CREATE POLICY tenant_isolation ON subscription_history FOR ALL TO PUBLIC
@@ -413,9 +401,7 @@ CREATE INDEX IF NOT EXISTS idx_billing_ledger_status
 
 ALTER TABLE billing_ledger ENABLE ROW LEVEL SECURITY;
 
-DO $$ BEGIN
-  ALTER TABLE billing_ledger FORCE ROW LEVEL SECURITY;
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+ALTER TABLE billing_ledger FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation ON billing_ledger;
 CREATE POLICY tenant_isolation ON billing_ledger FOR ALL TO PUBLIC
@@ -474,9 +460,7 @@ CREATE INDEX IF NOT EXISTS idx_usage_counters_period
 
 ALTER TABLE usage_counters ENABLE ROW LEVEL SECURITY;
 
-DO $$ BEGIN
-  ALTER TABLE usage_counters FORCE ROW LEVEL SECURITY;
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+ALTER TABLE usage_counters FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation ON usage_counters;
 CREATE POLICY tenant_isolation ON usage_counters FOR ALL TO PUBLIC
@@ -493,9 +477,7 @@ CREATE POLICY tenant_isolation ON usage_counters FOR ALL TO PUBLIC
 -- all authenticated can read (plan catalog needed for firm billing UI)
 ALTER TABLE plan_entitlements ENABLE ROW LEVEL SECURITY;
 
-DO $$ BEGIN
-  ALTER TABLE plan_entitlements FORCE ROW LEVEL SECURITY;
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+ALTER TABLE plan_entitlements FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation ON plan_entitlements;
 CREATE POLICY tenant_isolation ON plan_entitlements FOR SELECT TO PUBLIC
@@ -504,31 +486,21 @@ CREATE POLICY tenant_isolation ON plan_entitlements FOR SELECT TO PUBLIC
 -- RLS for platform_features - all authenticated can read (catalog)
 ALTER TABLE platform_features ENABLE ROW LEVEL SECURITY;
 
-DO $$ BEGIN
-  ALTER TABLE platform_features FORCE ROW LEVEL SECURITY;
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+ALTER TABLE platform_features FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation ON platform_features;
 CREATE POLICY tenant_isolation ON platform_features FOR SELECT TO PUBLIC
   USING (true);
 
 -- ----------------------------------------------------------------------
--- 8. GRANT runtime SELECT/INSERT to app_user on new tables
---    (Best-effort; if role does not exist in migration context, skip.)
+-- 8. Runtime privileges for app_user
+--    Baseline migration 0002_correct_rls_policies.sql already establishes
+--    schema-wide app_user privileges (SELECT/INSERT/UPDATE/DELETE on all
+--    tables, USAGE/SELECT on all sequences, plus ALTER DEFAULT PRIVILEGES
+--    for objects created hereafter).  A feature migration MUST NOT
+--    silently re-broaden app_user with "ON ALL TABLES IN SCHEMA public";
+--    exact per-table GRANTs are ONLY needed when a future role boundary
+--    requires LESS than the baseline.
 -- ----------------------------------------------------------------------
-
-DO $$
-BEGIN
-  EXECUTE 'GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA public TO app_user';
-EXCEPTION WHEN OTHERS THEN
-  RAISE NOTICE 'app_user grant skipped: %', SQLERRM;
-END $$;
-
-DO $$
-BEGIN
-  EXECUTE 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user';
-EXCEPTION WHEN OTHERS THEN
-  RAISE NOTICE 'app_user sequence grant skipped: %', SQLERRM;
-END $$;
 
 COMMIT;

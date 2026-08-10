@@ -5,18 +5,19 @@
 
 DO $$ BEGIN
   -- Safe widen of monitor_kind CHECK. Add new value 'approval_waiting' (PART 3 §44).
+  -- Drop is idempotent/harmless; swallow only DROP errors.
   ALTER TABLE IF EXISTS public.case_bottleneck_snapshots
     DROP CONSTRAINT IF EXISTS case_bottleneck_monitor_kind;
 EXCEPTION WHEN OTHERS THEN NULL; END $$;
 
-DO $$ BEGIN
-  ALTER TABLE IF EXISTS public.case_bottleneck_snapshots
-    ADD CONSTRAINT case_bottleneck_monitor_kind
-    CHECK (monitor_kind IN (
-      'case_no_movement','case_waiting','case_on_hold',
-      'pv_delay','urgent','approval_waiting'
-    ));
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+-- REQUIRED: ADD CONSTRAINT must FAIL LOUDLY so we never silently ship without
+-- the approval_waiting monitor kind constraint.
+ALTER TABLE IF EXISTS public.case_bottleneck_snapshots
+  ADD CONSTRAINT case_bottleneck_monitor_kind
+  CHECK (monitor_kind IN (
+    'case_no_movement','case_waiting','case_on_hold',
+    'pv_delay','urgent','approval_waiting'
+  ));
 
 -- Responsible manager user_id index (PART 3 §44 grouping by manager)
 CREATE INDEX IF NOT EXISTS case_bottleneck_manager_idx

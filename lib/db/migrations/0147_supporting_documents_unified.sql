@@ -149,10 +149,7 @@ END $$;
 -- 4. Row-Level Security (RLS) ------------------------------------------------
 ALTER TABLE supporting_documents ENABLE ROW LEVEL SECURITY;
 
-DO $$ BEGIN
-    ALTER TABLE supporting_documents FORCE ROW LEVEL SECURITY;
-EXCEPTION WHEN OTHERS THEN NULL;
-END $$;
+ALTER TABLE supporting_documents FORCE ROW LEVEL SECURITY;
 
 -- Drop existing policies idempotently
 DROP POLICY IF EXISTS supporting_docs_firm_isolation_select ON supporting_documents;

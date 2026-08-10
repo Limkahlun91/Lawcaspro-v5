@@ -145,16 +145,14 @@ ALTER TABLE public.case_bottleneck_snapshots ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.case_monitor_logs     ENABLE ROW LEVEL SECURITY;
 
 -- =========================================================================
--- 6) FORCE RLS — unconditional. Swallow harmless duplicate error.
+-- 6) FORCE RLS — required security DDL.  ALTER TABLE ... FORCE ROW LEVEL
+--    SECURITY is idempotent in modern Postgres; any failure here means
+--    the connected role cannot enforce tenant isolation — the migration
+--    MUST fail loudly.
 -- =========================================================================
 
-DO $$ BEGIN
-  ALTER TABLE public.case_bottleneck_snapshots FORCE ROW LEVEL SECURITY;
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
-
-DO $$ BEGIN
-  ALTER TABLE public.case_monitor_logs     FORCE ROW LEVEL SECURITY;
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+ALTER TABLE public.case_bottleneck_snapshots FORCE ROW LEVEL SECURITY;
+ALTER TABLE public.case_monitor_logs     FORCE ROW LEVEL SECURITY;
 
 -- =========================================================================
 -- 7) RLS POLICIES — DROP IF EXISTS, then CREATE. Unconditional.

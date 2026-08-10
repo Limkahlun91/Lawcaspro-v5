@@ -55,7 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_file_custody_mv_escalated
   WHERE escalated_to_partner = TRUE;
 
 ALTER TABLE file_custody_items ENABLE ROW LEVEL SECURITY;
-DO $$ BEGIN ALTER TABLE file_custody_items FORCE ROW LEVEL SECURITY; EXCEPTION WHEN OTHERS THEN NULL; END $$;
+ALTER TABLE file_custody_items FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS file_custody_items_tenant ON file_custody_items;
 CREATE POLICY file_custody_items_tenant ON file_custody_items
   AS PERMISSIVE FOR ALL TO PUBLIC
@@ -63,7 +63,7 @@ CREATE POLICY file_custody_items_tenant ON file_custody_items
   WITH CHECK (firm_id = (current_setting('app.current_firm_id', true)::int));
 
 ALTER TABLE file_custody_movements ENABLE ROW LEVEL SECURITY;
-DO $$ BEGIN ALTER TABLE file_custody_movements FORCE ROW LEVEL SECURITY; EXCEPTION WHEN OTHERS THEN NULL; END $$;
+ALTER TABLE file_custody_movements FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS file_custody_movements_tenant ON file_custody_movements;
 CREATE POLICY file_custody_movements_tenant ON file_custody_movements
   AS PERMISSIVE FOR ALL TO PUBLIC
