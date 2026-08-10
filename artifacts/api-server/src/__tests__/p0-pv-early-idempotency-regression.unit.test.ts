@@ -5,7 +5,7 @@ import {
   resolvePaymentVoucherCreateStatus,
 } from "../modules/accounting/payment-voucher-create-status.js";
 
-describe("P0 Payment Voucher Early Idempotency Regression - Behavioral contracts (A–J subset)", () => {
+describe("UNIT TESTS ONLY — P0 Payment Voucher Early Idempotency behavioral contracts (NOT HTTP/DB integration)", () => {
   const now = new Date("2026-07-28T12:00:00.000Z");
 
   it("A - NEW clientRequestId + fresh-first-insert branch: expected 201 completed/voucher persisted semantic", () => {
