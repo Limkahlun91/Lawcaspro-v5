@@ -426,11 +426,11 @@ describe("P0 PAYMENT VOUCHER — REAL HTTP + POSTGRES INTEGRATION TESTS (A–L)"
   // E/F/L tests do not depend on brittle ESM live-binding module mocks.
   const pvHarnessControls: {
     sawReservationInsert: boolean;
-    forceVoucherInsertAfterReservation: { code: string; message: string } | null;
-    forceAccountingSettingsTimeout: { code: string; message: string } | null;
+    forceVoucherInsertAfterReservation: { code: string; message: string; sqlstate?: string } | null;
+    forceAccountingSettingsTimeout: { code: string; message: string; sqlstate?: string } | null;
     forceTrackingUpdateError: { code: string; message: string; sqlstate?: string } | null;
-    trackingUpdateErrorOneShot: boolean; // if true, forceTrackingUpdateError only throws on FIRST invocation within test
-    _trackingUpdateErrorFired: boolean;  // internal counter (reset in beforeEach)
+    trackingUpdateErrorOneShot: boolean;
+    _trackingUpdateErrorFired: boolean;
   } = {
     sawReservationInsert: false,
     forceVoucherInsertAfterReservation: null,
@@ -557,10 +557,14 @@ describe("P0 PAYMENT VOUCHER — REAL HTTP + POSTGRES INTEGRATION TESTS (A–L)"
         const isSelAccounting = /select[\s\S]*from\s+"?accounting_settings"?/i.test(head);
         if (isSelAccounting) {
           const info = pvHarnessControls.forceAccountingSettingsTimeout;
-          const e: any = new Error(info.message);
-          e.code = info.code ?? "57014";
-          e.sqlstate = info.sqlstate ?? e.code;
-          e.sqlState = e.sqlstate;
+          const e = new Error(info.message) as unknown as {
+            code: string;
+            sqlstate: string;
+            sqlState: string;
+          };
+          (e as any).code = info.code ?? "57014";
+          (e as any).sqlstate = info.sqlstate ?? (e as any).code;
+          (e as any).sqlState = (e as any).sqlstate;
           throw e;
         }
       }
