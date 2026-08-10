@@ -281,26 +281,74 @@ CREATE INDEX IF NOT EXISTS idx_firm_entitlement_kind
   ON firm_entitlement_overrides (firm_id, override_kind);
 
 -- RLS
+--
+-- G10 WRITE-AUTHORITY MATRIX (P0 SECURITY — operation-specific policies):
+--   platform_features:  Firm app_user = SELECT only.  Founder/platform system = write.
+--   plan_entitlements:  Firm app_user = SELECT only.  Founder/platform system = write.
+--   firm_entitlement_overrides: Firm = read own effective config; Founder = create/
+--                       update/end overrides.  Firm user MUST NOT self-alter.
+--   subscription_history: Firm = SELECT own history; Platform/system = INSERT only.
+--                       UPDATE/DELETE forbidden (immutable history).
+--   billing_ledger:   Firm = SELECT own ledger; Platform billing/system service =
+--                     INSERT only.  UPDATE/DELETE blocked by append-only trigger.
+--   usage_counters:   Firm = SELECT own usage; Metering/service path = write.
+--
+-- Each table receives SEPARATE per-operation policies instead of a blanket
+-- FOR ALL TO PUBLIC.  This prevents a RLS-wide blanket from being used to
+-- e.g. INSERT platform billing rows as a generic firm app_user.
+--
+-- Shared firm-match predicate:
+--   (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
+-- Founder bypass (platform owner / privileged service connection):
+--   current_setting('app.is_founder',true) = 'true'
+-- ---------------------------------------------------------------------------
+
 ALTER TABLE firm_entitlement_overrides ENABLE ROW LEVEL SECURITY;
 
--- REQUIRED security DDL.  FORCE ROW LEVEL SECURITY is idempotent in
--- modern Postgres; there is never a reason to swallow this failure.
 ALTER TABLE firm_entitlement_overrides FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation ON firm_entitlement_overrides;
-CREATE POLICY tenant_isolation ON firm_entitlement_overrides FOR ALL TO PUBLIC
+DROP POLICY IF EXISTS firm_entitlement_overrides_select ON firm_entitlement_overrides;
+DROP POLICY IF EXISTS firm_entitlement_overrides_insert ON firm_entitlement_overrides;
+DROP POLICY IF EXISTS firm_entitlement_overrides_update ON firm_entitlement_overrides;
+DROP POLICY IF EXISTS firm_entitlement_overrides_delete ON firm_entitlement_overrides;
+
+-- SELECT: Firm may read own effective config; Founder may read cross-firm.
+CREATE POLICY firm_entitlement_overrides_select ON firm_entitlement_overrides
+  FOR SELECT TO PUBLIC
   USING (
-    (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
-    OR current_setting('app.is_founder',true) = 'true'
-  )
-  WITH CHECK (
     (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
     OR current_setting('app.is_founder',true) = 'true'
   );
 
--- ----------------------------------------------------------------------
+-- INSERT / UPDATE: Founder / privileged platform service ONLY.
+-- A normal firm app_user MUST NOT be able to self-alter its own plan/feature
+-- availability unless an explicit self-service path is designed later.
+CREATE POLICY firm_entitlement_overrides_insert ON firm_entitlement_overrides
+  FOR INSERT TO PUBLIC
+  WITH CHECK (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+CREATE POLICY firm_entitlement_overrides_update ON firm_entitlement_overrides
+  FOR UPDATE TO PUBLIC
+  USING (
+    current_setting('app.is_founder',true) = 'true'
+  )
+  WITH CHECK (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+-- DELETE: Founder / platform service ONLY (rare, for emergency cleanup).
+CREATE POLICY firm_entitlement_overrides_delete ON firm_entitlement_overrides
+  FOR DELETE TO PUBLIC
+  USING (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+-- ---------------------------------------------------------------------------
 -- 5. subscription_history — immutable log of subscription changes
--- ----------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS subscription_history (
   id              serial PRIMARY KEY,
@@ -328,19 +376,41 @@ ALTER TABLE subscription_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE subscription_history FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation ON subscription_history;
-CREATE POLICY tenant_isolation ON subscription_history FOR ALL TO PUBLIC
+DROP POLICY IF EXISTS subscription_history_select ON subscription_history;
+DROP POLICY IF EXISTS subscription_history_insert ON subscription_history;
+DROP POLICY IF EXISTS subscription_history_update ON subscription_history;
+DROP POLICY IF EXISTS subscription_history_delete ON subscription_history;
+
+-- SELECT: Firm may read own history (if UI displays it); Founder cross-firm.
+CREATE POLICY subscription_history_select ON subscription_history
+  FOR SELECT TO PUBLIC
   USING (
-    (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
-    OR current_setting('app.is_founder',true) = 'true'
-  )
-  WITH CHECK (
     (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
     OR current_setting('app.is_founder',true) = 'true'
   );
 
--- ----------------------------------------------------------------------
+-- INSERT: Platform/system service ONLY.  Immutable log.
+CREATE POLICY subscription_history_insert ON subscription_history
+  FOR INSERT TO PUBLIC
+  WITH CHECK (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+-- UPDATE / DELETE: EXPLICITLY FORBIDDEN for everybody.
+-- (Postgres requires a policy to exist in order for RLS to deny; we use a
+--  contradictory WHERE to guarantee zero rows pass.)
+CREATE POLICY subscription_history_update ON subscription_history
+  FOR UPDATE TO PUBLIC
+  USING (false)
+  WITH CHECK (false);
+
+CREATE POLICY subscription_history_delete ON subscription_history
+  FOR DELETE TO PUBLIC
+  USING (false);
+
+-- ---------------------------------------------------------------------------
 -- 6. billing_ledger — APPEND-ONLY platform billing ledger per firm
--- ----------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS billing_ledger (
   id                     bigserial PRIMARY KEY,
@@ -404,15 +474,40 @@ ALTER TABLE billing_ledger ENABLE ROW LEVEL SECURITY;
 ALTER TABLE billing_ledger FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation ON billing_ledger;
-CREATE POLICY tenant_isolation ON billing_ledger FOR ALL TO PUBLIC
+DROP POLICY IF EXISTS billing_ledger_select ON billing_ledger;
+DROP POLICY IF EXISTS billing_ledger_insert ON billing_ledger;
+DROP POLICY IF EXISTS billing_ledger_update ON billing_ledger;
+DROP POLICY IF EXISTS billing_ledger_delete ON billing_ledger;
+
+-- SELECT: Firm read own ledger; Founder cross-firm.
+CREATE POLICY billing_ledger_select ON billing_ledger
+  FOR SELECT TO PUBLIC
   USING (
     (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
     OR current_setting('app.is_founder',true) = 'true'
-  )
-  WITH CHECK (
-    (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
-    OR current_setting('app.is_founder',true) = 'true'
   );
+
+-- INSERT: Platform billing/system service ONLY.
+-- Generic firm app_user MUST NOT arbitrarily INSERT platform billing entries;
+-- ledger entries flow through the metering / monthly-charge / reversal
+-- service endpoints running as founder/privileged service context.
+CREATE POLICY billing_ledger_insert ON billing_ledger
+  FOR INSERT TO PUBLIC
+  WITH CHECK (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+-- UPDATE / DELETE: EXPLICITLY FORBIDDEN for everyone.
+-- (Append-only is also enforced by the billing_ledger_append_only trigger below;
+--  RLS denial here provides a second layer that also denies the owner.)
+CREATE POLICY billing_ledger_update ON billing_ledger
+  FOR UPDATE TO PUBLIC
+  USING (false)
+  WITH CHECK (false);
+
+CREATE POLICY billing_ledger_delete ON billing_ledger
+  FOR DELETE TO PUBLIC
+  USING (false);
 
 -- Guardrail: prevent UPDATE/DELETE on billing_ledger for non-superusers
 -- (We do not REVOKE from owner here; app-level code must treat append-only.)
@@ -434,11 +529,11 @@ BEGIN
   END IF;
 END $$;
 
--- ----------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 -- 7. usage_counters — unified usage source-of-truth per firm + feature
 --    Both Platform Admin and Firm read from this table.
 --    period_key format: YYYY-MM (monthly) or special 'all_time'
--- ----------------------------------------------------------------------
+-- ---------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS usage_counters (
   id           bigserial PRIMARY KEY,
@@ -463,44 +558,163 @@ ALTER TABLE usage_counters ENABLE ROW LEVEL SECURITY;
 ALTER TABLE usage_counters FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation ON usage_counters;
-CREATE POLICY tenant_isolation ON usage_counters FOR ALL TO PUBLIC
+DROP POLICY IF EXISTS usage_counters_select ON usage_counters;
+DROP POLICY IF EXISTS usage_counters_write ON usage_counters;
+DROP POLICY IF EXISTS usage_counters_delete ON usage_counters;
+
+-- SELECT: Firm read own usage; Founder cross-firm.
+CREATE POLICY usage_counters_select ON usage_counters
+  FOR SELECT TO PUBLIC
   USING (
-    (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
-    OR current_setting('app.is_founder',true) = 'true'
-  )
-  WITH CHECK (
     (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
     OR current_setting('app.is_founder',true) = 'true'
   );
 
--- RLS for plan_entitlements - cross-tenant read allowed via founder;
--- all authenticated can read (plan catalog needed for firm billing UI)
+-- INSERT / UPDATE: Actual metering/service path ONLY (founder context).
+-- No generic uncontrolled DELETE ever.
+CREATE POLICY usage_counters_write ON usage_counters
+  FOR INSERT TO PUBLIC
+  WITH CHECK (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+-- UPDATE: Metering service upsert path only.
+CREATE POLICY usage_counters_update ON usage_counters
+  FOR UPDATE TO PUBLIC
+  USING (
+    current_setting('app.is_founder',true) = 'true'
+  )
+  WITH CHECK (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+-- DELETE: Explicitly forbidden.  Meter increments are upserts; a counter is
+-- never deleted unless a founder emergency script runs outside RLS (superuser).
+CREATE POLICY usage_counters_delete ON usage_counters
+  FOR DELETE TO PUBLIC
+  USING (false);
+
+-- RLS for plan_entitlements — SELECT-only catalog policy retained (firm &
+-- founder both read); writes founder-only via separate INSERT/UPDATE/DELETE.
 ALTER TABLE plan_entitlements ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE plan_entitlements FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation ON plan_entitlements;
-CREATE POLICY tenant_isolation ON plan_entitlements FOR SELECT TO PUBLIC
+DROP POLICY IF EXISTS plan_entitlements_select ON plan_entitlements;
+DROP POLICY IF EXISTS plan_entitlements_write ON plan_entitlements;
+
+CREATE POLICY plan_entitlements_select ON plan_entitlements
+  FOR SELECT TO PUBLIC
   USING (true);
 
--- RLS for platform_features - all authenticated can read (catalog)
+CREATE POLICY plan_entitlements_insert ON plan_entitlements
+  FOR INSERT TO PUBLIC
+  WITH CHECK (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+CREATE POLICY plan_entitlements_update ON plan_entitlements
+  FOR UPDATE TO PUBLIC
+  USING (
+    current_setting('app.is_founder',true) = 'true'
+  )
+  WITH CHECK (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+CREATE POLICY plan_entitlements_delete ON plan_entitlements
+  FOR DELETE TO PUBLIC
+  USING (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+-- RLS for platform_features — SELECT-only catalog retained; writes founder-only
 ALTER TABLE platform_features ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE platform_features FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS tenant_isolation ON platform_features;
-CREATE POLICY tenant_isolation ON platform_features FOR SELECT TO PUBLIC
+DROP POLICY IF EXISTS platform_features_select ON platform_features;
+
+CREATE POLICY platform_features_select ON platform_features
+  FOR SELECT TO PUBLIC
   USING (true);
 
--- ----------------------------------------------------------------------
+CREATE POLICY platform_features_insert ON platform_features
+  FOR INSERT TO PUBLIC
+  WITH CHECK (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+CREATE POLICY platform_features_update ON platform_features
+  FOR UPDATE TO PUBLIC
+  USING (
+    current_setting('app.is_founder',true) = 'true'
+  )
+  WITH CHECK (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+CREATE POLICY platform_features_delete ON platform_features
+  FOR DELETE TO PUBLIC
+  USING (
+    current_setting('app.is_founder',true) = 'true'
+  );
+
+-- ---------------------------------------------------------------------------
 -- 8. Runtime privileges for app_user
---    Baseline migration 0002_correct_rls_policies.sql already establishes
---    schema-wide app_user privileges (SELECT/INSERT/UPDATE/DELETE on all
---    tables, USAGE/SELECT on all sequences, plus ALTER DEFAULT PRIVILEGES
---    for objects created hereafter).  A feature migration MUST NOT
---    silently re-broaden app_user with "ON ALL TABLES IN SCHEMA public";
---    exact per-table GRANTs are ONLY needed when a future role boundary
---    requires LESS than the baseline.
--- ----------------------------------------------------------------------
+--
+-- MODEL A — DETERMINISTIC EXPLICIT PER-TABLE GRANTS (G11):
+--   We rely on EXACT per-table GRANTs in this migration rather than on the
+--   0002 ALTER DEFAULT PRIVILEGES alone.  Default ACLs are role/creator
+--   scoped; unless the exact role that ran ALTER DEFAULT also creates these
+--   tables the ACL is NOT inherited — so Model A is the only deterministic
+--   contract.
+--
+--   We NEVER use `GRANT ... ON ALL TABLES IN SCHEMA public`.
+--
+-- WRITE-AUTHORITY (from G10 matrix):
+--   platform_features        → app_user: SELECT (reads feature catalog only)
+--   plan_entitlements        → app_user: SELECT (reads plan catalog only)
+--   firm_entitlement_overrides → app_user: SELECT (own firm only; no writes)
+--   subscription_history     → app_user: SELECT (own firm; immutable)
+--   billing_ledger           → app_user: SELECT (own firm; inserts via
+--                                           service founder context only)
+--   usage_counters           → app_user: SELECT (own firm; metering path
+--                                           writes via service founder ctx)
+--
+--   Sequences used by these tables are needed by the founder-service write
+--   path; we grant USAGE, SELECT to both authenticator and app_user so the
+--   server connection pool can obtain nextval() when running in the
+--   privileged service context.  The authenticator role is the Supabase
+--   standard proxy role; keeping grants in sync avoids runtime permission
+--   denied errors on insert paths.
+-- ---------------------------------------------------------------------------
+
+GRANT USAGE ON SCHEMA public TO app_user;
+
+-- platform_features (catalog SELECT for firm UI)
+GRANT SELECT ON TABLE public.platform_features TO app_user;
+-- plan_entitlements (catalog SELECT for firm UI)
+GRANT SELECT ON TABLE public.plan_entitlements TO app_user;
+-- firm_entitlement_overrides (firm reads own effective overrides only)
+GRANT SELECT ON TABLE public.firm_entitlement_overrides TO app_user;
+-- subscription_history (firm reads own history only; immutable log)
+GRANT SELECT ON TABLE public.subscription_history TO app_user;
+-- billing_ledger (firm reads own ledger only)
+GRANT SELECT ON TABLE public.billing_ledger TO app_user;
+-- usage_counters (firm reads own usage only)
+GRANT SELECT ON TABLE public.usage_counters TO app_user;
+
+-- Sequences (read usage for service write path; shared grants)
+GRANT USAGE, SELECT ON SEQUENCE
+  public.platform_features_id_seq,
+  public.plan_entitlements_id_seq,
+  public.firm_entitlement_overrides_id_seq,
+  public.subscription_history_id_seq,
+  public.billing_ledger_id_seq,
+  public.usage_counters_id_seq
+  TO authenticator, app_user;
 
 COMMIT;
