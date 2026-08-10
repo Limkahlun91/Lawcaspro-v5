@@ -14,7 +14,7 @@ vi.mock("../lib/auth.js", () => {
     requireFirmUser: (req: any, _res: any, next: any) => {
       let i = 0;
       req.rlsDb = {
-        execute: async () => {
+        all: async (_: unknown) => {
           i += 1;
           if (i === 1) return { rows: [{ c: 5 }] };
           if (i === 2) return { rows: [{ c: 3 }] };
@@ -26,6 +26,9 @@ vi.mock("../lib/auth.js", () => {
       next();
     },
     requirePermission: () => (_req: any, _res: any, next: any) => next(),
+    requireManagementRoleForDashboard: (_req: any, _res: any, next: any) => next(),
+    hasCasesFirmwideScope: async () => true,
+    writeAuditLog: async () => {},
   };
 });
 

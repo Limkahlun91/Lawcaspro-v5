@@ -62,3 +62,6 @@ Thumbs.db
 .sandbox-appdata/
 .npm-cache/
 .env*.local
+
+# Generated inventories (never versioned)
+LAWCASEPRO_FEATURE_REGISTRY.md
