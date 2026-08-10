@@ -536,6 +536,10 @@ describe("P0 PAYMENT VOUCHER — REAL HTTP + POSTGRES INTEGRATION TESTS (A–L)"
     const pgAny = pg as any;
     const proto = Object.getPrototypeOf(pgAny);
 
+    // Ratelimited diag counter — prevents OOM / runaway output
+    let _diagCount = 0;
+    const MAX_DIAG = 30;
+
     // -------- helper: apply scenario injections based on SQL head text (declared first to avoid TDZ) --------
     const applyTestScenarioInjections = (head: string): void => {
       if (pvHarnessControls.forceVoucherInsertAfterReservation) {
@@ -554,7 +558,9 @@ describe("P0 PAYMENT VOUCHER — REAL HTTP + POSTGRES INTEGRATION TESTS (A–L)"
         if (isSelAccounting) {
           const info = pvHarnessControls.forceAccountingSettingsTimeout;
           const e: any = new Error(info.message);
-          e.code = info.code;
+          e.code = info.code ?? "57014";
+          e.sqlstate = info.sqlstate ?? e.code;
+          e.sqlState = e.sqlstate;
           throw e;
         }
       }
@@ -570,7 +576,7 @@ describe("P0 PAYMENT VOUCHER — REAL HTTP + POSTGRES INTEGRATION TESTS (A–L)"
             const info = pvHarnessControls.forceTrackingUpdateError;
             const e: any = new Error(info.message);
             e.code = info.code;
-            if (info.sqlstate) e.sqlstate = info.sqlstate;
+            if (info.sqlstate) { e.sqlstate = info.sqlstate; e.sqlState = info.sqlstate; }
             throw e;
           }
         }
@@ -616,13 +622,15 @@ describe("P0 PAYMENT VOUCHER — REAL HTTP + POSTGRES INTEGRATION TESTS (A–L)"
           const head = headPieces.join(" ");
 
           if (
+            _diagCount < MAX_DIAG &&
             (pvHarnessControls.forceVoucherInsertAfterReservation ||
             pvHarnessControls.forceAccountingSettingsTimeout ||
             pvHarnessControls.forceTrackingUpdateError) &&
             head.trim().length > 0 &&
-            /SELECT|INSERT|UPDATE|DELETE|FROM|INTO/i.test(head)
+            /SELECT|INSERT|UPDATE|DELETE|FROM|INTO|SET\s/i.test(head)
           ) {
-            console.log("[DRIVER HEAD] SQL:", head.slice(0, 500));
+            _diagCount++;
+            console.log(`[DRIVER HEAD #${_diagCount}]`, head.slice(0, 500));
           }
 
           const isHighLevel = (typeof k === "string") && /^(sql|query|exec)$/.test(k);
