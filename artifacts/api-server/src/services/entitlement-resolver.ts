@@ -6,8 +6,12 @@
  *   2. Emergency kill switch (global override)
  *   3. Firm subscription status policy (suspended/past_due → denials)
  *   4. Base plan entitlement (plan_entitlements)
- *   5. Firm permanent entitlement override (firm_entitlement_overrides, expires_at NULL or future)
- *   6. Temporary override (within effective_from / expires_at)
+ *   5. Firm permanent entitlement override (firm_entitlement_overrides, override_kind='permanent')
+ *   6. ACTIVE Temporary override (within effective_from / expires_at)
+ *      — ACTIVE temporary SUPERSEDES permanent during its window
+ *        (temporary overrides exist specifically to temporarily change the
+ *        permanent/per-plan value without destroying the stored permanent
+ *        configuration; after expiry falls back transparently to permanent / plan)
  *   7. Parent feature check (chain up to root; if parent DENY → child DENY)
  *   8. Dependency check (all dependencies enabled)
  *   9. Result
@@ -619,16 +623,20 @@ interface ResolveOneCtx {
   stack: string[];
 }
 
-function selectActiveOverride(
+export function selectActiveOverride(
   rows: OverrideRow[] | undefined,
 ): { override: OverrideRow; isTemporary: boolean } | undefined {
   if (!rows || rows.length === 0) return undefined;
   const now = Date.now();
-  // PRECEDENCE:
-  //   Layer 5 (permanent) wins unconditionally over Layer 6 (temporary)
-  //   because per spec: permanent override has higher resolver precedence.
-  // Temporary = override_kind='temporary' AND now ∈ [effectiveFrom, expiresAt)
+  // PRECEDENCE (CORRECT, per §2.1 P4):
+  //   Layer 6 (ACTIVE temporary) wins UNCONDITIONALLY over Layer 5 (permanent)
+  //   because temporary overrides exist specifically to TEMPORARILY SUPERSEDE
+  //   the normal permanent configuration. Example: plan=enabled → perm
+  //   override=enabled → ACTIVE temp override=disabled → effective disabled
+  //   during window; after expiry → falls back to permanent enabled.
+  //
   // Permanent = override_kind='permanent' (always active, no time check)
+  // Temporary = override_kind='temporary' AND now ∈ [effectiveFrom, expiresAt)
   let tempActive: OverrideRow | undefined;
   let permActive: OverrideRow | undefined;
   for (const r of rows) {
@@ -646,9 +654,9 @@ function selectActiveOverride(
       }
     }
   }
-  // Layer 5 (permanent) > Layer 6 (temporary) per resolver precedence order
-  if (permActive) return { override: permActive, isTemporary: false };
+  // Layer 6 (active temporary) > Layer 5 (permanent): temp wins when active
   if (tempActive) return { override: tempActive, isTemporary: true };
+  if (permActive) return { override: permActive, isTemporary: false };
   return undefined;
 }
 

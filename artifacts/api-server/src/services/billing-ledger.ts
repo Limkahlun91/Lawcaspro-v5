@@ -93,11 +93,27 @@ function toDateStringOrNull(v: string | Date | null | undefined): string | null 
   return String(v);
 }
 
+export const BILLING_LEDGER_FIRM_LOCK_NAMESPACE = 0x4C43424Cn; // "LCBL" ascii for LawCaseBillingLedger
+
 // Stable numeric hash for advisory lock key (firm_id -> bigint).
 // We use a simple 32-bit mix (Postgres advisory xact lock accepts bigint via pg_catalog.int8).
-function firmAdvisoryLockKey(firmId: number): bigint {
-  const FIRM_LOCK_NAMESPACE = 0x4C43424Cn; // "LCBL" ascii for LawCaseBillingLedger
+export function firmAdvisoryLockKey(firmId: number): bigint {
+  const FIRM_LOCK_NAMESPACE = BILLING_LEDGER_FIRM_LOCK_NAMESPACE;
   return FIRM_LOCK_NAMESPACE * 0x100000000n + BigInt(Math.abs(Math.floor(firmId)) & 0xffffffff);
+}
+
+/**
+ * Pure helper: deterministic idempotency key per firm + billing period month.
+ * Used by generateMonthlySubscriptionCharge() and tests to guarantee no
+ * double-bill of the same firm/month window.
+ *
+ * @param firmId Firm identifier (positive integer)
+ * @param year   4-digit calendar year (Gregorian)
+ * @param month0 0-indexed month (0 = Jan, 11 = Dec) — matches Date.getUTCMonth()
+ */
+export function buildMonthlySubscriptionIdempotencyKey(firmId: number, year: number, month0: number): string {
+  const mm = String(month0 + 1).padStart(2, "0");
+  return `SUB-MONTHLY-${firmId}-${year}${mm}`;
 }
 
 /**
@@ -313,7 +329,7 @@ export async function generateMonthlySubscriptionCharge(
   const yyyymm = `${periodStart.getUTCFullYear()}${String(periodStart.getUTCMonth() + 1).padStart(2, "0")}`;
   const description = `Subscription ${firm.planName ?? "plan"} — ${yyyymm.slice(0, 4)}-${yyyymm.slice(4)}`;
   // Deterministic idempotency key per firm + period → clicking "generate" twice never double-bills.
-  const idempotencyKey = `SUB-MONTHLY-${firmId}-${yyyymm}`;
+  const idempotencyKey = buildMonthlySubscriptionIdempotencyKey(firmId, periodStart.getUTCFullYear(), periodStart.getUTCMonth());
   const res = await appendLedgerEntry(
     {
       firmId,

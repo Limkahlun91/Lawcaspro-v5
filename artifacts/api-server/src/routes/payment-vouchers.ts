@@ -85,7 +85,12 @@ function parsePageLimit(
 
 const createSectionTimer = (req: AuthRequest, key: string) => {
   const start = Date.now();
+  let stopped = false;
   return () => {
+    if (stopped) {
+      return (req.timing?.sections?.[key] as number | undefined) ?? 0;
+    }
+    stopped = true;
     const ms = Math.max(0, Date.now() - start);
     if (req.timing?.sections) {
       req.timing.sections[key] = (req.timing.sections[key] ?? 0) + ms;
@@ -872,9 +877,9 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     const stopIdempotency = createSectionTimer(req, "pv.create.early_idempotency");
     emitPvCreateTiming(req, "idempotency_tracking_started");
     try {
-      await r.transaction(async (tx) => {
+      const inserted = await r.transaction(async (tx) => {
         await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_PRELOCK_TIMEOUT_MS}ms'`));
-        await tx
+        return await tx
           .insert(paymentVoucherCreateRequestsTable)
           .values({
             firmId: req.firmId!,
@@ -883,106 +888,151 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
             requestPayloadHash,
             status: "processing",
           })
-          .onConflictDoNothing();
+          .onConflictDoNothing()
+          .returning({ id: paymentVoucherCreateRequestsTable.id });
       });
-      emitPvCreateTiming(req, "idempotency_tracking_inserted");
+      const thisRequestJustReservedTheRow = inserted.length === 1;
+      emitPvCreateTiming(req, "idempotency_tracking_inserted", { reserved: thisRequestJustReservedTheRow });
 
-      const preExisting = await r
-        .select()
-        .from(paymentVoucherCreateRequestsTable)
-        .where(and(
-          eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
-          eq(paymentVoucherCreateRequestsTable.createdByUserId, req.userId!),
-          eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
-        ))
-        .limit(1);
-      const existingRequest = preExisting[0];
-      if (existingRequest && existingRequest.requestPayloadHash && requestPayloadHash && existingRequest.requestPayloadHash !== requestPayloadHash) {
-        res.status(409).json({ error: "clientRequestId already used for a different request", code: "CLIENT_REQUEST_ID_REUSED" });
-        stopIdempotency();
-        return;
-      }
-      if (existingRequest) {
-        if (existingRequest.status === "failed") {
-          const existingVoucher = await loadVoucherByClientRequest(r, req.firmId!, normalizedClientRequestId);
-          if (existingVoucher) {
-            idempotencyConflictResponse = { httpStatus: 200, body: existingVoucher };
-          } else {
-            const reclaimed = await r.transaction(async (tx) => {
-              await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = ${PV_CREATE_PRELOCK_TIMEOUT_MS}`));
-              return await tx
-                .update(paymentVoucherCreateRequestsTable)
-                .set({
-                  status: "processing",
-                  lastError: null,
-                  completedAt: null,
-                  updatedAt: now,
-                  requestPayloadHash,
-                })
-                .where(and(
-                  eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
-                  eq(paymentVoucherCreateRequestsTable.createdByUserId, req.userId!),
-                  eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
-                  eq(paymentVoucherCreateRequestsTable.status, "failed"),
-                ))
-                .returning({ id: paymentVoucherCreateRequestsTable.id });
-            });
-            if (!reclaimed[0]) {
-              idempotencyConflictResponse = { httpStatus: 202, body: { status: "processing", clientRequestId: normalizedClientRequestId } };
+      if (thisRequestJustReservedTheRow) {
+        idempotencyConflictResponse = null;
+      } else {
+        const preExisting = await r
+          .select()
+          .from(paymentVoucherCreateRequestsTable)
+          .where(and(
+            eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
+            eq(paymentVoucherCreateRequestsTable.createdByUserId, req.userId!),
+            eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
+          ))
+          .limit(1);
+        const existingRequest = preExisting[0];
+        if (!existingRequest) {
+          const byAnyUser = await r
+            .select()
+            .from(paymentVoucherCreateRequestsTable)
+            .where(and(
+              eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
+              eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
+            ))
+            .limit(1);
+          const crossUserRequest = byAnyUser[0];
+          if (!crossUserRequest) {
+            const existingVoucher = await loadVoucherByClientRequest(r, req.firmId!, normalizedClientRequestId);
+            if (existingVoucher) {
+              idempotencyConflictResponse = { httpStatus: 200, body: existingVoucher };
             }
-          }
-        } else {
-          const requestOwnerId = Number(existingRequest.createdByUserId ?? req.userId!);
-          if (existingRequest.status === "completed") {
+          } else if (crossUserRequest.requestPayloadHash && requestPayloadHash && crossUserRequest.requestPayloadHash !== requestPayloadHash) {
+            res.status(409).json({ error: "clientRequestId already used for a different request", code: "CLIENT_REQUEST_ID_REUSED" });
+            stopIdempotency();
+            return;
+          } else if (crossUserRequest.status === "completed") {
             const existingVoucher =
-              existingRequest.paymentVoucherId
+              crossUserRequest.paymentVoucherId
                 ? (await r
                   .select()
                   .from(paymentVouchersTable)
                   .where(and(
                     eq(paymentVouchersTable.firmId, req.firmId!),
-                    eq(paymentVouchersTable.id, Number(existingRequest.paymentVoucherId)),
+                    eq(paymentVouchersTable.id, Number(crossUserRequest.paymentVoucherId)),
                   ))
                   .limit(1))[0] ?? null
                 : await loadVoucherByClientRequest(r, req.firmId!, normalizedClientRequestId);
             if (existingVoucher) {
               idempotencyConflictResponse = { httpStatus: 200, body: existingVoucher };
-            }
-          }
-          if (!idempotencyConflictResponse) {
-            const fallbackVoucher = await loadVoucherByClientRequest(r, req.firmId!, normalizedClientRequestId);
-            if (fallbackVoucher) {
-              idempotencyConflictResponse = { httpStatus: 200, body: fallbackVoucher };
             } else {
-              const stale = isPaymentVoucherCreateRequestStale(existingRequest.updatedAt, now);
-              if (stale) {
-                const activeLockHeld = await isCreateRequestActivelyLocked(r, req.firmId!, requestOwnerId, normalizedClientRequestId);
-                if (!activeLockHeld) {
-                  const reclaimed = await r.transaction(async (tx) => {
-                    await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = ${PV_CREATE_PRELOCK_TIMEOUT_MS}`));
-                    return await tx
-                      .update(paymentVoucherCreateRequestsTable)
-                      .set({
-                        updatedAt: now,
-                        lastError: null,
-                      })
-                      .where(and(
-                        eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
-                        eq(paymentVoucherCreateRequestsTable.createdByUserId, requestOwnerId),
-                        eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
-                        eq(paymentVoucherCreateRequestsTable.status, "processing"),
-                        eq(paymentVoucherCreateRequestsTable.updatedAt, existingRequest.updatedAt as any),
-                      ))
-                      .returning({ id: paymentVoucherCreateRequestsTable.id });
-                  });
-                  if (!reclaimed[0]) {
+              idempotencyConflictResponse = { httpStatus: 202, body: { status: "processing", clientRequestId: normalizedClientRequestId } };
+            }
+          } else {
+            idempotencyConflictResponse = { httpStatus: 202, body: { status: "processing", clientRequestId: normalizedClientRequestId } };
+          }
+        } else {
+          if (existingRequest.requestPayloadHash && requestPayloadHash && existingRequest.requestPayloadHash !== requestPayloadHash) {
+            res.status(409).json({ error: "clientRequestId already used for a different request", code: "CLIENT_REQUEST_ID_REUSED" });
+            stopIdempotency();
+            return;
+          }
+          if (existingRequest.status === "failed") {
+            const existingVoucher = await loadVoucherByClientRequest(r, req.firmId!, normalizedClientRequestId);
+            if (existingVoucher) {
+              idempotencyConflictResponse = { httpStatus: 200, body: existingVoucher };
+            } else {
+              const reclaimed = await r.transaction(async (tx) => {
+                await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_PRELOCK_TIMEOUT_MS}ms'`));
+                return await tx
+                  .update(paymentVoucherCreateRequestsTable)
+                  .set({
+                    status: "processing",
+                    lastError: null,
+                    completedAt: null,
+                    updatedAt: now,
+                    requestPayloadHash,
+                  })
+                  .where(and(
+                    eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
+                    eq(paymentVoucherCreateRequestsTable.createdByUserId, req.userId!),
+                    eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
+                    eq(paymentVoucherCreateRequestsTable.status, "failed"),
+                  ))
+                  .returning({ id: paymentVoucherCreateRequestsTable.id });
+              });
+              if (!reclaimed[0]) {
+                idempotencyConflictResponse = { httpStatus: 202, body: { status: "processing", clientRequestId: normalizedClientRequestId } };
+              }
+            }
+          } else {
+            const requestOwnerId = Number(existingRequest.createdByUserId ?? req.userId!);
+            if (existingRequest.status === "completed") {
+              const existingVoucher =
+                existingRequest.paymentVoucherId
+                  ? (await r
+                    .select()
+                    .from(paymentVouchersTable)
+                    .where(and(
+                      eq(paymentVouchersTable.firmId, req.firmId!),
+                      eq(paymentVouchersTable.id, Number(existingRequest.paymentVoucherId)),
+                    ))
+                    .limit(1))[0] ?? null
+                  : await loadVoucherByClientRequest(r, req.firmId!, normalizedClientRequestId);
+              if (existingVoucher) {
+                idempotencyConflictResponse = { httpStatus: 200, body: existingVoucher };
+              }
+            }
+            if (!idempotencyConflictResponse) {
+              const fallbackVoucher = await loadVoucherByClientRequest(r, req.firmId!, normalizedClientRequestId);
+              if (fallbackVoucher) {
+                idempotencyConflictResponse = { httpStatus: 200, body: fallbackVoucher };
+              } else {
+                const stale = isPaymentVoucherCreateRequestStale(existingRequest.updatedAt, now);
+                if (stale) {
+                  const activeLockHeld = await isCreateRequestActivelyLocked(r, req.firmId!, requestOwnerId, normalizedClientRequestId);
+                  if (!activeLockHeld) {
+                    const reclaimed = await r.transaction(async (tx) => {
+                      await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_PRELOCK_TIMEOUT_MS}ms'`));
+                      return await tx
+                        .update(paymentVoucherCreateRequestsTable)
+                        .set({
+                          updatedAt: now,
+                          lastError: null,
+                        })
+                        .where(and(
+                          eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
+                          eq(paymentVoucherCreateRequestsTable.createdByUserId, requestOwnerId),
+                          eq(paymentVoucherCreateRequestsTable.clientRequestId, normalizedClientRequestId),
+                          eq(paymentVoucherCreateRequestsTable.status, "processing"),
+                          eq(paymentVoucherCreateRequestsTable.updatedAt, existingRequest.updatedAt as any),
+                        ))
+                        .returning({ id: paymentVoucherCreateRequestsTable.id });
+                    });
+                    if (!reclaimed[0]) {
+                      idempotencyConflictResponse = { httpStatus: 202, body: { status: "processing", clientRequestId: normalizedClientRequestId } };
+                    }
+                  } else {
                     idempotencyConflictResponse = { httpStatus: 202, body: { status: "processing", clientRequestId: normalizedClientRequestId } };
                   }
                 } else {
                   idempotencyConflictResponse = { httpStatus: 202, body: { status: "processing", clientRequestId: normalizedClientRequestId } };
                 }
-              } else {
-                idempotencyConflictResponse = { httpStatus: 202, body: { status: "processing", clientRequestId: normalizedClientRequestId } };
               }
             }
           }
@@ -998,6 +1048,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
           idempotencyConflictResponse = { httpStatus: 202, body: { status: "processing", clientRequestId: normalizedClientRequestId } };
         }
       } else if (!isMissingSchemaError(err)) {
+        if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, `EARLY_IDEMPOTENCY:${String((err as any)?.message ?? err ?? "").slice(0, 300)}`);
+        emitPvCreateTiming(req, "failed", { code, message: String((err as any)?.message ?? "").slice(0, 120) });
         stopIdempotency();
         throw err;
       } else {
@@ -1043,6 +1095,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (err instanceof AccountingSettingsLoaderError && (
       err.code === "QUERY_TIMEOUT" || err.code === "LOCK_TIMEOUT"
     )) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, `ACCOUNTING_SETTINGS:${err.code}`);
+      emitPvCreateTiming(req, "failed", { code: err.code, message: String(err.message ?? "").slice(0, 120) });
       writeAccountingSettingsErrorResponse(res, err);
       stopSettings();
       return;
@@ -1057,6 +1111,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     requiresPartnerApproval: Boolean(approvalDecision.requiresPartnerApproval),
   });
   stopSettings();
+  emitPvCreateTiming(req, "accounting_settings_loaded");
 
   const stopCaseCheck = createSectionTimer(req, "pv.create.case_check");
   const caseIdValue = typeof caseId === "number" && Number.isFinite(caseId) ? Number(caseId) : null;
