@@ -29,7 +29,7 @@ import {
   GetCaseNotesParams, CreateCaseNoteParams, CreateCaseNoteBody
 } from "@workspace/api-zod";
 import { z } from "zod/v4";
-import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest, hasCasesFirmwideScope } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest, hasCasesFirmwideScope, canAccessCase } from "../lib/auth.js";
 import { buildWorkflowSteps } from "../lib/workflow.js";
 import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type KeyDateField } from "../lib/keyDatesWorkflow.js";
 import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresenceWhereSql, normalizeMilestoneFilter, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic.js";
@@ -8959,7 +8959,13 @@ router.post(
       .where(and(eq(rolesTable.id, req.roleId!), eq(rolesTable.firmId, req.firmId!)))
       .limit(1);
     const roleName = String(roleRow?.name ?? "");
-    const canBypassCaseAssignment = await hasCasesFirmwideScope(r, firmId, req.roleId ?? undefined, roleName);
+    const [rolePermissions] = await r
+      .select({ module: permissionsTable.module, action: permissionsTable.action })
+      .from(permissionsTable)
+      .where(and(eq(permissionsTable.roleId, req.roleId!), eq(permissionsTable.allowed, true)));
+    const perms: Array<{ module: string; action: string }> = (Array.isArray((rolePermissions as unknown))
+      ? (rolePermissions as unknown as Array<{ module: string; action: string }>)
+      : [rolePermissions as unknown as { module: string; action: string }].filter(Boolean)) as Array<{ module: string; action: string }>;
 
     const body = asObject(req.body);
     const rawCaseIds = Array.isArray(body?.caseIds) ? body!.caseIds : [];
@@ -9033,20 +9039,29 @@ router.post(
         authFailures.push({ caseId: id, error: "Case not found in this firm", code: "CASE_NOT_FOUND_OR_UNAUTHORIZED" });
         continue;
       }
-      if (!canBypassCaseAssignment) {
-        const [assignmentRow] = await r
-          .select({ count: count() })
-          .from(caseAssignmentsTable)
-          .where(and(
-            eq(caseAssignmentsTable.caseId, id),
-            eq(caseAssignmentsTable.userId, userId),
-            sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
-          ));
-        const hasAssignment = Number(assignmentRow?.count ?? 0) > 0;
-        if (!hasAssignment) {
-          authFailures.push({ caseId: id, error: "Not authorized for this case", code: "CASE_NOT_AUTHORIZED" });
-          continue;
-        }
+      // Centralized access decision: ONE engine via canAccessCase(...)
+      const access = await canAccessCase({
+        r: r as any,
+        firmId,
+        userId,
+        roleId: req.roleId,
+        roleName,
+        rolePermissions: perms,
+        caseId: id,
+        caseAlreadyLoaded: { id: c.id, firmId: c.firmId },
+        checkRoleInCase: ["lawyer", "clerk", "supporting_docs_viewer", "supporting_docs_editor", "responsible_lawyer", "witness", "client_party"],
+      });
+      if (access.ok === false) {
+        authFailures.push({
+          caseId: id,
+          error: access.code === "CROSS_FIRM"
+            ? "Cross-firm case ID rejected"
+            : access.code === "NOT_ASSIGNED"
+              ? "Not authorized for this case"
+              : "Case not found or unauthorized",
+          code: access.code === "CROSS_FIRM" ? "CROSS_FIRM" : "CASE_NOT_AUTHORIZED",
+        });
+        continue;
       }
       authorized.push(c);
     }
