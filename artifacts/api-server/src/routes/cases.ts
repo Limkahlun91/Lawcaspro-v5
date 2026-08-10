@@ -9040,6 +9040,9 @@ router.post(
         continue;
       }
       // Centralized access decision: ONE engine via canAccessCase(...)
+      // batch_update purpose enforces mutation-grade access: lawyer / clerk /
+      // responsible_lawyer ONLY.  supporting_docs_viewer/editor, witness and
+      // client_party are intentionally excluded from batch mutations.
       const access = await canAccessCase({
         r: r as any,
         firmId,
@@ -9049,7 +9052,7 @@ router.post(
         rolePermissions: perms,
         caseId: id,
         caseAlreadyLoaded: { id: c.id, firmId: c.firmId },
-        checkRoleInCase: ["lawyer", "clerk", "supporting_docs_viewer", "supporting_docs_editor", "responsible_lawyer", "witness", "client_party"],
+        purpose: "batch_update",
       });
       if (access.ok === false) {
         authFailures.push({

@@ -1405,7 +1405,6 @@ async function ensureBaselinePermissions(
     SELECT ${roleId}, v.module, v.action, TRUE
     FROM (
       VALUES
-        ('dashboard','read'),
         ('cases','read'),('cases','create'),('cases','update'),
         ('case_reference','view'),
         ('projects','read'),('projects','create'),('projects','update'),
@@ -1654,7 +1653,7 @@ export function isRoleGroupManagement(roleName: unknown): boolean {
   return scope.canAccessFirmDashboard || scope.hasFirmwideCaseScope;
 }
 
-async function hasExplicitPermission(req: AuthRequest, moduleName: string, action: string): Promise<boolean> {
+async function _reqHasExplicitPermission(req: AuthRequest, moduleName: string, action: string): Promise<boolean> {
   if (!req.roleId || !req.firmId) return false;
   const r = req.rlsDb ?? db;
   let [perm] = await r
@@ -1696,9 +1695,9 @@ export async function requirePartnerOrAccountForInvoices(
     res.status(403).json({ error: "Forbidden" });
     return;
   }
-  const allowed = await hasExplicitPermission(req, "accounting", "write")
-    || await hasExplicitPermission(req, "accounting", "create")
-    || await hasExplicitPermission(req, "accounting", "edit");
+  const allowed = await _reqHasExplicitPermission(req, "accounting", "write")
+    || await _reqHasExplicitPermission(req, "accounting", "create")
+    || await _reqHasExplicitPermission(req, "accounting", "edit");
   if (!allowed) {
     await writeAuditLog({
       actorId: req.userId,
@@ -1820,6 +1819,15 @@ export async function hasCasesFirmwideScope(
   return fallbackScope.hasFirmwideCaseScope;
 }
 
+export function hasExplicitPermission(
+  permissions: ReadonlyArray<{ module: string; action: string }> | null | undefined,
+  module: string,
+  action: string,
+): boolean {
+  if (!permissions || permissions.length === 0) return false;
+  return permissions.some((p) => p.module === module && p.action === action);
+}
+
 export type CaseScopeSqlOpts = {
   casesTableAlias?: string;
   assignmentsAlias?: string;
@@ -1850,13 +1858,6 @@ export async function requireManagementRoleForDashboard(
   res: Response,
   next: NextFunction
 ): Promise<void> {
-  // Explicit dashboard:read permission (or exact management role name) wins;
-  // "Account Manager"/"HR Manager" substring matches intentionally excluded.
-  const permOk = await new Promise<boolean>((resolve) => {
-    const mw = requirePermission("dashboard", "read") as any;
-    mw(req, res, () => resolve(true));
-  });
-
   const rlsDb = req.rlsDb ?? db;
   let roleName: string | null = null;
   let permissions: ReadonlyArray<{ module: string; action: string }> | null = null;
@@ -1886,9 +1887,7 @@ export async function requireManagementRoleForDashboard(
   const scope = resolveFirmAccessScopeFromInputs({
     userType: req.userType ?? null,
     roleName,
-    permissions: permOk
-      ? [...(permissions ?? []), { module: "dashboard", action: "read" }]
-      : (permissions ?? []),
+    permissions: permissions ?? [],
   });
 
   if (!scope.canAccessFirmDashboard) {
@@ -1906,6 +1905,37 @@ export async function requireManagementRoleForDashboard(
   }
 
   next();
+}
+
+/**
+ * Canonical case-level access purpose.
+ *
+ * Never let route handlers pass raw `checkRoleInCase` arrays.  All callers
+ * declare a semantic purpose from this enum and the centralized engine
+ * below resolves which case-assignment roles are allowed for that purpose.
+ *
+ * Mutation-grade purposes intentionally exclude supporting_docs-only,
+ * witness and client_party assignments.
+ */
+export type CaseAccessPurpose =
+  | "view_case"
+  | "edit_case"
+  | "batch_update"
+  | "view_documents"
+  | "edit_documents"
+  | "print_documents";
+
+export const CANONICAL_CASE_ACCESS_ROLES: Readonly<Record<CaseAccessPurpose, ReadonlyArray<string>>> = {
+  view_case: ["lawyer", "clerk", "responsible_lawyer", "supporting_docs_viewer", "supporting_docs_editor", "witness", "client_party"],
+  edit_case: ["lawyer", "clerk", "responsible_lawyer"],
+  batch_update: ["lawyer", "clerk", "responsible_lawyer"],
+  view_documents: ["lawyer", "clerk", "responsible_lawyer", "supporting_docs_viewer", "supporting_docs_editor", "witness", "client_party"],
+  edit_documents: ["lawyer", "clerk", "responsible_lawyer", "supporting_docs_editor"],
+  print_documents: ["lawyer", "clerk", "responsible_lawyer", "supporting_docs_viewer", "supporting_docs_editor"],
+};
+
+export function getAllowedAssignmentRoles(purpose: CaseAccessPurpose): ReadonlyArray<string> {
+  return CANONICAL_CASE_ACCESS_ROLES[purpose] ?? [];
 }
 
 /**
@@ -1927,6 +1957,10 @@ export async function requireManagementRoleForDashboard(
  *   { ok: false, code: "NO_CONTEXT" | "CROSS_FIRM" | "NOT_FOUND" | "NOT_ASSIGNED" }
  *
  * NEVER duplicate these predicates in a route handler!
+ *
+ * caseAlreadyLoaded is PURELY an optimization.  This function ALWAYS
+ * validates firm ownership — either from the preloaded case or by querying
+ * the cases table itself.  Correctness never depends on caller preload.
  */
 export async function canAccessCase(args: {
   r: { select: any };
@@ -1937,7 +1971,7 @@ export async function canAccessCase(args: {
   rolePermissions?: ReadonlyArray<{ module: string; action: string }> | null;
   caseId: number;
   caseAlreadyLoaded?: { id: number; firmId: number } | null;
-  checkRoleInCase?: ReadonlyArray<string>;
+  purpose: CaseAccessPurpose;
 }): Promise<
   | { ok: true; reason: "firmwide" | "assigned" }
   | { ok: false; code: "NO_CONTEXT" | "CROSS_FIRM" | "NOT_FOUND" | "NOT_ASSIGNED" }
@@ -1946,29 +1980,26 @@ export async function canAccessCase(args: {
   const userId = args.userId;
   if (!firmId || !userId) return { ok: false, code: "NO_CONTEXT" };
 
-  const caseRow =
-    args.caseAlreadyLoaded && args.caseAlreadyLoaded.id === args.caseId
-      ? args.caseAlreadyLoaded
-      : (() => {
-          void args.r;
-          return null;
-        })() ??
-        (() => {
-          // (caller may optionally pass caseAlreadyLoaded to avoid re-query)
-          return null;
-        })();
-
-  if (!caseRow) {
-    // Fallback: do the cross-firm/404 check.  NOTE: rawCases filter in
-    // batch-update already guarantees same firm_id, but this is the single
-    // source of truth for cross-firm rejection (we also honor explicit
-    // caseAlreadyLoaded).  In practice, callers set caseAlreadyLoaded.
+  // ── Step 1: resolve case row (preload OR DB query) ────────────────────
+  //    Preload is honored only if case_id matches.  Otherwise we go to the
+  //    cases table — NEVER trust an absent preload to skip 404 / CROSS_FIRM.
+  let caseRow: { id: number; firmId: number } | null = null;
+  if (args.caseAlreadyLoaded && Number(args.caseAlreadyLoaded.id) === Number(args.caseId)) {
+    caseRow = args.caseAlreadyLoaded;
+  } else {
+    const rows = await args.r
+      .select({ id: casesTable.id, firmId: casesTable.firmId })
+      .from(casesTable)
+      .where(eq(casesTable.id, args.caseId))
+      .limit(1);
+    caseRow = rows?.[0] ?? null;
   }
-
-  if (caseRow && Number(caseRow.firmId) !== Number(firmId)) {
+  if (!caseRow) return { ok: false, code: "NOT_FOUND" };
+  if (Number(caseRow.firmId) !== Number(firmId)) {
     return { ok: false, code: "CROSS_FIRM" };
   }
 
+  // ── Step 2: firmwide permission override ──────────────────────────────
   const elevated = await hasCasesFirmwideScope(
     args.r,
     firmId,
@@ -1978,12 +2009,12 @@ export async function canAccessCase(args: {
   );
   if (elevated) return { ok: true, reason: "firmwide" };
 
-  const roleInCasePredicate = (() => {
-    if (args.checkRoleInCase && args.checkRoleInCase.length > 0) {
-      return inArray(caseAssignmentsTable.roleInCase, args.checkRoleInCase as unknown as string[]);
-    }
-    return sql`TRUE`;
-  })();
+  // ── Step 3: per-case assignment check using canonical purpose matrix ──
+  const allowedRoles = getAllowedAssignmentRoles(args.purpose);
+  const roleInCasePredicate =
+    allowedRoles.length > 0
+      ? inArray(caseAssignmentsTable.roleInCase, allowedRoles as unknown as string[])
+      : sql`FALSE`;
 
   const [assigned] = await args.r
     .select({ id: caseAssignmentsTable.id })
@@ -2013,6 +2044,7 @@ export async function enforceCaseAccessGeneric(
   req: AuthRequest,
   res: Response,
   caseId: number,
+  opts: { purpose?: CaseAccessPurpose } = {},
 ): Promise<boolean> {
   const firmId = req.firmId;
   if (!firmId || !req.userId) {
@@ -2056,6 +2088,7 @@ export async function enforceCaseAccessGeneric(
     }
   }
 
+  const purpose = opts.purpose ?? "view_case";
   const result = await canAccessCase({
     r: r as any,
     firmId,
@@ -2065,7 +2098,7 @@ export async function enforceCaseAccessGeneric(
     rolePermissions: permissions ?? [],
     caseId,
     caseAlreadyLoaded: caseRow,
-    checkRoleInCase: ["lawyer", "clerk"],
+    purpose,
   });
   if (result.ok) return true;
 
@@ -2077,7 +2110,7 @@ export async function enforceCaseAccessGeneric(
       action: "auth.forbidden.case_access_denied",
       entityType: "case",
       entityId: caseId,
-      detail: `code=${result.code}`,
+      detail: `code=${result.code} purpose=${purpose}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
     }, { db: req.rlsDb });

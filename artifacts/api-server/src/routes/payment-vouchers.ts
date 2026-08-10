@@ -547,7 +547,7 @@ async function tryAcquireCreateRequestTxnLock(tx: DbTxConn, firmId: number, crea
   const key = buildCreateRequestLockKey(firmId, createdByUserId, clientRequestId);
   const rows = await (tx as any).select({
     locked: sql<boolean>`pg_try_advisory_xact_lock(hashtext(${key}), hashtext(${key}))`,
-  });
+  }).from(sql`(select 1) as __dual__`);
   return Boolean(rows?.[0]?.locked);
 }
 
@@ -556,7 +556,7 @@ async function isCreateRequestActivelyLocked(r: DbConn, firmId: number, createdB
   return await r.transaction(async (tx) => {
     const rows = await (tx as any).select({
       locked: sql<boolean>`pg_try_advisory_xact_lock(hashtext(${key}), hashtext(${key}))`,
-    });
+    }).from(sql`(select 1) as __dual__`);
     return !Boolean(rows?.[0]?.locked);
   });
 }
