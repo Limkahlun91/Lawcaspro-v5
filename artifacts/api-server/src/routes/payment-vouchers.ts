@@ -1,6 +1,6 @@
 import express, { type NextFunction, type Response, type Router as ExpressRouter } from "express";
 import crypto from "crypto";
-import { eq, and, desc, asc, inArray, ne, isNull, count } from "drizzle-orm";
+import { eq, and, desc, asc, inArray, ne, isNull, count, or } from "drizzle-orm";
 import {
   accountingSettingsTable,
   auditLogsTable,
@@ -97,6 +97,79 @@ const createSectionTimer = (req: AuthRequest, key: string) => {
 const PV_CREATE_PRELOCK_TIMEOUT_MS = 2_000;
 const PV_CREATE_TX_LOCK_TIMEOUT_MS = 5_000;
 const PV_CREATE_TX_STATEMENT_TIMEOUT_MS = 45_000;
+
+type PvCreateTimingStage =
+  | "request_received"
+  | "payload_validated"
+  | "auth_resolved"
+  | "permission_checked"
+  | "accounting_settings_loaded"
+  | "idempotency_tracking_started"
+  | "idempotency_tracking_inserted"
+  | "case_and_reference_loaded"
+  | "preflight_validation_passed"
+  | "transaction_started"
+  | "voucher_inserted"
+  | "items_inserted"
+  | "audit_written"
+  | "tracking_completed"
+  | "response_sent"
+  | "failed";
+
+function emitPvCreateTiming(
+  req: AuthRequest,
+  stage: PvCreateTimingStage,
+  meta: Record<string, unknown> = {},
+) {
+  const now = Date.now();
+  const startedAt = (req as { pvCreateStartedAt?: number }).pvCreateStartedAt ?? now;
+  const elapsedMs = Math.max(0, now - startedAt);
+  const lastEmit = (req as { pvCreateLastEmitAt?: number }).pvCreateLastEmitAt ?? startedAt;
+  const stageMs = Math.max(0, now - lastEmit);
+  (req as { pvCreateLastEmitAt?: number }).pvCreateLastEmitAt = now;
+  if (req.timing?.sections) {
+    req.timing.sections[`pv.stage.${stage}`] = (req.timing.sections[`pv.stage.${stage}`] ?? 0) + stageMs;
+  }
+  const event = {
+    clientRequestId: (req as { pvClientRequestId?: string }).pvClientRequestId ?? null,
+    firmId: req.firmId ?? null,
+    userId: req.userId ?? null,
+    stage,
+    elapsedMs,
+    stageMs,
+    ...meta,
+  };
+  if (elapsedMs >= 2000 || stage === "failed") {
+    logger.info(event, "payment_voucher.create_timing");
+  }
+}
+
+async function updatePvTrackingFailed(
+  r: DbConn,
+  firmId: number,
+  userId: number,
+  clientRequestId: string,
+  error: string,
+): Promise<void> {
+  try {
+    await r.transaction(async (tx) => {
+      await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_PRELOCK_TIMEOUT_MS}ms'`));
+      await tx
+        .update(paymentVoucherCreateRequestsTable)
+        .set({
+          status: "failed",
+          lastError: String(error ?? "").slice(0, 500),
+          updatedAt: new Date(),
+        })
+        .where(and(
+          eq(paymentVoucherCreateRequestsTable.firmId, firmId),
+          eq(paymentVoucherCreateRequestsTable.createdByUserId, userId),
+          eq(paymentVoucherCreateRequestsTable.clientRequestId, clientRequestId),
+        ));
+    });
+  } catch {
+  }
+}
 
 async function getRoleName(req: AuthRequest): Promise<string> {
   return String((req as { roleName?: unknown }).roleName ?? "").trim();
@@ -686,12 +759,33 @@ router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requirePermiss
 // Create
 router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();
+  (req as { pvCreateStartedAt?: number }).pvCreateStartedAt = startedAt;
+  emitPvCreateTiming(req, "request_received");
   const stopParse = createSectionTimer(req, "pv.create.parse");
   const parsed = CreatePaymentVoucherBody.safeParse(req.body);
   stopParse();
-  if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
+  if (!parsed.success) {
+    emitPvCreateTiming(req, "failed", { code: "INVALID_PAYLOAD" });
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+
+  emitPvCreateTiming(req, "payload_validated");
+  const r = rdb(req);
+  const now = new Date();
+  const normalizedClientRequestId =
+    typeof parsed.data.clientRequestId === "string" && parsed.data.clientRequestId.trim()
+      ? parsed.data.clientRequestId.trim()
+      : null;
+  (req as { pvClientRequestId?: string }).pvClientRequestId = normalizedClientRequestId ?? undefined;
+  const requestPayloadHash = normalizedClientRequestId
+    ? hashCreatePayload({
+      ...parsed.data,
+      clientRequestId: undefined,
+    })
+    : null;
+
   const {
-    clientRequestId,
     caseId,
     voucherType,
     targetCaseId,
@@ -716,6 +810,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     quotationId: rawQuotationId,
     acknowledgedUnclaimedItems,
   } = parsed.data;
+
+  emitPvCreateTiming(req, "auth_resolved");
 
   const normalizedLineItems =
     Array.isArray(lineItems) && lineItems.length > 0
@@ -769,140 +865,28 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (bankAccountId === targetAccountId) { res.status(400).json({ error: "targetAccountId must be different from bankAccountId" }); return; }
   }
   stopPermissions();
-  const initialStatus =
-    (() => {
-      const isSimplified = !paymentMethod && !accountType && !bankAccountId;
-      if (isSimplified) return "pending_account";
-      if (canCreateAccountingRequest) return "pending_account";
-      return roleKind === "partner"
-        ? "pending_account"
-        : roleKind === "lawyer"
-          ? "pending_partner"
-          : "pending_lawyer";
-    })();
-
-  const effectiveIsAdvance = Boolean(isAdvance);
-  const effectiveFundStatus = effectiveIsAdvance ? "request_advance" : (fundStatus ?? "client_paid");
-  const stopSettings = createSectionTimer(req, "pv.create.settings");
-  let settings: AccountingSettingsRecord;
-  try {
-    const loaded = await safeLoadAccountingSettings({
-      firmId: req.firmId!,
-      db: rdb(req) as any,
-      accountingSettingsTable,
-      sql,
-      eq,
-    });
-    settings = loaded.rowExisted ? loaded.settings : getDefaultAccountingSettings(req.firmId!);
-  } catch (err) {
-    if (err instanceof AccountingSettingsLoaderError && (
-      err.code === "QUERY_TIMEOUT" || err.code === "LOCK_TIMEOUT"
-    )) {
-      writeAccountingSettingsErrorResponse(res, err);
-      stopSettings();
-      return;
-    }
-    settings = getDefaultAccountingSettings(req.firmId!);
-  }
-  const approvalDecision = resolveApprovalRequirement(effectiveAmount, voucherType, settings);
-  const approvalStatus = resolvePaymentVoucherApprovalStatus({
-    voucherType,
-    isAdvance: effectiveIsAdvance,
-    fundStatus: effectiveFundStatus,
-    requiresPartnerApproval: Boolean(approvalDecision.requiresPartnerApproval),
-  });
-  stopSettings();
-
-  const r = rdb(req);
-  const now = new Date();
-  const normalizedClientRequestId = typeof clientRequestId === "string" && clientRequestId.trim() ? clientRequestId.trim() : null;
-  const requestPayloadHash = normalizedClientRequestId
-    ? hashCreatePayload({
-      ...parsed.data,
-      clientRequestId: undefined,
-    })
-    : null;
-
-  const stopCaseCheck = createSectionTimer(req, "pv.create.case_check");
-  const caseIdValue = typeof caseId === "number" && Number.isFinite(caseId) ? Number(caseId) : null;
-  const targetCaseIdValue = typeof targetCaseId === "number" && Number.isFinite(targetCaseId) ? Number(targetCaseId) : null;
-  if (caseIdValue) {
-    const rows = await r
-      .select({ id: casesTable.id })
-      .from(casesTable)
-      .where(and(
-        eq(casesTable.firmId, req.firmId!),
-        eq(casesTable.id, caseIdValue),
-        isNull(casesTable.deletedAt),
-      ))
-      .limit(1);
-    if (!rows[0]) { res.status(404).json({ error: "Case not found" }); return; }
-  }
-  if (targetCaseIdValue) {
-    const rows = await r
-      .select({ id: casesTable.id })
-      .from(casesTable)
-      .where(and(
-        eq(casesTable.firmId, req.firmId!),
-        eq(casesTable.id, targetCaseIdValue),
-        isNull(casesTable.deletedAt),
-      ))
-      .limit(1);
-    if (!rows[0]) { res.status(404).json({ error: "Target case not found" }); return; }
-  }
-
-  let responsibleLawyerId: number | null =
-    typeof rawResponsibleLawyerId === "number" && Number.isFinite(rawResponsibleLawyerId) && rawResponsibleLawyerId > 0
-      ? Number(rawResponsibleLawyerId)
-      : null;
-  let approvingPartnerId: number | null =
-    typeof rawApprovingPartnerId === "number" && Number.isFinite(rawApprovingPartnerId) && rawApprovingPartnerId > 0
-      ? Number(rawApprovingPartnerId)
-      : null;
-  let quotationId: number | null =
-    typeof rawQuotationId === "number" && Number.isFinite(rawQuotationId) && rawQuotationId > 0
-      ? Number(rawQuotationId)
-      : null;
-  let quotationClaimWarning: string | null = null;
-
-  if (!responsibleLawyerId && caseIdValue) {
-    const autoLawyerId = await loadResponsibleLawyerFromCase(r, req.firmId!, caseIdValue);
-    if (autoLawyerId) responsibleLawyerId = autoLawyerId;
-  }
-  if (responsibleLawyerId) {
-    const [u] = await r
-      .select({ id: usersTable.id })
-      .from(usersTable)
-      .where(and(eq(usersTable.firmId, req.firmId!), eq(usersTable.id, responsibleLawyerId), eq(usersTable.status, "active")))
-      .limit(1);
-    if (!u) { res.status(400).json({ error: "Responsible lawyer is invalid", code: "INVALID_RESPONSIBLE_LAWYER" }); return; }
-  }
-  if (approvingPartnerId) {
-    const [u] = await r
-      .select({ id: usersTable.id, roleId: usersTable.roleId })
-      .from(usersTable)
-      .where(and(eq(usersTable.firmId, req.firmId!), eq(usersTable.id, approvingPartnerId), eq(usersTable.status, "active")))
-      .limit(1);
-    if (!u) { res.status(400).json({ error: "Approving partner is invalid", code: "INVALID_APPROVING_PARTNER" }); return; }
-    if (u.roleId) {
-      const isPartner = await resolveIsPartnerBySettingsOrName(settings, Number(u.roleId), "");
-      if (!isPartner) {
-        res.status(400).json({ error: "Approving partner must have Partner role", code: "INVALID_APPROVING_PARTNER_ROLE" });
-        return;
-      }
-    }
-  }
-  if (quotationId) {
-    const qCheck = await validateQuotationAndBuildWarning(r, req.firmId!, caseIdValue, quotationId);
-    if (!qCheck.valid) { res.status(400).json({ error: qCheck.error ?? "Invalid quotation", code: "INVALID_QUOTATION" }); return; }
-    if (qCheck.warning) quotationClaimWarning = qCheck.warning;
-  }
-  stopCaseCheck();
+  emitPvCreateTiming(req, "permission_checked");
 
   let idempotencyConflictResponse: { httpStatus: number; body: any } | null = null;
   if (normalizedClientRequestId) {
-    const stopIdempotency = createSectionTimer(req, "pv.create.idempotency");
+    const stopIdempotency = createSectionTimer(req, "pv.create.early_idempotency");
+    emitPvCreateTiming(req, "idempotency_tracking_started");
     try {
+      await r.transaction(async (tx) => {
+        await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_PRELOCK_TIMEOUT_MS}ms'`));
+        await tx
+          .insert(paymentVoucherCreateRequestsTable)
+          .values({
+            firmId: req.firmId!,
+            createdByUserId: req.userId!,
+            clientRequestId: normalizedClientRequestId,
+            requestPayloadHash,
+            status: "processing",
+          })
+          .onConflictDoNothing();
+      });
+      emitPvCreateTiming(req, "idempotency_tracking_inserted");
+
       const preExisting = await r
         .select()
         .from(paymentVoucherCreateRequestsTable)
@@ -913,19 +897,19 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
         ))
         .limit(1);
       const existingRequest = preExisting[0];
+      if (existingRequest && existingRequest.requestPayloadHash && requestPayloadHash && existingRequest.requestPayloadHash !== requestPayloadHash) {
+        res.status(409).json({ error: "clientRequestId already used for a different request", code: "CLIENT_REQUEST_ID_REUSED" });
+        stopIdempotency();
+        return;
+      }
       if (existingRequest) {
-        if (existingRequest.requestPayloadHash && requestPayloadHash && existingRequest.requestPayloadHash !== requestPayloadHash) {
-          res.status(409).json({ error: "clientRequestId already used for a different request", code: "CLIENT_REQUEST_ID_REUSED" });
-          stopIdempotency();
-          return;
-        }
         if (existingRequest.status === "failed") {
           const existingVoucher = await loadVoucherByClientRequest(r, req.firmId!, normalizedClientRequestId);
           if (existingVoucher) {
             idempotencyConflictResponse = { httpStatus: 200, body: existingVoucher };
           } else {
             const reclaimed = await r.transaction(async (tx) => {
-              await tx.execute(sql.raw(`SET LOCAL lock_timeout = ${PV_CREATE_PRELOCK_TIMEOUT_MS}`));
+              await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = ${PV_CREATE_PRELOCK_TIMEOUT_MS}`));
               return await tx
                 .update(paymentVoucherCreateRequestsTable)
                 .set({
@@ -933,6 +917,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
                   lastError: null,
                   completedAt: null,
                   updatedAt: now,
+                  requestPayloadHash,
                 })
                 .where(and(
                   eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
@@ -974,7 +959,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
                 const activeLockHeld = await isCreateRequestActivelyLocked(r, req.firmId!, requestOwnerId, normalizedClientRequestId);
                 if (!activeLockHeld) {
                   const reclaimed = await r.transaction(async (tx) => {
-                    await tx.execute(sql.raw(`SET LOCAL lock_timeout = ${PV_CREATE_PRELOCK_TIMEOUT_MS}`));
+                    await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = ${PV_CREATE_PRELOCK_TIMEOUT_MS}`));
                     return await tx
                       .update(paymentVoucherCreateRequestsTable)
                       .set({
@@ -1029,6 +1014,155 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     }
   }
 
+  const initialStatus =
+    (() => {
+      const isSimplified = !paymentMethod && !accountType && !bankAccountId;
+      if (isSimplified) return "pending_account";
+      if (canCreateAccountingRequest) return "pending_account";
+      return roleKind === "partner"
+        ? "pending_account"
+        : roleKind === "lawyer"
+          ? "pending_partner"
+          : "pending_lawyer";
+    })();
+
+  const effectiveIsAdvance = Boolean(isAdvance);
+  const effectiveFundStatus = effectiveIsAdvance ? "request_advance" : (fundStatus ?? "client_paid");
+  const stopSettings = createSectionTimer(req, "pv.create.settings");
+  let settings: AccountingSettingsRecord;
+  try {
+    const loaded = await safeLoadAccountingSettings({
+      firmId: req.firmId!,
+      db: rdb(req) as any,
+      accountingSettingsTable,
+      sql,
+      eq,
+    });
+    settings = loaded.rowExisted ? loaded.settings : getDefaultAccountingSettings(req.firmId!);
+  } catch (err) {
+    if (err instanceof AccountingSettingsLoaderError && (
+      err.code === "QUERY_TIMEOUT" || err.code === "LOCK_TIMEOUT"
+    )) {
+      writeAccountingSettingsErrorResponse(res, err);
+      stopSettings();
+      return;
+    }
+    settings = getDefaultAccountingSettings(req.firmId!);
+  }
+  const approvalDecision = resolveApprovalRequirement(effectiveAmount, voucherType, settings);
+  const approvalStatus = resolvePaymentVoucherApprovalStatus({
+    voucherType,
+    isAdvance: effectiveIsAdvance,
+    fundStatus: effectiveFundStatus,
+    requiresPartnerApproval: Boolean(approvalDecision.requiresPartnerApproval),
+  });
+  stopSettings();
+
+  const stopCaseCheck = createSectionTimer(req, "pv.create.case_check");
+  const caseIdValue = typeof caseId === "number" && Number.isFinite(caseId) ? Number(caseId) : null;
+  const targetCaseIdValue = typeof targetCaseId === "number" && Number.isFinite(targetCaseId) ? Number(targetCaseId) : null;
+  if (caseIdValue) {
+    const rows = await r
+      .select({ id: casesTable.id })
+      .from(casesTable)
+      .where(and(
+        eq(casesTable.firmId, req.firmId!),
+        eq(casesTable.id, caseIdValue),
+        isNull(casesTable.deletedAt),
+      ))
+      .limit(1);
+    if (!rows[0]) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "CASE_NOT_FOUND");
+      emitPvCreateTiming(req, "failed", { code: "CASE_NOT_FOUND" });
+      res.status(404).json({ error: "Case not found" });
+      return;
+    }
+  }
+  if (targetCaseIdValue) {
+    const rows = await r
+      .select({ id: casesTable.id })
+      .from(casesTable)
+      .where(and(
+        eq(casesTable.firmId, req.firmId!),
+        eq(casesTable.id, targetCaseIdValue),
+        isNull(casesTable.deletedAt),
+      ))
+      .limit(1);
+    if (!rows[0]) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "TARGET_CASE_NOT_FOUND");
+      emitPvCreateTiming(req, "failed", { code: "TARGET_CASE_NOT_FOUND" });
+      res.status(404).json({ error: "Target case not found" });
+      return;
+    }
+  }
+
+  let responsibleLawyerId: number | null =
+    typeof rawResponsibleLawyerId === "number" && Number.isFinite(rawResponsibleLawyerId) && rawResponsibleLawyerId > 0
+      ? Number(rawResponsibleLawyerId)
+      : null;
+  let approvingPartnerId: number | null =
+    typeof rawApprovingPartnerId === "number" && Number.isFinite(rawApprovingPartnerId) && rawApprovingPartnerId > 0
+      ? Number(rawApprovingPartnerId)
+      : null;
+  let quotationId: number | null =
+    typeof rawQuotationId === "number" && Number.isFinite(rawQuotationId) && rawQuotationId > 0
+      ? Number(rawQuotationId)
+      : null;
+  let quotationClaimWarning: string | null = null;
+
+  if (!responsibleLawyerId && caseIdValue) {
+    const autoLawyerId = await loadResponsibleLawyerFromCase(r, req.firmId!, caseIdValue);
+    if (autoLawyerId) responsibleLawyerId = autoLawyerId;
+  }
+  if (responsibleLawyerId) {
+    const [u] = await r
+      .select({ id: usersTable.id })
+      .from(usersTable)
+      .where(and(eq(usersTable.firmId, req.firmId!), eq(usersTable.id, responsibleLawyerId), eq(usersTable.status, "active")))
+      .limit(1);
+    if (!u) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "INVALID_RESPONSIBLE_LAWYER");
+      emitPvCreateTiming(req, "failed", { code: "INVALID_RESPONSIBLE_LAWYER" });
+      res.status(400).json({ error: "Responsible lawyer is invalid", code: "INVALID_RESPONSIBLE_LAWYER" });
+      return;
+    }
+  }
+  if (approvingPartnerId) {
+    const [u] = await r
+      .select({ id: usersTable.id, roleId: usersTable.roleId })
+      .from(usersTable)
+      .where(and(eq(usersTable.firmId, req.firmId!), eq(usersTable.id, approvingPartnerId), eq(usersTable.status, "active")))
+      .limit(1);
+    if (!u) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "INVALID_APPROVING_PARTNER");
+      emitPvCreateTiming(req, "failed", { code: "INVALID_APPROVING_PARTNER" });
+      res.status(400).json({ error: "Approving partner is invalid", code: "INVALID_APPROVING_PARTNER" });
+      return;
+    }
+    if (u.roleId) {
+      const isPartner = await resolveIsPartnerBySettingsOrName(settings, Number(u.roleId), "");
+      if (!isPartner) {
+        if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "INVALID_APPROVING_PARTNER_ROLE");
+        emitPvCreateTiming(req, "failed", { code: "INVALID_APPROVING_PARTNER_ROLE" });
+        res.status(400).json({ error: "Approving partner must have Partner role", code: "INVALID_APPROVING_PARTNER_ROLE" });
+        return;
+      }
+    }
+  }
+  if (quotationId) {
+    const qCheck = await validateQuotationAndBuildWarning(r, req.firmId!, caseIdValue, quotationId);
+    if (!qCheck.valid) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, `INVALID_QUOTATION:${qCheck.error ?? ""}`);
+      emitPvCreateTiming(req, "failed", { code: "INVALID_QUOTATION" });
+      res.status(400).json({ error: qCheck.error ?? "Invalid quotation", code: "INVALID_QUOTATION" });
+      return;
+    }
+    if (qCheck.warning) quotationClaimWarning = qCheck.warning;
+  }
+  stopCaseCheck();
+  emitPvCreateTiming(req, "case_and_reference_loaded");
+  emitPvCreateTiming(req, "preflight_validation_passed");
+
   const voucherNo = generateVoucherNo(now);
   if (voucherType === "account_transfer") {
     const rows = await r
@@ -1036,13 +1170,23 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       .from(firmBankAccountsTable)
       .where(and(eq(firmBankAccountsTable.firmId, req.firmId!), eq(firmBankAccountsTable.id, bankAccountId!)))
       .limit(1);
-    if (!rows[0]) { res.status(404).json({ error: "Source bank account not found" }); return; }
+    if (!rows[0]) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "SOURCE_BANK_NOT_FOUND");
+      emitPvCreateTiming(req, "failed", { code: "SOURCE_BANK_NOT_FOUND" });
+      res.status(404).json({ error: "Source bank account not found" });
+      return;
+    }
     const rows2 = await r
       .select({ id: firmBankAccountsTable.id })
       .from(firmBankAccountsTable)
       .where(and(eq(firmBankAccountsTable.firmId, req.firmId!), eq(firmBankAccountsTable.id, targetAccountId!)))
       .limit(1);
-    if (!rows2[0]) { res.status(404).json({ error: "Target bank account not found" }); return; }
+    if (!rows2[0]) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "TARGET_BANK_NOT_FOUND");
+      emitPvCreateTiming(req, "failed", { code: "TARGET_BANK_NOT_FOUND" });
+      res.status(404).json({ error: "Target bank account not found" });
+      return;
+    }
   }
 
   const normalizedAccountType = accountType ? normalizeLedgerAccountType(accountType) : null;
@@ -1053,42 +1197,36 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   if (normalizedAccountType === "client") {
     const stopBalance = createSectionTimer(req, "pv.create.balance_check");
     const cid = caseId ? Number(caseId) : NaN;
-    if (!Number.isFinite(cid) || cid <= 0) { res.status(400).json({ error: "caseId is required when deducting from Client Account" }); return; }
+    if (!Number.isFinite(cid) || cid <= 0) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "CASE_REQUIRED_FOR_CLIENT_ACCOUNT");
+      emitPvCreateTiming(req, "failed", { code: "CASE_REQUIRED_FOR_CLIENT_ACCOUNT" });
+      res.status(400).json({ error: "caseId is required when deducting from Client Account" });
+      return;
+    }
     const [row] = await r.select({ bal: sql<string>`COALESCE(SUM(credit - debit), 0)` }).from(ledgerEntriesTable).where(and(
       eq(ledgerEntriesTable.firmId, req.firmId!),
       eq(ledgerEntriesTable.caseId, cid),
       sql`${ledgerEntriesTable.accountType} IN ('client','trust')`,
     )).limit(1);
     const bal = Number(row?.bal ?? 0);
-    if (bal + 1e-9 < effectiveAmount) { res.status(400).json({ error: "Insufficient Client Account Balance", code: "INSUFFICIENT_CLIENT_BALANCE" }); return; }
+    if (bal + 1e-9 < effectiveAmount) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "INSUFFICIENT_CLIENT_BALANCE");
+      emitPvCreateTiming(req, "failed", { code: "INSUFFICIENT_CLIENT_BALANCE", balance: bal, required: effectiveAmount });
+      res.status(400).json({ error: "Insufficient Client Account Balance", code: "INSUFFICIENT_CLIENT_BALANCE" });
+      return;
+    }
     stopBalance();
   }
 
   let pv: typeof paymentVouchersTable.$inferSelect;
   const stopTx = createSectionTimer(req, "pv.create.tx");
   try {
+    emitPvCreateTiming(req, "transaction_started");
     pv = await r.transaction(async (tx) => {
       await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_TX_LOCK_TIMEOUT_MS}ms'`));
       await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${PV_CREATE_TX_STATEMENT_TIMEOUT_MS}ms'`));
 
       if (normalizedClientRequestId) {
-        try {
-          await tx
-            .insert(paymentVoucherCreateRequestsTable)
-            .values({
-              firmId: req.firmId!,
-              createdByUserId: req.userId!,
-              clientRequestId: normalizedClientRequestId,
-              requestPayloadHash,
-              status: "processing",
-            })
-            .onConflictDoNothing();
-        } catch {
-          const locked = await tryAcquireCreateRequestTxnLock(tx, req.firmId!, req.userId!, normalizedClientRequestId);
-          if (!locked) {
-            throw Object.assign(new Error("Payment Voucher create request is already active"), { code: "CLIENT_REQUEST_IN_PROGRESS" });
-          }
-        }
         const locked = await tryAcquireCreateRequestTxnLock(tx, req.firmId!, req.userId!, normalizedClientRequestId);
         if (!locked) {
           throw Object.assign(new Error("Payment Voucher create request is already active"), { code: "CLIENT_REQUEST_IN_PROGRESS" });
@@ -1127,6 +1265,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
         preparedAt: now,
         createdBy: req.userId!,
       }).returning();
+      emitPvCreateTiming(req, "voucher_inserted", { voucherId: createdVoucher.id });
 
       await tx.insert(paymentVoucherItemsTable).values(effectiveItems.map((i, idx) => ({
         voucherId: createdVoucher.id,
@@ -1135,6 +1274,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
         amount: i.amount.toFixed(2),
         sortOrder: idx,
       })));
+      emitPvCreateTiming(req, "items_inserted", { itemCount: effectiveItems.length });
 
       await writePaymentVoucherCreateAuditEvents({
         writeAuditLog,
@@ -1149,6 +1289,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
       });
+      emitPvCreateTiming(req, "audit_written");
 
       if (normalizedClientRequestId) {
         await ensureExactlyOneCreateRequestCompleted({
@@ -1171,6 +1312,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
             return rows.length;
           },
         });
+        emitPvCreateTiming(req, "tracking_completed");
       }
 
       return createdVoucher;
@@ -1198,6 +1340,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       } catch {
       }
     }
+    emitPvCreateTiming(req, "failed", { code: String(err?.code ?? ""), message: String(err?.message ?? "").slice(0, 120) });
     if (String(err?.code ?? "") === "CLIENT_REQUEST_IN_PROGRESS" && normalizedClientRequestId) {
       res.status(202).json({ status: "processing", clientRequestId: normalizedClientRequestId });
       stopTx();
@@ -1222,6 +1365,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     stopTx();
   }
 
+  emitPvCreateTiming(req, "response_sent", { voucherId: pv.id });
   res.status(201).json(pv);
   const durationMs = Date.now() - startedAt;
   if (durationMs >= 2000) {
@@ -1296,28 +1440,27 @@ router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, 
     stopPermissions();
     const canViewOtherUsers = Boolean(canReadAccounting || canReviewAccounting || canApproveAccounting || roleKind === "partner");
     const stopRequestLoad = createSectionTimer(req, "pv.by_client_request.request_state");
-    const [ownRequestState] = await r
+
+    const requestStates = await r
       .select()
       .from(paymentVoucherCreateRequestsTable)
-      .where(and(
-        eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
-        eq(paymentVoucherCreateRequestsTable.createdByUserId, req.userId!),
-        eq(paymentVoucherCreateRequestsTable.clientRequestId, clientRequestId),
-      ))
-      .limit(1);
-
-    const [reviewerRequestState] = !ownRequestState && canViewOtherUsers
-      ? await r
-        .select()
-        .from(paymentVoucherCreateRequestsTable)
-        .where(and(
+      .where(canViewOtherUsers
+        ? and(
           eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
           eq(paymentVoucherCreateRequestsTable.clientRequestId, clientRequestId),
+        )
+        : and(
+          eq(paymentVoucherCreateRequestsTable.firmId, req.firmId!),
+          eq(paymentVoucherCreateRequestsTable.createdByUserId, req.userId!),
+          eq(paymentVoucherCreateRequestsTable.clientRequestId, clientRequestId),
         ))
-        .limit(1)
-      : [null];
+      .orderBy(desc(paymentVoucherCreateRequestsTable.createdAt))
+      .limit(2);
 
-    const requestState = ownRequestState ?? reviewerRequestState ?? null;
+    let requestState: typeof paymentVoucherCreateRequestsTable.$inferSelect | null = requestStates[0] ?? null;
+    if (requestState && !canViewOtherUsers && Number(requestState.createdByUserId) !== Number(req.userId)) {
+      requestState = null;
+    }
     stopRequestLoad();
     if (!requestState) {
       res.status(404).json({ error: "Not found" });
@@ -1331,29 +1474,23 @@ router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, 
     }
 
     const stopVoucherLookup = createSectionTimer(req, "pv.by_client_request.voucher_lookup");
-    const voucher = requestState.paymentVoucherId
-      ? (await r
-        .select({
-          id: paymentVouchersTable.id,
-          voucherNo: paymentVouchersTable.voucherNo,
-        })
-        .from(paymentVouchersTable)
-        .where(and(
-          eq(paymentVouchersTable.firmId, req.firmId!),
-          eq(paymentVouchersTable.id, Number(requestState.paymentVoucherId)),
-        ))
-        .limit(1))[0] ?? null
-      : (await r
-        .select({
-          id: paymentVouchersTable.id,
-          voucherNo: paymentVouchersTable.voucherNo,
-        })
-        .from(paymentVouchersTable)
-        .where(and(
-          eq(paymentVouchersTable.firmId, req.firmId!),
+    const pvIdRaw = requestState.paymentVoucherId;
+    const pvId = pvIdRaw != null ? Number(pvIdRaw) : null;
+    const voucherCandidates = await r
+      .select({
+        id: paymentVouchersTable.id,
+        voucherNo: paymentVouchersTable.voucherNo,
+      })
+      .from(paymentVouchersTable)
+      .where(and(
+        eq(paymentVouchersTable.firmId, req.firmId!),
+        or(
+          pvId ? eq(paymentVouchersTable.id, pvId) : sql`FALSE`,
           eq(paymentVouchersTable.clientRequestId, clientRequestId),
-        ))
-        .limit(1))[0] ?? null;
+        ),
+      ))
+      .limit(1);
+    const voucher = voucherCandidates[0] ?? null;
     stopVoucherLookup();
 
     const requestOwnerId = Number(requestState.createdByUserId ?? req.userId!);
