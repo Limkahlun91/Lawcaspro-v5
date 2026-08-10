@@ -4,7 +4,7 @@ import crypto from "crypto";
 import { and, eq } from "drizzle-orm";
 import { auditLogsTable, clearTenantContext, db, firmsTable, makeRlsDb, permissionsTable, pool, rolesTable, sessionsTable, setTenantContextSession, sql, usersTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
-import { ensureRolePermissionsInitialized, invalidateVerifiedSessionCacheByTokenHash, invalidateVerifiedSessionCacheByUserId, isRoleGroupManagement, loadFounderPermissions, lookupSessionAndUserByTokenHash, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ensureRolePermissionsInitialized, invalidateVerifiedSessionCacheByTokenHash, invalidateVerifiedSessionCacheByUserId, loadFounderPermissions, lookupSessionAndUserByTokenHash, requireAuth, requireReAuth, issueReauthToken, resolveFirmAccessScopeFromInputs, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { ApiError, sendError, sendOk } from "../lib/api-response.js";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { logger } from "../lib/logger.js";
@@ -928,12 +928,28 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
 
     const enrichmentDbSource =
       user.userType === "firm_user" && user.firmId ? "DATABASE_URL/app_user" : "DATABASE_URL";
+
+    const accessScope = resolveFirmAccessScopeFromInputs({
+      userType: user.userType,
+      roleName,
+      permissions,
+    });
     const roleGroup: string = (() => {
       if (user.userType === "founder") return "platform";
       if (user.userType === "developer_user" || roleName === "Developer_User") return "developer";
-      if (isRoleGroupManagement(roleName)) return "management";
+      if (accessScope.canAccessFirmDashboard || accessScope.hasFirmwideCaseScope) return "management";
       return "staff";
     })();
+
+    // Backend-verified login destination hint.  The backend is the
+    // authoritative guard; the frontend is not allowed to make substring
+    // authorization decisions (e.g. includes("manager") is forbidden).
+    const defaultRouteHint: string = (() => {
+      if (user.userType === "founder") return "/platform/dashboard";
+      if (user.userType === "developer_user" || roleName === "Developer_User") return "/developer/dashboard";
+      return accessScope.canAccessFirmDashboard ? "/app/dashboard" : "/app/workbench";
+    })();
+
     const payload = {
       id: user.id,
       userType: user.userType,
@@ -944,6 +960,8 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       roleGroup,
       firmName,
       permissions,
+      accessScope,
+      defaultRouteHint,
       founderPermissions: founder.permissions,
       founderRoleLevel: founder.highestLevel,
       email: user.email,

@@ -52,12 +52,15 @@ export default function Login() {
     if (isLoading) return;
     if (!user) return;
     if (hasNavigated) return;
-    const roleName = String((user as any)?.roleName ?? "");
-    const isManagement = (n: string) => (n || "").toLowerCase().includes("partner") || (n || "").toLowerCase().includes("manager");
     const nextPath = (() => {
+      const recordUser = user as unknown as Record<string, unknown>;
+      const hint = typeof recordUser.defaultRouteHint === "string" && recordUser.defaultRouteHint
+        ? recordUser.defaultRouteHint
+        : null;
       if (user.userType === "founder") return "/platform/dashboard";
-      if (roleName === "Developer_User") return "/developer/dashboard";
-      return isManagement(roleName) ? "/app/dashboard" : "/app/workbench";
+      if ((user as unknown as { roleName?: string | null }).roleName === "Developer_User") return "/developer/dashboard";
+      if (hint) return hint;
+      return "/app/workbench";
     })();
     setHasNavigated(true);
     setLocation(nextPath);
@@ -107,11 +110,15 @@ export default function Login() {
       setAuthUser(verified);
 
       const nextPath = (() => {
+        const raw = unwrapped as unknown as Record<string, unknown>;
+        const hint = typeof raw.defaultRouteHint === "string" && raw.defaultRouteHint
+          ? raw.defaultRouteHint
+          : null;
         if (verified.userType === "founder") return "/platform/dashboard";
-        const roleName = String((verified as any)?.roleName ?? "");
-        const isManagement = (n: string) => (n || "").toLowerCase().includes("partner") || (n || "").toLowerCase().includes("manager");
+        const roleName = String((verified as unknown as { roleName?: string | null }).roleName ?? "");
         if (roleName === "Developer_User") return "/developer/dashboard";
-        return isManagement(roleName) ? "/app/dashboard" : "/app/workbench";
+        if (hint) return hint;
+        return "/app/workbench";
       })();
       if (!hasNavigated) {
         setHasNavigated(true);

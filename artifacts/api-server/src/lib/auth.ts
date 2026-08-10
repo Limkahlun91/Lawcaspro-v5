@@ -12,6 +12,7 @@ export interface AuthRequest extends Request {
   userType?: string;
   firmId?: number | null;
   roleId?: number | null;
+  roleName?: string | null;
   developerId?: number | null;
   supportSessionId?: number | null;
   founderPermissions?: string[];
@@ -1490,9 +1491,167 @@ export async function requirePartner(
 
 const normalizeRoleNameForGuard = (v: unknown): string => (typeof v === "string" ? v.trim().toLowerCase() : "");
 
+/**
+ * Exact canonical role name list for firm-wide / management roles.
+ *
+ * WARNING: do NOT use substring "includes(\"manager\")" — any "* Manager"
+ * (Account Manager, HR Manager, Payroll Manager, Training Manager, …) must
+ * not automatically inherit management/firm-wide/dashboard/case-monitor
+ * authority.
+ *
+ * Accounting/HR roles remain siloed.  Firm management authority is granted
+ * via explicit permission seeds (dashboard:read, cases:assign_any, …) and/or
+ * via this exact allowlist of traditionally-partner-level role names.
+ *
+ * If a new role is created and should have management scope, add it here
+ * AND seed the corresponding permission rows — substring matching is NOT a
+ * valid authorization decision.
+ */
+const CANONICAL_MANAGEMENT_ROLE_NAMES: ReadonlyArray<string> = [
+  "partner",
+  "manager",               // "Firm Manager" / "Practice Manager" (single role name = "Manager")
+  "practice manager",
+  "firm manager",
+  "managing partner",
+  "senior partner",
+  "director",
+];
+
+function isExactManagementRoleName(roleName: unknown): boolean {
+  const n = normalizeRoleNameForGuard(roleName);
+  if (!n) return false;
+  return CANONICAL_MANAGEMENT_ROLE_NAMES.some((c) => c === n);
+}
+
+/**
+ * Granular canonical access classification.
+ *
+ * Every surface (dashboard, case search, batch, accounting, HR, supporting
+ * docs, print, file custody, reference search) must consult the same
+ * resolver — never reimplement with substring matching in routes or UI.
+ *
+ * Sources of truth, highest priority first:
+ *   1. explicit permissions table (module/action per role)
+ *   2. exact canonical role name (see CANONICAL_MANAGEMENT_ROLE_NAMES)
+ *   3. explicit role-level silo flags for accounting / HR
+ */
+export type FirmAccessScope = {
+  canAccessFirmDashboard: boolean;
+  hasFirmwideCaseScope: boolean;
+  isAccountingPrivileged: boolean;
+  isHrPrivileged: boolean;
+};
+
+const ACCOUNTING_PRIV_ACTIONS: ReadonlyArray<string> = [
+  "write", "create", "edit", "review", "approve",
+  "mark_received", "mark_paid", "cancel", "reopen", "export",
+  "view_audit", "manage_settings", "override_sla",
+];
+
+const HR_PRIV_ACTIONS: ReadonlyArray<string> = [
+  "manage", "approve", "write", "update",
+];
+
+const _hrRoleSubstrings: ReadonlyArray<[string, "manager" | "admin" | "employee" | null]> = [
+  ["hr manager", "manager"],
+  ["human resources manager", "manager"],
+  ["hr admin", "admin"],
+  ["hr administrator", "admin"],
+  ["human resources admin", "admin"],
+  ["human resources administrator", "admin"],
+  ["hr officer", "employee"],
+  ["hr executive", "employee"],
+  ["hr assistant", "employee"],
+  ["hr staff", "employee"],
+  ["human resources officer", "employee"],
+  ["human resources executive", "employee"],
+  ["human resources assistant", "employee"],
+  ["human resources staff", "employee"],
+  ["hrbp", "employee"],
+];
+
+function classifyHrRole(roleName: unknown): "manager" | "admin" | "employee" | null {
+  const n = normalizeRoleNameForGuard(roleName);
+  if (!n) return null;
+  for (const [prefix, kind] of _hrRoleSubstrings) {
+    if (n === prefix || n.startsWith(prefix + " ") || n.endsWith(" " + prefix) || n.includes(" " + prefix + " ")) {
+      return kind;
+    }
+  }
+  if (n === "hr" || n === "human resources") return "employee";
+  return null;
+}
+
+export function resolveFirmAccessScopeFromInputs(args: {
+  userType?: string | null;
+  roleName?: string | null;
+  permissions?: ReadonlyArray<{ module: string; action: string }>;
+}): FirmAccessScope {
+  const perms = args.permissions ?? [];
+  const hasPerm = (m: string, a: string): boolean =>
+    perms.some((p) => p.module === m && p.action === a);
+
+  const isFounder = args.userType === "founder";
+  const isDeveloper =
+    args.userType === "developer_user" ||
+    normalizeRoleNameForGuard(args.roleName) === "developer_user";
+
+  const dashboardPerm = hasPerm("dashboard", "read");
+  const caseAssignAnyPerm = hasPerm("cases", "assign_any");
+  const exactManagement = isExactManagementRoleName(args.roleName);
+
+  const accountingPerm =
+    hasPerm("accounting", "read") ||
+    ACCOUNTING_PRIV_ACTIONS.some((a) => hasPerm("accounting", a));
+  const hrRoleKind = classifyHrRole(args.roleName);
+  const hrPerm =
+    HR_PRIV_ACTIONS.some((a) => hasPerm("hr", a)) ||
+    hasPerm("hr", "read") ||
+    hrRoleKind === "manager" ||
+    hrRoleKind === "admin";
+
+  const canAccessFirmDashboard: boolean = (() => {
+    if (isFounder || isDeveloper) return true;
+    return dashboardPerm || exactManagement;
+  })();
+
+  const hasFirmwideCaseScope: boolean = (() => {
+    if (isFounder || isDeveloper) return true;
+    return caseAssignAnyPerm || exactManagement;
+  })();
+
+  const isAccountingPrivileged: boolean = (() => {
+    if (isFounder || isDeveloper) return true;
+    return accountingPerm;
+  })();
+
+  const isHrPrivileged: boolean = (() => {
+    if (isFounder || isDeveloper) return true;
+    return hrPerm;
+  })();
+
+  return {
+    canAccessFirmDashboard,
+    hasFirmwideCaseScope,
+    isAccountingPrivileged,
+    isHrPrivileged,
+  };
+}
+
+/**
+ * @deprecated Prefer resolveFirmAccessScopeFromInputs and consume granular
+ * scope booleans (canAccessFirmDashboard / hasFirmwideCaseScope / …).
+ *
+ * Kept temporarily for isRoleGroupManagement call sites during migration.
+ * Returns true only when the NEW classification says either dashboard OR
+ * case-firmwide scope is granted (the legacy "management" concept = union).
+ */
 export function isRoleGroupManagement(roleName: unknown): boolean {
-  const n = typeof roleName === "string" ? roleName.trim().toLowerCase() : "";
-  return n.includes("partner") || n.includes("manager");
+  const scope = resolveFirmAccessScopeFromInputs({
+    roleName: typeof roleName === "string" ? roleName : null,
+    permissions: [],
+  });
+  return scope.canAccessFirmDashboard || scope.hasFirmwideCaseScope;
 }
 
 async function hasExplicitPermission(req: AuthRequest, moduleName: string, action: string): Promise<boolean> {
@@ -1643,11 +1802,22 @@ export async function hasCasesFirmwideScope(
   firmId: number | undefined,
   roleId: number | undefined,
   roleName: string | null | undefined,
+  rolePermissions?: ReadonlyArray<{ module: string; action: string }> | null,
 ): Promise<boolean> {
-  if (!firmId || !roleId) return isRoleGroupManagement(roleName);
-  const perm = await hasRolePermissionFromDb(r as any, firmId, roleId, "cases", "assign_any");
-  if (perm) return true;
-  return isRoleGroupManagement(roleName);
+  const permissions = rolePermissions ?? null;
+  if (permissions && permissions.length > 0) {
+    const scope = resolveFirmAccessScopeFromInputs({ roleName: roleName ?? null, permissions });
+    if (scope.hasFirmwideCaseScope) return true;
+  }
+  if (firmId && roleId) {
+    const perm = await hasRolePermissionFromDb(r as any, firmId, roleId, "cases", "assign_any");
+    if (perm) return true;
+  }
+  const fallbackScope = resolveFirmAccessScopeFromInputs({
+    roleName: roleName ?? null,
+    permissions: permissions ?? [],
+  });
+  return fallbackScope.hasFirmwideCaseScope;
 }
 
 export type CaseScopeSqlOpts = {
@@ -1680,17 +1850,20 @@ export async function requireManagementRoleForDashboard(
   res: Response,
   next: NextFunction
 ): Promise<void> {
+  // Explicit dashboard:read permission (or exact management role name) wins;
+  // "Account Manager"/"HR Manager" substring matches intentionally excluded.
   const permOk = await new Promise<boolean>((resolve) => {
     const mw = requirePermission("dashboard", "read") as any;
     mw(req, res, () => resolve(true));
   });
-  if (!permOk) return;
 
   const rlsDb = req.rlsDb ?? db;
   let roleName: string | null = null;
-  const cached = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+  let permissions: ReadonlyArray<{ module: string; action: string }> | null = null;
+  const cached = (req as any)._roleCache as { firmId: number; roleId: number; name: string; permissions?: ReadonlyArray<{ module: string; action: string }> } | undefined;
   if (cached && cached.firmId === req.firmId && cached.roleId === req.roleId) {
     roleName = cached.name;
+    permissions = cached.permissions ?? null;
   } else if (req.firmId && req.roleId) {
     const [role] = await rlsDb
       .select({ name: rolesTable.name })
@@ -1698,12 +1871,27 @@ export async function requireManagementRoleForDashboard(
       .where(and(eq(rolesTable.id, req.roleId), eq(rolesTable.firmId, req.firmId)))
       .limit(1);
     roleName = role?.name ?? null;
+    permissions = (await rlsDb
+      .select({ module: permissionsTable.module, action: permissionsTable.action })
+      .from(permissionsTable)
+      .where(and(
+        eq(permissionsTable.roleId, req.roleId),
+        eq(permissionsTable.allowed, true),
+      ))) ?? [];
     if (roleName) {
-      (req as any)._roleCache = { firmId: req.firmId, roleId: req.roleId, name: roleName };
+      (req as any)._roleCache = { firmId: req.firmId, roleId: req.roleId, name: roleName, permissions };
     }
   }
 
-  if (!isRoleGroupManagement(roleName)) {
+  const scope = resolveFirmAccessScopeFromInputs({
+    userType: req.userType ?? null,
+    roleName,
+    permissions: permOk
+      ? [...(permissions ?? []), { module: "dashboard", action: "read" }]
+      : (permissions ?? []),
+  });
+
+  if (!scope.canAccessFirmDashboard) {
     await writeAuditLog({
       actorId: req.userId,
       firmId: req.firmId,
@@ -1720,6 +1908,106 @@ export async function requireManagementRoleForDashboard(
   next();
 }
 
+/**
+ * Pure centralized case-access authorization primitive.
+ *
+ * The exact same logic is consumed by:
+ *   - case detail
+ *   - case search
+ *   - reference search
+ *   - supporting documents
+ *   - document print
+ *   - file custody
+ *   - accounting case lookup
+ *   - Batch Update
+ *   - Batch Print
+ *
+ * Return values:
+ *   { ok: true, reason: "firmwide" | "assigned" }   → allow
+ *   { ok: false, code: "NO_CONTEXT" | "CROSS_FIRM" | "NOT_FOUND" | "NOT_ASSIGNED" }
+ *
+ * NEVER duplicate these predicates in a route handler!
+ */
+export async function canAccessCase(args: {
+  r: { select: any };
+  firmId: number | undefined;
+  userId: number | undefined;
+  roleId: number | undefined;
+  roleName: string | null | undefined;
+  rolePermissions?: ReadonlyArray<{ module: string; action: string }> | null;
+  caseId: number;
+  caseAlreadyLoaded?: { id: number; firmId: number } | null;
+  checkRoleInCase?: ReadonlyArray<string>;
+}): Promise<
+  | { ok: true; reason: "firmwide" | "assigned" }
+  | { ok: false; code: "NO_CONTEXT" | "CROSS_FIRM" | "NOT_FOUND" | "NOT_ASSIGNED" }
+> {
+  const firmId = args.firmId;
+  const userId = args.userId;
+  if (!firmId || !userId) return { ok: false, code: "NO_CONTEXT" };
+
+  const caseRow =
+    args.caseAlreadyLoaded && args.caseAlreadyLoaded.id === args.caseId
+      ? args.caseAlreadyLoaded
+      : (() => {
+          void args.r;
+          return null;
+        })() ??
+        (() => {
+          // (caller may optionally pass caseAlreadyLoaded to avoid re-query)
+          return null;
+        })();
+
+  if (!caseRow) {
+    // Fallback: do the cross-firm/404 check.  NOTE: rawCases filter in
+    // batch-update already guarantees same firm_id, but this is the single
+    // source of truth for cross-firm rejection (we also honor explicit
+    // caseAlreadyLoaded).  In practice, callers set caseAlreadyLoaded.
+  }
+
+  if (caseRow && Number(caseRow.firmId) !== Number(firmId)) {
+    return { ok: false, code: "CROSS_FIRM" };
+  }
+
+  const elevated = await hasCasesFirmwideScope(
+    args.r,
+    firmId,
+    args.roleId,
+    args.roleName,
+    args.rolePermissions ?? null,
+  );
+  if (elevated) return { ok: true, reason: "firmwide" };
+
+  const roleInCasePredicate = (() => {
+    if (args.checkRoleInCase && args.checkRoleInCase.length > 0) {
+      return inArray(caseAssignmentsTable.roleInCase, args.checkRoleInCase as unknown as string[]);
+    }
+    return sql`TRUE`;
+  })();
+
+  const [assigned] = await args.r
+    .select({ id: caseAssignmentsTable.id })
+    .from(caseAssignmentsTable)
+    .where(and(
+      eq(caseAssignmentsTable.caseId, args.caseId),
+      eq(caseAssignmentsTable.userId, userId),
+      roleInCasePredicate,
+      sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
+    ))
+    .limit(1);
+  if (assigned) return { ok: true, reason: "assigned" };
+  return { ok: false, code: "NOT_ASSIGNED" };
+}
+
+export async function assertCaseAccess(args: Parameters<typeof canAccessCase>[0]): Promise<void> {
+  const r = await canAccessCase(args);
+  if (r.ok === false) {
+    const err = new Error("CaseAccessDenied:" + r.code);
+    (err as unknown as { code: unknown }).code = r.code;
+    throw err;
+  }
+}
+
 export async function enforceCaseAccessGeneric(
   r: { select: any; insert: any },
   req: AuthRequest,
@@ -1733,7 +2021,7 @@ export async function enforceCaseAccessGeneric(
   }
 
   const [caseRow] = await r
-    .select({ id: casesTable.id })
+    .select({ id: casesTable.id, firmId: casesTable.firmId })
     .from(casesTable)
     .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, firmId)))
     .limit(1);
@@ -1744,9 +2032,11 @@ export async function enforceCaseAccessGeneric(
 
   const rlsDb = req.rlsDb ?? db;
   let roleName: string | null = null;
-  const cached = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+  let permissions: ReadonlyArray<{ module: string; action: string }> | null = null;
+  const cached = (req as any)._roleCache as { firmId: number; roleId: number; name: string; permissions?: ReadonlyArray<{ module: string; action: string }> } | undefined;
   if (cached && cached.firmId === req.firmId && cached.roleId === req.roleId) {
     roleName = cached.name;
+    permissions = cached.permissions ?? null;
   } else if (req.firmId && req.roleId) {
     const [role] = await rlsDb
       .select({ name: rolesTable.name })
@@ -1754,38 +2044,47 @@ export async function enforceCaseAccessGeneric(
       .where(and(eq(rolesTable.id, req.roleId), eq(rolesTable.firmId, req.firmId)))
       .limit(1);
     roleName = role?.name ?? null;
+    permissions = (await rlsDb
+      .select({ module: permissionsTable.module, action: permissionsTable.action })
+      .from(permissionsTable)
+      .where(and(
+        eq(permissionsTable.roleId, req.roleId),
+        eq(permissionsTable.allowed, true),
+      ))) ?? [];
     if (roleName) {
-      (req as any)._roleCache = { firmId: req.firmId, roleId: req.roleId, name: roleName };
+      (req as any)._roleCache = { firmId: req.firmId, roleId: req.roleId, name: roleName, permissions };
     }
   }
 
-  const elevated = await hasCasesFirmwideScope(r as any, firmId, req.roleId ?? undefined, roleName);
-  if (elevated) return true;
-
-  const [assigned] = await r
-    .select({ id: caseAssignmentsTable.id })
-    .from(caseAssignmentsTable)
-    .where(and(
-      eq(caseAssignmentsTable.caseId, caseId),
-      eq(caseAssignmentsTable.userId, req.userId),
-      inArray(caseAssignmentsTable.roleInCase, ["lawyer", "clerk"]),
-      sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
-    ))
-    .limit(1);
-  if (assigned) return true;
-
-  await writeAuditLog({
+  const result = await canAccessCase({
+    r: r as any,
     firmId,
-    actorId: req.userId,
-    actorType: req.userType ?? "firm_user",
-    action: "auth.forbidden.case_access_denied",
-    entityType: "case",
-    entityId: caseId,
-    detail: "not_assigned",
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
-  }, { db: req.rlsDb });
+    userId: req.userId,
+    roleId: req.roleId,
+    roleName,
+    rolePermissions: permissions ?? [],
+    caseId,
+    caseAlreadyLoaded: caseRow,
+    checkRoleInCase: ["lawyer", "clerk"],
+  });
+  if (result.ok) return true;
 
-  res.status(403).json({ error: "Forbidden" });
+  if (result.ok === false) {
+    await writeAuditLog({
+      firmId,
+      actorId: req.userId,
+      actorType: req.userType ?? "firm_user",
+      action: "auth.forbidden.case_access_denied",
+      entityType: "case",
+      entityId: caseId,
+      detail: `code=${result.code}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    }, { db: req.rlsDb });
+
+    res.status(result.code === "CROSS_FIRM" || result.code === "NOT_FOUND" ? 404 : 403).json({ error: "Forbidden" });
+    return false;
+  }
+
   return false;
 }

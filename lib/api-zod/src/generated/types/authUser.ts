@@ -6,11 +6,18 @@
  * OpenAPI spec version: 1.0.0
  */
 
+export interface FirmAccessScope {
+  canAccessFirmDashboard: boolean;
+  hasFirmwideCaseScope: boolean;
+  isAccountingPrivileged: boolean;
+  isHrPrivileged: boolean;
+}
+
 export interface AuthUser {
   id: number;
   email: string;
   name: string;
-  /** founder | firm_user */
+  /** founder | firm_user | developer_user */
   userType: string;
   /** @nullable */
   firmId: number | null;
@@ -20,7 +27,23 @@ export interface AuthUser {
   roleId: number | null;
   /** @nullable */
   roleName: string | null;
+  /** platform | developer | management | staff */
+  roleGroup?: string | null;
   /** @nullable */
   department?: string | null;
+  /**
+   * Granular access scope decided server-side via explicit permissions +
+   * exact role name matching.  The frontend MUST NOT re-derive these
+   * booleans with role-name substring matching.
+   * @nullable
+   */
+  accessScope?: FirmAccessScope | null;
+  /**
+   * Backend-verified default landing-route hint for the post-login
+   * redirect.  Treat as non-authoritative convenience only; server route
+   * guards remain authoritative.
+   * @nullable
+   */
+  defaultRouteHint?: string | null;
   status: string;
 }
