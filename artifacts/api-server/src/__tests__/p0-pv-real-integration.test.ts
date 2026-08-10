@@ -39,6 +39,40 @@ vi.mock("../lib/rate-limit.js", () => ({
   sensitiveRateLimiter: (_req: any, _res: any, next: any) => next(),
 }));
 
+// vi.mock factory is HOISTED above everything else. Use vi.hoisted so the
+// control object exists before the factory references it.
+const { _testSafeLoadControl, makeAcctgMockModule } = vi.hoisted(() => {
+  const ctrl: { forceError: null | { code: string; message: string } } = { forceError: null };
+  const factory = async (importOriginal: () => Promise<any>) => {
+    const orig = (await importOriginal()) as any;
+    return {
+      ...orig,
+      safeLoadAccountingSettings: async (...args: any[]) => {
+        if (ctrl.forceError) {
+          const e: any = new Error(ctrl.forceError.message);
+          e.code = ctrl.forceError.code;
+          throw e;
+        }
+        return await orig.safeLoadAccountingSettings(...args);
+      },
+      safeLoadAccountingSettingsOrDefault: async (...args: any[]) => {
+        if (ctrl.forceError) {
+          const e: any = new Error(ctrl.forceError.message);
+          e.code = ctrl.forceError.code;
+          throw e;
+        }
+        return await orig.safeLoadAccountingSettingsOrDefault?.(...args);
+      },
+      _testSafeLoadControl: ctrl,
+    };
+  };
+  return { _testSafeLoadControl: ctrl, makeAcctgMockModule: factory };
+});
+// Mock both .ts and .js resolution suffixes (ESM imports in TS use .js but
+// vitest resolver may register the source file under .ts path)
+vi.mock("../modules/accounting/accounting-settings.js", makeAcctgMockModule);
+vi.mock("../modules/accounting/accounting-settings.ts", makeAcctgMockModule);
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = path.resolve(__dirname, "../../../../lib/db/migrations");
 
@@ -387,11 +421,317 @@ describe("P0 PAYMENT VOUCHER — REAL HTTP + POSTGRES INTEGRATION TESTS (A–L)"
   let authApp: express.Application;
   let noPermApp: express.Application;
 
+  // Global test-harness behavioral controls (set by individual tests, reset
+  // in beforeEach). These intercept at the drizzle-connection/tx layer so
+  // E/F/L tests do not depend on brittle ESM live-binding module mocks.
+  const pvHarnessControls: {
+    sawReservationInsert: boolean;
+    forceVoucherInsertAfterReservation: { code: string; message: string } | null;
+    forceAccountingSettingsTimeout: { code: string; message: string } | null;
+    forceTrackingUpdateError: { code: string; message: string; sqlstate?: string } | null;
+    trackingUpdateErrorOneShot: boolean; // if true, forceTrackingUpdateError only throws on FIRST invocation within test
+    _trackingUpdateErrorFired: boolean;  // internal counter (reset in beforeEach)
+  } = {
+    sawReservationInsert: false,
+    forceVoucherInsertAfterReservation: null,
+    forceAccountingSettingsTimeout: null,
+    forceTrackingUpdateError: null,
+    trackingUpdateErrorOneShot: false,
+    _trackingUpdateErrorFired: false,
+  };
+
   beforeAll(async () => {
     pg = new PGlite();
     await applyMigrations(pg);
 
+    // Driver-level advisory lock shim: patch PGlite PROTOTYPE methods so even
+    // non-public drizzle-orm/pglite internal dispatch paths are intercepted.
+    // drizzle-orm/pglite calls _runExclusiveQuery directly on the prototype chain.
+    const makeAdvisoryLockRows = () => ({ rows: [{ locked: true }], rowCount: 1, fields: [], affectedRows: null, command: "SELECT" });
+    const isAdvisorySql = (text: unknown): boolean => {
+      const s = String(text ?? "");
+      return /pg_try_advisory_xact_lock|pg_advisory_xact_lock|pg_advisory_unlock_all|pg_try_advisory|isCreateRequestActivelyLocked/.test(
+        s,
+      );
+    };
+
+    // Postgres wire protocol SQL extractor: drizzle-orm/pglite passes
+    // Uint8Array / Buffer as args[0] containing raw binary protocol messages.
+    // We pull out SQL strings from Query (Q) / Parse (P) messages.
+    const extractSqlFromPgWire = (data: unknown): string[] => {
+      const results: string[] = [];
+      if (!data) return results;
+      let buf: Uint8Array | null = null;
+      if (data instanceof Uint8Array) buf = data;
+      else if (typeof (data as any).buffer === "object" && (data as any).buffer instanceof Uint8Array) buf = (data as any).buffer;
+      else if (Array.isArray(data)) {
+        for (const x of data) { const r = extractSqlFromPgWire(x); if (r.length) results.push(...r); }
+        return results;
+      } else if (typeof data === "object") {
+        for (const k of Object.keys(data as any)) { const r = extractSqlFromPgWire((data as any)[k]); if (r.length) results.push(...r); }
+        return results;
+      }
+      if (!buf) return results;
+      try {
+        let i = 0;
+        while (i < buf.length) {
+          const type = buf[i];
+          // Need at least 5 bytes: type (1) + length (4)
+          if (i + 5 > buf.length) break;
+          // big-endian uint32 length at offset i+1 (includes itself)
+          const len = (buf[i+1] << 24 >>> 0) | (buf[i+2] << 16) | (buf[i+3] << 8) | buf[i+4];
+          if (len < 4 || (i + 1 + len) > buf.length) {
+            // Not a valid frame; try scanning for printable SQL runs
+            // as fallback (some messages are prefixed with msg id only)
+            i += 1;
+            continue;
+          }
+          const msgEnd = i + 1 + len;
+          // Message types: 'Q'(0x51)=Query, 'P'(0x50)=Parse, 'B'(0x42)=Bind, 'E'(0x45)=Execute, 'D'(0x44)=Describe
+          if (type === 0x51 /* Q */) {
+            // SQL from i+5 .. msgEnd-1 (null terminated)
+            let end = msgEnd - 1;
+            while (end > i + 5 && buf[end] === 0) end--;
+            const bytes = buf.subarray(i + 5, end + 1);
+            results.push(new TextDecoder("utf-8").decode(bytes));
+          } else if (type === 0x50 /* P */) {
+            // Parse: statement name (null-term) + SQL (null-term) + numParams int16 + params oids
+            let p = i + 5;
+            // Skip statement name
+            while (p < msgEnd && buf[p] !== 0) p++;
+            p++; // skip null
+            const sqlStart = p;
+            while (p < msgEnd && buf[p] !== 0) p++;
+            const bytes = buf.subarray(sqlStart, p);
+            results.push(new TextDecoder("utf-8").decode(bytes));
+          }
+          i = msgEnd;
+        }
+        // Fallback: if no Q/P detected, carve out any long ASCII printable runs
+        // (PGlite sometimes uses compact representations)
+        if (results.length === 0) {
+          let runStart = -1;
+          const MIN_RUN = 10;
+          for (let k = 0; k < buf.length; k++) {
+            const c = buf[k];
+            const printable = (c >= 0x20 && c < 0x7F) || c === 0x09 || c === 0x0A || c === 0x0D;
+            if (printable) { if (runStart === -1) runStart = k; }
+            else {
+              if (runStart !== -1 && k - runStart >= MIN_RUN) {
+                const s = new TextDecoder("utf-8").decode(buf.subarray(runStart, k));
+                if (/SELECT|INSERT|UPDATE|DELETE|FROM|INTO/i.test(s)) results.push(s);
+              }
+              runStart = -1;
+            }
+          }
+          if (runStart !== -1 && buf.length - runStart >= MIN_RUN) {
+            const s = new TextDecoder("utf-8").decode(buf.subarray(runStart, buf.length));
+            if (/SELECT|INSERT|UPDATE|DELETE|FROM|INTO/i.test(s)) results.push(s);
+          }
+        }
+      } catch {}
+      return results;
+    };
+
+    const pgAny = pg as any;
+    const proto = Object.getPrototypeOf(pgAny);
+
+    // -------- helper: apply scenario injections based on SQL head text (declared first to avoid TDZ) --------
+    const applyTestScenarioInjections = (head: string): void => {
+      if (pvHarnessControls.forceVoucherInsertAfterReservation) {
+        const isReservation = /insert\s+into\s+"?payment_voucher_create_requests"?/i.test(head);
+        const isPvInsert = /insert\s+into\s+"?payment_vouchers"?/i.test(head);
+        if (isReservation) pvHarnessControls.sawReservationInsert = true;
+        if (isPvInsert && pvHarnessControls.sawReservationInsert) {
+          const info = pvHarnessControls.forceVoucherInsertAfterReservation;
+          const e: any = new Error(info.message);
+          e.code = info.code;
+          throw e;
+        }
+      }
+      if (pvHarnessControls.forceAccountingSettingsTimeout) {
+        const isSelAccounting = /select[\s\S]*from\s+"?accounting_settings"?/i.test(head);
+        if (isSelAccounting) {
+          const info = pvHarnessControls.forceAccountingSettingsTimeout;
+          const e: any = new Error(info.message);
+          e.code = info.code;
+          throw e;
+        }
+      }
+      if (pvHarnessControls.forceTrackingUpdateError) {
+        const isUpdTrack = /update\s+"?payment_voucher_create_requests"?/i.test(head);
+        if (isUpdTrack) {
+          let shouldThrow = true;
+          if (pvHarnessControls.trackingUpdateErrorOneShot) {
+            if (pvHarnessControls._trackingUpdateErrorFired) shouldThrow = false;
+            else pvHarnessControls._trackingUpdateErrorFired = true;
+          }
+          if (shouldThrow) {
+            const info = pvHarnessControls.forceTrackingUpdateError;
+            const e: any = new Error(info.message);
+            e.code = info.code;
+            if (info.sqlstate) e.sqlstate = info.sqlstate;
+            throw e;
+          }
+        }
+      }
+    };
+
+    // Patch every low-level and high-level dispatch we can reach
+    for (const k of [
+      "_runExclusiveQuery",
+      "execProtocol",
+      "execProtocolRaw",
+      "execProtocolStream",
+      "execProtocolRawStream",
+      "execProtocolRawSync",
+    ] as const) {
+      const origFn = (proto && proto[k]) || pgAny[k];
+      if (typeof origFn === "function") {
+        const bound = origFn.bind(pgAny);
+        const wrapper = async function patchedProto(...args: any[]) {
+          const headBuilder = (args[0] && typeof args[0] === "object") ? args[0] : null;
+          const headPieces: string[] = [];
+          try {
+            headPieces.push(String(headBuilder?.sql ?? headBuilder?.query ?? headBuilder?.statement ?? ""));
+            headPieces.push(String(headBuilder?.params?.join?.(" ") ?? ""));
+            headPieces.push(String(args[0] ?? ""));
+            if (headBuilder && typeof headBuilder.toSQL === "function") {
+              const t = headBuilder.toSQL();
+              headPieces.push(String((t as any)?.sql ?? t));
+            }
+            if (headBuilder && (headBuilder as any)._ && typeof (headBuilder as any)._?.toSQL === "function") {
+              const t = (headBuilder as any)._.toSQL();
+              headPieces.push(String((t as any)?.sql ?? t));
+            }
+            const obj1 = args[1];
+            if (obj1 && typeof obj1 === "object") {
+              headPieces.push(String((obj1 as any).sql ?? (obj1 as any).text ?? (obj1 as any).statement ?? ""));
+            }
+            for (let ai = 0; ai < args.length; ai++) {
+              const decoded = extractSqlFromPgWire(args[ai]);
+              if (decoded.length) headPieces.push(...decoded);
+            }
+          } catch {}
+          const head = headPieces.join(" ");
+
+          if (
+            (pvHarnessControls.forceVoucherInsertAfterReservation ||
+            pvHarnessControls.forceAccountingSettingsTimeout ||
+            pvHarnessControls.forceTrackingUpdateError) &&
+            head.trim().length > 0 &&
+            /SELECT|INSERT|UPDATE|DELETE|FROM|INTO/i.test(head)
+          ) {
+            console.log("[DRIVER HEAD] SQL:", head.slice(0, 500));
+          }
+
+          const isHighLevel = (typeof k === "string") && /^(sql|query|exec)$/.test(k);
+          if (isAdvisorySql(head) && isHighLevel) {
+            return makeAdvisoryLockRows();
+          }
+
+          applyTestScenarioInjections(head);
+
+          return await bound(...args);
+        };
+        Object.defineProperty(pgAny, k, { value: wrapper, writable: true, configurable: true });
+        if (proto && proto[k]) {
+          try { Object.defineProperty(proto, k, { value: wrapper, writable: true, configurable: true }); } catch {}
+        }
+      }
+    }
+
+    // Also patch high-level convenience methods for completeness
+    for (const k of ["sql", "query", "exec"] as const) {
+      const origFn = pgAny[k]?.bind?.(pgAny);
+      if (typeof origFn === "function") {
+        if (k === "sql") {
+          pgAny[k] = function patchedSql(strings: any, ...vals: any[]) {
+            const combined = Array.isArray(strings?.raw)
+              ? strings.raw.reduce((acc: string, seg: string, i: number) => acc + seg + (i < vals.length ? String(vals[i] ?? "?") : ""), "")
+              : String(strings ?? "");
+            if (isAdvisorySql(combined)) return Promise.resolve(makeAdvisoryLockRows());
+            applyTestScenarioInjections(combined);
+            return origFn(strings, ...vals);
+          };
+        } else {
+          pgAny[k] = async function patchedHigh(...args: any[]) {
+            const first = String((args[0] as any)?.text ?? (args[0] as any)?.sql ?? args[0] ?? "");
+            if (isAdvisorySql(first)) return makeAdvisoryLockRows();
+            applyTestScenarioInjections(first);
+            return await origFn(...args);
+          };
+        }
+      }
+    }
+
     db = drizzle(pg, { schema });
+
+    // ============================================================
+    // Connection/Tx-level advisory lock result post-processor.
+    // Driver-level shim guarantees advisory SQL returns {locked:true}, but
+    // drizzle-orm/pglite occasionally drops column values for no-FROM
+    // synthetic selects; this re-assigns locked=true per row. Driver-level
+    // also handles all E/F/L scenario injection via pvHarnessControls SQL
+    // regex matching, so we do NOT intercept insert/update/select text here.
+    const isAdvisoryBuilderSql = (obj: any): boolean => {
+      try {
+        const toSQL = (obj as any)?._?.toSQL ? (obj as any)._ : obj as any;
+        const s = String((toSQL as any)?.sql ?? toSQL?.getSQL?.() ?? JSON.stringify(toSQL ?? ""));
+        return /pg_try_advisory_xact_lock|pg_advisory_xact_lock|pg_advisory_unlock_all|pg_try_advisory|isCreateRequestActivelyLocked/.test(
+          s,
+        );
+      } catch { return false; }
+    };
+
+    const wrapConnWithLockShim = <T extends { select: any; transaction?: any }>(conn: T): T => {
+      const anyConn = conn as any;
+      const wrapped: any = new Proxy(anyConn, {
+        get(target: any, prop: string | symbol, receiver: any) {
+          const origVal = Reflect.get(target, prop, receiver);
+
+          if (prop === "select" && typeof origVal === "function") {
+            return (...selArgs: any[]) => {
+              const builder = origVal.apply(target, selArgs);
+              if (builder && typeof builder.then === "function") {
+                const origThen = builder.then.bind(builder);
+                builder.then = async (onFulfilled: any, onRejected: any) => {
+                  try {
+                    const res = await origThen((r: any) => r, (e: any) => { throw e; });
+                    if (Array.isArray(res) && isAdvisoryBuilderSql(builder)) {
+                      for (const row of res) {
+                        if (row && typeof row === "object") (row as any).locked = true;
+                      }
+                    }
+                    return Promise.resolve(res).then(onFulfilled, onRejected);
+                  } catch (e) {
+                    return Promise.reject(e).catch(onRejected);
+                  }
+                };
+                if (typeof builder.catch === "function") {
+                  const origCatch = builder.catch.bind(builder);
+                  builder.catch = (fn: any) => origCatch(fn);
+                }
+              }
+              return builder;
+            };
+          }
+
+          if (prop === "transaction" && typeof origVal === "function") {
+            return async (fn: any) => {
+              return await origVal.call(target, async (tx: any) => {
+                const wtx = wrapConnWithLockShim(tx);
+                return await fn(wtx);
+              });
+            };
+          }
+
+          return origVal;
+        },
+      });
+      return wrapped as T;
+    };
+    db = wrapConnWithLockShim(db);
 
     // Seed firm
     await db.insert(firmsTable).values({
@@ -573,6 +913,13 @@ describe("P0 PAYMENT VOUCHER — REAL HTTP + POSTGRES INTEGRATION TESTS (A–L)"
   beforeEach(async () => {
     await db.delete(paymentVouchersTable).where(eq(paymentVouchersTable.firmId, TEST_FIRM_ID));
     await db.delete(paymentVoucherCreateRequestsTable).where(eq(paymentVoucherCreateRequestsTable.firmId, TEST_FIRM_ID));
+    // Reset all behavioral controls between tests
+    pvHarnessControls.sawReservationInsert = false;
+    pvHarnessControls.forceVoucherInsertAfterReservation = null;
+    pvHarnessControls.forceAccountingSettingsTimeout = null;
+    pvHarnessControls.forceTrackingUpdateError = null;
+    pvHarnessControls.trackingUpdateErrorOneShot = false;
+    pvHarnessControls._trackingUpdateErrorFired = false;
     vi.restoreAllMocks();
     vi.clearAllMocks();
   });
@@ -698,52 +1045,32 @@ describe("P0 PAYMENT VOUCHER — REAL HTTP + POSTGRES INTEGRATION TESTS (A–L)"
     const crid = newClientRequestId();
     const payload = basePayload(crid);
 
-    const dbModule = await import("@workspace/db");
-    const realDbInsert = (dbModule.db as any).insert;
+    // Leverage the connection/tx-level harness interceptor: the moment we
+    // observe ANY insert into payment_voucher_create_requests we mark the
+    // reservation as done, and on the subsequent voucher INSERT we throw.
+    // This propagates fully inside .transaction() wrapped contexts so the
+    // real operations (tx.insert inside route) actually fail — no brittle
+    // module-mock path-matching needed.
+    pvHarnessControls.forceVoucherInsertAfterReservation = {
+      code: "INJECTED_TEST_FAILURE",
+      message: "INJECTED_AFTER_RESERVATION_FAILURE",
+    };
 
-    let failOnSecondInsert = true;
-    const mock = vi.spyOn(dbModule.db as any, "insert").mockImplementation(function (this: any, table: any) {
-      const builder = realDbInsert.call(this, table);
-      const originalThen = builder.then.bind(builder);
-      builder.then = async (onFulfilled: any, onRejected: any) => {
-        try {
-          const tableName = String(table?.[Symbol.toStringTag] ?? table?.name ?? "");
-          if (
-            failOnSecondInsert &&
-            tableName.includes("paymentVouchers")
-          ) {
-            failOnSecondInsert = false;
-            const err: any = new Error("INJECTED_AFTER_RESERVATION_FAILURE");
-            err.code = "INJECTED_TEST_FAILURE";
-            throw err;
-          }
-          return await originalThen(onFulfilled, onRejected);
-        } catch (e) {
-          return Promise.reject(e).catch(onRejected);
-        }
-      };
-      return builder;
-    });
+    const res = await request(app)
+      .post("/payment-vouchers")
+      .send(payload)
+      .set("Content-Type", "application/json");
 
-    try {
-      const res = await request(app)
-        .post("/payment-vouchers")
-        .send(payload)
-        .set("Content-Type", "application/json");
+    expect(res.status).toBeGreaterThanOrEqual(400);
 
-      expect(res.status).toBeGreaterThanOrEqual(400);
+    const voucherCount = await countVouchersFor(crid);
+    const trackingCount = await countTrackingFor(crid);
+    const tracking = await getTracking(crid);
 
-      const voucherCount = await countVouchersFor(crid);
-      const trackingCount = await countTrackingFor(crid);
-      const tracking = await getTracking(crid);
-
-      expect(voucherCount).toBe(0);
-      expect(trackingCount).toBe(1);
-      expect(tracking?.status).toBe("failed");
-      expect(String(tracking?.lastError ?? "").length).toBeGreaterThan(0);
-    } finally {
-      mock.mockRestore();
-    }
+    expect(voucherCount).toBe(0);
+    expect(trackingCount).toBe(1);
+    expect(tracking?.status).toBe("failed");
+    expect(String(tracking?.lastError ?? "").length).toBeGreaterThan(0);
   }, 60_000);
 
   // ============================================================
@@ -753,35 +1080,31 @@ describe("P0 PAYMENT VOUCHER — REAL HTTP + POSTGRES INTEGRATION TESTS (A–L)"
     const crid = newClientRequestId();
     const payload = basePayload(crid);
 
-    const mod = await import("../modules/accounting/accounting-settings.js");
-    const origSafeLoad = mod.safeLoadAccountingSettings;
+    // Trigger timeout inside the drizzle connection/tx layer: any
+    // SELECT ... FROM accounting_settings (regardless of ESM module binding
+    // of safeLoadAccountingSettings) will throw code 57014. This also arms
+    // the module-level vi.mock as belt-and-suspenders.
+    pvHarnessControls.forceAccountingSettingsTimeout = {
+      code: "57014",
+      message: "canceling statement due to statement timeout",
+    };
+    _testSafeLoadControl.forceError = { ...pvHarnessControls.forceAccountingSettingsTimeout };
 
-    const mock = vi.spyOn(mod, "safeLoadAccountingSettings").mockImplementation(async (...args: any[]) => {
-      const err: any = new Error("canceling statement due to statement timeout");
-      err.code = "57014";
-      throw err;
-    });
+    const res = await request(app)
+      .post("/payment-vouchers")
+      .send(payload)
+      .set("Content-Type", "application/json");
 
-    try {
-      const res = await request(app)
-        .post("/payment-vouchers")
-        .send(payload)
-        .set("Content-Type", "application/json");
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).not.toBe(201);
 
-      expect(res.status).toBeGreaterThanOrEqual(400);
-      expect(res.status).not.toBe(201);
+    const voucherCount = await countVouchersFor(crid);
+    const tracking = await getTracking(crid);
 
-      const voucherCount = await countVouchersFor(crid);
-      const tracking = await getTracking(crid);
-
-      expect(voucherCount).toBe(0);
-      expect(tracking).toBeDefined();
-      expect(tracking?.status).not.toBe("processing");
-      expect(tracking?.status === "completed" || tracking?.status === "failed" ? tracking?.status : "failed")
-        .toBe("failed");
-    } finally {
-      mock.mockRestore();
-    }
+    expect(voucherCount).toBe(0);
+    expect(tracking).toBeDefined();
+    expect(tracking?.status).not.toBe("processing");
+    expect(tracking?.status).toBe("failed");
   }, 60_000);
 
   // ============================================================
@@ -965,41 +1288,34 @@ describe("P0 PAYMENT VOUCHER — REAL HTTP + POSTGRES INTEGRATION TESTS (A–L)"
         lastError: null,
       });
 
-      // Now inject DB error by mocking drizzle update to throw
-      const originalUpdate = (db as any).update.bind(db);
-      (db as any).update = (table: any) => {
-        const tblName = String(table?.[Symbol.toStringTag] ?? table?.name ?? "");
-        if (tblName.includes("paymentVoucherCreateRequests")) {
-          const err: any = new Error("INJECTED_LOCK_FAILURE during updatePvTrackingFailed");
-          err.code = "55P03";
-          err.sqlstate = "55P03";
-          throw err;
-        }
-        return originalUpdate(table);
+      // ONE-SHOT failure: first update(payment_voucher_create_requests) inside
+      // ANY transaction/connection throws code 55P03 (lock_not_available). This
+      // propagates inside .transaction-wrapped tx so updatePvTrackingFailed's
+      // guarded UPDATE fails and emits the warning we assert on.
+      pvHarnessControls.trackingUpdateErrorOneShot = true;
+      pvHarnessControls.forceTrackingUpdateError = {
+        code: "55P03",
+        sqlstate: "55P03",
+        message: "INJECTED_LOCK_FAILURE during updatePvTrackingFailed",
       };
 
-      // Trigger by calling POST with failure injection so the code path actually enters updatePvTrackingFailed
-      const payload = basePayload(newClientRequestId());
-      const mod = await import("../routes/payment-vouchers.js");
+      // Also arm timeout so the controlled failure path is entered. This
+      // ensures the route catches, then calls updatePvTrackingFailed — which
+      // in turn runs the CREATE_REQUESTS update → our one-shot throw above
+      // fires producing the structured warning.
+      pvHarnessControls.forceAccountingSettingsTimeout = {
+        code: "57014",
+        message: "force failure path so updatePvTrackingFailed is called",
+      };
+      _testSafeLoadControl.forceError = { ...pvHarnessControls.forceAccountingSettingsTimeout };
 
-      // Since updatePvTrackingFailed is not exported, trigger by forcing failure path
-      const mod2 = await import("../modules/accounting/accounting-settings.js");
-      const m2 = vi.spyOn(mod2, "safeLoadAccountingSettings").mockImplementation(async () => {
-        const e: any = new Error("force failure path so updatePvTrackingFailed is called");
-        e.code = "57014";
-        throw e;
-      });
-
-      try {
-        const res = await request(app)
-          .post("/payment-vouchers")
-          .send(payload)
-          .set("Content-Type", "application/json");
-        expect(res.status).toBeGreaterThanOrEqual(400);
-      } finally {
-        m2.mockRestore();
-        (db as any).update = originalUpdate;
-      }
+      const payload = basePayload(crid);
+      const res = await request(app)
+        .post("/payment-vouchers")
+        .send(payload)
+        .set("Content-Type", "application/json");
+      // We only care about the side effect on logs, but sanity-check >=400 family
+      expect(res.status).toBeGreaterThanOrEqual(400);
 
       const hasFailureLog = logs.some((l) =>
         l.level === "warn" &&
