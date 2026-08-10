@@ -18,13 +18,14 @@ export function AuthGuard({ children, requireRole }: { children: ReactNode, requ
         if (user.userType === "founder") {
           setLocation("/platform/dashboard");
         } else {
-          setLocation("/app/dashboard");
+          const isManagement = (n: string) => (n || "").toLowerCase().includes("partner") || (n || "").toLowerCase().includes("manager");
+          setLocation(isManagement(roleName) ? "/app/dashboard" : "/app/workbench");
         }
       } else if (shouldRedirectDeveloperAwayFromApp) {
         setLocation("/developer/dashboard");
       }
     }
-  }, [user, isLoading, authStatus, requireRole, setLocation, shouldRedirectDeveloperAwayFromApp]);
+  }, [user, isLoading, authStatus, requireRole, setLocation, shouldRedirectDeveloperAwayFromApp, roleName]);
 
   if (isLoading) {
     return (

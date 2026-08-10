@@ -1214,8 +1214,13 @@ export default function CasesList() {
           <div className="mx-auto w-full max-w-6xl px-4 pb-4">
             <Card className="shadow-lg border-slate-200">
               <CardContent className="py-4 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
-                <div className="text-sm text-slate-700">
-                  {selectedCaseIds.size} case(s) selected
+                <div className="flex items-center gap-2 text-sm text-slate-700">
+                  <span>{selectedCaseIds.size} case(s) selected</span>
+                  {!isPartnerOrManager && (
+                    <span className="text-amber-600/90 text-xs px-2 py-1 bg-amber-500/10 rounded border border-amber-200/40">
+                      Batch is limited to My Work assigned cases only
+                    </span>
+                  )}
                 </div>
                 <div className="flex flex-col lg:flex-row gap-2 lg:items-center">
                   <Button
@@ -1443,6 +1448,50 @@ export default function CasesList() {
             }}
             toast={toast}
           />
+
+          <Dialog open={isBatchUpdateOpen} onOpenChange={setIsBatchUpdateOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Batch Update</DialogTitle>
+                <DialogDescription>Update multiple case fields in a single batch operation.</DialogDescription>
+              </DialogHeader>
+              <BatchUpdateModalBody
+                selectedCaseIds={selectedCaseIds}
+                caseById={caseById}
+                firmUsers={firmUsers}
+                spaStatuses={spaStatuses}
+                loanStatuses={loanStatuses}
+                onClose={() => setIsBatchUpdateOpen(false)}
+                onSuccess={() => {
+                  setSelectedCaseIds(new Set());
+                  setIsBatchUpdateOpen(false);
+                }}
+                toast={toast}
+                isPartnerOrManager={isPartnerOrManager}
+                isStaffMode={!isPartnerOrManager}
+              />
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={isBatchPrintOpen} onOpenChange={setIsBatchPrintOpen}>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Batch Print</DialogTitle>
+                <DialogDescription>Print or download documents for multiple cases.</DialogDescription>
+              </DialogHeader>
+              <BatchPrintModalBody
+                selectedCaseIds={selectedCaseIds}
+                caseById={caseById}
+                onClose={() => setIsBatchPrintOpen(false)}
+                onSuccess={() => {
+                  setSelectedCaseIds(new Set());
+                  setIsBatchPrintOpen(false);
+                }}
+                toast={toast}
+                isStaffMode={!isPartnerOrManager}
+              />
+            </DialogContent>
+          </Dialog>
         </>
       ) : null}
     </div>
@@ -1845,8 +1894,9 @@ function BatchUpdateModalBody(props: {
   onSuccess: () => void;
   toast: ReturnType<typeof useToast>["toast"];
   isPartnerOrManager: boolean;
+  isStaffMode: boolean;
 }) {
-  const { selectedCaseIds, caseById, firmUsers, spaStatuses, loanStatuses, onClose, onSuccess, toast, isPartnerOrManager } = props;
+  const { selectedCaseIds, caseById, firmUsers, spaStatuses, loanStatuses, onClose, onSuccess, toast, isPartnerOrManager, isStaffMode } = props;
   const queryClient = useQueryClient();
 
   const caseIdsArr = Array.from(selectedCaseIds).sort();
@@ -2009,6 +2059,11 @@ function BatchUpdateModalBody(props: {
   if (result) {
     return (
       <div className="space-y-4">
+        {isStaffMode && (
+          <div className="text-amber-600/90 text-xs p-3 bg-amber-500/10 rounded border border-amber-200/40 mb-3">
+            Batch actions restricted: server will only apply to cases assigned to you (My Work scope). Unassigned cases will be skipped.
+          </div>
+        )}
         <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2">
           <div className="font-medium text-green-800">Batch update finished</div>
           <div className="text-sm text-green-700">
@@ -2052,6 +2107,11 @@ function BatchUpdateModalBody(props: {
   if (!confirmStep) {
     return (
       <div className="space-y-4">
+        {isStaffMode && (
+          <div className="text-amber-600/90 text-xs p-3 bg-amber-500/10 rounded border border-amber-200/40 mb-3">
+            Batch actions restricted: server will only apply to cases assigned to you (My Work scope). Unassigned cases will be skipped.
+          </div>
+        )}
         <div className="text-sm text-slate-600">
           {casesSelected.length} case(s) selected · {enabledFields.size} field(s) to update
         </div>
@@ -2167,6 +2227,11 @@ function BatchUpdateModalBody(props: {
 
   return (
     <div className="space-y-4">
+      {isStaffMode && (
+        <div className="text-amber-600/90 text-xs p-3 bg-amber-500/10 rounded border border-amber-200/40 mb-3">
+          Batch actions restricted: server will only apply to cases assigned to you (My Work scope). Unassigned cases will be skipped.
+        </div>
+      )}
       <Card>
         <CardContent className="p-4 space-y-3">
           <div className="font-medium">Confirm Batch Update · {casesSelected.length} Cases Selected</div>
@@ -2216,8 +2281,9 @@ function BatchPrintModalBody(props: {
   onClose: () => void;
   onSuccess: () => void;
   toast: ReturnType<typeof useToast>["toast"];
+  isStaffMode: boolean;
 }) {
-  const { selectedCaseIds, caseById, onClose, onSuccess, toast } = props;
+  const { selectedCaseIds, caseById, onClose, onSuccess, toast, isStaffMode } = props;
 
   const caseIdsArr = Array.from(selectedCaseIds).sort();
   const casesSelected = caseIdsArr.map((id) => caseById.get(id)).filter(Boolean);
@@ -2423,6 +2489,11 @@ function BatchPrintModalBody(props: {
 
   return (
     <div className="space-y-4">
+      {isStaffMode && (
+        <div className="text-amber-600/90 text-xs p-3 bg-amber-500/10 rounded border border-amber-200/40 mb-3">
+          Batch actions restricted: server will only process documents for cases assigned to you (My Work scope). Unassigned cases will be skipped.
+        </div>
+      )}
       <Tabs value={selectionMode} onValueChange={(v) => {
         if (v === "same_for_all" || v === "per_case") setSelectionMode(v);
       }}>

@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from "express";
-import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContext, setTenantContextSession, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable, type PoolClient } from "@workspace/db";
-import { and, eq } from "drizzle-orm";
+import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContext, setTenantContextSession, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable, caseAssignmentsTable, casesTable, type PoolClient } from "@workspace/db";
+import { and, eq, inArray } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
 import { isAuthAdminDbConfigured, withAuthAdminDb } from "./auth-admin-db";
@@ -1490,6 +1490,11 @@ export async function requirePartner(
 
 const normalizeRoleNameForGuard = (v: unknown): string => (typeof v === "string" ? v.trim().toLowerCase() : "");
 
+export function isRoleGroupManagement(roleName: unknown): boolean {
+  const n = typeof roleName === "string" ? roleName.trim().toLowerCase() : "";
+  return n.includes("partner") || n.includes("manager");
+}
+
 async function hasExplicitPermission(req: AuthRequest, moduleName: string, action: string): Promise<boolean> {
   if (!req.roleId || !req.firmId) return false;
   const r = req.rlsDb ?? db;
@@ -1607,4 +1612,180 @@ export async function requireReAuth(
 
   entry.used = true;
   next();
+}
+
+async function hasRolePermissionFromDb(
+  r: { select: any },
+  firmId: number,
+  roleId: number | undefined,
+  module: string,
+  action: string,
+): Promise<boolean> {
+  if (!roleId) return false;
+  const [role] = await r
+    .select({ id: rolesTable.id })
+    .from(rolesTable)
+    .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)));
+  if (!role) return false;
+  const [perm] = await r
+    .select({ allowed: permissionsTable.allowed })
+    .from(permissionsTable)
+    .where(and(
+      eq(permissionsTable.roleId, roleId),
+      eq(permissionsTable.module, module),
+      eq(permissionsTable.action, action),
+    ));
+  return Boolean(perm?.allowed);
+}
+
+export async function hasCasesFirmwideScope(
+  r: { select: any },
+  firmId: number | undefined,
+  roleId: number | undefined,
+  roleName: string | null | undefined,
+): Promise<boolean> {
+  if (!firmId || !roleId) return isRoleGroupManagement(roleName);
+  const perm = await hasRolePermissionFromDb(r as any, firmId, roleId, "cases", "assign_any");
+  if (perm) return true;
+  return isRoleGroupManagement(roleName);
+}
+
+export type CaseScopeSqlOpts = {
+  casesTableAlias?: string;
+  assignmentsAlias?: string;
+};
+
+export function getAccessibleCasesSqlScope(
+  opts: {
+    hasFirmwideScope: boolean;
+    firmId: number;
+    userId: number;
+    caseIdColumnRef?: any;
+    rawCaseAssignments?: any;
+  },
+): any {
+  if (opts.hasFirmwideScope) return sql`TRUE`;
+  const caseRef = opts.caseIdColumnRef ?? casesTable.id;
+  const assignmentsTable = opts.rawCaseAssignments ?? caseAssignmentsTable;
+  return sql`EXISTS (
+    SELECT 1 FROM ${assignmentsTable} a
+    WHERE a.case_id = ${caseRef}
+      AND a.user_id = ${opts.userId}
+      AND a.unassigned_at IS NULL
+  )`;
+}
+
+export async function requireManagementRoleForDashboard(
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  const permOk = await new Promise<boolean>((resolve) => {
+    const mw = requirePermission("dashboard", "read") as any;
+    mw(req, res, () => resolve(true));
+  });
+  if (!permOk) return;
+
+  const rlsDb = req.rlsDb ?? db;
+  let roleName: string | null = null;
+  const cached = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+  if (cached && cached.firmId === req.firmId && cached.roleId === req.roleId) {
+    roleName = cached.name;
+  } else if (req.firmId && req.roleId) {
+    const [role] = await rlsDb
+      .select({ name: rolesTable.name })
+      .from(rolesTable)
+      .where(and(eq(rolesTable.id, req.roleId), eq(rolesTable.firmId, req.firmId)))
+      .limit(1);
+    roleName = role?.name ?? null;
+    if (roleName) {
+      (req as any)._roleCache = { firmId: req.firmId, roleId: req.roleId, name: roleName };
+    }
+  }
+
+  if (!isRoleGroupManagement(roleName)) {
+    await writeAuditLog({
+      actorId: req.userId,
+      firmId: req.firmId,
+      actorType: req.userType ?? "unknown",
+      action: "auth.forbidden.dashboard_access_denied_staff",
+      detail: `${req.method} ${req.path}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    }, { db: req.rlsDb });
+    res.status(403).json({ error: "DashboardAccessRestricted", code: "DASHBOARD_ACCESS_RESTRICTED" });
+    return;
+  }
+
+  next();
+}
+
+export async function enforceCaseAccessGeneric(
+  r: { select: any; insert: any },
+  req: AuthRequest,
+  res: Response,
+  caseId: number,
+): Promise<boolean> {
+  const firmId = req.firmId;
+  if (!firmId || !req.userId) {
+    res.status(403).json({ error: "Forbidden" });
+    return false;
+  }
+
+  const [caseRow] = await r
+    .select({ id: casesTable.id })
+    .from(casesTable)
+    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, firmId)))
+    .limit(1);
+  if (!caseRow) {
+    res.status(404).json({ error: "Case not found" });
+    return false;
+  }
+
+  const rlsDb = req.rlsDb ?? db;
+  let roleName: string | null = null;
+  const cached = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+  if (cached && cached.firmId === req.firmId && cached.roleId === req.roleId) {
+    roleName = cached.name;
+  } else if (req.firmId && req.roleId) {
+    const [role] = await rlsDb
+      .select({ name: rolesTable.name })
+      .from(rolesTable)
+      .where(and(eq(rolesTable.id, req.roleId), eq(rolesTable.firmId, req.firmId)))
+      .limit(1);
+    roleName = role?.name ?? null;
+    if (roleName) {
+      (req as any)._roleCache = { firmId: req.firmId, roleId: req.roleId, name: roleName };
+    }
+  }
+
+  const elevated = await hasCasesFirmwideScope(r as any, firmId, req.roleId ?? undefined, roleName);
+  if (elevated) return true;
+
+  const [assigned] = await r
+    .select({ id: caseAssignmentsTable.id })
+    .from(caseAssignmentsTable)
+    .where(and(
+      eq(caseAssignmentsTable.caseId, caseId),
+      eq(caseAssignmentsTable.userId, req.userId),
+      inArray(caseAssignmentsTable.roleInCase, ["lawyer", "clerk"]),
+      sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
+    ))
+    .limit(1);
+  if (assigned) return true;
+
+  await writeAuditLog({
+    firmId,
+    actorId: req.userId,
+    actorType: req.userType ?? "firm_user",
+    action: "auth.forbidden.case_access_denied",
+    entityType: "case",
+    entityId: caseId,
+    detail: "not_assigned",
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  }, { db: req.rlsDb });
+
+  res.status(403).json({ error: "Forbidden" });
+  return false;
 }

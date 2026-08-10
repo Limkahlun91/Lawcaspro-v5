@@ -74,6 +74,13 @@ export function PermissionGuard(props: { module: string; action: string; childre
     );
   }
   const allowed = hasPermission(user, props.module, props.action);
+  const roleName = user ? String((user as any)?.roleName ?? "") : "";
+  const isManagement = (n: string) => (n || "").toLowerCase().includes("partner") || (n || "").toLowerCase().includes("manager");
+  const isStaffDashboardBlock =
+    user && user.userType === "firm_user" && props.module === "dashboard" && props.action === "read" && !isManagement(roleName);
+  if (isStaffDashboardBlock) {
+    return <DashboardFallbackRedirect setLocation={setLocation} />;
+  }
   if (allowed) return props.children;
   if (user && user.userType === "firm_user" && props.module === "dashboard" && props.action === "read") {
     if (hasPermission(user, "cases", "read")) {

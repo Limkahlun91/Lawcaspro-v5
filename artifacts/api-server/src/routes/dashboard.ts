@@ -1,6 +1,6 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { db, sql } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, requireManagementRoleForDashboard } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 import { computeDashboardStats } from "../services/dashboard-stats.js";
 
@@ -131,7 +131,7 @@ async function computeDashboardSummary(r: DbConn, args: { firmId: number; assign
   return { ok: true, data: summary, errors };
 }
 
-router.get("/dashboard/summary", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/dashboard/summary", requireAuth, requireFirmUser, requirePermission("dashboard", "read"), requireManagementRoleForDashboard, async (req: AuthRequest, res: Response): Promise<void> => {
   res.setHeader("Cache-Control", "no-store");
   const firmId = req.firmId!;
   const r = rdb(req);
@@ -172,7 +172,7 @@ router.get("/dashboard/summary", requireAuth, requireFirmUser, requirePermission
   res.status(200).json({ ok: true, partial: true, data: { totalCases: 0, totalClients: 0, totalProjects: 0, totalDevelopers: 0 }, errors: [{ section: "summary", code: null, message: out.error }], requestId });
 });
 
-router.get("/debug/dashboard", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/debug/dashboard", requireAuth, requireFirmUser, requireManagementRoleForDashboard, async (req: AuthRequest, res: Response): Promise<void> => {
   const allowDetails =
     process.env.API_ERROR_DETAILS === "1" ||
     process.env.NODE_ENV !== "production" ||
@@ -342,7 +342,7 @@ router.get("/debug/dashboard", requireAuth, requireFirmUser, async (req: AuthReq
 router.get("/dashboard", (req: AuthRequest, _res: Response, next: any) => {
   req.timing = { startAt: Date.now(), sections: {} };
   next();
-}, requireAuth, requireFirmUser, requirePermission("dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+}, requireAuth, requireFirmUser, requirePermission("dashboard", "read"), requireManagementRoleForDashboard, async (req: AuthRequest, res: Response): Promise<void> => {
   res.setHeader("Cache-Control", "no-store");
   const allowDetails =
     process.env.API_ERROR_DETAILS === "1" ||

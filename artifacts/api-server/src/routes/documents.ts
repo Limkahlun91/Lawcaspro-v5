@@ -24,6 +24,7 @@ import {
   requirePermission,
   writeAuditLog,
   type AuthRequest,
+  hasCasesFirmwideScope,
 } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 import { withAuthSafeDb } from "../lib/auth-safe-db.js";
@@ -14509,8 +14510,7 @@ router.post(
     const roleName = roleRows[0]?.name
       ? String(roleRows[0].name).toLowerCase()
       : "";
-    const elevated =
-      roleName.includes("partner") || roleName.includes("manager");
+    const elevated = await hasCasesFirmwideScope(r, req.firmId, req.roleId ?? undefined, roleRows[0]?.name ? String(roleRows[0].name) : null);
 
     const hasPurchaserOrderNo = await columnExists(r, {
       schema: "public",
@@ -15007,8 +15007,7 @@ router.get(
     const roleName = roleRows[0]?.name
       ? String(roleRows[0].name).toLowerCase()
       : "";
-    const elevated =
-      roleName.includes("partner") || roleName.includes("manager");
+    const elevated = await hasCasesFirmwideScope(r, req.firmId, req.roleId ?? undefined, roleRows[0]?.name ? String(roleRows[0].name) : null);
 
     const like = `%${search.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
     const searchClause = search
@@ -15149,8 +15148,7 @@ router.get(
     const roleName = roleRows[0]?.name
       ? String(roleRows[0].name).toLowerCase()
       : "";
-    const elevated =
-      roleName.includes("partner") || roleName.includes("manager");
+    const elevated = await hasCasesFirmwideScope(r, req.firmId, req.roleId ?? undefined, roleRows[0]?.name ? String(roleRows[0].name) : null);
 
     const like = `%${search.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
     const searchClause = search
@@ -22732,8 +22730,7 @@ router.post(
     const roleName = roleRows[0]?.name
       ? String(roleRows[0].name).toLowerCase()
       : "";
-    const elevated =
-      roleName.includes("partner") || roleName.includes("manager");
+    const elevated = await hasCasesFirmwideScope(r, req.firmId, req.roleId ?? undefined, roleRows[0]?.name ? String(roleRows[0].name) : null);
 
     const caseRows = elevated
       ? await queryRows(

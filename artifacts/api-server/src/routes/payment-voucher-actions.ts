@@ -1,8 +1,8 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { and, count, desc, eq, inArray, lte, or } from "drizzle-orm";
-import { casesTable, casePurchasersTable, clientsTable, db, paymentVoucherActionsTable, paymentVouchersTable, permissionsTable, projectsTable, sql, userNotificationsTable } from "@workspace/db";
+import { casesTable, casePurchasersTable, clientsTable, db, paymentVoucherActionsTable, paymentVouchersTable, permissionsTable, projectsTable, rolesTable, sql, userNotificationsTable } from "@workspace/db";
 import { z } from "zod";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog, hasCasesFirmwideScope, isRoleGroupManagement } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 import { extractDbErrorInfo } from "../lib/db-error.js";
 import { queryOne } from "../lib/http.js";
@@ -60,7 +60,27 @@ router.get("/payment-voucher-actions/cases/reference-search", requireAuth, requi
     return;
   }
   const firmId = req.firmId!;
+  const roleId = req.roleId;
+  const userId = req.userId!;
   const r = rdb(req);
+  let roleName: string | null = null;
+  if (roleId) {
+    const cached = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+    if (cached && cached.firmId === firmId && cached.roleId === roleId) {
+      roleName = cached.name;
+    } else {
+      const [role] = await r
+        .select({ name: rolesTable.name })
+        .from(rolesTable)
+        .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)))
+        .limit(1);
+      roleName = role?.name ?? null;
+      if (roleName) {
+        (req as any)._roleCache = { firmId, roleId, name: roleName };
+      }
+    }
+  }
+  const hasFirmwideScope = await hasCasesFirmwideScope(r, firmId, roleId ?? undefined, roleName);
   try {
     const withScopedTimeouts = async <T,>(fn: (conn: any) => Promise<T>): Promise<T> => {
       if (req.rlsDb) {
@@ -76,6 +96,14 @@ router.get("/payment-voucher-actions/cases/reference-search", requireAuth, requi
     };
 
     const result = await withScopedTimeouts(async (tx: any) => {
+      const escapedQ = escapedLike(q);
+      const params: any[] = [firmId, escapedQ, escapedQ, escapedQ];
+      const caseAssignScope = hasFirmwideScope
+        ? sql``
+        : sql`AND EXISTS (SELECT 1 FROM case_assignments ca WHERE ca.case_id = c.id AND ca.user_id = ${userId} AND ca.unassigned_at IS NULL)`;
+      if (!hasFirmwideScope) {
+        params.push(userId);
+      }
       return await tx.execute(sql`
         SELECT
           c.id AS case_id,
@@ -90,10 +118,11 @@ router.get("/payment-voucher-actions/cases/reference-search", requireAuth, requi
         LEFT JOIN clients ON clients.id = cp.client_id AND clients.firm_id = c.firm_id AND clients.deleted_at IS NULL
         WHERE c.firm_id = ${firmId}
           AND c.deleted_at IS NULL
+          ${caseAssignScope}
           AND (
-            LOWER(c.reference_no) LIKE LOWER('%' || ${escapedLike(q)} || '%')
-            OR LOWER(clients.name) LIKE LOWER('%' || ${escapedLike(q)} || '%')
-            OR LOWER(p.name) LIKE LOWER('%' || ${escapedLike(q)} || '%')
+            LOWER(c.reference_no) LIKE LOWER('%' || ${escapedQ} || '%')
+            OR LOWER(clients.name) LIKE LOWER('%' || ${escapedQ} || '%')
+            OR LOWER(p.name) LIKE LOWER('%' || ${escapedQ} || '%')
           )
         GROUP BY c.id, c.reference_no, c.project_id, p.name
         ORDER BY c.reference_no IS NULL, c.reference_no ASC NULLS LAST, c.id DESC

@@ -53,10 +53,11 @@ export default function Login() {
     if (!user) return;
     if (hasNavigated) return;
     const roleName = String((user as any)?.roleName ?? "");
+    const isManagement = (n: string) => (n || "").toLowerCase().includes("partner") || (n || "").toLowerCase().includes("manager");
     const nextPath = (() => {
       if (user.userType === "founder") return "/platform/dashboard";
       if (roleName === "Developer_User") return "/developer/dashboard";
-      return "/app/dashboard";
+      return isManagement(roleName) ? "/app/dashboard" : "/app/workbench";
     })();
     setHasNavigated(true);
     setLocation(nextPath);
@@ -108,9 +109,9 @@ export default function Login() {
       const nextPath = (() => {
         if (verified.userType === "founder") return "/platform/dashboard";
         const roleName = String((verified as any)?.roleName ?? "");
+        const isManagement = (n: string) => (n || "").toLowerCase().includes("partner") || (n || "").toLowerCase().includes("manager");
         if (roleName === "Developer_User") return "/developer/dashboard";
-        if (hasPermission(verified, "dashboard", "read")) return "/app/dashboard";
-        return "/app/dashboard";
+        return isManagement(roleName) ? "/app/dashboard" : "/app/workbench";
       })();
       if (!hasNavigated) {
         setHasNavigated(true);

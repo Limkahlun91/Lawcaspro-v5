@@ -12,7 +12,7 @@ import {
   rolesTable,
   usersTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog, requireManagementRoleForDashboard } from "../lib/auth.js";
 import { extractDbErrorInfo } from "../lib/db-error.js";
 
 type RouterInternalLike = {
@@ -122,6 +122,7 @@ router.get(
   requireAuth,
   requireFirmUser,
   requirePermission("case_monitor", "view"),
+  requireManagementRoleForDashboard,
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const firmId = Number(req.firmId);
@@ -274,6 +275,7 @@ router.get(
   requireAuth,
   requireFirmUser,
   requirePermission("case_monitor", "view"),
+  requireManagementRoleForDashboard,
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const firmId = Number(req.firmId);
@@ -380,6 +382,7 @@ router.post(
   requireAuth,
   requireFirmUser,
   requirePermission("case_monitor", "view"),
+  requireManagementRoleForDashboard,
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const firmId = Number(req.firmId);

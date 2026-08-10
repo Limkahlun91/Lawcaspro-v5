@@ -1,12 +1,12 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { and, desc, eq, sql } from "drizzle-orm";
-import { caseAssignmentsTable, casePurchasersTable, casesTable, clientsTable, db, developersTable, invoicesTable, paymentVouchersTable, projectsTable, quotationsTable, receiptsTable, usersTable } from "@workspace/db";
+import { caseAssignmentsTable, casePurchasersTable, casesTable, clientsTable, db, developersTable, invoicesTable, paymentVouchersTable, projectsTable, quotationsTable, receiptsTable, rolesTable, usersTable } from "@workspace/db";
 import multer from "multer";
 import { PDFParse } from "pdf-parse";
 import OpenAI from "openai";
 import * as XLSX from "xlsx";
 import { z } from "zod";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog, hasCasesFirmwideScope } from "../lib/auth.js";
 import { computeInvoiceMetrics } from "../services/invoice-metrics.js";
 
 type SqlChunk = ReturnType<typeof sql>;
@@ -903,6 +903,27 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
 export async function handleAccountingCaseSearch(req: AuthRequest, res: Response): Promise<void> {
   const startedAt = Date.now();
   const firmId = req.firmId!;
+  const roleId = req.roleId;
+  const userId = req.userId!;
+  const r = (req.rlsDb ?? db) as any;
+  let roleName: string | null = null;
+  if (roleId) {
+    const cached = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+    if (cached && cached.firmId === firmId && cached.roleId === roleId) {
+      roleName = cached.name;
+    } else {
+      const [role] = await r
+        .select({ name: rolesTable.name })
+        .from(rolesTable)
+        .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)))
+        .limit(1);
+      roleName = role?.name ?? null;
+      if (roleName) {
+        (req as any)._roleCache = { firmId, roleId, name: roleName };
+      }
+    }
+  }
+  const hasFirmwideScope = await hasCasesFirmwideScope(r, firmId, roleId ?? undefined, roleName);
   const q = typeof (req.query as any)?.query === "string" ? String((req.query as any).query).trim() : "";
   const limitRaw = typeof (req.query as any)?.limit === "string" ? String((req.query as any).limit).trim() : "";
   const limitParsed = limitRaw ? Number.parseInt(limitRaw, 10) : NaN;
@@ -925,6 +946,9 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
 
   const like = `%${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
   const queryStartedAt = Date.now();
+  const caseAssignScope = hasFirmwideScope
+    ? sql``
+    : sql`AND EXISTS (SELECT 1 FROM case_assignments ca WHERE ca.case_id = c.id AND ca.user_id = ${userId} AND ca.unassigned_at IS NULL)`;
   const rows = await queryRowsFromReq(req, sql`
     SELECT
       c.id,
@@ -955,6 +979,7 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
     LEFT JOIN developers d ON d.id = c.developer_id AND d.firm_id = ${firmId}
     WHERE c.firm_id = ${firmId}
       AND c.deleted_at IS NULL
+      ${caseAssignScope}
       AND (
         c.reference_no ILIKE ${like}
         OR COALESCE(p.name, '') ILIKE ${like}

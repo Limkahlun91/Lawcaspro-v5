@@ -48,6 +48,16 @@ export default function AppDashboard() {
   const { user } = useAuth();
   const firmId = user?.firmId ?? null;
   const roleName = String((user as any)?.roleName ?? "");
+  const isManagement = (n: string) => (n || "").toLowerCase().includes("partner") || (n || "").toLowerCase().includes("manager");
+  const isManagementRole = isManagement(roleName);
+  const isFirmStaffBlocked = user?.userType === "firm_user" && !isManagementRole;
+
+  useEffect(() => {
+    if (isFirmStaffBlocked) {
+      setLocation("/app/workbench");
+    }
+  }, [isFirmStaffBlocked, setLocation]);
+
   const canApproveCases = (() => {
     const n = roleName.trim().toLowerCase();
     if (!n) return false;
@@ -66,7 +76,7 @@ export default function AppDashboard() {
   })();
 
   const queryClient = useQueryClient();
-  const canViewCaseMonitor = hasPermission(user, "case_monitor", "view") || canApproveCases;
+  const canViewCaseMonitor = !isFirmStaffBlocked && (hasPermission(user, "case_monitor", "view") || canApproveCases);
 
   const [resolveOpen, setResolveOpen] = useState(false);
   const [resolveTargetId, setResolveTargetId] = useState<number | null>(null);
@@ -106,7 +116,7 @@ export default function AppDashboard() {
     retry: 0,
   });
 
-  const canViewFileCustody = hasPermission(user, "accounting", "view") || hasPermission(user, "file_custody", "view");
+  const canViewFileCustody = !isFirmStaffBlocked && (hasPermission(user, "accounting", "view") || hasPermission(user, "file_custody", "view"));
   const custodySummary = useQuery({
     queryKey: ["file-custody", "summary", firmId],
     queryFn: ({ signal }) =>
@@ -165,7 +175,7 @@ export default function AppDashboard() {
     queryKey: ["dashboard", firmId],
     queryFn: ({ signal }) =>
       apiFetchJson(refresh ? "/dashboard?refresh=1" : "/dashboard", { timeoutMs: refresh ? 15_000 : 12_000, signal }) as Promise<Record<string, any>>,
-    enabled: Number.isFinite(firmId) && Number(firmId) > 0,
+    enabled: !isFirmStaffBlocked && Number.isFinite(firmId) && Number(firmId) > 0,
     staleTime: 30_000,
     retry: (failureCount, err) => {
       if (failureCount >= 2) return false;

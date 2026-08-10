@@ -79,7 +79,8 @@ export function navGroupsForUser(): Array<{
 }
 
 export function SidebarBody({ isMobile, onNavigate, className }: { isMobile: boolean; onNavigate?: () => void; className?: string }) {
-  const { user, logout } = useAuth();
+  const { user, logout, roleName: roleNameFromContext } = useAuth() as any;
+  const roleName = roleNameFromContext ?? (user as any)?.roleName ?? "";
   const [location] = useLocation();
   const qc = useQueryClient();
   const { toast } = useToast();
@@ -159,6 +160,16 @@ export function SidebarBody({ isMobile, onNavigate, className }: { isMobile: boo
       label: g.label,
       items: g.items.filter((i) => {
         if (!hasPermission(user, i.perm[0], i.perm[1])) return false;
+        if (i.href === "/app/dashboard") {
+          const userType = String((user as any)?.userType ?? "");
+          const roleGroup = String((user as any)?.roleGroup ?? "");
+          const isFounder = userType === "founder";
+          const isDeveloperUser = userType === "developer_user";
+          const hasManagementGroup = roleGroup.toLowerCase() === "management";
+          const roleLower = String(roleName ?? "").toLowerCase();
+          const hasManagementKeyword = roleLower.includes("partner") || roleLower.includes("manager");
+          if (!(isFounder || isDeveloperUser || hasManagementGroup || hasManagementKeyword)) return false;
+        }
         if (i.href === "/app/communication/email" && !isEmailControlEnabled()) return false;
         if (i.href === "/app/communication/whatsapp" && !isWhatsAppInboxEnabled()) return false;
         if (i.href === "/app/settings/email" && !isEmailSettingsEnabled()) return false;

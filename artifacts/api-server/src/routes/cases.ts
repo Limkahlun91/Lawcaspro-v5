@@ -29,7 +29,7 @@ import {
   GetCaseNotesParams, CreateCaseNoteParams, CreateCaseNoteBody
 } from "@workspace/api-zod";
 import { z } from "zod/v4";
-import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest, hasCasesFirmwideScope } from "../lib/auth.js";
 import { buildWorkflowSteps } from "../lib/workflow.js";
 import { KEY_DATE_FIELD_TO_STEP_KEY, WORKFLOW_STEP_KEY_TO_KEY_DATE_FIELD, type KeyDateField } from "../lib/keyDatesWorkflow.js";
 import { loanStatusSql, milestoneDateSql, milestoneDateYmdSql, milestonePresenceWhereSql, normalizeMilestoneFilter, spaStatusSql, type CaseMilestoneKey, type MilestonePresence } from "../lib/caseListLogic.js";
@@ -254,11 +254,8 @@ async function insertCaseNotifications(r: DbConn, args: {
 }
 
 async function canBypassCaseAssignment(r: DbConn, firmId: number, roleId: number | null | undefined): Promise<boolean> {
-  const canAssignAny = await hasRolePermission(r, firmId, roleId, "cases", "assign_any");
-  if (canAssignAny) return true;
   const roleName = await getRoleName(r, firmId, roleId);
-  const rn = roleName.toLowerCase();
-  return rn.includes("partner") || rn.includes("manager");
+  return hasCasesFirmwideScope(r, firmId, roleId ?? undefined, roleName);
 }
 
 async function enforceCaseAccess(r: DbConn, req: AuthRequest, res: ExpressResponse, caseId: number): Promise<boolean> {
@@ -8962,7 +8959,7 @@ router.post(
       .where(and(eq(rolesTable.id, req.roleId!), eq(rolesTable.firmId, req.firmId!)))
       .limit(1);
     const roleName = String(roleRow?.name ?? "");
-    const canBypassCaseAssignment = roleName === "Partner" || roleName === "Manager" || roleName.startsWith("Manager");
+    const canBypassCaseAssignment = await hasCasesFirmwideScope(r, firmId, req.roleId ?? undefined, roleName);
 
     const body = asObject(req.body);
     const rawCaseIds = Array.isArray(body?.caseIds) ? body!.caseIds : [];

@@ -1,8 +1,8 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { z } from "zod";
 import { and, asc, count, desc, eq, gte, inArray, isNull, lte, ne, sql } from "drizzle-orm";
-import { db, casesTable, fileCustodyItemsTable, fileCustodyMovementsTable, permissionsTable, rolesTable, userNotificationsTable, usersTable } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { db, caseAssignmentsTable, casesTable, fileCustodyItemsTable, fileCustodyMovementsTable, permissionsTable, rolesTable, userNotificationsTable, usersTable } from "@workspace/db";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog, enforceCaseAccessGeneric, hasCasesFirmwideScope } from "../lib/auth.js";
 import { extractDbErrorInfo } from "../lib/db-error.js";
 
 type RouterInternalLike = {
@@ -255,6 +255,57 @@ router.get("/file-custody/items", requireAuth, requireFirmUser, async (req: Auth
     const limitRaw = asInt(one(req.query.limit)) ?? 30;
     const limit = Math.min(200, Math.max(1, limitRaw));
     const now = new Date();
+
+    if (caseId) {
+      const orm = rdb(req) as any;
+      let roleName: string | null = null;
+      const roleId = req.roleId;
+      if (roleId) {
+        const cached = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+        if (cached && cached.firmId === firmId && cached.roleId === roleId) {
+          roleName = cached.name;
+        } else {
+          const [role] = await orm
+            .select({ name: rolesTable.name })
+            .from(rolesTable)
+            .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)))
+            .limit(1);
+          roleName = role?.name ?? null;
+          if (roleName) {
+            (req as any)._roleCache = { firmId, roleId, name: roleName };
+          }
+        }
+      }
+      const elevated = await hasCasesFirmwideScope(orm, firmId, roleId ?? undefined, roleName);
+      if (!elevated) {
+        const [assigned] = await orm
+          .select({ id: caseAssignmentsTable.id })
+          .from(caseAssignmentsTable)
+          .where(and(
+            eq(caseAssignmentsTable.caseId, caseId),
+            eq(caseAssignmentsTable.userId, req.userId!),
+            inArray(caseAssignmentsTable.roleInCase, ["lawyer", "clerk"]),
+            sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
+          ))
+          .limit(1);
+        if (!assigned) {
+          await writeAuditLog({
+            firmId,
+            actorId: req.userId,
+            actorType: req.userType ?? "firm_user",
+            action: "auth.forbidden.file_custody_unauthorized_case",
+            entityType: "case",
+            entityId: caseId,
+            detail: `caseId=${caseId} not_assigned`,
+            ipAddress: req.ip,
+            userAgent: req.headers["user-agent"],
+          }, { db: req.rlsDb });
+          res.status(403).json({ error: "Forbidden", message: "You are not authorized to view files for this case" });
+          return;
+        }
+      }
+    }
+
     const where = [eq(fileCustodyItemsTable.firmId, firmId)];
     if (status) where.push(eq(fileCustodyItemsTable.lifecycleStatus, status));
     else if (onlyOut) where.push(inArray(fileCustodyItemsTable.lifecycleStatus, ACTIVE_OUT as unknown as string[]));

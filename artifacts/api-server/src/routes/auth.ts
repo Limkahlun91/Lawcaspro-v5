@@ -4,7 +4,7 @@ import crypto from "crypto";
 import { and, eq } from "drizzle-orm";
 import { auditLogsTable, clearTenantContext, db, firmsTable, makeRlsDb, permissionsTable, pool, rolesTable, sessionsTable, setTenantContextSession, sql, usersTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
-import { ensureRolePermissionsInitialized, invalidateVerifiedSessionCacheByTokenHash, invalidateVerifiedSessionCacheByUserId, loadFounderPermissions, lookupSessionAndUserByTokenHash, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ensureRolePermissionsInitialized, invalidateVerifiedSessionCacheByTokenHash, invalidateVerifiedSessionCacheByUserId, isRoleGroupManagement, loadFounderPermissions, lookupSessionAndUserByTokenHash, requireAuth, requireReAuth, issueReauthToken, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { ApiError, sendError, sendOk } from "../lib/api-response.js";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { logger } from "../lib/logger.js";
@@ -928,6 +928,12 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
 
     const enrichmentDbSource =
       user.userType === "firm_user" && user.firmId ? "DATABASE_URL/app_user" : "DATABASE_URL";
+    const roleGroup: string = (() => {
+      if (user.userType === "founder") return "platform";
+      if (user.userType === "developer_user" || roleName === "Developer_User") return "developer";
+      if (isRoleGroupManagement(roleName)) return "management";
+      return "staff";
+    })();
     const payload = {
       id: user.id,
       userType: user.userType,
@@ -935,6 +941,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       roleId: user.roleId,
       developerId: (user as any).developerId ?? null,
       roleName,
+      roleGroup,
       firmName,
       permissions,
       founderPermissions: founder.permissions,
