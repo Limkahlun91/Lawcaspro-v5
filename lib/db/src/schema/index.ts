@@ -38,3 +38,4 @@ export * from "./hrms-memberships";
 export * from "./hrms-approvals";
 export * from "./platform-entitlements";
 export * from "./batch-operations";
+export * from "./supporting-documents";

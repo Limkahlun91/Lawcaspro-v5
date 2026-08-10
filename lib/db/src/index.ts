@@ -160,3 +160,5 @@ export { caseDocumentVariableOverridesTable } from "./schema";
 export { sql } from "drizzle-orm";
 export type { SQL } from "drizzle-orm";
 export type { Pool, PoolClient } from "pg";
+
+export * from "./feature-registry";
