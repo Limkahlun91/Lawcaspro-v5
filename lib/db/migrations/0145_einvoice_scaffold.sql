@@ -65,8 +65,8 @@ ALTER TABLE einvoice_submissions ADD CONSTRAINT chk_einvoice_submissions_status
 ALTER TABLE einvoice_submissions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE einvoice_submissions FORCE ROW LEVEL SECURITY;
 
-DO $$ BEGIN
-  DROP POLICY IF EXISTS einvoice_submissions_firm_id ON einvoice_submissions;
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+DROP POLICY IF EXISTS einvoice_submissions_firm_id ON einvoice_submissions;
 CREATE POLICY einvoice_submissions_firm_id ON einvoice_submissions
-  USING (firm_id = (current_setting('app.current_firm_id', true))::INTEGER);
+  FOR ALL
+  USING (firm_id = (current_setting('app.current_firm_id', true))::INTEGER)
+  WITH CHECK (firm_id = (current_setting('app.current_firm_id', true))::INTEGER);

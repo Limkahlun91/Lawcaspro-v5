@@ -74,15 +74,15 @@ ALTER TABLE batch_operations FORCE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS batch_operations_firm_select ON batch_operations;
 CREATE POLICY batch_operations_firm_select ON batch_operations
-  FOR SELECT USING (firm_id = current_setting('app.current_firm_id', TRUE)::INTEGER);
+  FOR SELECT TO PUBLIC USING (firm_id = current_setting('app.current_firm_id', TRUE)::INTEGER);
 
 DROP POLICY IF EXISTS batch_operations_firm_insert ON batch_operations;
 CREATE POLICY batch_operations_firm_insert ON batch_operations
-  FOR INSERT WITH CHECK (firm_id = current_setting('app.current_firm_id', TRUE)::INTEGER);
+  FOR INSERT TO PUBLIC WITH CHECK (firm_id = current_setting('app.current_firm_id', TRUE)::INTEGER);
 
 DROP POLICY IF EXISTS batch_operations_firm_update ON batch_operations;
 CREATE POLICY batch_operations_firm_update ON batch_operations
-  FOR UPDATE USING (firm_id = current_setting('app.current_firm_id', TRUE)::INTEGER)
+  FOR UPDATE TO PUBLIC USING (firm_id = current_setting('app.current_firm_id', TRUE)::INTEGER)
   WITH CHECK (firm_id = current_setting('app.current_firm_id', TRUE)::INTEGER);
 
 GRANT SELECT, INSERT, UPDATE ON batch_operations TO app_user;

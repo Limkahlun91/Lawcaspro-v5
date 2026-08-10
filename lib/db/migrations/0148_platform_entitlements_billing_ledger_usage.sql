@@ -105,7 +105,8 @@ CREATE INDEX IF NOT EXISTS idx_plan_entitlements_feature
 
 -- ----------------------------------------------------------------------
 -- 4. firm_entitlement_overrides — per-firm permanent/temporary overrides
---    Layers 5 (permanent) + 6 (temporary) of resolver — DETERMINISTIC DESIGN.
+--    Layers 5 (permanent) + 6 (active temporary = higher) of resolver
+--    — DETERMINISTIC DESIGN.
 --
 -- REDESIGN REASON (0148 before production):
 --   The previous partial unique index WHERE (expires_at IS NULL OR expires_at > now())
@@ -113,18 +114,20 @@ CREATE INDEX IF NOT EXISTS idx_plan_entitlements_feature
 --   and unsafe. It also collapsed two semantically distinct override kinds
 --   (permanent vs scheduled-temporary) into one ambiguous column combination.
 --
--- NEW DETERMINISTIC MODEL:
+-- NEW DETERMINISTIC MODEL + CORRECT PRECEDENCE:
 --   override_kind = 'permanent'
 --     → At most ONE row per (firm_id, feature_key).
 --       enforced by: uq_firm_entitlement_permanent (partial unique index)
 --     → effective_from/expires_at must be NULL (permanent has no range).
---     → Resolver layer 5 (higher precedence than temporary).
+--     → Resolver layer 5. Falls through to temporary only when NO permanent
+--       exists (permanent is the base configuration).
 --   override_kind = 'temporary'
 --     → Explicit effective_from / expires_at range.
 --     → NO OVERLAPPING ranges per (firm_id, feature_key).
 --       enforced by: ex_firm_entitlement_temp_no_overlap (GiST exclusion).
 --     → Resolver layer 6 (active only when now() falls within [effective_from, expires_at)
---       — this is a *runtime filter* during resolution, NOT part of uniqueness.
+--       — this is a *runtime filter* during resolution, NOT part of uniqueness).
+--       ACTIVE TEMPORARY always SUPERSEDES permanent override during its window.
 --   Historical expired rows are preserved forever (APPEND-only audit trail).
 -- ----------------------------------------------------------------------
 
@@ -149,22 +152,47 @@ CREATE TABLE IF NOT EXISTS firm_entitlement_overrides (
 );
 
 -- Validation: permanent overrides have no effective/expiry ranges.
+-- (PostgreSQL has no IMPLIES operator; explicit boolean rewrite:
+--  P IMPLIES Q ≡ ¬P ∨ Q).
 DO $$ BEGIN
   ALTER TABLE firm_entitlement_overrides
     ADD CONSTRAINT firm_entitlement_overrides_permanent_no_range
     CHECK (
-      override_kind = 'permanent'
-        IMPLIES (effective_from IS NULL AND expires_at IS NULL)
+      override_kind <> 'permanent'
+      OR (effective_from IS NULL AND expires_at IS NULL)
     );
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+EXCEPTION
+  WHEN duplicate_object THEN NULL;          -- idempotent: already exists
+END $$;
 
 -- Validation: temporary overrides must have at least an effective_from.
--- (expires_at may be null for "until further notice, but still override_kind=temporary")
+-- (expires_at may be null for "until further notice", but if present
+--  it must be strictly after effective_from.)
 DO $$ BEGIN
   ALTER TABLE firm_entitlement_overrides
     ADD CONSTRAINT firm_entitlement_overrides_temporary_effective
-    CHECK (override_kind = 'temporary' IMPLIES effective_from IS NOT NULL);
-EXCEPTION WHEN OTHERS THEN NULL; END $$;
+    CHECK (
+      override_kind <> 'temporary'
+      OR effective_from IS NOT NULL
+    );
+EXCEPTION
+  WHEN duplicate_object THEN NULL;          -- idempotent: already exists
+END $$;
+
+-- Validation: when a temporary override provides expires_at, it must be
+-- strictly after effective_from (prevents zero-duration/inverted ranges
+-- from being stored even when btree_gist EXCLUSION fallback-only active).
+DO $$ BEGIN
+  ALTER TABLE firm_entitlement_overrides
+    ADD CONSTRAINT firm_entitlement_overrides_temporary_range_order
+    CHECK (
+      override_kind <> 'temporary'
+      OR expires_at IS NULL
+      OR expires_at > effective_from
+    );
+EXCEPTION
+  WHEN duplicate_object THEN NULL;          -- idempotent: already exists
+END $$;
 
 -- UNIQUENESS 1 — Permanent: max 1 row per (firm, feature).
 -- 100% deterministic — no time-dependent membership.
@@ -207,41 +235,38 @@ END $$;
 
 -- FALLBACK guard for temporary range overlap if GiST exclusion could not be added.
 -- This is ALWAYS present as a belt-and-suspenders check even when GiST is used.
-DO $$ BEGIN
-  CREATE OR REPLACE FUNCTION firm_entitlement_temp_overlap_guard()
-  RETURNS trigger AS $ovl$
-  DECLARE
-    _conflict integer;
-  BEGIN
-    IF NEW.override_kind IS DISTINCT FROM 'temporary' THEN RETURN NEW; END IF;
+CREATE OR REPLACE FUNCTION firm_entitlement_temp_overlap_guard()
+RETURNS trigger AS $ovl$
+DECLARE
+  _conflict integer;
+BEGIN
+  IF NEW.override_kind IS DISTINCT FROM 'temporary' THEN RETURN NEW; END IF;
 
-    SELECT 1
-    INTO STRICT _conflict
-    FROM firm_entitlement_overrides o
-    WHERE o.id              <> COALESCE(NEW.id, -1)
-      AND o.firm_id         = NEW.firm_id
-      AND o.feature_key     = NEW.feature_key
-      AND o.override_kind   = 'temporary'
-      AND tstzrange(
-            COALESCE(o.effective_from, '-infinity'::timestamptz),
-            COALESCE(o.expires_at,     'infinity'::timestamptz),
-            '[)'
-          ) &&
-          tstzrange(
-            COALESCE(NEW.effective_from, '-infinity'::timestamptz),
-            COALESCE(NEW.expires_at,     'infinity'::timestamptz),
-            '[)'
-          )
-    LIMIT 1;
+  SELECT 1
+  INTO STRICT _conflict
+  FROM firm_entitlement_overrides o
+  WHERE o.id              <> COALESCE(NEW.id, -1)
+    AND o.firm_id         = NEW.firm_id
+    AND o.feature_key     = NEW.feature_key
+    AND o.override_kind   = 'temporary'
+    AND tstzrange(
+          COALESCE(o.effective_from, '-infinity'::timestamptz),
+          COALESCE(o.expires_at,     'infinity'::timestamptz),
+          '[)'
+        ) &&
+        tstzrange(
+          COALESCE(NEW.effective_from, '-infinity'::timestamptz),
+          COALESCE(NEW.expires_at,     'infinity'::timestamptz),
+          '[)'
+        )
+  LIMIT 1;
 
-    RAISE EXCEPTION 'firm_entitlement_overrides: overlapping temporary override range for firm=%, feature=%', NEW.firm_id, NEW.feature_key
-      USING HINT = 'Choose a non-overlapping effective_from/expires_at window, or end the existing temporary override first.';
-  EXCEPTION WHEN NO_DATA_FOUND THEN
-    RETURN NEW;
-  END;
-  $ovl$ LANGUAGE plpgsql;
-EXCEPTION WHEN OTHERS THEN NULL;
-END $$;
+  RAISE EXCEPTION 'firm_entitlement_overrides: overlapping temporary override range for firm=%, feature=%', NEW.firm_id, NEW.feature_key
+    USING HINT = 'Choose a non-overlapping effective_from/expires_at window, or end the existing temporary override first.';
+EXCEPTION WHEN NO_DATA_FOUND THEN
+  RETURN NEW;
+END;
+$ovl$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS firm_entitlement_temp_overlap_guard_trg
   ON firm_entitlement_overrides;
@@ -268,8 +293,12 @@ CREATE INDEX IF NOT EXISTS idx_firm_entitlement_kind
 -- RLS
 ALTER TABLE firm_entitlement_overrides ENABLE ROW LEVEL SECURITY;
 
+DO $$ BEGIN
+  ALTER TABLE firm_entitlement_overrides FORCE ROW LEVEL SECURITY;
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+
 DROP POLICY IF EXISTS tenant_isolation ON firm_entitlement_overrides;
-CREATE POLICY tenant_isolation ON firm_entitlement_overrides FOR ALL TO app_rls_user, authenticated
+CREATE POLICY tenant_isolation ON firm_entitlement_overrides FOR ALL TO PUBLIC
   USING (
     (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
     OR current_setting('app.is_founder',true) = 'true'
@@ -311,7 +340,7 @@ DO $$ BEGIN
 EXCEPTION WHEN OTHERS THEN NULL; END $$;
 
 DROP POLICY IF EXISTS tenant_isolation ON subscription_history;
-CREATE POLICY tenant_isolation ON subscription_history FOR ALL TO app_rls_user, authenticated
+CREATE POLICY tenant_isolation ON subscription_history FOR ALL TO PUBLIC
   USING (
     (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
     OR current_setting('app.is_founder',true) = 'true'
@@ -389,7 +418,7 @@ DO $$ BEGIN
 EXCEPTION WHEN OTHERS THEN NULL; END $$;
 
 DROP POLICY IF EXISTS tenant_isolation ON billing_ledger;
-CREATE POLICY tenant_isolation ON billing_ledger FOR ALL TO app_rls_user, authenticated
+CREATE POLICY tenant_isolation ON billing_ledger FOR ALL TO PUBLIC
   USING (
     (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
     OR current_setting('app.is_founder',true) = 'true'
@@ -450,7 +479,7 @@ DO $$ BEGIN
 EXCEPTION WHEN OTHERS THEN NULL; END $$;
 
 DROP POLICY IF EXISTS tenant_isolation ON usage_counters;
-CREATE POLICY tenant_isolation ON usage_counters FOR ALL TO app_rls_user, authenticated
+CREATE POLICY tenant_isolation ON usage_counters FOR ALL TO PUBLIC
   USING (
     (firm_id = NULLIF(current_setting('app.current_firm_id',true),'')::integer)
     OR current_setting('app.is_founder',true) = 'true'
@@ -463,14 +492,24 @@ CREATE POLICY tenant_isolation ON usage_counters FOR ALL TO app_rls_user, authen
 -- RLS for plan_entitlements - cross-tenant read allowed via founder;
 -- all authenticated can read (plan catalog needed for firm billing UI)
 ALTER TABLE plan_entitlements ENABLE ROW LEVEL SECURITY;
+
+DO $$ BEGIN
+  ALTER TABLE plan_entitlements FORCE ROW LEVEL SECURITY;
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+
 DROP POLICY IF EXISTS tenant_isolation ON plan_entitlements;
-CREATE POLICY tenant_isolation ON plan_entitlements FOR SELECT TO app_rls_user, authenticated
+CREATE POLICY tenant_isolation ON plan_entitlements FOR SELECT TO PUBLIC
   USING (true);
 
 -- RLS for platform_features - all authenticated can read (catalog)
 ALTER TABLE platform_features ENABLE ROW LEVEL SECURITY;
+
+DO $$ BEGIN
+  ALTER TABLE platform_features FORCE ROW LEVEL SECURITY;
+EXCEPTION WHEN OTHERS THEN NULL; END $$;
+
 DROP POLICY IF EXISTS tenant_isolation ON platform_features;
-CREATE POLICY tenant_isolation ON platform_features FOR SELECT TO app_rls_user, authenticated
+CREATE POLICY tenant_isolation ON platform_features FOR SELECT TO PUBLIC
   USING (true);
 
 -- ----------------------------------------------------------------------

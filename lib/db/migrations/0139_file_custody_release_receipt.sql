@@ -58,7 +58,7 @@ ALTER TABLE file_custody_items ENABLE ROW LEVEL SECURITY;
 DO $$ BEGIN ALTER TABLE file_custody_items FORCE ROW LEVEL SECURITY; EXCEPTION WHEN OTHERS THEN NULL; END $$;
 DROP POLICY IF EXISTS file_custody_items_tenant ON file_custody_items;
 CREATE POLICY file_custody_items_tenant ON file_custody_items
-  AS PERMISSIVE FOR ALL TO app_rls_user, authenticated
+  AS PERMISSIVE FOR ALL TO PUBLIC
   USING (firm_id = (current_setting('app.current_firm_id', true)::int))
   WITH CHECK (firm_id = (current_setting('app.current_firm_id', true)::int));
 
@@ -66,36 +66,30 @@ ALTER TABLE file_custody_movements ENABLE ROW LEVEL SECURITY;
 DO $$ BEGIN ALTER TABLE file_custody_movements FORCE ROW LEVEL SECURITY; EXCEPTION WHEN OTHERS THEN NULL; END $$;
 DROP POLICY IF EXISTS file_custody_movements_tenant ON file_custody_movements;
 CREATE POLICY file_custody_movements_tenant ON file_custody_movements
-  AS PERMISSIVE FOR ALL TO app_rls_user, authenticated
+  AS PERMISSIVE FOR ALL TO PUBLIC
   USING (firm_id = (current_setting('app.current_firm_id', true)::int))
   WITH CHECK (firm_id = (current_setting('app.current_firm_id', true)::int));
 
-DO $$ BEGIN
-  CREATE OR REPLACE FUNCTION file_custody_items_set_updated_at()
-  RETURNS trigger AS $fc$
-  BEGIN
-    NEW.updated_at := now();
-    RETURN NEW;
-  END;
-  $fc$ LANGUAGE plpgsql;
-EXCEPTION WHEN OTHERS THEN NULL;
-END $$;
+CREATE OR REPLACE FUNCTION file_custody_items_set_updated_at()
+RETURNS trigger AS $fc$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$fc$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS file_custody_items_set_updated_at ON file_custody_items;
 CREATE TRIGGER file_custody_items_set_updated_at
   BEFORE UPDATE ON file_custody_items
   FOR EACH ROW EXECUTE FUNCTION file_custody_items_set_updated_at();
 
-DO $$ BEGIN
-  CREATE OR REPLACE FUNCTION file_custody_movements_set_updated_at()
-  RETURNS trigger AS $fcm$
-  BEGIN
-    NEW.updated_at := now();
-    RETURN NEW;
-  END;
-  $fcm$ LANGUAGE plpgsql;
-EXCEPTION WHEN OTHERS THEN NULL;
-END $$;
+CREATE OR REPLACE FUNCTION file_custody_movements_set_updated_at()
+RETURNS trigger AS $fcm$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$fcm$ LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS file_custody_movements_set_updated_at ON file_custody_movements;
 CREATE TRIGGER file_custody_movements_set_updated_at

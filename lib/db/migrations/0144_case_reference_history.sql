@@ -36,22 +36,13 @@ CREATE INDEX IF NOT EXISTS idx_case_reference_history_actor
 ALTER TABLE case_reference_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE case_reference_history FORCE ROW LEVEL SECURITY;
 
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_policy
-    WHERE polrelid = 'case_reference_history'::regclass
-      AND polname = 'case_reference_history_firm_rw'
-  ) THEN
-    CREATE POLICY case_reference_history_firm_rw
-      ON case_reference_history
-      FOR ALL
-      TO app_user
-      USING (firm_id = current_setting('app.current_firm_id', true)::INTEGER)
-      WITH CHECK (firm_id = current_setting('app.current_firm_id', true)::INTEGER);
-  END IF;
-END
-$$;
+DROP POLICY IF EXISTS case_reference_history_firm_rw ON case_reference_history;
+CREATE POLICY case_reference_history_firm_rw
+  ON case_reference_history
+  FOR ALL
+  TO PUBLIC
+  USING (firm_id = current_setting('app.current_firm_id', true)::INTEGER)
+  WITH CHECK (firm_id = current_setting('app.current_firm_id', true)::INTEGER);
 
 CREATE OR REPLACE FUNCTION case_reference_history_immutable_guard()
 RETURNS TRIGGER AS $$

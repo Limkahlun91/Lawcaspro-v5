@@ -165,7 +165,7 @@ CREATE POLICY case_bottleneck_snapshots_isolation
   ON public.case_bottleneck_snapshots
   AS PERMISSIVE
   FOR ALL
-  TO app_rls_user, authenticated
+  TO PUBLIC
   USING (firm_id = (current_setting('app.current_firm_id', true))::int)
   WITH CHECK (firm_id = (current_setting('app.current_firm_id', true))::int);
 
@@ -174,20 +174,32 @@ CREATE POLICY case_monitor_logs_isolation
   ON public.case_monitor_logs
   AS PERMISSIVE
   FOR ALL
-  TO app_rls_user, authenticated
+  TO PUBLIC
   USING (firm_id = (current_setting('app.current_firm_id', true))::int)
   WITH CHECK (firm_id = (current_setting('app.current_firm_id', true))::int);
 
 -- =========================================================================
--- 8) UPDATED_AT TRIGGER on snapshots — UNCONDITIONAL (fix 0137 typo bug).
---    Original 0137 had a typo: it checked for existence of table
---    "case_bottleneck_snapshots_audit" which was UNRELATED to the trigger
---    we want. Now: always drop + recreate trigger to guarantee presence.
+-- 8) UPDATED_AT TRIGGER on snapshots — SELF-CONTAINED.
+--    Previous revision used public.trigger_set_timestamp() which was
+--    a global undeclared helper not guaranteed to exist on the connected
+--    instance (had caused code 42883 elsewhere). We now CREATE OR REPLACE
+--    our own inline PL/pgSQL function that does not depend on any
+--    pre-existing helper.
 -- =========================================================================
+
+CREATE OR REPLACE FUNCTION public.case_bottleneck_snapshots_set_updated_at_fn()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$;
 
 DROP TRIGGER IF EXISTS case_bottleneck_snapshots_set_updated_at
   ON public.case_bottleneck_snapshots;
 
 CREATE TRIGGER case_bottleneck_snapshots_set_updated_at
   BEFORE UPDATE ON public.case_bottleneck_snapshots
-  FOR EACH ROW EXECUTE FUNCTION public.trigger_set_timestamp();
+  FOR EACH ROW EXECUTE FUNCTION public.case_bottleneck_snapshots_set_updated_at_fn();

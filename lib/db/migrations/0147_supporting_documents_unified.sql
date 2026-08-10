@@ -149,6 +149,11 @@ END $$;
 -- 4. Row-Level Security (RLS) ------------------------------------------------
 ALTER TABLE supporting_documents ENABLE ROW LEVEL SECURITY;
 
+DO $$ BEGIN
+    ALTER TABLE supporting_documents FORCE ROW LEVEL SECURITY;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
 -- Drop existing policies idempotently
 DROP POLICY IF EXISTS supporting_docs_firm_isolation_select ON supporting_documents;
 DROP POLICY IF EXISTS supporting_docs_firm_isolation_insert ON supporting_documents;
@@ -158,6 +163,7 @@ DROP POLICY IF EXISTS supporting_docs_firm_isolation_delete ON supporting_docume
 -- 4a. SELECT: Users can only see documents belonging to their own firm, non-deleted
 CREATE POLICY supporting_docs_firm_isolation_select ON supporting_documents
     FOR SELECT
+    TO PUBLIC
     USING (
         firm_id = current_setting('app.current_firm_id', true)::INTEGER
         AND deleted_at IS NULL
@@ -166,6 +172,7 @@ CREATE POLICY supporting_docs_firm_isolation_select ON supporting_documents
 -- 4b. INSERT: Users can only insert documents for their own firm
 CREATE POLICY supporting_docs_firm_isolation_insert ON supporting_documents
     FOR INSERT
+    TO PUBLIC
     WITH CHECK (
         firm_id = current_setting('app.current_firm_id', true)::INTEGER
     );
@@ -173,6 +180,7 @@ CREATE POLICY supporting_docs_firm_isolation_insert ON supporting_documents
 -- 4c. UPDATE: Users can only update documents for their own firm
 CREATE POLICY supporting_docs_firm_isolation_update ON supporting_documents
     FOR UPDATE
+    TO PUBLIC
     USING (
         firm_id = current_setting('app.current_firm_id', true)::INTEGER
         AND deleted_at IS NULL
@@ -184,6 +192,7 @@ CREATE POLICY supporting_docs_firm_isolation_update ON supporting_documents
 -- 4d. DELETE: Soft-delete pattern (set deleted_at); hard delete allowed for own firm only
 CREATE POLICY supporting_docs_firm_isolation_delete ON supporting_documents
     FOR DELETE
+    TO PUBLIC
     USING (
         firm_id = current_setting('app.current_firm_id', true)::INTEGER
     );
