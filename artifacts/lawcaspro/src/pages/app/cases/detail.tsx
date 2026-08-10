@@ -31,6 +31,7 @@ import CaseComplianceTab from "./components/CaseComplianceTab";
 import { ErrorBoundary } from "@/components/common/error-boundary";
 import { CaseFormModal, mapCaseToFormValues } from "./components/case-form/CaseFormModal";
 import { QueryFallback } from "@/components/query-fallback";
+import { CasePrintModal } from "@/components/CasePrintModal";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { DateOnlyInput, formatYmdToDmy, normalizeDateOnlyFromApi } from "@/components/date-only-input";
@@ -518,11 +519,11 @@ export default function CaseDetail() {
   const users = Array.isArray(usersList) ? usersList as any[] : [];
   const lawyerOptions = users.filter((u) => ["Partner", "Senior Lawyer", "Lawyer"].includes(String(u.roleName ?? "").trim()));
   const clerkOptions = users.filter((u) => ["Senior Clerk", "Clerk"].includes(String(u.roleName ?? "").trim()));
-  const currentLawyerIds = (Array.isArray((caseInfo as any)?.assignments) ? (caseInfo as any).assignments : [])
+  const currentLawyerIds: number[] = (Array.isArray((caseInfo as any)?.assignments) ? (caseInfo as any).assignments : [])
     .filter((a: any) => a?.roleInCase === "lawyer")
     .map((a: any) => Number(a?.userId))
     .filter((id: number) => Number.isInteger(id) && id > 0);
-  const currentClerkIds = (Array.isArray((caseInfo as any)?.assignments) ? (caseInfo as any).assignments : [])
+  const currentClerkIds: number[] = (Array.isArray((caseInfo as any)?.assignments) ? (caseInfo as any).assignments : [])
     .filter((a: any) => a?.roleInCase === "clerk")
     .map((a: any) => Number(a?.userId))
     .filter((id: number) => Number.isInteger(id) && id > 0);
@@ -769,6 +770,7 @@ export default function CaseDetail() {
   const [shareTrackingOpen, setShareTrackingOpen] = useState(false);
   const [clientReplyDraft, setClientReplyDraft] = useState("");
   const [editCaseOpen, setEditCaseOpen] = useState(false);
+  const [casePrintOpen, setCasePrintOpen] = useState(false);
   const params = new URLSearchParams(searchString);
   const tabFromUrlRaw = params.get("tab") ?? "overview";
   const threadIdFromUrl = params.get("threadId");
@@ -2469,6 +2471,14 @@ export default function CaseDetail() {
           <Button
             variant="outline"
             size="sm"
+            onClick={() => Number.isFinite(caseId) && caseId > 0 && setCasePrintOpen(true)}
+          >
+            <Printer className="w-4 h-4 mr-2" />
+            Print Case
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
             onClick={() => {
               const params = new URLSearchParams();
               params.set("caseId", String((caseInfo as any).id ?? ""));
@@ -2559,6 +2569,12 @@ export default function CaseDetail() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <CasePrintModal
+        open={casePrintOpen}
+        onOpenChange={setCasePrintOpen}
+        caseId={Number.isFinite(caseId) && caseId > 0 ? caseId : 0}
+      />
 
       {!progressQuery.isError && Array.isArray(progressQuery.data?.sections) && progressQuery.data.sections.length > 0 && (
         <Card className="mb-6">

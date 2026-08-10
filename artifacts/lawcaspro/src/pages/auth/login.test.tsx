@@ -85,6 +85,7 @@ describe("Login flow", () => {
       status: "active",
       firmId: 1,
       roleId: 1,
+      roleName: "Partner",
     };
     const meUser = {
       id: 1,
@@ -94,6 +95,7 @@ describe("Login flow", () => {
       status: "active",
       firmId: 1,
       roleId: 1,
+      roleName: "Partner",
     };
     apiFetchJsonMock.mockResolvedValue({ user: loginUser, token: "t" });
     apiRequestMock.mockResolvedValue(createResponse(200, { ok: true, data: meUser, meta: { request_id: "r", timestamp: "t", duration_ms: 1 } }));
@@ -175,6 +177,7 @@ describe("Login flow", () => {
       status: "active",
       firmId: 1,
       roleId: 1,
+      roleName: "Partner",
     };
     const meUser = {
       id: 1,
@@ -184,6 +187,7 @@ describe("Login flow", () => {
       status: "active",
       firmId: 1,
       roleId: 1,
+      roleName: "Partner",
     };
     apiFetchJsonMock.mockResolvedValue(loginUser);
     apiRequestMock.mockImplementation(async (path: string) => {

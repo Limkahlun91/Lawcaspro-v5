@@ -31,12 +31,13 @@ import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
 import { QueryFallback } from "@/components/query-fallback";
 import DocumentTemplates from "@/pages/app/settings/DocumentTemplates";
+import FirmSubscriptionFeaturesTab from "@/pages/app/settings/FirmSubscriptionFeaturesTab";
 import { useReAuth } from "@/components/re-auth-dialog";
 import { validateUploadFile } from "@/lib/upload-validation";
 
 const apiFetch = apiFetchJson;
 
-const TABS = ["Firm Info", "Users", "Roles & Permissions", "Security", "Document Templates", "File Reference"] as const;
+const TABS = ["Firm Info", "Users", "Roles & Permissions", "Security", "Document Templates", "File Reference", "Subscription & Billing"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
@@ -46,6 +47,7 @@ const TAB_KEYS: Record<string, Tab> = {
   security: "Security",
   documents: "Document Templates",
   fileRef: "File Reference",
+  subscription: "Subscription & Billing",
 };
 
 const PERMISSION_CATALOG: Array<{ module: string; actions: string[] }> = [
@@ -1411,7 +1413,7 @@ function FileReferenceSettingsTab({ canRead, canUpdate }: { canRead: boolean; ca
   );
 }
 
-export default function Settings() {
+export default function Settings(props?: { defaultTab?: string }) {
   const { user } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -1431,9 +1433,10 @@ export default function Settings() {
     ...(canManageRoles ? (["Roles & Permissions"] as const) : []),
     "Security",
     "Document Templates",
+    "Subscription & Billing",
   ] as const) as readonly Tab[];
   const enabledTabs = visibleTabs.filter((t) => (t === "Document Templates" ? canAccessDocuments : true));
-  const resolvedTabFromUrl = (tabFromUrl && TAB_KEYS[tabFromUrl]) ? TAB_KEYS[tabFromUrl] : null;
+  const resolvedTabFromUrl = (tabFromUrl && TAB_KEYS[tabFromUrl]) ? TAB_KEYS[tabFromUrl] : (props?.defaultTab && TAB_KEYS[props.defaultTab] ? TAB_KEYS[props.defaultTab] : null);
   const initialTab = (resolvedTabFromUrl && enabledTabs.includes(resolvedTabFromUrl)) ? resolvedTabFromUrl : "Firm Info";
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
 
@@ -1905,6 +1908,8 @@ export default function Settings() {
       )}
 
       {activeTab === "Security" && <SecurityTab />}
+
+      {activeTab === "Subscription & Billing" && <FirmSubscriptionFeaturesTab firmId={user?.firmId ? Number(user.firmId) : 0} />}
 
       {canManageRoles && activeTab === "Roles & Permissions" && (
         <div className="space-y-4">

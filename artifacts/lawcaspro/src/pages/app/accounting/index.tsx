@@ -2077,8 +2077,8 @@ export function PaymentVouchersTab() {
                   >
                     <option value="">— None —</option>
                     {(quotationsQuery.data ?? [])
-                      .filter((q) => selectedCases.length === 0 || selectedCases.some((c) => c.case_id === q.caseId))
-                      .map((q) => (
+                      .filter((q: { id: number; caseId: number | null; totalAmount: number | string | null }) => selectedCases.length === 0 || selectedCases.some((c) => c.case_id === q.caseId))
+                      .map((q: { id: number; caseId: number | null; totalAmount: number | string | null }) => (
                         <option key={`quot-${q.id}`} value={String(q.id)}>
                           Q-{q.id} · RM{(Number(q.totalAmount) || 0).toFixed(2)} · Case #{q.caseId}
                         </option>

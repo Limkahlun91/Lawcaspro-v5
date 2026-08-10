@@ -203,7 +203,7 @@ describe("CaseMultiSelect", () => {
     await waitFor(() => expect(apiFetchJsonMock).toHaveBeenCalledTimes(2));
     expect(await screen.findByText("CON-001")).toBeInTheDocument();
 
-    failLaterReject?.(new Error("network"));
+    (failLaterReject as unknown as (e: unknown) => void)(new Error("network"));
     await waitFor(() => expect(screen.queryByText("Search failed. Please retry.")).toBeNull());
     expect(screen.getByText("CON-001")).toBeInTheDocument();
   });
