@@ -148,18 +148,24 @@ export async function appendLedgerEntry(
   entry: NewLedgerEntry,
   opts: {
     /**
-     * Open transaction-scoped connection owned by the caller (optional).
-     * If provided, we do NOT open a new db.transaction; instead the advisory
-     * lock + running-balance read + insert ALL run inside the caller's tx.
+     * Verified open DB transaction owned by the caller.
+     * If provided, LOCK + SUM + INSERT run inside this single existing
+     * transaction (caller owns COMMIT/ROLLBACK).
+     *
+     * If omitted, appendLedgerEntry opens its own `db.transaction(...)` so
+     * the three statements are guaranteed to share one real PostgreSQL
+     * transaction (the pg_advisory_xact_lock lives until COMMIT).
+     *
+     * There is intentionally no plain-`conn` escape hatch. Passing a raw
+     * auto-commit PoolClient/RlsDb/db object would release the xact advisory
+     * lock immediately after the LOCK statement and is therefore forbidden.
      */
     transaction?: AppDb | RlsDb;
-    /** @deprecated Use `transaction` — name distinguishes plain-connection vs. tx. */
-    conn?: AppDb | RlsDb;
     forceRunningBalance?: string;
     /**
-     * The ONLY safe short-circuit: callers that have ALREADY acquired
-     * firmAdvisoryLockKey(entry.firmId) on the current transaction context
-     * may pass true to avoid re-acquiring. Default = false → LOCK ALWAYS.
+     * Callers that have ALREADY acquired firmAdvisoryLockKey(entry.firmId)
+     * on the current transaction may pass true to avoid re-acquiring.
+     * Default = false → LOCK ALWAYS.
      */
     lockAlreadyHeld?: boolean;
   } = {},
@@ -171,24 +177,20 @@ export async function appendLedgerEntry(
     throw new ApiError({ status: 400, code: "INVALID_REVERSAL", message: "Reversal must carry non-zero debit or credit", retryable: false });
   }
 
-  const txOrConn = opts.transaction ?? opts.conn;
   const lockAlreadyHeld = Boolean(opts.lockAlreadyHeld);
 
   /**
-   * Core append logic — run either inside an auto-opened db.transaction
-   * or inside the caller's pre-existing transaction (both paths hold lock).
+   * Core append logic.  The caller guarantees `conn` lives inside a real
+   * BEGIN/COMMIT PostgreSQL transaction — either one we opened just below
+   * (Path B) or one the caller explicitly passed in as `transaction`
+   * (Path A).
    */
   const run = async (conn: AppDb | RlsDb, opts2: { lockAlreadyHeld: boolean }) => {
     if (!opts2.lockAlreadyHeld) {
-      // ── CRITICAL serialization point ────────────────────────────────────
-      // Acquire per-firm transaction-level advisory lock BEFORE any balance
-      // reads. This is required for both paths (caller tx or internal tx).
       const lockKey = firmAdvisoryLockKey(entry.firmId);
       await conn.execute(sql`SELECT pg_advisory_xact_lock(${lockKey})`);
     }
 
-    // ── Step 1: recompute running balance from IMMUTABLE existing entries (Option A-derived)
-    //    The running balance = COALESCE(SUM(debit - credit), 0) + new debit - new credit.
     let runningBalance: string;
     if (opts.forceRunningBalance !== undefined && opts.forceRunningBalance !== null) {
       runningBalance = String(opts.forceRunningBalance);
@@ -205,7 +207,6 @@ export async function appendLedgerEntry(
       runningBalance = next.toFixed(2);
     }
 
-    // ── Step 2: insert (may hit UNIQUE uq_billing_ledger_idempotency if duplicate)
     try {
       const payload: InsertBillingLedgerEntry = {
         firmId: entry.firmId,
@@ -245,7 +246,6 @@ export async function appendLedgerEntry(
         throw new ApiError({ status: 409, code: "LEDGER_APPEND_ONLY", message: "Ledger is append-only; use reversal/credit_note instead of update/delete", retryable: false });
       }
       if (/uq_billing_ledger_idempotency|duplicate.*key.*idempotency/i.test(msg) || (String(err?.code) === "23505" && /idempotency/.test(msg))) {
-        // Duplicate idempotency_key → return the already-written row as idempotent success.
         const prior = await conn
           .select({ id: billingLedgerTable.id, runningBalance: billingLedgerTable.runningBalance })
           .from(billingLedgerTable)
@@ -262,13 +262,13 @@ export async function appendLedgerEntry(
     }
   };
 
-  // ── Path A: caller owns their own transaction-scoped connection ────────
-  //         → run LOCK inside their tx; caller is responsible for COMMIT.
-  if (txOrConn) {
-    return await run(txOrConn, { lockAlreadyHeld });
+  // ── Path A: caller provided a real transaction-scoped connection ───────
+  //         → run LOCK/SUM/INSERT inside their transaction.
+  if (opts.transaction) {
+    return await run(opts.transaction, { lockAlreadyHeld });
   }
-  // ── Path B: internal transaction (no caller tx provided) ────────────────
-  //         → open our own tx + acquire lock inside + COMMIT
+  // ── Path B: no caller transaction → open our own REAL db.transaction ───
+  //         → LOCK + SUM + INSERT all inside one BEGIN/COMMIT block.
   return await db.transaction(async (tx) =>
     run(tx as unknown as AppDb, { lockAlreadyHeld }),
   );
@@ -278,23 +278,33 @@ export function buildBillingReversalIdempotencyKey(firmId: number, originalEntry
   return `billing-reversal:${firmId}:${originalEntryId}`;
 }
 
-/**
- * Reverse a prior charge by creating a new entry with opposite debit/credit.
- * Used for error correction instead of updating/deleting rows.
- *
- * Duplicate full-reversal prevention:
- *   • Deterministic idempotency key `billing-reversal:{firmId}:{entryId}`
- *   • Pre-flight existence check of `source_type = billing_ledger_reversal AND source_id = entryId`
- *   • uq_billing_ledger_idempotency unique index guarantees one row per key
- *   → two concurrent attempts for the same original entry → one winner only.
- */
 export async function reverseLedgerEntry(
   entryId: number,
   params: { actorId?: number | null; reason?: string; referenceNo?: string } = {},
-  opts: { conn?: AppDb | RlsDb; transaction?: AppDb | RlsDb; lockAlreadyHeld?: boolean } = {},
+  opts: { transaction?: AppDb | RlsDb; lockAlreadyHeld?: boolean } = {},
 ): Promise<{ reversalId: number; runningBalance: string; alreadyReversed: boolean }> {
-  const txOrConn = opts.transaction ?? opts.conn;
   const runInternal = async (conn: AppDb | RlsDb, runOpts: { lockAlreadyHeld: boolean }) => {
+    // ── LOCK first: we must serialize the whole CHECK-then-INSERT with the
+    //    firm-level xact advisory lock BEFORE any reads, so two concurrent
+    //    reversals of the same original entry never both observe "no prior
+    //    reversal exists" and race past the pre-flight.
+    let firmIdFromLock: number | undefined;
+    if (!runOpts.lockAlreadyHeld) {
+      // Peek firmId first so we know which lock key to acquire.  This is a
+      // single-row PK read (safe without our lock) — the critical ordering
+      // guarantee is that we acquire the firm lock BEFORE the "any prior
+      // reversal exists?" check below.  If we get a stale read here the
+      // worst case is the idempotency UNIQUE index fires correctly.
+      const peek = (await conn
+        .select({ firmId: billingLedgerTable.firmId })
+        .from(billingLedgerTable)
+        .where(eq(billingLedgerTable.id, entryId))
+        .limit(1))[0];
+      if (!peek) throw new ApiError({ status: 404, code: "NOT_FOUND", message: "Ledger entry not found", retryable: false });
+      firmIdFromLock = Number(peek.firmId);
+      await conn.execute(sql`SELECT pg_advisory_xact_lock(${firmAdvisoryLockKey(firmIdFromLock)})`);
+    }
+
     const prior = (await conn
       .select()
       .from(billingLedgerTable)
@@ -305,14 +315,12 @@ export async function reverseLedgerEntry(
       throw new ApiError({ status: 409, code: "ALREADY_VOIDED", message: "Ledger entry already voided", retryable: false });
     }
     const firmId = Number(prior.firmId);
-
-    // Lock this firm if not yet held.  Required so the existence check + append
-    // are atomic with respect to other reversals of the same original entry.
-    if (!runOpts.lockAlreadyHeld) {
+    if (firmIdFromLock !== undefined && firmIdFromLock !== firmId) {
+      // Edge case: PK changed between peek and read — defensively re-lock
+      // the real firm before continuing.
       await conn.execute(sql`SELECT pg_advisory_xact_lock(${firmAdvisoryLockKey(firmId)})`);
     }
 
-    // ── Pre-flight: any prior reversal row for the same source_id ─────────
     const existingReversal = (await conn
       .select({ id: billingLedgerTable.id, runningBalance: billingLedgerTable.runningBalance })
       .from(billingLedgerTable)
@@ -359,28 +367,25 @@ export async function reverseLedgerEntry(
     return { reversalId: res.id, runningBalance: res.runningBalance, alreadyReversed: false };
   };
 
-  if (txOrConn) {
-    return runInternal(txOrConn, { lockAlreadyHeld: Boolean(opts.lockAlreadyHeld) });
+  if (opts.transaction) {
+    return runInternal(opts.transaction, { lockAlreadyHeld: Boolean(opts.lockAlreadyHeld) });
   }
   return await db.transaction(async (tx) =>
     runInternal(tx as unknown as AppDb, { lockAlreadyHeld: Boolean(opts.lockAlreadyHeld) }),
   );
 }
 
-/**
- * Generate the standard monthly subscription charge for a single firm,
- * honoring custom_price_monthly + add-on overrides (paid_addon type).
- * TODO: Paid addon overrides are integrated via firm_entitlement_overrides join
- * in caller. This function does base plan charge only.
- */
 export async function generateMonthlySubscriptionCharge(
   firmId: number,
   periodStart: Date,
   periodEnd: Date,
-  opts: { conn?: AppDb | RlsDb; actorId?: number | null } = {},
+  opts: { transaction?: AppDb | RlsDb; actorId?: number | null } = {},
 ): Promise<{ chargeId: number; amount: string; runningBalance: string }> {
-  const conn = opts.conn ?? db;
-  const [firm] = await conn
+  // Firm+plan lookup is a READ — it may run on autocommit; there is no
+  // correctness risk if pricing races because the idempotency + append-
+  // inside-its-own-transaction below guarantees the real serialized part.
+  const readConn = opts.transaction ?? db;
+  const [firm] = await readConn
     .select({
       planId: firmsTable.subscriptionPlanId,
       isCustomPlan: firmsTable.isCustomPlan,
@@ -401,8 +406,12 @@ export async function generateMonthlySubscriptionCharge(
 
   const yyyymm = `${periodStart.getUTCFullYear()}${String(periodStart.getUTCMonth() + 1).padStart(2, "0")}`;
   const description = `Subscription ${firm.planName ?? "plan"} — ${yyyymm.slice(0, 4)}-${yyyymm.slice(4)}`;
-  // Deterministic idempotency key per firm + period → clicking "generate" twice never double-bills.
   const idempotencyKey = buildMonthlySubscriptionIdempotencyKey(firmId, periodStart.getUTCFullYear(), periodStart.getUTCMonth());
+
+  // Critical: when the caller does NOT own a transaction, pass NO options
+  // here so appendLedgerEntry opens its OWN real db.transaction() and
+  // performs LOCK → SUM → INSERT inside one PostgreSQL transaction.
+  // A plain PoolClient/RlsDb in autocommit mode is NEVER passed in.
   const res = await appendLedgerEntry(
     {
       firmId,
@@ -418,7 +427,7 @@ export async function generateMonthlySubscriptionCharge(
       sourceType: "subscription_monthly",
       createdBy: opts.actorId ?? null,
     },
-    { conn },
+    opts.transaction ? { transaction: opts.transaction } : {},
   );
   return { chargeId: res.id, amount: amountStr, runningBalance: res.runningBalance };
 }
