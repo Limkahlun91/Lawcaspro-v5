@@ -1,7 +1,7 @@
-import { CaseMilestoneKey, MilestonePresence, getListCasesQueryKey, useListCases, useListProjects, getListProjectsQueryKey } from "@workspace/api-client-react";
+import { CaseMilestoneKey, MilestonePresence, getListCasesQueryKey, useListCases, useListProjects, getListProjectsQueryKey, useListUsers, getListUsersQueryKey } from "@workspace/api-client-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Download, Plus, Search } from "lucide-react";
+import { Download, Plus, Search, Printer, Pencil as BatchUpdateIcon } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -27,6 +27,8 @@ import {
   type NormalizedGenerationJob,
 } from "@/lib/document-generation-client";
 import { normalizeAssignedToUserIdParam } from "./case-filter-utils";
+import { Label } from "@/components/ui/label";
+import { ScrollArea } from "@/components/ui/scroll-area";
 
 async function apiFetchCsv(path: string): Promise<Blob> {
   return await apiFetchBlob(path, { timeoutMs: 60000, headers: { accept: "text/csv" } });
@@ -370,6 +372,14 @@ export default function CasesList() {
   });
   const projects = Array.isArray((projectsRes as any)?.data) ? ((projectsRes as any).data as any[]) : [];
 
+  const listUsersParams = { page: 1 as const, limit: 500 as const };
+  const { data: usersResData } = useListUsers(listUsersParams, {
+    query: { staleTime: 5 * 60 * 1000, queryKey: getListUsersQueryKey(listUsersParams), retry: false, enabled: Boolean(user) },
+  });
+  const firmUsers: Array<{ id: number; name: string; roleName?: string | null }> = Array.isArray((usersResData as any)?.data?.users)
+    ? (usersResData as any).data.users
+    : Array.isArray((usersResData as any)?.users) ? (usersResData as any).users : [];
+
   const lastApprovedRef = useRef<{ data: any[]; total: number; page: number; limit: number } | null>(null);
   const lastApprovalListRef = useRef<{ data: any[]; total: number; page: number; limit: number } | null>(null);
 
@@ -504,6 +514,9 @@ export default function CasesList() {
   const [isBatchGenerateOpen, setIsBatchGenerateOpen] = useState(false);
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<Set<number>>(new Set());
   const [bulkGenerateDownloading, setBulkGenerateDownloading] = useState(false);
+
+  const [isBatchUpdateOpen, setIsBatchUpdateOpen] = useState(false);
+  const [isBatchPrintOpen, setIsBatchPrintOpen] = useState(false);
   const resubmitMutation = useMutation({
     mutationFn: async (caseId: number) => {
       return await apiFetchJson(`/cases/${caseId}/resubmit`, { method: "POST" });
@@ -1235,6 +1248,23 @@ export default function CasesList() {
                     Batch Generate Documents
                   </Button>
 
+                  <Button
+                    variant="secondary"
+                    disabled={bulkStatusMutation.isPending || bulkKeyDatesMutation.isPending || bulkGenerateDownloading}
+                    onClick={() => setIsBatchUpdateOpen(true)}
+                  >
+                    <BatchUpdateIcon className="w-4 h-4 mr-2" />
+                    Batch Update
+                  </Button>
+
+                  <Button
+                    disabled={bulkStatusMutation.isPending || bulkKeyDatesMutation.isPending || bulkGenerateDownloading}
+                    onClick={() => setIsBatchPrintOpen(true)}
+                  >
+                    <Printer className="w-4 h-4 mr-2" />
+                    Batch Print
+                  </Button>
+
                   <Button variant="ghost" onClick={() => setSelectedCaseIds(new Set())}>
                     Clear selection
                   </Button>
@@ -1802,5 +1832,752 @@ function BatchGenerateDialog(props: {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function BatchUpdateModalBody(props: {
+  selectedCaseIds: Set<number>;
+  caseById: Map<number, any>;
+  firmUsers: Array<{ id: number; name: string; roleName?: string | null }>;
+  spaStatuses: string[];
+  loanStatuses: string[];
+  onClose: () => void;
+  onSuccess: () => void;
+  toast: ReturnType<typeof useToast>["toast"];
+  isPartnerOrManager: boolean;
+}) {
+  const { selectedCaseIds, caseById, firmUsers, spaStatuses, loanStatuses, onClose, onSuccess, toast, isPartnerOrManager } = props;
+  const queryClient = useQueryClient();
+
+  const caseIdsArr = Array.from(selectedCaseIds).sort();
+  const casesSelected = caseIdsArr.map((id) => caseById.get(id)).filter(Boolean);
+
+  const [enabledFields, setEnabledFields] = useState<Set<string>>(new Set());
+  const [statusModule, setStatusModule] = useState<"spa" | "loan">("loan");
+  const [statusValue, setStatusValue] = useState<string>("");
+  const [statusDateYmd, setStatusDateYmd] = useState<string>("");
+  const [remarksText, setRemarksText] = useState<string>("");
+  const [assignedLawyerId, setAssignedLawyerId] = useState<string>("");
+  const [assignedClerkId, setAssignedClerkId] = useState<string>("");
+  const [responsibleLawyerId, setResponsibleLawyerId] = useState<string>("");
+  const [nextAction, setNextAction] = useState<string>("");
+  const [nextActionDateYmd, setNextActionDateYmd] = useState<string>("");
+  const [lawyerStatus, setLawyerStatus] = useState<string>("");
+  const [confirmStep, setConfirmStep] = useState<boolean>(false);
+  const [submitting, setSubmitting] = useState<boolean>(false);
+  const [result, setResult] = useState<null | {
+    succeeded: number;
+    skipped: number;
+    failed: number;
+    results: any[];
+    transitionWarnings: string[];
+  }>(null);
+
+  const caseUpdatedAtById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const c of casesSelected) {
+      const id = String(c.id);
+      const ua = c.updatedAt ?? c.updated_at;
+      if (ua) m.set(id, ua);
+    }
+    return m;
+  }, [casesSelected]);
+
+  const getCurrentStatus = (c: any, module: "spa" | "loan"): string => {
+    return module === "spa" ? (c.spaStatus ?? c.spa_status ?? "") : (c.loanStatus ?? c.loan_status ?? "");
+  };
+
+  const toggleField = (key: string) => {
+    setEnabledFields((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const lawyerUsers = firmUsers.filter((u) => {
+    const r = String(u.roleName ?? "").toLowerCase();
+    return r.includes("lawyer") || isPartnerOrManager;
+  });
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      setSubmitting(true);
+      const body = {
+        caseIds: caseIdsArr,
+        updates: {
+          status: enabledFields.has("status") ? { module: statusModule, value: statusValue } : undefined,
+          statusDate: enabledFields.has("statusDate") ? statusDateYmd : undefined,
+          remarks: enabledFields.has("remarks") ? remarksText : undefined,
+          assignedLawyerId: enabledFields.has("assignedLawyerId") && assignedLawyerId ? Number(assignedLawyerId) : undefined,
+          assignedClerkId: enabledFields.has("assignedClerkId") && assignedClerkId ? Number(assignedClerkId) : undefined,
+          responsibleLawyerId: enabledFields.has("responsibleLawyerId") && responsibleLawyerId ? Number(responsibleLawyerId) : undefined,
+          nextAction: enabledFields.has("nextAction") ? nextAction : undefined,
+          nextActionDate: enabledFields.has("nextActionDate") ? nextActionDateYmd : undefined,
+          lawyerStatus: enabledFields.has("lawyerStatus") ? lawyerStatus : undefined,
+        },
+        enabledFields: Array.from(enabledFields),
+        caseUpdatedAtById: Object.fromEntries(Array.from(caseUpdatedAtById.entries()).filter(([, v]) => v != null)),
+        confirmSummary: true,
+      };
+      const res = await apiFetchJson("/cases/batch/update", { method: "POST", body: JSON.stringify(body) });
+      return res as any;
+    },
+    onSuccess: (data) => {
+      setResult({
+        succeeded: data.succeeded ?? 0,
+        skipped: data.skipped ?? 0,
+        failed: data.failed ?? 0,
+        results: data.results ?? [],
+        transitionWarnings: data.transitionWarnings ?? [],
+      });
+      queryClient.invalidateQueries({ queryKey: getListCasesQueryKey() });
+      toast({ title: "Batch update completed", description: `${data.succeeded ?? 0} succeeded, ${data.skipped ?? 0} skipped, ${data.failed ?? 0} failed` });
+    },
+    onError: (err) => {
+      toastError(toast, err, "Batch update failed");
+    },
+    onSettled: () => {
+      setSubmitting(false);
+    },
+  });
+
+  const renderFieldToggle = (key: string, label: string, controls: React.ReactNode) => (
+    <div className="space-y-2 rounded-md border border-slate-200 p-3">
+      <div className="flex items-center gap-2">
+        <Checkbox checked={enabledFields.has(key)} onCheckedChange={() => toggleField(key)} id={`toggle-${key}`} />
+        <Label htmlFor={`toggle-${key}`} className="text-sm font-medium">{label}</Label>
+      </div>
+      {enabledFields.has(key) && <div className="pl-6 space-y-2">{controls}</div>}
+    </div>
+  );
+
+  const getFieldNewValue = (key: string): string => {
+    switch (key) {
+      case "status": return `Status (${statusModule}) → ${statusValue || "—"}`;
+      case "statusDate": return `Status Date → ${statusDateYmd || "—"}`;
+      case "remarks": return `Append Remark → "${remarksText.slice(0, 60)}${remarksText.length > 60 ? "…" : ""}"`;
+      case "assignedLawyerId": {
+        const u = firmUsers.find((x) => String(x.id) === assignedLawyerId);
+        return `Assigned Lawyer → ${u ? u.name : "Clear"}`;
+      }
+      case "assignedClerkId": {
+        const u = firmUsers.find((x) => String(x.id) === assignedClerkId);
+        return `Assigned Clerk → ${u ? u.name : "Clear"}`;
+      }
+      case "responsibleLawyerId": {
+        const u = firmUsers.find((x) => String(x.id) === responsibleLawyerId);
+        return `Responsible Lawyer → ${u ? u.name : "Clear"}`;
+      }
+      case "nextAction": return `Next Action → "${nextAction || "—"}"`;
+      case "nextActionDate": return `Next Action Date → ${nextActionDateYmd || "—"}`;
+      case "lawyerStatus": return `Lawyer Status → "${lawyerStatus || "—"}"`;
+      default: return key;
+    }
+  };
+
+  const getFieldCurrentValues = (key: string): string[] => {
+    return casesSelected.map((c) => {
+      switch (key) {
+        case "status": return getCurrentStatus(c, statusModule);
+        case "statusDate": return fmtIsoToYmd(c.statusDate ?? c.status_date);
+        case "remarks": return c.caseNotes ?? c.case_notes ?? "—";
+        case "assignedLawyerId": return c.assignedLawyerName ?? c.assigned_lawyer_name ?? "—";
+        case "assignedClerkId": return c.assignedClerkName ?? c.assigned_clerk_name ?? "—";
+        case "responsibleLawyerId": return c.responsibleLawyerName ?? c.responsible_lawyer_name ?? "—";
+        case "nextAction": return c.nextAction ?? c.next_action ?? "—";
+        case "nextActionDate": return fmtIsoToYmd(c.nextActionDate ?? c.next_action_date);
+        case "lawyerStatus": return c.lawyerStatus ?? c.lawyer_status ?? "—";
+        default: return "—";
+      }
+    });
+  };
+
+  const hasTransitionWarning = (() => {
+    if (!enabledFields.has("status")) return false;
+    const currentVals = Array.from(new Set(casesSelected.map((c) => getCurrentStatus(c, statusModule)).filter(Boolean)));
+    if (currentVals.length <= 1) return false;
+    const backward = ["Pending", "In Progress", "Completed"];
+    const targetIdx = backward.indexOf(statusValue);
+    return currentVals.some((v) => {
+      const curIdx = backward.indexOf(v);
+      return targetIdx >= 0 && curIdx > targetIdx;
+    });
+  })();
+
+  if (result) {
+    return (
+      <div className="space-y-4">
+        <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2">
+          <div className="font-medium text-green-800">Batch update finished</div>
+          <div className="text-sm text-green-700">
+            Succeeded: {result.succeeded} · Skipped: {result.skipped} · Failed: {result.failed}
+          </div>
+        </div>
+        {result.transitionWarnings.length > 0 && (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            {result.transitionWarnings.map((w, i) => (
+              <div key={i}>• {w}</div>
+            ))}
+          </div>
+        )}
+        {result.results && result.results.some((r: any) => !r.ok) && (
+          <ScrollArea className="h-48 rounded-md border border-slate-200">
+            <div className="space-y-1 p-2 text-sm">
+              {result.results
+                .filter((r: any) => !r.ok)
+                .map((r: any, i: number) => (
+                  <div key={i} className="rounded bg-red-50 px-2 py-1 text-red-800">
+                    Case #{r.caseId}: {r.reason || r.error || "Failed"}
+                  </div>
+                ))}
+            </div>
+          </ScrollArea>
+        )}
+        <DialogFooter>
+          <Button
+            onClick={() => {
+              onSuccess();
+              onClose();
+            }}
+          >
+            Close
+          </Button>
+        </DialogFooter>
+      </div>
+    );
+  }
+
+  if (!confirmStep) {
+    return (
+      <div className="space-y-4">
+        <div className="text-sm text-slate-600">
+          {casesSelected.length} case(s) selected · {enabledFields.size} field(s) to update
+        </div>
+        <ScrollArea className="max-h-[50vh]">
+          <div className="space-y-2 pr-2">
+            {renderFieldToggle(
+              "status",
+              "Case Status",
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Select value={statusModule} onValueChange={(v) => setStatusModule(v === "spa" ? "spa" : "loan")}>
+                  <SelectTrigger className="w-full sm:w-[120px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="loan">Loan</SelectItem>
+                    <SelectItem value="spa">SPA</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Select value={statusValue} onValueChange={setStatusValue}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Select status..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(statusModule === "spa" ? spaStatuses : loanStatuses).map((s) => (
+                      <SelectItem key={s} value={s}>{s}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            {renderFieldToggle(
+              "statusDate",
+              "Status Date",
+              <DateOnlyInput valueYmd={statusDateYmd} onChangeYmd={setStatusDateYmd} />
+            )}
+            {renderFieldToggle(
+              "remarks",
+              "Remarks",
+              <>
+                <Label className="text-xs text-slate-500">Append remark note to each case</Label>
+                <Input value={remarksText} onChange={(e) => setRemarksText(e.target.value)} placeholder="Enter remark..." />
+              </>
+            )}
+            {renderFieldToggle(
+              "assignedLawyerId",
+              "Assigned Lawyer",
+              <Select value={assignedLawyerId} onValueChange={setAssignedLawyerId}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="No change / clear" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">No change / clear</SelectItem>
+                  {lawyerUsers.map((u) => (
+                    <SelectItem key={u.id} value={String(u.id)}>{u.name} (#{u.id})</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            {renderFieldToggle(
+              "assignedClerkId",
+              "Assigned Clerk",
+              <Select value={assignedClerkId} onValueChange={setAssignedClerkId}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="No change / clear" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">No change / clear</SelectItem>
+                  {firmUsers.map((u) => (
+                    <SelectItem key={u.id} value={String(u.id)}>{u.name} (#{u.id})</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            {renderFieldToggle(
+              "responsibleLawyerId",
+              "Responsible Lawyer",
+              <Select value={responsibleLawyerId} onValueChange={setResponsibleLawyerId}>
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="No change / clear" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="">No change / clear</SelectItem>
+                  {lawyerUsers.map((u) => (
+                    <SelectItem key={u.id} value={String(u.id)}>{u.name} (#{u.id})</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            {renderFieldToggle(
+              "nextAction",
+              "Next Action",
+              <Input value={nextAction} onChange={(e) => setNextAction(e.target.value)} placeholder="Next action..." />
+            )}
+            {renderFieldToggle(
+              "nextActionDate",
+              "Next Action Date",
+              <DateOnlyInput valueYmd={nextActionDateYmd} onChangeYmd={setNextActionDateYmd} />
+            )}
+            {renderFieldToggle(
+              "lawyerStatus",
+              "Lawyer Status",
+              <Input value={lawyerStatus} onChange={(e) => setLawyerStatus(e.target.value)} placeholder="Lawyer status..." />
+            )}
+          </div>
+        </ScrollArea>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button disabled={enabledFields.size === 0 || submitting} onClick={() => setConfirmStep(true)}>Next</Button>
+        </DialogFooter>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardContent className="p-4 space-y-3">
+          <div className="font-medium">Confirm Batch Update · {casesSelected.length} Cases Selected</div>
+          {hasTransitionWarning && (
+            <div className="rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-800">
+              ⚠ Updating cases with different statuses may cause invalid workflow transitions. Some cases may be skipped.
+            </div>
+          )}
+          <div className="space-y-2">
+            {Array.from(enabledFields).map((key) => {
+              const currVals = getFieldCurrentValues(key);
+              const uniq = Array.from(new Set(currVals.filter((v) => v && v !== "—")));
+              return (
+                <div key={key} className="rounded-md border border-slate-200 p-2 text-sm">
+                  <div className="font-medium">{getFieldNewValue(key)}</div>
+                  <div className="mt-1 text-slate-600">
+                    {uniq.length === 0 ? (
+                      <span>Current: —</span>
+                    ) : uniq.length === 1 ? (
+                      <span>Current: {uniq[0]}</span>
+                    ) : (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">Varies</Badge>
+                        <span>Current: Values vary → New Value applied</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </CardContent>
+      </Card>
+      <DialogFooter>
+        <Button variant="outline" disabled={submitting || mutation.isPending} onClick={() => setConfirmStep(false)}>Back</Button>
+        <Button disabled={submitting || mutation.isPending} onClick={() => mutation.mutate()}>
+          {mutation.isPending || submitting ? "Submitting..." : "Submit"}
+        </Button>
+      </DialogFooter>
+    </div>
+  );
+}
+
+function BatchPrintModalBody(props: {
+  selectedCaseIds: Set<number>;
+  caseById: Map<number, any>;
+  onClose: () => void;
+  onSuccess: () => void;
+  toast: ReturnType<typeof useToast>["toast"];
+}) {
+  const { selectedCaseIds, caseById, onClose, onSuccess, toast } = props;
+
+  const caseIdsArr = Array.from(selectedCaseIds).sort();
+  const casesSelected = caseIdsArr.map((id) => caseById.get(id)).filter(Boolean);
+
+  const [selectionMode, setSelectionMode] = useState<"same_for_all" | "per_case">("same_for_all");
+  const [outputMode, setOutputMode] = useState<"combined_pdf" | "separate_files">("combined_pdf");
+  const [sharedSelection, setSharedSelection] = useState<Set<string>>(new Set());
+  const [perCaseSelections, setPerCaseSelections] = useState<Record<string, Set<string>>>({});
+  const [prepareResult, setPrepareResult] = useState<any>(null);
+  const [prepareLoading, setPrepareLoading] = useState(false);
+  const [opStatus, setOpStatus] = useState<string | null>(null);
+  const [allPrimaryJobsDone, setAllPrimaryJobsDone] = useState(false);
+  const [readyToDownload, setReadyToDownload] = useState(false);
+  const [jobCounts, setJobCounts] = useState<any>(null);
+  const [downloadLoading, setDownloadLoading] = useState(false);
+  const [downloadResult, setDownloadResult] = useState<any>(null);
+  const [batchOpId, setBatchOpId] = useState<string | null>(null);
+
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  const CATEGORIES = [
+    { key: "primary_status", label: "Primary Status Document" },
+    { key: "stamped_spa", label: "Stamped SPA" },
+    { key: "letter_of_offer", label: "Letter of Offer" },
+    { key: "spa", label: "SPA" },
+    { key: "facility_agreement", label: "Facility Agreement" },
+    { key: "deed_of_assignment", label: "Deed of Assignment" },
+    { key: "power_of_attorney", label: "Power of Attorney" },
+    { key: "memorandum_of_transfer", label: "MOT" },
+    { key: "charge_document", label: "Charge Document" },
+    { key: "land_search", label: "Land Search" },
+    { key: "bankruptcy_search", label: "Bankruptcy Search" },
+    { key: "identity_document", label: "Identity Document" },
+  ] as const;
+
+  const parseKindRef = (s: string): { kind: string; ref: string } => {
+    const idx = s.indexOf(":");
+    if (idx < 0) return { kind: s, ref: "" };
+    return { kind: s.slice(0, idx), ref: s.slice(idx + 1) };
+  };
+
+  const toggleShared = (key: string) => {
+    setSharedSelection((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const togglePerCase = (caseIdStr: string, key: string) => {
+    setPerCaseSelections((prev) => {
+      const existing = prev[caseIdStr] ?? new Set<string>();
+      const next = new Set(existing);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return { ...prev, [caseIdStr]: next };
+    });
+  };
+
+  const hasAnySelection = () => {
+    if (selectionMode === "same_for_all") return sharedSelection.size > 0;
+    return Object.values(perCaseSelections).some((s) => s.size > 0);
+  };
+
+  const triggerDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const prepareAndPoll = async () => {
+    if (casesSelected.length === 0 || !hasAnySelection()) return;
+    setPrepareLoading(true);
+    setPrepareResult(null);
+    setOpStatus(null);
+    setReadyToDownload(false);
+    setBatchOpId(null);
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
+
+    try {
+      const body: any = {
+        caseIds: caseIdsArr,
+        selectionMode,
+        outputMode,
+        sharedSelection: [],
+        perCaseSelections: {},
+      };
+      if (selectionMode === "same_for_all") {
+        body.sharedSelection = Array.from(sharedSelection).map((s) => {
+          const { kind, ref } = parseKindRef(s);
+          return { kind, ref };
+        });
+      } else {
+        body.perCaseSelections = Object.fromEntries(
+          Object.entries(perCaseSelections).map(([cid, set]) => [
+            cid,
+            Array.from(set).map((s) => {
+              const { kind, ref } = parseKindRef(s);
+              return { kind, ref };
+            }),
+          ])
+        );
+      }
+
+      const res = await apiFetchJson("/cases/batch/print/prepare", { method: "POST", body: JSON.stringify(body) });
+      setPrepareResult(res);
+      const opId = (res as any).batchOperationId ?? (res as any).batchOpId ?? null;
+      if (opId) {
+        setBatchOpId(opId);
+        pollIntervalRef.current = setInterval(async () => {
+          try {
+            const st = await apiFetchJson(`/cases/batch/print/${opId}/status`);
+            setOpStatus((st as any).opStatus ?? (st as any).status ?? null);
+            setJobCounts((st as any).jobCounts ?? null);
+            setAllPrimaryJobsDone(Boolean((st as any).allPrimaryJobsDone ?? false));
+            if ((st as any).readyToDownload || (st as any).status === "ready") {
+              setReadyToDownload(true);
+              if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
+              }
+            } else if ((st as any).opStatus === "failed" || (st as any).status === "failed") {
+              if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
+              }
+              toastError(toast, new Error((st as any).errorMessage || "Batch print failed"), "Batch print failed");
+            }
+          } catch (e) {
+            // ignore poll error, will retry next interval
+          }
+        }, 2000);
+      }
+      const sc = (res as any).summaryCounts;
+      if (sc && sc.tooLarge) {
+        toast({ title: "Warning", description: "Batch print limit: maximum 50 cases per batch print operation." });
+      }
+    } catch (err) {
+      toastError(toast, err, "Batch print prepare failed");
+    } finally {
+      setPrepareLoading(false);
+    }
+  };
+
+  const doDownload = async () => {
+    if (!batchOpId) return;
+    setDownloadLoading(true);
+    try {
+      if (outputMode === "combined_pdf") {
+        const blob = await apiFetchBlob(`/cases/batch/print/${batchOpId}/download?mode=combined_pdf`);
+        const filename = `Batch-Print-${Date.now()}-combined.pdf`;
+        triggerDownload(blob, filename);
+        setDownloadResult({ mode: "combined_pdf", filename });
+        toast({ title: "Download started", description: filename });
+        onSuccess();
+      } else {
+        const res = await apiFetchJson(`/cases/batch/print/${batchOpId}/download?mode=separate_files`);
+        const files = (res as any).files ?? [];
+        for (const f of files) {
+          try {
+            const resp = await fetch(f.signedUrl);
+            const blob = await resp.blob();
+            triggerDownload(blob, f.filename || `document-${Date.now()}.pdf`);
+            await new Promise((r) => setTimeout(r, 200));
+          } catch {
+            // skip individual file error
+          }
+        }
+        setDownloadResult({ mode: "separate_files", count: files.length });
+        toast({ title: "Download started", description: `${files.length} file(s)` });
+        onSuccess();
+      }
+    } catch (err) {
+      toastError(toast, err, "Download failed");
+    } finally {
+      setDownloadLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+  }, []);
+
+  const disabled = prepareLoading || downloadLoading || (pollIntervalRef.current != null && !readyToDownload);
+
+  const summary = prepareResult?.summaryCounts;
+  const authFailures = prepareResult?.authFailures ?? prepareResult?.authorizationFailures ?? [];
+  const caseSummaries = prepareResult?.caseSummaries ?? prepareResult?.perCase ?? [];
+
+  return (
+    <div className="space-y-4">
+      <Tabs value={selectionMode} onValueChange={(v) => {
+        if (v === "same_for_all" || v === "per_case") setSelectionMode(v);
+      }}>
+        <TabsList>
+          <TabsTrigger value="same_for_all">Same for All Cases</TabsTrigger>
+          <TabsTrigger value="per_case">Customize Per Case</TabsTrigger>
+        </TabsList>
+      </Tabs>
+
+      <div>
+        <Label className="text-xs text-slate-500">Output mode</Label>
+        <div className="mt-1">
+          <Select value={outputMode} onValueChange={(v) => setOutputMode(v === "separate_files" ? "separate_files" : "combined_pdf")} disabled={disabled}>
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="combined_pdf">Combined PDF</SelectItem>
+              <SelectItem value="separate_files">Separate Files</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+
+      {selectionMode === "same_for_all" && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">Mode 1: Same Selection for All Cases</Badge>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {CATEGORIES.map((cat) => (
+              <Button
+                key={cat.key}
+                type="button"
+                variant={sharedSelection.has(cat.key) ? "default" : "outline"}
+                size="sm"
+                disabled={disabled}
+                onClick={() => toggleShared(cat.key)}
+              >
+                {cat.label}
+              </Button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {selectionMode === "per_case" && (
+        <ScrollArea className="max-h-[40vh]">
+          <div className="space-y-2 pr-2">
+            {casesSelected.map((c) => {
+              const cid = String(c.id);
+              const sel = perCaseSelections[cid] ?? new Set<string>();
+              return (
+                <details key={cid} className="rounded-md border border-slate-200 p-2" open={false}>
+                  <summary className="flex items-center justify-between cursor-pointer list-none">
+                    <div className="flex items-center gap-2 text-sm">
+                      <span className="font-medium">{c.caseReference ?? c.case_reference ?? `Case #${c.id}`}</span>
+                      <Badge variant="outline">{sel.size} selected</Badge>
+                      {sel.size > 0 && (
+                        <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">Missing docs</Badge>
+                      )}
+                    </div>
+                  </summary>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {CATEGORIES.map((cat) => (
+                      <Button
+                        key={cat.key}
+                        type="button"
+                        variant={sel.has(cat.key) ? "default" : "outline"}
+                        size="sm"
+                        disabled={disabled}
+                        onClick={() => togglePerCase(cid, cat.key)}
+                      >
+                        {cat.label}
+                      </Button>
+                    ))}
+                  </div>
+                </details>
+              );
+            })}
+          </div>
+        </ScrollArea>
+      )}
+
+      {summary && (
+        <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+          <div className="font-medium">Summary</div>
+          <div className="text-slate-600">
+            Total: {summary.total ?? 0} · Ready: {summary.ready ?? 0} · Missing docs: {summary.missing ?? 0} · Failed/Unauthorized: {summary.failed ?? 0}
+          </div>
+          {summary.tooLarge && (
+            <div className="mt-2 rounded-md border border-yellow-200 bg-yellow-50 px-2 py-1 text-yellow-800">
+              ⚠ Batch limit exceeded. Maximum 50 cases allowed per batch print operation.
+            </div>
+          )}
+        </div>
+      )}
+
+      {authFailures.length > 0 && (
+        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+          ⚠ Some cases were not authorized (injection attempt detected and blocked) — see audit log.
+        </div>
+      )}
+
+      {caseSummaries.length > 0 && (
+        <ScrollArea className="max-h-[30vh] rounded-md border border-slate-200">
+          <div className="space-y-1 p-2 text-sm">
+            {caseSummaries.map((cs: any, i: number) => (
+              <div key={i} className="rounded border border-slate-100 p-2">
+                <div className="font-medium">{cs.caseReference ?? `Case #${cs.caseId}`}</div>
+                <div className="text-slate-600">
+                  Selected: {cs.selectedCount ?? 0} · {cs.missing && cs.missing.length > 0 ? <>Missing: {cs.missing.join(", ")}</> : null}
+                  {cs.error ? <span className="text-red-600"> · Error: {cs.error}</span> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+      )}
+
+      {(opStatus || jobCounts) && (
+        <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-800">
+          <div>Status: {opStatus || "processing..."} {allPrimaryJobsDone ? "· Jobs ready" : ""}</div>
+          {jobCounts && (
+            <div className="text-xs text-blue-700">
+              Pending: {jobCounts.pending ?? 0} · Running: {jobCounts.running ?? 0} · Done: {jobCounts.done ?? 0} · Failed: {jobCounts.failed ?? 0}
+            </div>
+          )}
+        </div>
+      )}
+
+      <DialogFooter className="gap-2">
+        <Button
+          variant="outline"
+          onClick={onClose}
+          disabled={disabled}
+        >
+          Close
+        </Button>
+        {!prepareResult || !readyToDownload ? (
+          <Button
+            onClick={prepareAndPoll}
+            disabled={disabled || casesSelected.length === 0 || !hasAnySelection()}
+          >
+            {prepareLoading ? "Preparing..." : "Prepare Preview"}
+          </Button>
+        ) : (
+          <Button
+            onClick={doDownload}
+            disabled={downloadLoading}
+          >
+            {downloadLoading ? "Downloading..." : outputMode === "combined_pdf" ? "Download Combined PDF" : "Download Separate Files"}
+          </Button>
+        )}
+      </DialogFooter>
+    </div>
   );
 }

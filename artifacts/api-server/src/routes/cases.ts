@@ -15,6 +15,7 @@ import {
   caseListSavedViewsTable,
   caseLedgersTable,
   projectsTable, developersTable, clientsTable, usersTable, rolesTable, auditLogsTable,
+  batchOperationsTable,
   firmFileRefSettingsTable,
   permissionsTable,
   caseNotificationsTable,
@@ -8928,6 +8929,503 @@ router.post("/cases/:caseId/ledger", requireAuthHandler, requireFirmUserHandler,
     updatedAt: toIsoStringSafe(created?.updatedAt),
   });
 }));
+
+const BATCH_UPDATE_MAX_CASES = 200;
+const BATCH_UPDATE_ALLOWED_KEYS = new Set([
+  "status",
+  "statusDate",
+  "remarks",
+  "assignedLawyerId",
+  "assignedClerkId",
+  "responsibleLawyerId",
+  "nextAction",
+  "nextActionDate",
+  "lawyerStatus",
+]);
+
+router.post(
+  "/cases/batch/update",
+  requireAuthHandler,
+  requireFirmUserHandler,
+  requirePermission("cases", "update") as RequestHandler,
+  authed(async (req, res) => {
+    const r = req.rlsDb;
+    if (!r) {
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
+    const firmId = req.firmId!;
+    const userId = req.userId!;
+    const [roleRow] = await r
+      .select({ name: rolesTable.name })
+      .from(rolesTable)
+      .where(and(eq(rolesTable.id, req.roleId!), eq(rolesTable.firmId, req.firmId!)))
+      .limit(1);
+    const roleName = String(roleRow?.name ?? "");
+    const canBypassCaseAssignment = roleName === "Partner" || roleName === "Manager" || roleName.startsWith("Manager");
+
+    const body = asObject(req.body);
+    const rawCaseIds = Array.isArray(body?.caseIds) ? body!.caseIds : [];
+    const enabledFieldsRaw = Array.isArray(body?.enabledFields) ? body!.enabledFields : [];
+    const caseUpdatedAtByIdRaw = body && typeof (body as any).caseUpdatedAtById === "object" && !Array.isArray((body as any).caseUpdatedAtById)
+      ? (body as any).caseUpdatedAtById as Record<string, unknown>
+      : {};
+    const updates = asObject((body as any)?.updates) ?? {};
+    const confirmSummary = Boolean((body as any).confirmSummary);
+
+    const normalizedCaseIds = Array.from(new Set(
+      rawCaseIds
+        .map((x: unknown) => Number(x))
+        .filter((x: number) => Number.isInteger(x) && x > 0),
+    ));
+
+    if (normalizedCaseIds.length === 0) {
+      res.status(400).json({ error: "caseIds is required and must contain positive integers" });
+      return;
+    }
+    if (normalizedCaseIds.length > BATCH_UPDATE_MAX_CASES) {
+      res.status(400).json({
+        error: `Too many cases. Maximum ${BATCH_UPDATE_MAX_CASES} cases per batch update.`,
+        code: "BATCH_TOO_LARGE",
+        maxCases: BATCH_UPDATE_MAX_CASES,
+      });
+      return;
+    }
+
+    const enabledFields = enabledFieldsRaw
+      .map((x: unknown) => String(x ?? ""))
+      .filter((k: string) => BATCH_UPDATE_ALLOWED_KEYS.has(k));
+
+    if (enabledFields.length === 0) {
+      res.status(400).json({ error: "At least one field must be selected to update" });
+      return;
+    }
+
+    if (!confirmSummary) {
+      res.status(400).json({ error: "Confirmation required before batch update" });
+      return;
+    }
+
+    const rawCases = await r
+      .select({
+        id: casesTable.id,
+        firmId: casesTable.firmId,
+        referenceNo: casesTable.referenceNo,
+        purchaseMode: casesTable.purchaseMode,
+        titleType: casesTable.titleType,
+        status: casesTable.status,
+        lawyerStatus: casesTable.lawyerStatus,
+        approvalStatus: casesTable.approvalStatus,
+        projectId: casesTable.projectId,
+        developerId: casesTable.developerId,
+        updatedAt: casesTable.updatedAt,
+        createdAt: casesTable.createdAt,
+        spaStatus: sql<string>`${spaStatusSql()}`,
+        loanStatus: sql<string>`${loanStatusSql()}`,
+      })
+      .from(casesTable)
+      .where(and(eq(casesTable.firmId, firmId), inArray(casesTable.id, normalizedCaseIds)));
+
+    const foundById = new Map(rawCases.map((c) => [c.id, c]));
+
+    const authFailures: Array<{ caseId: number; error: string; code: string }> = [];
+    const authorized: typeof rawCases = [];
+    for (const id of normalizedCaseIds) {
+      const c = foundById.get(id);
+      if (!c) {
+        authFailures.push({ caseId: id, error: "Case not found in this firm", code: "CASE_NOT_FOUND_OR_UNAUTHORIZED" });
+        continue;
+      }
+      if (!canBypassCaseAssignment) {
+        const [assignmentRow] = await r
+          .select({ count: count() })
+          .from(caseAssignmentsTable)
+          .where(and(
+            eq(caseAssignmentsTable.caseId, id),
+            eq(caseAssignmentsTable.userId, userId),
+            sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
+          ));
+        const hasAssignment = Number(assignmentRow?.count ?? 0) > 0;
+        if (!hasAssignment) {
+          authFailures.push({ caseId: id, error: "Not authorized for this case", code: "CASE_NOT_AUTHORIZED" });
+          continue;
+        }
+      }
+      authorized.push(c);
+    }
+
+    for (const f of authFailures) {
+      try {
+        await writeAuditLog({
+          firmId,
+          actorId: req.userId,
+          actorType: req.userType ?? "firm_user",
+          action: "auth.forbidden.batch_update_injection_rejected",
+          entityType: "case",
+          entityId: f.caseId,
+          detail: `rejected_case_id=${f.caseId} code=${f.code}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        }, { db: req.rlsDb });
+      } catch {
+        // swallow audit errors
+      }
+    }
+
+    const now = new Date();
+
+    const [insertedBatchOp] = await r
+      .insert(batchOperationsTable)
+      .values({
+        firmId,
+        userId,
+        userType: "firm_user",
+        operationType: "cases.batch_update",
+        status: "running",
+        requestedIds: normalizedCaseIds as any,
+        counts: { requested: normalizedCaseIds.length, authorized: authorized.length, authFailed: authFailures.length } as any,
+        payload: { enabledFields, updates: JSON.parse(JSON.stringify(updates)), confirmSummary } as any,
+        itemErrors: authFailures as any,
+        ipAddress: req.ip ?? undefined,
+        userAgent: req.headers["user-agent"] ? String(req.headers["user-agent"]) : undefined,
+        startedAt: now,
+      } as any)
+      .returning({ id: batchOperationsTable.id });
+
+    const batchOperationId = Number(insertedBatchOp?.id ?? 0);
+
+    const results: Array<{
+      caseId: number;
+      outcome: "success" | "skipped" | "failed";
+      reason?: string;
+      code?: string;
+      changedFields?: string[];
+    }> = [];
+    const beforeByCase: Record<string, Record<string, unknown>> = {};
+    const afterByCase: Record<string, Record<string, unknown>> = {};
+    const transitionWarnings: string[] = [];
+
+    const getStaleExpected = (caseId: number): number | null => {
+      const raw = caseUpdatedAtByIdRaw[String(caseId)];
+      if (!raw) return null;
+      const t = typeof raw === "string" ? Date.parse(raw) : raw instanceof Date ? raw.getTime() : Number(raw);
+      return Number.isFinite(t) ? t : null;
+    };
+
+    const statusUpdate: { module: "spa" | "loan"; value: string } | null =
+      enabledFields.includes("status") &&
+      updates?.status &&
+      typeof (updates.status as any).module === "string" &&
+      typeof (updates.status as any).value === "string"
+        ? { module: (updates.status as any).module === "spa" ? "spa" : "loan", value: String((updates.status as any).value) }
+        : null;
+
+    const statusDateYmd = enabledFields.includes("statusDate")
+      ? (typeof updates?.statusDate === "string" ? parseDateOnlyInput(String(updates.statusDate)) ?? null : null)
+      : null;
+    const remarksText = enabledFields.includes("remarks") && typeof (updates as any).remarks === "string"
+      ? String((updates as any).remarks).slice(0, 4000)
+      : null;
+    const nextActionText = enabledFields.includes("nextAction") && typeof (updates as any).nextAction === "string"
+      ? String((updates as any).nextAction).slice(0, 500)
+      : null;
+    const nextActionDateYmd = enabledFields.includes("nextActionDate")
+      ? (typeof (updates as any).nextActionDate === "string" ? parseDateOnlyInput(String((updates as any).nextActionDate)) ?? null : null)
+      : null;
+    const lawyerStatusText = enabledFields.includes("lawyerStatus") && typeof (updates as any).lawyerStatus === "string"
+      ? String((updates as any).lawyerStatus).slice(0, 200)
+      : null;
+
+    const parseUserIdField = (key: "assignedLawyerId" | "assignedClerkId" | "responsibleLawyerId"): number | null => {
+      if (!enabledFields.includes(key)) return null;
+      const raw = (updates as any)[key];
+      if (raw === null || raw === undefined || raw === "") return null;
+      const n = Number(raw);
+      return Number.isInteger(n) && n > 0 ? n : null;
+    };
+    const newAssignedLawyerId = parseUserIdField("assignedLawyerId");
+    const newAssignedClerkId = parseUserIdField("assignedClerkId");
+    const newResponsibleLawyerId = parseUserIdField("responsibleLawyerId");
+
+    const validatedUserIds = new Set<number>();
+    if (newAssignedLawyerId !== null) validatedUserIds.add(newAssignedLawyerId);
+    if (newAssignedClerkId !== null) validatedUserIds.add(newAssignedClerkId);
+    if (newResponsibleLawyerId !== null) validatedUserIds.add(newResponsibleLawyerId);
+    const invalidUserIds: number[] = [];
+    if (validatedUserIds.size > 0) {
+      const usersFound = await r
+        .select({ id: usersTable.id })
+        .from(usersTable)
+        .where(and(eq(usersTable.firmId, firmId), inArray(usersTable.id, Array.from(validatedUserIds))));
+      const foundUsers = new Set(usersFound.map((u) => u.id));
+      for (const uid of validatedUserIds) {
+        if (!foundUsers.has(uid)) invalidUserIds.push(uid);
+      }
+    }
+
+    for (const c of authorized) {
+      const changedFields: string[] = [];
+      const before: Record<string, unknown> = {};
+      const after: Record<string, unknown> = {};
+
+      const staleExpected = getStaleExpected(c.id);
+      const staleActual = c.updatedAt ? (c.updatedAt instanceof Date ? c.updatedAt.getTime() : Date.parse(String(c.updatedAt))) : null;
+      if (staleExpected !== null && staleActual !== null) {
+        if (Math.abs(staleActual - staleExpected) > 2000) {
+          results.push({ caseId: c.id, outcome: "skipped", reason: "Case was updated by another user since this dialog was opened. Re-open and try again.", code: "CASE_UPDATED_SINCE_LOAD" });
+          continue;
+        }
+      }
+
+      if (invalidUserIds.length > 0) {
+        const hit =
+          (newAssignedLawyerId !== null && invalidUserIds.includes(newAssignedLawyerId)) ||
+          (newAssignedClerkId !== null && invalidUserIds.includes(newAssignedClerkId)) ||
+          (newResponsibleLawyerId !== null && invalidUserIds.includes(newResponsibleLawyerId));
+        if (hit) {
+          results.push({ caseId: c.id, outcome: "skipped", reason: "Target assignee user not found in this firm.", code: "ASSIGNEE_NOT_IN_FIRM" });
+          continue;
+        }
+      }
+
+      if (statusUpdate !== null) {
+        const cur = statusUpdate.module === "spa" ? String(c.spaStatus ?? "") : String(c.loanStatus ?? "");
+        before[statusUpdate.module === "spa" ? "spaStatus" : "loanStatus"] = cur;
+        after[statusUpdate.module === "spa" ? "spaStatus" : "loanStatus"] = statusUpdate.value;
+
+        try {
+          const titleTypeNorm = typeof c.titleType === "string" ? String(c.titleType) : undefined;
+          const pm = String(c.purchaseMode ?? "");
+          const steps = buildWorkflowSteps(pm === "loan" ? "loan" : pm === "spa" ? "spa" : "spa", titleTypeNorm as any);
+          const stepKeys = steps.map((s: any) => String(s.key ?? ""));
+          const curIdx = stepKeys.indexOf(cur);
+          const newIdx = stepKeys.indexOf(statusUpdate.value);
+          if (cur !== statusUpdate.value && curIdx >= 0 && newIdx >= 0 && newIdx < curIdx) {
+            transitionWarnings.push(`Case #${c.id} (${c.referenceNo ?? ""}): possible backward transition ${cur} → ${statusUpdate.value}. Verify workflow before approval.`);
+          }
+        } catch {
+          // ignore workflow step parse errors in batch
+        }
+
+        changedFields.push(statusUpdate.module === "spa" ? "spaStatus" : "loanStatus");
+      }
+
+      if (statusDateYmd !== null) {
+        before.statusDate = (c as any).statusDate ? String((c as any).statusDate) : null;
+        after.statusDate = statusDateYmd;
+        changedFields.push("statusDate");
+      }
+      if (remarksText !== null && remarksText.trim() !== "") {
+        before.remarks = typeof (c as any).remarks === "string" ? (c as any).remarks : null;
+        after.remarksAppend = remarksText;
+        changedFields.push("remarks");
+      }
+      if (nextActionText !== null) {
+        before.nextAction = typeof (c as any).nextAction === "string" ? (c as any).nextAction : null;
+        after.nextAction = nextActionText;
+        changedFields.push("nextAction");
+      }
+      if (nextActionDateYmd !== null) {
+        before.nextActionDate = (c as any).nextActionDate ? String((c as any).nextActionDate) : null;
+        after.nextActionDate = nextActionDateYmd;
+        changedFields.push("nextActionDate");
+      }
+      if (lawyerStatusText !== null) {
+        before.lawyerStatus = typeof c.lawyerStatus === "string" ? c.lawyerStatus : null;
+        after.lawyerStatus = lawyerStatusText;
+        changedFields.push("lawyerStatus");
+      }
+      if (enabledFields.includes("assignedLawyerId")) {
+        before.assignedLawyerId = (c as any).assignedLawyerId ?? null;
+        after.assignedLawyerId = newAssignedLawyerId;
+        changedFields.push("assignedLawyerId");
+      }
+      if (enabledFields.includes("assignedClerkId")) {
+        before.assignedClerkId = (c as any).assignedClerkId ?? null;
+        after.assignedClerkId = newAssignedClerkId;
+        changedFields.push("assignedClerkId");
+      }
+      if (enabledFields.includes("responsibleLawyerId")) {
+        before.responsibleLawyerId = (c as any).responsibleLawyerId ?? null;
+        after.responsibleLawyerId = newResponsibleLawyerId;
+        changedFields.push("responsibleLawyerId");
+      }
+
+      if (changedFields.length === 0) {
+        results.push({ caseId: c.id, outcome: "skipped", reason: "No fields actually changed after composing update.", code: "NO_CHANGES_COMPOSED" });
+        continue;
+      }
+
+      try {
+        const caseUpdates: Record<string, unknown> = {};
+        if (statusUpdate) {
+          caseUpdates.status = statusUpdate.value;
+        }
+        if (lawyerStatusText !== null) {
+          caseUpdates.lawyerStatus = lawyerStatusText;
+          caseUpdates.lawyerStatusUpdatedAt = now;
+        }
+
+        if (Object.keys(caseUpdates).length > 0) {
+          await r.update(casesTable).set(caseUpdates as any).where(eq(casesTable.id, c.id));
+        }
+
+        const doAssign = async (roleInCase: "lawyer" | "clerk", nextUid: number | null) => {
+          await r
+            .update(caseAssignmentsTable)
+            .set({ unassignedAt: now })
+            .where(and(
+              eq(caseAssignmentsTable.caseId, c.id),
+              eq(caseAssignmentsTable.roleInCase, roleInCase),
+              sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
+            ));
+          if (nextUid !== null) {
+            await r.insert(caseAssignmentsTable).values({
+              firmId,
+              caseId: c.id,
+              userId: nextUid,
+              roleInCase,
+              assignedAt: now,
+            } as any).onConflictDoNothing();
+          }
+        };
+        if (enabledFields.includes("assignedLawyerId")) await doAssign("lawyer", newAssignedLawyerId);
+        if (enabledFields.includes("assignedClerkId")) await doAssign("clerk", newAssignedClerkId);
+
+        if (remarksText !== null && remarksText.trim() !== "") {
+          try {
+            await r.insert(caseNotesTable).values({
+              firmId,
+              caseId: c.id,
+              userId,
+              noteType: "status_update",
+              note: `[Batch Update #${batchOperationId}] ${remarksText.trim()}`,
+              createdAt: now,
+            } as any);
+          } catch {
+            // ignore note insert error
+          }
+        }
+
+        beforeByCase[String(c.id)] = before;
+        afterByCase[String(c.id)] = after;
+
+        try {
+          await writeAuditLog({
+            firmId,
+            actorId: req.userId,
+            actorType: req.userType ?? "firm_user",
+            action: "cases.batch_update.case",
+            entityType: "case",
+            entityId: c.id,
+            detail: JSON.stringify({
+              batchOperationId,
+              enabledFields,
+              before,
+              after,
+              changedFields,
+            }),
+            ipAddress: req.ip,
+            userAgent: req.headers["user-agent"],
+          }, { db: req.rlsDb });
+        } catch {
+          // swallow audit errors
+        }
+
+        results.push({ caseId: c.id, outcome: "success", changedFields });
+      } catch (err: any) {
+        results.push({
+          caseId: c.id,
+          outcome: "failed",
+          reason: err?.message ? String(err.message) : "Unknown update error",
+          code: err?.code ? String(err.code) : "BATCH_UPDATE_CASE_ERROR",
+        });
+      }
+    }
+
+    const succeeded = results.filter((r) => r.outcome === "success").length;
+    const skipped = results.filter((r) => r.outcome === "skipped").length + authFailures.length;
+    const failed = results.filter((r) => r.outcome === "failed").length;
+
+    let finalStatus: "completed" | "partial_failure" | "failed" = "completed";
+    if (succeeded === 0 && (skipped > 0 || failed > 0)) finalStatus = "failed";
+    else if (skipped > 0 || failed > 0) finalStatus = "partial_failure";
+
+    const finishedAt = new Date();
+    await r
+      .update(batchOperationsTable)
+      .set({
+        status: finalStatus,
+        counts: {
+          requested: normalizedCaseIds.length,
+          authorized: authorized.length,
+          authFailed: authFailures.length,
+          succeeded,
+          skipped,
+          failed,
+        } as any,
+        output: {
+          beforeByCase,
+          afterByCase,
+          transitionWarnings,
+          enabledFields,
+        } as any,
+        itemErrors: [...authFailures, ...results.filter((x) => x.outcome !== "success")] as any,
+        finishedAt,
+        updatedAt: finishedAt,
+      } as any)
+      .where(eq(batchOperationsTable.id, batchOperationId));
+
+    try {
+      await writeAuditLog({
+        firmId,
+        actorId: req.userId,
+        actorType: req.userType ?? "firm_user",
+        action: "cases.batch_update.summary",
+        entityType: "batch_operation",
+        entityId: batchOperationId,
+        detail: JSON.stringify({
+          requested: normalizedCaseIds.length,
+          authorized: authorized.length,
+          authFailed: authFailures.length,
+          succeeded,
+          skipped,
+          failed,
+          enabledFields,
+          transitionWarnings,
+        }),
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      }, { db: req.rlsDb });
+    } catch {
+      // swallow
+    }
+
+    const authFailureResults = authFailures.map((f) => ({
+      caseId: f.caseId,
+      outcome: "skipped" as const,
+      reason: f.error,
+      code: f.code,
+    }));
+
+    res.status(200).json({
+      ok: true,
+      batchOperationId: String(batchOperationId),
+      status: finalStatus,
+      counts: {
+        requested: normalizedCaseIds.length,
+        authorized: authorized.length,
+        authFailed: authFailures.length,
+        succeeded,
+        skipped,
+        failed,
+      },
+      transitionWarnings,
+      enabledFields,
+      results: [...authFailureResults, ...results],
+    });
+  }),
+);
 
 export { router };
 export default router;
