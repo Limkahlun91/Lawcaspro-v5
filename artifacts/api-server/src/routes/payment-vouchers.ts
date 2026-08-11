@@ -27,7 +27,7 @@ import {
   usersTable,
 } from "@workspace/db";
 import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog, finalizeFirmUserTransaction } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { queryOne } from "../lib/http.js";
 import { logger } from "../lib/logger.js";
@@ -110,6 +110,8 @@ const PV_CREATE_SMALL_QUERY_TIMEOUT_MS = 3_000;
 const PV_CREATE_AGGREGATE_TIMEOUT_MS = 5_000;
 const PV_CREATE_TX_LOCK_TIMEOUT_MS = 2_000;
 const PV_CREATE_TX_STATEMENT_TIMEOUT_MS = 15_000;
+const PV_CREATE_COMMIT_MAX_MS = 3_000;
+const PV_CREATE_OVERHEAD_RESERVE_MS = 2_000;
 
 type PvCreateTimingStage =
   | "request_received"
@@ -146,9 +148,21 @@ const getReqIdForLog = (req: AuthRequest): string | null => {
   return typeof id === "string" ? id : null;
 };
 
-async function setRlsClientStatementTimeout(
+export class PvTimeoutSetupFailed extends Error {
+  readonly name = "PvTimeoutSetupFailed";
+  constructor(
+    readonly sqlState: string | null,
+    readonly stage: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`pv.statement_timeout.setup_failed@${stage} t=${timeoutMs}ms sqlState=${sqlState ?? "none"}`);
+  }
+}
+
+export async function setRlsClientStatementTimeout(
   req: AuthRequest,
   timeoutMs: number,
+  stage: string,
 ): Promise<void> {
   const client = req.rlsClient;
   if (!client) return;
@@ -157,20 +171,69 @@ async function setRlsClientStatementTimeout(
     await client.query({
       text: `SET LOCAL statement_timeout = '${safeMs}ms'`,
     });
-  } catch {
+  } catch (err) {
+    const sqlState = (() => {
+      if (!err || typeof err !== "object") return null;
+      const c = err as { code?: unknown; sqlState?: unknown; sqlstate?: unknown };
+      for (const v of [c.sqlState, c.sqlstate, c.code]) {
+        if (typeof v === "string") return v;
+      }
+      return null;
+    })();
+    logger.warn(
+      {
+        reqId: getReqIdForLog(req),
+        firmId: req.firmId ?? null,
+        clientRequestId: (req as { pvClientRequestId?: string }).pvClientRequestId ?? null,
+        userId: req.userId ?? null,
+        stage,
+        timeoutMs: safeMs,
+        sqlState,
+        err,
+      },
+      "payment_voucher.set_statement_timeout_failed",
+    );
+    throw new PvTimeoutSetupFailed(sqlState, stage, safeMs);
   }
+}
+
+async function pvEarlyRollback(req: AuthRequest): Promise<{ ok: boolean; code?: string }> {
+  try {
+    const fin = await finalizeFirmUserTransaction(req, "rollback");
+    return { ok: fin.ok, code: fin.code };
+  } catch (err) {
+    logger.warn(
+      { reqId: getReqIdForLog(req), firmId: req.firmId ?? null, err },
+      "payment_voucher.early_rollback_failed",
+    );
+    return { ok: false, code: "EARLY_ROLLBACK_FAILED" };
+  }
+}
+
+function pvRollbackFailedResponse(res: Response, code: string): void {
+  res.status(500).json({
+    error: "Database unavailable during early rollback",
+    code: code || "DB_ROLLBACK_FAILED",
+  });
+}
+
+function getPvE2eStartAt(req: AuthRequest): number {
+  if (req.timing && typeof req.timing.startAt === "number") return req.timing.startAt;
+  const v = (req as { pvCreateStartedAt?: number }).pvCreateStartedAt;
+  if (typeof v === "number") return v;
+  return Date.now();
 }
 
 function checkPvCreateBudget(
   req: AuthRequest,
   stage: PvCreateTimingStage,
-): { exceeded: boolean; elapsedMs: number } {
-  const startedAt = (req as { pvCreateStartedAt?: number }).pvCreateStartedAt ?? Date.now();
+): { exceeded: boolean; elapsedMs: number; remainingMs: number } {
+  const startedAt = getPvE2eStartAt(req);
   const elapsedMs = Math.max(0, Date.now() - startedAt);
   if (elapsedMs >= PV_CREATE_REQUEST_BUDGET_MS) {
-    return { exceeded: true, elapsedMs };
+    return { exceeded: true, elapsedMs, remainingMs: 0 };
   }
-  return { exceeded: false, elapsedMs };
+  return { exceeded: false, elapsedMs, remainingMs: Math.max(0, PV_CREATE_REQUEST_BUDGET_MS - elapsedMs) };
 }
 
 function emitPvCreateTiming(
@@ -179,7 +242,7 @@ function emitPvCreateTiming(
   meta: Record<string, unknown> = {},
 ) {
   const now = Date.now();
-  const startedAt = (req as { pvCreateStartedAt?: number }).pvCreateStartedAt ?? now;
+  const startedAt = getPvE2eStartAt(req);
   const elapsedMs = Math.max(0, now - startedAt);
   const lastEmit = (req as { pvCreateLastEmitAt?: number }).pvCreateLastEmitAt ?? startedAt;
   const stageMs = Math.max(0, now - lastEmit);
@@ -187,6 +250,7 @@ function emitPvCreateTiming(
   if (req.timing?.sections) {
     req.timing.sections[`pv.stage.${stage}`] = (req.timing.sections[`pv.stage.${stage}`] ?? 0) + stageMs;
   }
+  const sections = req.timing?.sections ?? null;
   const event = {
     reqId: getReqIdForLog(req),
     clientRequestId: (req as { pvClientRequestId?: string }).pvClientRequestId ?? null,
@@ -195,6 +259,10 @@ function emitPvCreateTiming(
     stage,
     elapsedMs,
     stageMs,
+    authMs: sections && typeof sections.authSessionMs === "number" ? sections.authSessionMs : null,
+    dbPoolConnectMs: sections && typeof sections.tenantContextDbConnectMs === "number" ? sections.tenantContextDbConnectMs : null,
+    tenantContextMs: sections && typeof sections.tenantContextMs === "number" ? sections.tenantContextMs : null,
+    handlerElapsedMs: (req as { pvCreateStartedAt?: number }).pvCreateStartedAt ? Math.max(0, now - (req as { pvCreateStartedAt?: number }).pvCreateStartedAt!) : null,
     ...getPoolStatsSnapshot(),
     ...meta,
   };
@@ -790,6 +858,7 @@ router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requirePermiss
 
 // Create
 router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  req._firmContextManualCommitMode = true;
   const startedAt = Date.now();
   (req as { pvCreateStartedAt?: number }).pvCreateStartedAt = startedAt;
   emitPvCreateTiming(req, "request_received");
@@ -798,6 +867,11 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   stopParse();
   if (!parsed.success) {
     emitPvCreateTiming(req, "failed", { code: "INVALID_PAYLOAD" });
+    const fin = await finalizeFirmUserTransaction(req, "rollback");
+    if (!fin.ok) {
+      res.status(500).json({ error: "Database unavailable", code: "DB_ROLLBACK_FAILED" });
+      return;
+    }
     res.status(400).json({ error: parsed.error.message });
     return;
   }
@@ -857,45 +931,74 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       : [{ description: purpose, itemType: "disbursement" as const, amount }];
 
   const effectiveAmount = effectiveItems.reduce((sum, i) => sum + Number(i.amount), 0);
+  await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS, "pre_tracking_checks");
   const storedPurpose =
     normalizedLineItems && normalizedLineItems.length > 1
       ? `${normalizedLineItems[0].purpose} (+${normalizedLineItems.length - 1} more)`
       : purpose;
 
   const stopPermissions = createSectionTimer(req, "pv.create.permissions");
-  await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS);
+  await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS, "permissions_checks");
   const roleName = await getRoleName(req);
   const roleKind = classifyCaseWorkflowRole(roleName);
   const canCreateAccountingRequest = await roleHasPermission(req, "accounting", "create");
   const canCreateCaseScopedRequest = await roleHasPermission(req, "cases", "update");
   if ((voucherType === "account_transfer" || voucherType === "internal_transfer" || voucherType === "file_to_file_transfer") && !canCreateAccountingRequest) {
+    const rb = await pvEarlyRollback(req);
+    if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
     res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" });
     return;
   }
   if (voucherType === "external_payment" || voucherType === "file_transfer") {
     if (!caseId) {
       if (!canCreateAccountingRequest) {
+        const rb = await pvEarlyRollback(req);
+        if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
         res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" });
         return;
       }
     } else if (!canCreateAccountingRequest && !canCreateCaseScopedRequest) {
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" });
       return;
     }
   } else if (!canCreateAccountingRequest) {
+    const rb = await pvEarlyRollback(req);
+    if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
     res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" });
     return;
   }
   if (voucherType === "internal_transfer") {
-    if (!caseId) { res.status(400).json({ error: "caseId is required" }); return; }
+    if (!caseId) {
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
+      res.status(400).json({ error: "caseId is required" }); return;
+    }
   }
   if (voucherType === "file_transfer" || voucherType === "file_to_file_transfer") {
-    if (!caseId || !targetCaseId) { res.status(400).json({ error: "caseId and targetCaseId are required" }); return; }
-    if (caseId === targetCaseId) { res.status(400).json({ error: "targetCaseId must be different from caseId" }); return; }
+    if (!caseId || !targetCaseId) {
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
+      res.status(400).json({ error: "caseId and targetCaseId are required" }); return;
+    }
+    if (caseId === targetCaseId) {
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
+      res.status(400).json({ error: "targetCaseId must be different from caseId" }); return;
+    }
   }
   if (voucherType === "account_transfer") {
-    if (!bankAccountId || !targetAccountId) { res.status(400).json({ error: "bankAccountId and targetAccountId are required" }); return; }
-    if (bankAccountId === targetAccountId) { res.status(400).json({ error: "targetAccountId must be different from bankAccountId" }); return; }
+    if (!bankAccountId || !targetAccountId) {
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
+      res.status(400).json({ error: "bankAccountId and targetAccountId are required" }); return;
+    }
+    if (bankAccountId === targetAccountId) {
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
+      res.status(400).json({ error: "targetAccountId must be different from bankAccountId" }); return;
+    }
   }
   stopPermissions();
   emitPvCreateTiming(req, "permission_checked");
@@ -904,6 +1007,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (budget.exceeded) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "REQUEST_BUDGET_EXCEEDED:permission_checked", "permission_checked");
       emitPvCreateTiming(req, "failed", { code: "REQUEST_BUDGET_EXCEEDED", elapsedMs: budget.elapsedMs });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(503).json({ error: "Service unavailable - request timeout budget exceeded", code: "REQUEST_BUDGET_EXCEEDED" });
       return;
     }
@@ -914,7 +1019,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     const stopIdempotency = createSectionTimer(req, "pv.create.early_idempotency");
     emitPvCreateTiming(req, "idempotency_tracking_started");
     try {
-      await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS);
+      await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS, "early_idempotency_insert");
       const inserted = await r.transaction(async (tx) => {
         await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_PRELOCK_TIMEOUT_MS}ms'`));
         await (tx as any).execute(sql.raw(`SET LOCAL statement_timeout = '${PV_CREATE_SMALL_QUERY_TIMEOUT_MS}ms'`));
@@ -938,6 +1043,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
           await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "REQUEST_BUDGET_EXCEEDED:idempotency", "idempotency");
           emitPvCreateTiming(req, "failed", { code: "REQUEST_BUDGET_EXCEEDED", elapsedMs: budget.elapsedMs });
           stopIdempotency();
+          const rb = await pvEarlyRollback(req);
+          if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
           res.status(503).json({ error: "Service unavailable - request timeout budget exceeded", code: "REQUEST_BUDGET_EXCEEDED" });
           return;
         }
@@ -972,8 +1079,10 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
               idempotencyConflictResponse = { httpStatus: 200, body: existingVoucher };
             }
           } else if (crossUserRequest.requestPayloadHash && requestPayloadHash && crossUserRequest.requestPayloadHash !== requestPayloadHash) {
-            res.status(409).json({ error: "clientRequestId already used for a different request", code: "CLIENT_REQUEST_ID_REUSED" });
             stopIdempotency();
+            const rb = await pvEarlyRollback(req);
+            if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
+            res.status(409).json({ error: "clientRequestId already used for a different request", code: "CLIENT_REQUEST_ID_REUSED" });
             return;
           } else if (crossUserRequest.status === "completed") {
             const existingVoucher =
@@ -997,8 +1106,10 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
           }
         } else {
           if (existingRequest.requestPayloadHash && requestPayloadHash && existingRequest.requestPayloadHash !== requestPayloadHash) {
-            res.status(409).json({ error: "clientRequestId already used for a different request", code: "CLIENT_REQUEST_ID_REUSED" });
             stopIdempotency();
+            const rb = await pvEarlyRollback(req);
+            if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
+            res.status(409).json({ error: "clientRequestId already used for a different request", code: "CLIENT_REQUEST_ID_REUSED" });
             return;
           }
           if (existingRequest.status === "failed") {
@@ -1104,14 +1215,18 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
         stopIdempotency();
         throw err;
       } else {
-        res.status(500).json({ error: "Database migration missing for idempotency. Apply migration 0126_payment_voucher_create_request_tracking.sql", code: "MIGRATION_MISSING" });
         stopIdempotency();
+        const rb = await pvEarlyRollback(req);
+        if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
+        res.status(500).json({ error: "Database migration missing for idempotency. Apply migration 0126_payment_voucher_create_request_tracking.sql", code: "MIGRATION_MISSING" });
         return;
       }
     } finally {
       stopIdempotency();
     }
     if (idempotencyConflictResponse) {
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(idempotencyConflictResponse.httpStatus).json(idempotencyConflictResponse.body);
       return;
     }
@@ -1134,7 +1249,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   const stopSettings = createSectionTimer(req, "pv.create.settings");
   let settings: AccountingSettingsRecord;
   try {
-    await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS);
+    await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS, "accounting_settings_load");
     const loaded = await safeLoadAccountingSettings({
       firmId: req.firmId!,
       db: rdb(req) as any,
@@ -1149,8 +1264,10 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     )) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, `ACCOUNTING_SETTINGS:${err.code}`);
       emitPvCreateTiming(req, "failed", { code: err.code, message: String(err.message ?? "").slice(0, 120) });
-      writeAccountingSettingsErrorResponse(res, err);
       stopSettings();
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
+      writeAccountingSettingsErrorResponse(res, err);
       return;
     }
     settings = getDefaultAccountingSettings(req.firmId!);
@@ -1169,13 +1286,15 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (budget.exceeded) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "REQUEST_BUDGET_EXCEEDED:accounting_settings", "accounting_settings");
       emitPvCreateTiming(req, "failed", { code: "REQUEST_BUDGET_EXCEEDED", elapsedMs: budget.elapsedMs });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(503).json({ error: "Service unavailable - request timeout budget exceeded", code: "REQUEST_BUDGET_EXCEEDED" });
       return;
     }
   }
 
   const stopCaseCheck = createSectionTimer(req, "pv.create.case_check");
-  await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS);
+  await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS, "case_and_bank_validity");
   const caseIdValue = typeof caseId === "number" && Number.isFinite(caseId) ? Number(caseId) : null;
   const targetCaseIdValue = typeof targetCaseId === "number" && Number.isFinite(targetCaseId) ? Number(targetCaseId) : null;
   if (caseIdValue) {
@@ -1191,6 +1310,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (!rows[0]) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "CASE_NOT_FOUND");
       emitPvCreateTiming(req, "failed", { code: "CASE_NOT_FOUND" });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(404).json({ error: "Case not found" });
       return;
     }
@@ -1208,6 +1329,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (!rows[0]) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "TARGET_CASE_NOT_FOUND");
       emitPvCreateTiming(req, "failed", { code: "TARGET_CASE_NOT_FOUND" });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(404).json({ error: "Target case not found" });
       return;
     }
@@ -1240,6 +1363,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (!u) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "INVALID_RESPONSIBLE_LAWYER");
       emitPvCreateTiming(req, "failed", { code: "INVALID_RESPONSIBLE_LAWYER" });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(400).json({ error: "Responsible lawyer is invalid", code: "INVALID_RESPONSIBLE_LAWYER" });
       return;
     }
@@ -1253,6 +1378,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (!u) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "INVALID_APPROVING_PARTNER");
       emitPvCreateTiming(req, "failed", { code: "INVALID_APPROVING_PARTNER" });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(400).json({ error: "Approving partner is invalid", code: "INVALID_APPROVING_PARTNER" });
       return;
     }
@@ -1261,6 +1388,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       if (!isPartner) {
         if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "INVALID_APPROVING_PARTNER_ROLE");
         emitPvCreateTiming(req, "failed", { code: "INVALID_APPROVING_PARTNER_ROLE" });
+        const rb = await pvEarlyRollback(req);
+        if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
         res.status(400).json({ error: "Approving partner must have Partner role", code: "INVALID_APPROVING_PARTNER_ROLE" });
         return;
       }
@@ -1271,6 +1400,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (!qCheck.valid) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, `INVALID_QUOTATION:${qCheck.error ?? ""}`);
       emitPvCreateTiming(req, "failed", { code: "INVALID_QUOTATION" });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(400).json({ error: qCheck.error ?? "Invalid quotation", code: "INVALID_QUOTATION" });
       return;
     }
@@ -1283,6 +1414,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (budget.exceeded) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "REQUEST_BUDGET_EXCEEDED:case_and_reference", "case_and_reference");
       emitPvCreateTiming(req, "failed", { code: "REQUEST_BUDGET_EXCEEDED", elapsedMs: budget.elapsedMs });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(503).json({ error: "Service unavailable - request timeout budget exceeded", code: "REQUEST_BUDGET_EXCEEDED" });
       return;
     }
@@ -1293,6 +1426,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (budget.exceeded) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "REQUEST_BUDGET_EXCEEDED:preflight", "preflight");
       emitPvCreateTiming(req, "failed", { code: "REQUEST_BUDGET_EXCEEDED", elapsedMs: budget.elapsedMs });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(503).json({ error: "Service unavailable - request timeout budget exceeded", code: "REQUEST_BUDGET_EXCEEDED" });
       return;
     }
@@ -1300,7 +1435,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
 
   const voucherNo = generateVoucherNo(now);
   if (voucherType === "account_transfer") {
-    await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS);
+    await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS, "bank_account_existence");
     const rows = await r
       .select({ id: firmBankAccountsTable.id })
       .from(firmBankAccountsTable)
@@ -1309,6 +1444,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (!rows[0]) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "SOURCE_BANK_NOT_FOUND");
       emitPvCreateTiming(req, "failed", { code: "SOURCE_BANK_NOT_FOUND" });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(404).json({ error: "Source bank account not found" });
       return;
     }
@@ -1320,6 +1457,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (!rows2[0]) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "TARGET_BANK_NOT_FOUND");
       emitPvCreateTiming(req, "failed", { code: "TARGET_BANK_NOT_FOUND" });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(404).json({ error: "Target bank account not found" });
       return;
     }
@@ -1336,10 +1475,12 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (!Number.isFinite(cid) || cid <= 0) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "CASE_REQUIRED_FOR_CLIENT_ACCOUNT");
       emitPvCreateTiming(req, "failed", { code: "CASE_REQUIRED_FOR_CLIENT_ACCOUNT" });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(400).json({ error: "caseId is required when deducting from Client Account" });
       return;
     }
-    await setRlsClientStatementTimeout(req, PV_CREATE_AGGREGATE_TIMEOUT_MS);
+    await setRlsClientStatementTimeout(req, PV_CREATE_AGGREGATE_TIMEOUT_MS, "client_balance_aggregate");
     const [row] = await r.select({ bal: sql<string>`COALESCE(SUM(credit - debit), 0)` }).from(ledgerEntriesTable).where(and(
       eq(ledgerEntriesTable.firmId, req.firmId!),
       eq(ledgerEntriesTable.caseId, cid),
@@ -1349,6 +1490,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (bal + 1e-9 < effectiveAmount) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "INSUFFICIENT_CLIENT_BALANCE");
       emitPvCreateTiming(req, "failed", { code: "INSUFFICIENT_CLIENT_BALANCE", balance: bal, required: effectiveAmount });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(400).json({ error: "Insufficient Client Account Balance", code: "INSUFFICIENT_CLIENT_BALANCE" });
       return;
     }
@@ -1360,6 +1503,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
     if (budget.exceeded) {
       if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "REQUEST_BUDGET_EXCEEDED:before_main_tx", "before_main_tx");
       emitPvCreateTiming(req, "failed", { code: "REQUEST_BUDGET_EXCEEDED", elapsedMs: budget.elapsedMs });
+      const rb = await pvEarlyRollback(req);
+      if (!rb.ok) { pvRollbackFailedResponse(res, rb.code ?? "DB_ROLLBACK_FAILED"); return; }
       res.status(503).json({ error: "Service unavailable - request timeout budget exceeded", code: "REQUEST_BUDGET_EXCEEDED" });
       return;
     }
@@ -1367,11 +1512,52 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
 
   let pv: typeof paymentVouchersTable.$inferSelect;
   const stopTx = createSectionTimer(req, "pv.create.tx");
+  const finalRollback = async () => { try { await finalizeFirmUserTransaction(req, "rollback"); } catch {} };
+  let lastDesiredSqlState: string | null = null;
+  let abortHandle: ReturnType<typeof setTimeout> | null = null;
+  const e2eStartAt = getPvE2eStartAt(req);
+  const hardBudgetLeftMs = Math.max(500, PV_CREATE_REQUEST_BUDGET_MS - (Date.now() - e2eStartAt));
+  const commitReserveMs = Math.min(PV_CREATE_COMMIT_MAX_MS, Math.max(1000, Math.floor(hardBudgetLeftMs * 0.15)));
+  const budgetLeftBeforeMainTxMs = Math.max(1500, hardBudgetLeftMs - commitReserveMs - PV_CREATE_OVERHEAD_RESERVE_MS);
+  const txStatementMs = Math.max(1500, Math.min(budgetLeftBeforeMainTxMs, PV_CREATE_TX_STATEMENT_TIMEOUT_MS));
+  const txLockMs = Math.max(500, Math.min(budgetLeftBeforeMainTxMs - 1000, PV_CREATE_TX_LOCK_TIMEOUT_MS));
+  const lastResortMs = PV_CREATE_REQUEST_BUDGET_MS - (Date.now() - e2eStartAt) + 500;
   try {
-    emitPvCreateTiming(req, "transaction_started");
+    if (req.rlsClient) {
+      const rlsClient = req.rlsClient;
+      abortHandle = setTimeout(() => {
+        try {
+          logger.warn(
+            {
+              reqId: getReqIdForLog(req),
+              clientRequestId: normalizedClientRequestId,
+              firmId: req.firmId ?? null,
+              userId: req.userId ?? null,
+              lastResortMs,
+            },
+            "payment_voucher.create_last_resort_abort",
+          );
+          (rlsClient as any).release?.(true);
+        } catch {}
+      }, Math.max(500, lastResortMs));
+      abortHandle.unref?.();
+    }
+    try {
+      await setRlsClientStatementTimeout(req, txStatementMs, "main_tx_entry");
+    } catch (setupErr) {
+      lastDesiredSqlState = setupErr instanceof PvTimeoutSetupFailed ? setupErr.sqlState : null;
+      if (normalizedClientRequestId) {
+        try { await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, `TIMEOUT_SETUP_FAILED:main_tx_entry:${lastDesiredSqlState ?? "unknown"}`, "timeout_setup"); } catch {}
+      }
+      emitPvCreateTiming(req, "failed", { code: "TIMEOUT_SETUP_FAILED", stage: "main_tx_entry", sqlState: lastDesiredSqlState });
+      await finalRollback();
+      res.status(503).json({ error: "Service unavailable - request protection not available", code: "TIMEOUT_SETUP_FAILED", sqlState: lastDesiredSqlState, retryAfterMs: 1000 });
+      return;
+    }
+    emitPvCreateTiming(req, "transaction_started", { txStatementMs, txLockMs, commitReserveMs, hardBudgetLeftMs });
     pv = await r.transaction(async (tx) => {
-      await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_TX_LOCK_TIMEOUT_MS}ms'`));
-      await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${PV_CREATE_TX_STATEMENT_TIMEOUT_MS}ms'`));
+      await tx.execute(sql.raw(`SET LOCAL lock_timeout = '${txLockMs}ms'`));
+      await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${txStatementMs}ms'`));
 
       if (normalizedClientRequestId) {
         const locked = await tryAcquireCreateRequestTxnLock(tx, req.firmId!, req.userId!, normalizedClientRequestId);
@@ -1464,26 +1650,58 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
 
       return createdVoucher;
     });
+    if (abortHandle) { try { clearTimeout(abortHandle); abortHandle = null; } catch {} }
+    const tCommitPre = Date.now();
+    const fin = await finalizeFirmUserTransaction(req, "commit");
+    const commitMs = Date.now() - tCommitPre;
+    if (req.timing?.sections) {
+      req.timing.sections.pvCommitMs = commitMs;
+      req.timing.sections.pvCommitReleaseMs = fin.releaseMs;
+      req.timing.sections.totalRequestMs = Math.max(0, Date.now() - e2eStartAt);
+    }
+    if (!fin.ok) {
+      emitPvCreateTiming(req, "failed", { code: fin.code, sqlState: fin.sqlState, commitMs, releaseMs: fin.releaseMs });
+      res.status(500).json({ error: "Database unavailable", code: "TRANSACTION_COMMIT_FAILED", sqlState: fin.sqlState, innerCode: fin.code });
+      return;
+    }
   } catch (err: any) {
+    if (abortHandle) { try { clearTimeout(abortHandle); abortHandle = null; } catch {} }
+    let trackingMarkedFailed = false;
+    const errCode = String(err?.code ?? "");
     if (normalizedClientRequestId) {
-      if (String(err?.code ?? "") !== "CLIENT_REQUEST_IN_PROGRESS") {
-        await updatePvTrackingFailed(
-          r,
-          req.firmId!,
-          req.userId!,
-          normalizedClientRequestId,
-          String(err?.message ?? err ?? "").slice(0, 500),
-          "main_transaction_catch",
-        );
+      if (errCode !== "CLIENT_REQUEST_IN_PROGRESS" && errCode !== "RESPONSE_SENT_VIA_EARLY_RETURN") {
+        try {
+          await updatePvTrackingFailed(
+            r,
+            req.firmId!,
+            req.userId!,
+            normalizedClientRequestId,
+            String(err?.message ?? err ?? "").slice(0, 500),
+            "main_transaction_catch",
+          );
+          trackingMarkedFailed = true;
+        } catch {}
       }
     }
-    emitPvCreateTiming(req, "failed", { code: String(err?.code ?? ""), message: String(err?.message ?? "").slice(0, 120) });
-    if (String(err?.code ?? "") === "CLIENT_REQUEST_IN_PROGRESS" && normalizedClientRequestId) {
-      res.status(202).json({ status: "processing", clientRequestId: normalizedClientRequestId });
+    emitPvCreateTiming(req, "failed", { code: errCode, message: String(err?.message ?? "").slice(0, 120), trackingMarkedFailed });
+    if (err instanceof PvTimeoutSetupFailed) {
+      try { await finalRollback(); } catch {}
+      if (normalizedClientRequestId) {
+        try { await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, `TIMEOUT_SETUP_FAILED:${err.stage}:${err.sqlState ?? "unknown"}`, "timeout_setup"); } catch {}
+      }
+      const resp503: any = { error: "Service unavailable - request protection not available", code: "TIMEOUT_SETUP_FAILED", sqlState: err.sqlState, stage: err.stage, timeoutMs: err.timeoutMs, retryAfterMs: 1000 };
+      if (normalizedClientRequestId) resp503.clientRequestId = normalizedClientRequestId;
+      res.status(503).json(resp503);
+      return;
+    }
+    if (errCode === "CLIENT_REQUEST_IN_PROGRESS" && normalizedClientRequestId) {
+      try { await finalRollback(); } catch {}
+      res.status(202).json({ status: "processing", clientRequestId: normalizedClientRequestId, code: "CLIENT_REQUEST_IN_PROGRESS", retryAfterMs: 500 });
       stopTx();
       return;
     }
-    if (String(err?.code ?? "") === "23505" && normalizedClientRequestId) {
+    if (errCode === "23505" && normalizedClientRequestId) {
+      try { await finalRollback(); } catch {}
       const existingVoucher = await loadVoucherByClientRequest(r, req.firmId!, normalizedClientRequestId);
       if (existingVoucher) {
         res.status(200).json(existingVoucher);
@@ -1491,26 +1709,31 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
         return;
       }
     }
-    if (normalizedClientRequestId && (String(err?.code ?? "") === "55P03" || String(err?.code ?? "") === "57014" || String(err?.code ?? "") === "40P01")) {
-      res.status(202).json({ status: "processing", clientRequestId: normalizedClientRequestId });
+    if (normalizedClientRequestId && trackingMarkedFailed && (errCode === "55P03" || errCode === "57014" || errCode === "40P01")) {
+      try { await finalRollback(); } catch {}
+      res.status(503).json({ status: "failed", code: "RETRYABLE_DB_CONTENTION", clientRequestId: normalizedClientRequestId, sqlstate: errCode, retryAfterMs: 2000 });
       stopTx();
       return;
     }
     stopTx();
+    try { await finalRollback(); } catch {}
     throw err;
   } finally {
     stopTx();
+    if (abortHandle) { try { clearTimeout(abortHandle); } catch {} }
   }
 
-  emitPvCreateTiming(req, "response_sent", { voucherId: pv.id });
+  emitPvCreateTiming(req, "response_sent", { voucherId: pv.id, committedBefore201: true });
   res.status(201).json(pv);
   const durationMs = Date.now() - startedAt;
-  if (durationMs >= 2000) {
+  const totalRequestMs = Math.max(0, Date.now() - e2eStartAt);
+  if (durationMs >= 2000 || totalRequestMs >= 5000) {
     logger.warn(
       {
         reqId: getReqIdForLog(req),
         clientRequestId: normalizedClientRequestId,
         durationMs,
+        totalRequestMs,
         firmId: req.firmId,
         userId: req.userId,
         voucherType,

@@ -32,6 +32,20 @@ export interface AuthRequest extends Request {
    * opening a separate transaction.
    */
   rlsClient?: PoolClient;
+  /**
+   * Optional opt-in flag for financial routes (Payment Voucher create, etc.).
+   * When `true`, the caller takes FULL responsibility for:
+   *   - COMMITing the transaction synchronously before sending HTTP 2xx so
+   *     that a successful DB write cannot lose a COMMIT after a 201 response.
+   *   - ROLLBACKing on any error path.
+   *   - destroying the client on any fatal release error to avoid pool reuse.
+   * If this flag is set, `requireFirmUser` does NOT hook res.finish/close
+   * to COMMIT; `requireFirmUser` still hooks release on `close` with a
+   * ROLLBACK safety net, but that is purely defensive (handler released).
+   *
+   * MUST ONLY be set true by handlers that call `finalizeFirmUserTransaction`.
+   */
+  _firmContextManualCommitMode?: boolean;
 }
 
 const getReqId = (req: unknown): string | undefined => {
@@ -1015,10 +1029,149 @@ export async function requireFirmUser(
     return;
   }
 
-  res.on("finish", () => { releaseClient(true); });
+  if (req._firmContextManualCommitMode !== true) {
+    res.on("finish", () => { releaseClient(true); });
+  } else {
+    res.on("finish", () => {
+      try {
+        if (!released) {
+          logger.error(
+            {
+              route: req.path,
+              requestId: getReqId(req) ?? null,
+              firmId: req.firmId ?? null,
+              userId: req.userId ?? null,
+            },
+            "auth.firm_context_manual_commit_leak",
+          );
+        }
+      } catch {
+      }
+    });
+  }
   res.on("close", () => { releaseClient(false); });
 
   next();
+}
+
+/**
+ * Financial-write safe COMMIT finalizer.
+ *
+ * Call this only from handlers that previously set
+ * `req._firmContextManualCommitMode = true` during the same request.
+ *
+ * Guarantees (for Payment Voucher create / other financial writes):
+ *   - ok=true  → caller MAY send HTTP 2xx (DB durable: COMMIT success + release success)
+ *   - ok=false → caller MUST NOT send 2xx (COMMIT failed or unknown, DB rollback performed,
+ *                client destroyed if release unsafe so pool never reuses leaked session)
+ */
+export async function finalizeFirmUserTransaction(
+  req: AuthRequest,
+  intent: "commit" | "rollback",
+): Promise<{
+  ok: boolean;
+  code: "COMMIT_OK" | "COMMIT_FAILED" | "ROLLBACK_OK" | "ROLLBACK_FAILED" | "NO_CLIENT";
+  sqlState: string | null;
+  releaseMs: number;
+  commitOrRollbackMs: number;
+}> {
+  const t0 = Date.now();
+  const client = req.rlsClient ?? null;
+  if (!client) {
+    return { ok: true, code: "NO_CLIENT", sqlState: null, releaseMs: 0, commitOrRollbackMs: 0 };
+  }
+  const sqlStateFrom = (err: unknown): string | null => {
+    if (!err || typeof err !== "object") return null;
+    const c = (err as { code?: unknown; sqlState?: unknown; sqlstate?: unknown });
+    for (const v of [c.sqlState, c.sqlstate, c.code]) {
+      if (typeof v === "string") return v;
+    }
+    return null;
+  };
+
+  type FinalizeCode = "COMMIT_OK" | "COMMIT_FAILED" | "ROLLBACK_OK" | "ROLLBACK_FAILED" | "NO_CLIENT";
+  const needDestroy = new WeakSet<PoolClient>();
+  let commitMs = 0;
+  let code: FinalizeCode = intent === "commit" ? "COMMIT_OK" : "ROLLBACK_OK";
+  let sqlState: string | null = null;
+  let ok = true;
+
+  try {
+    if (intent === "commit") {
+      const t1 = Date.now();
+      try {
+        await client.query("COMMIT");
+        commitMs = Date.now() - t1;
+        code = "COMMIT_OK";
+        ok = true;
+      } catch (err) {
+        commitMs = Date.now() - t1;
+        sqlState = sqlStateFrom(err);
+        logger.error(
+          { err, route: req.path, requestId: getReqId(req) ?? null, firmId: req.firmId ?? null, userId: req.userId ?? null, sqlState, commitMs },
+          "auth.firm_context_commit_failed",
+        );
+        try { await client.query("ROLLBACK"); } catch {}
+        code = "COMMIT_FAILED";
+        ok = false;
+        needDestroy.add(client);
+      }
+    } else {
+      const t1 = Date.now();
+      try {
+        await client.query("ROLLBACK");
+        commitMs = Date.now() - t1;
+        code = "ROLLBACK_OK";
+        ok = true;
+      } catch (err) {
+        commitMs = Date.now() - t1;
+        sqlState = sqlStateFrom(err);
+        code = "ROLLBACK_FAILED";
+        ok = false;
+        needDestroy.add(client);
+        logger.error(
+          { err, route: req.path, requestId: getReqId(req) ?? null, firmId: req.firmId ?? null, userId: req.userId ?? null, sqlState, rollbackMs: commitMs },
+          "auth.firm_context_rollback_failed",
+        );
+      }
+    }
+  } catch (err) {
+    sqlState = sqlStateFrom(err);
+    ok = false;
+    needDestroy.add(client);
+  }
+
+  let releaseMs = 0;
+  try {
+    const t2 = Date.now();
+    try {
+      await clearTenantContext(client);
+    } catch (err) {
+      logger.warn(
+        { err, route: req.path, requestId: getReqId(req) ?? null, firmId: req.firmId ?? null, userId: req.userId ?? null },
+        "auth.firm_context_clear_tenant_context_warn",
+      );
+      needDestroy.add(client);
+    }
+    try {
+      if (needDestroy.has(client)) {
+        client.release(true);
+      } else {
+        client.release(false);
+      }
+    } catch {}
+    releaseMs = Date.now() - t2;
+  } catch (err) {
+    logger.error(
+      { err, route: req.path, requestId: getReqId(req) ?? null, firmId: req.firmId ?? null, userId: req.userId ?? null },
+      "auth.firm_context_client_release_failed",
+    );
+  }
+
+  req.rlsClient = undefined;
+  req.rlsDb = undefined;
+
+  return { ok, code, sqlState, releaseMs, commitOrRollbackMs: commitMs };
 }
 
 export async function requireFirmUserSession(
