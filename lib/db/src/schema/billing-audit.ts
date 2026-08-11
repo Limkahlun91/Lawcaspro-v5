@@ -53,6 +53,7 @@ export type InvoiceAuditActionType =
   | "edit_notes"
   | "change_due_date"
   | "retry_einvoice"
+  | "einvoice_submit_initiated"
   | "einvoice_submit_success"
   | "einvoice_submit_failed"
   | "manual_adjustment"

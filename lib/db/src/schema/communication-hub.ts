@@ -1,4 +1,5 @@
 import { index, integer, jsonb, pgTable, serial, text, timestamp, boolean, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const communicationMailboxesTable = pgTable("communication_mailboxes", {
   id: serial("id").primaryKey(),
@@ -112,18 +113,33 @@ export const communicationDraftsTable = pgTable("communication_drafts", {
   id: serial("id").primaryKey(),
   firmId: integer("firm_id").notNull(),
   parentMessageId: integer("parent_message_id").notNull(),
-  channel: text("channel").notNull(),
+  mailboxId: integer("mailbox_id"),
+  linkedCaseId: integer("linked_case_id"),
+  caseRef: text("case_ref"),
+  channel: text("channel").notNull().default("email"),
   draftType: text("draft_type").notNull(),
+  replyType: text("reply_type"),
   status: text("status").notNull().default("draft"),
   toAddresses: jsonb("to_addresses").$type<string[]>().notNull().default([]),
   ccAddresses: jsonb("cc_addresses").$type<string[]>().notNull().default([]),
   bccAddresses: jsonb("bcc_addresses").$type<string[]>().notNull().default([]),
+  to: jsonb("to").$type<string[]>(),
+  cc: jsonb("cc").$type<string[]>(),
+  bcc: jsonb("bcc").$type<string[]>(),
   subject: text("subject"),
   bodyText: text("body_text"),
   bodyHtml: text("body_html"),
+  inReplyTo: text("in_reply_to"),
+  references: text("references"),
+  forwardedFromMessageId: integer("forwarded_from_message_id"),
+  includeOriginalAttachments: boolean("include_original_attachments").notNull().default(false),
+  forwardedAttachmentRefs: jsonb("forwarded_attachment_refs").$type<any[]>(),
+  idempotencyKey: text("idempotency_key"),
+  assignedToUserId: integer("assigned_to_user_id"),
   preparedByUserId: integer("prepared_by_user_id"),
   approvedByUserId: integer("approved_by_user_id"),
   sentByUserId: integer("sent_by_user_id"),
+  createdBy: integer("created_by"),
   preparedAt: timestamp("prepared_at", { withTimezone: true }),
   approvedAt: timestamp("approved_at", { withTimezone: true }),
   sentAt: timestamp("sent_at", { withTimezone: true }),
@@ -133,6 +149,7 @@ export const communicationDraftsTable = pgTable("communication_drafts", {
   firmIdIdx: index("idx_communication_drafts_firm").on(t.firmId),
   firmStatusIdx: index("idx_communication_drafts_firm_status").on(t.firmId, t.status, t.createdAt),
   firmParentIdx: index("idx_communication_drafts_parent").on(t.firmId, t.parentMessageId),
+  firmIdemIdx: index("idx_communication_drafts_idem").on(t.firmId, t.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
 }));
 
 export const communicationDraftTasksTable = pgTable("communication_draft_tasks", {
