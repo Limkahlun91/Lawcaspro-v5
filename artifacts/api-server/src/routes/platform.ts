@@ -1651,15 +1651,21 @@ routerInternal.post("/platform/firms/:firmId/reset/execute", requireAuth, requir
   const firmId = parseInt(firmIdStr ?? "", 10);
   if (!Number.isFinite(firmId) || firmId <= 0) { res.status(400).json({ error: "Invalid firmId", code: "INVALID_FIRM_ID" }); return; }
 
+  res.status(200).json({
+    executionAvailable: false,
+    code: "RESET_EXECUTION_NOT_ENABLED",
+  });
+  return;
+
   const body = one(req.body) as { scopes?: unknown; confirmation?: unknown } ?? {};
   let scopes: FirmResetScope[];
   try { scopes = validateResetScopes(body.scopes); } catch (err) { sendError(res, err); return; }
-  const confirmation = typeof body.confirmation === "string" ? body.confirmation.trim() : "";
+  const confirmation = typeof body.confirmation === "string" ? (body.confirmation as string).trim() : "";
 
   const [firm] = await db.select({ id: firmsTable.id, slug: firmsTable.slug, name: firmsTable.name }).from(firmsTable).where(eq(firmsTable.id, firmId));
   if (!firm) { res.status(404).json({ error: "Firm not found", code: "FIRM_NOT_FOUND" }); return; }
 
-  const expected = (firm.slug ?? "").trim();
+  const expected = String((firm as any).slug ?? "").trim();
   if (!expected || confirmation !== expected) {
     res.status(400).json({ error: "confirmation must match firm slug", code: "CONFIRMATION_MISMATCH", expectedScope: "slug" });
     return;

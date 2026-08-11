@@ -537,6 +537,19 @@ router.post("/platform/firms/:firmId/maintenance/execute", requireAuth, requireF
       emergency_flag?: boolean;
       force?: boolean;
     };
+
+    sendOk(res, {
+      operation: {
+        id: body.action_id ?? null,
+        type: "maintenance_action",
+        status: "blocked",
+      },
+      executionAvailable: false,
+      code: "RESET_EXECUTION_NOT_ENABLED",
+      message: "Preview available. Reset execution is not yet enabled.",
+    });
+    return;
+
     const actionId = String(body?.action_id ?? "").trim();
     if (!actionId) throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: "action_id is required", retryable: false });
     const reason = String(body?.reason ?? "").trim();

@@ -7,6 +7,7 @@ import {
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { one } from "../lib/http.js";
+import { ApiError } from "../lib/api-response.js";
 import {
   prepareInvoiceForEInvoice,
   submitInvoiceEInvoice,
@@ -15,6 +16,7 @@ import {
   submitConsolidatedEInvoices,
 } from "../services/einvoice/einvoice-service.js";
 import { isSandboxEnabled } from "../services/einvoice/sandbox-adapter.js";
+import { submitEinvoice } from "../modules/accounting/einvoice-adapter-boundary.service.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -150,6 +152,137 @@ router.post("/einvoices/consolidated/submit", requireAuth, requireFirmUser, requ
     const msg = err?.message ?? String(err);
     if (msg === "EINVOICE_SANDBOX_DISABLED") res.status(503).json({ error: "EINVOICE_SANDBOX_DISABLED" });
     else res.status(500).json({ error: "Failed consolidated submit", detail: msg });
+  }
+});
+
+const boundarySubmitBodySchema = z.object({
+  idempotencyKey: z.string().min(8),
+});
+
+router.post("/einvoices/:invoiceId/submit", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const invoiceIdStr = one(req.params.invoiceId);
+    const invoiceId = invoiceIdStr ? parseInt(invoiceIdStr, 10) : NaN;
+    if (!Number.isFinite(invoiceId) || invoiceId <= 0) {
+      res.status(400).json({ error: "Invalid invoice id", code: "EINVOICE_INVALID_ID" });
+      return;
+    }
+    const parsed = boundarySubmitBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      const missing = !req.body || typeof (req.body as any)?.idempotencyKey !== "string" || !(req.body as any).idempotencyKey.trim();
+      if (missing) {
+        res.status(400).json({ error: "idempotencyKey is required", code: "EINVOICE_IDEMPOTENCY_KEY_REQUIRED" });
+        return;
+      }
+      res.status(400).json({ error: "Validation failed", issues: parsed.error.issues, code: "EINVOICE_IDEMPOTENCY_KEY_REQUIRED" });
+      return;
+    }
+    const idemKey = parsed.data.idempotencyKey.trim();
+    const r = rdb(req);
+    const [inv] = await r.select().from(invoicesTable).where(and(eq(invoicesTable.id, invoiceId), eq(invoicesTable.firmId, req.firmId!)));
+    if (!inv) {
+      res.status(404).json({ error: "Invoice not found", code: "INVOICE_NOT_FOUND" });
+      return;
+    }
+    let boundaryResult: any;
+    try {
+      boundaryResult = await submitEinvoice({
+        firmId: req.firmId!,
+        invoiceId,
+        idempotencyKey: idemKey,
+        actorUserId: req.userId!,
+        actorRole: req.roleName ?? req.userType ?? null,
+        ipAddress: req.ip ?? null,
+        userAgent: (req.headers["user-agent"] as string) ?? null,
+      }, { tx: r });
+    } catch (err: any) {
+      if (err instanceof ApiError) {
+        if (err.code === "EINVOICE_IDEMPOTENCY_KEY_REQUIRED") {
+          res.status(400).json({ error: err.message, code: err.code });
+          return;
+        }
+        if (err.code === "EINVOICE_INTEGRATION_LOOKUP_FAILED") {
+          res.status(503).json({ error: err.message, code: err.code });
+          return;
+        }
+        if (err.code === "EINVOICE_INTEGRATION_NOT_CONFIGURED") {
+          res.status(400).json({ error: err.message, code: err.code });
+          return;
+        }
+        res.status(err.status ?? 500).json({ error: err.message, code: err.code });
+        return;
+      }
+      throw err;
+    }
+    if (boundaryResult.boundaryPassed === false && boundaryResult.boundaryErrorCode) {
+      const ec = String(boundaryResult.boundaryErrorCode);
+      if (ec === "EINVOICE_INTEGRATION_LOOKUP_FAILED") {
+        res.status(503).json({ error: boundaryResult.boundaryErrorMessage ?? "Integration lookup failed", code: ec });
+        return;
+      }
+      if (ec === "EINVOICE_INTEGRATION_NOT_CONFIGURED") {
+        res.status(400).json({ error: boundaryResult.boundaryErrorMessage ?? "Integration not configured", code: ec });
+        return;
+      }
+      if (ec === "EINVOICE_IDEMPOTENCY_KEY_REQUIRED") {
+        res.status(400).json({ error: boundaryResult.boundaryErrorMessage ?? "Idempotency key required", code: ec });
+        return;
+      }
+    }
+    if (boundaryResult.canProceedToProvider === true || boundaryResult.providerSubmitQueued === true) {
+      try {
+        await r
+          .update(invoicesTable)
+          .set({
+            einvoiceStatus: "Submitted",
+            updatedAt: new Date(),
+          } as any)
+          .where(and(eq(invoicesTable.id, invoiceId), eq(invoicesTable.firmId, req.firmId!)));
+      } catch (updateErr: any) {
+        req.log?.warn({ err: updateErr, invoiceId, firmId: req.firmId }, "einvoice.mark_submitted_status_failed");
+      }
+    }
+    await writeAuditLog({
+      firmId: req.firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "accounting.einvoice.boundary_submit",
+      entityType: "invoice",
+      entityId: invoiceId,
+      detail: `boundaryPassed=${boundaryResult.boundaryPassed} idem=${idemKey} providerQueued=${boundaryResult.providerSubmitQueued ?? false} code=${boundaryResult.boundaryErrorCode ?? "null"}`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    }, { db: req.rlsDb }).catch(() => undefined);
+    res.json({
+      ok: true,
+      auditId: boundaryResult.auditId,
+      boundaryPassed: boundaryResult.boundaryPassed,
+      boundaryErrorCode: boundaryResult.boundaryErrorCode,
+      boundaryErrorMessage: boundaryResult.boundaryErrorMessage,
+      canProceedToProvider: boundaryResult.canProceedToProvider,
+      providerSubmitQueued: boundaryResult.providerSubmitQueued,
+      integrationId: boundaryResult.integrationId,
+      integrationStatus: boundaryResult.integrationStatus,
+      queueToken: boundaryResult.queueToken,
+      einvoiceStatus: boundaryResult.canProceedToProvider || boundaryResult.providerSubmitQueued ? "Submitted" : (boundaryResult.einvoiceStatusSnapshot ?? inv.einvoiceStatus ?? null),
+      idempotencyKey: idemKey,
+    });
+  } catch (err: any) {
+    req.log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "einvoice.boundary_submit_failed");
+    const msg = err?.message ?? String(err);
+    if (msg.includes("EINVOICE_IDEMPOTENCY_KEY_REQUIRED") || String((err as any)?.code) === "EINVOICE_IDEMPOTENCY_KEY_REQUIRED") {
+      res.status(400).json({ error: "idempotencyKey is required", code: "EINVOICE_IDEMPOTENCY_KEY_REQUIRED" });
+      return;
+    }
+    if (msg.includes("EINVOICE_INTEGRATION_LOOKUP_FAILED") || String((err as any)?.code) === "EINVOICE_INTEGRATION_LOOKUP_FAILED") {
+      res.status(503).json({ error: "Unable to verify e-Invoice integration", code: "EINVOICE_INTEGRATION_LOOKUP_FAILED" });
+      return;
+    }
+    if (msg.includes("EINVOICE_INTEGRATION_NOT_CONFIGURED") || String((err as any)?.code) === "EINVOICE_INTEGRATION_NOT_CONFIGURED") {
+      res.status(400).json({ error: "Integration Not Configured", code: "EINVOICE_INTEGRATION_NOT_CONFIGURED" });
+      return;
+    }
+    res.status(500).json({ error: "Failed e-invoice submit", detail: msg });
   }
 });
 

@@ -67,6 +67,10 @@ import hrSettingsRouter from "./hr-settings.js";
 import hrReportsRouter from "./hr-reports.js";
 import hrSelfServiceRouter from "./hr-self-service.js";
 import hrIntegrationEventsRouter from "./hr-integration-events.js";
+import documentIntelligenceRouter from "./document-intelligence.js";
+import templateMigrationsRouter from "./template-migrations.js";
+import bankAdaptersRouter from "./bank-adapters.js";
+import himsRouter from "./hims.js";
 import cronJobsRouter from "./cron-jobs.js";
 import { isHRGlobalEnvEnabled, requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate";
 
@@ -147,6 +151,11 @@ if (isHRGlobalEnvEnabled()) {
   routerInternal.use(hrSelfServiceRouter);
   routerInternal.use(hrIntegrationEventsRouter);
 }
+
+routerInternal.use(documentIntelligenceRouter);
+routerInternal.use(templateMigrationsRouter);
+routerInternal.use(bankAdaptersRouter);
+routerInternal.use(himsRouter);
 
 routerInternal.use(partiesRouter);
 routerInternal.use(complianceRouter);

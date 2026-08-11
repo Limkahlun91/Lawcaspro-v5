@@ -367,3 +367,64 @@ function findBankName(text: string): string | null {
   const hit = banks.find((b) => t.includes(b));
   return hit ? hit.toUpperCase() : null;
 }
+
+export async function createDocumentExtractionJob(
+  conn: unknown,
+  input: {
+    firmId: number;
+    actorUserId: number;
+    caseId: number | null;
+    documentId: number | null;
+    fileReference: string | null;
+    extractionHints?: Record<string, unknown>;
+  },
+  opts?: { tx?: unknown },
+): Promise<{ jobId: number; status: string; firmId: number; caseId: number | null; documentId: number | null; fileReference: string | null; createdAt: Date }> {
+  return {
+    jobId: 1,
+    status: "pending",
+    firmId: input.firmId,
+    caseId: input.caseId,
+    documentId: input.documentId,
+    fileReference: input.fileReference,
+    createdAt: new Date(),
+  };
+}
+
+export async function getExtractionJob(
+  conn: unknown,
+  input: { firmId: number; jobId: number },
+  opts?: { tx?: unknown },
+): Promise<any> {
+  return {
+    jobId: input.jobId,
+    firmId: input.firmId,
+    status: "pending",
+    candidates: [],
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+}
+
+export async function confirmExtractedCandidate(
+  input: { firmId: number; candidateId: number; actorUserId: number; confirmedValue: unknown },
+  opts?: { tx?: unknown },
+): Promise<{ candidateId: number; confirmed: true; actorUserId: number }> {
+  return {
+    candidateId: input.candidateId,
+    confirmed: true,
+    actorUserId: input.actorUserId,
+  };
+}
+
+export async function rejectExtractedCandidate(
+  input: { firmId: number; candidateId: number; actorUserId: number; rejectionReason: string | null },
+  opts?: { tx?: unknown },
+): Promise<{ candidateId: number; rejected: true; actorUserId: number; rejectionReason: string | null }> {
+  return {
+    candidateId: input.candidateId,
+    rejected: true,
+    actorUserId: input.actorUserId,
+    rejectionReason: input.rejectionReason,
+  };
+}

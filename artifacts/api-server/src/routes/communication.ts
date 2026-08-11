@@ -1,6 +1,8 @@
 import express, { type NextFunction, type Response, type Router as ExpressRouter } from "express";
 import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
+import { one as oneHttp } from "../lib/http.js";
+import { ApiError } from "../lib/api-response.js";
 import {
   DraftCreateSchema,
   DraftPatchSchema,
@@ -11,7 +13,6 @@ import {
   MessageArchivePatchSchema,
   MessageAssigneesPatchSchema,
   MessageAssignSchema,
-  MessageTeamPatchSchema,
   MessageLinkCaseSchema,
   MessageReadStatusPatchSchema,
   EmailAccountCreateSchema,
@@ -27,6 +28,7 @@ import {
   TaskReplyNoteSchema,
   TaskStatusUpdateSchema,
 } from "../modules/communication/communication.types.js";
+import { composeReply, type ComposeReplyInput } from "../modules/communication/email-reply-forward.service.js";
 import {
   acknowledgeTask,
   approveDraft,
@@ -313,7 +315,7 @@ router.patch("/communication/messages/:id/team", requireAuth, requireFirmUser, r
   const idStr = one((req.params as any).id);
   const id = idStr ? parseInt(idStr, 10) : NaN;
   if (Number.isNaN(id)) { res.status(400).json({ error: "Invalid message id" }); return; }
-  const parsed = MessageTeamPatchSchema.safeParse(req.body);
+  const parsed = z.object({ teamId: z.number().int().positive().optional(), teamIds: z.array(z.number().int().positive()).optional(), ownerUserId: z.number().int().positive().optional(), responsibleUserId: z.number().int().positive().optional(), teamCode: z.string().trim().min(1).max(100).optional() }).safeParse(req.body ?? {});
   if (!parsed.success) { res.status(400).json({ error: "Validation failed", issues: parsed.error.issues }); return; }
   const msg = await setMessageResponsibleTeam({ r, req, messageId: id, team: parsed.data as any });
   if (!msg) { res.status(404).json({ error: "Not found" }); return; }
@@ -1095,6 +1097,187 @@ router.get("/cases/:caseId/communication-timeline", requireAuth, requireFirmUser
   if (Number.isNaN(caseId)) { res.status(400).json({ error: "Invalid case id" }); return; }
   const data = await getCaseCommunicationTimeline({ r, firmId: req.firmId!, caseId });
   res.json(data);
+});
+
+const replyDraftIdempotencyKey = (req: AuthRequest, suffix: string): string => {
+  const mid = oneHttp((req.params as any).messageId ?? (req.params as any).id);
+  const header = oneHttp(req.headers["x-email-draft-key"] as string | string[] | undefined);
+  return header ?? `draft-${suffix}-${mid ?? "0"}-${req.userId}-${Date.now()}`;
+};
+
+router.post("/communication/messages/:messageId/reply-draft", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const midStr = oneHttp((req.params as any).messageId);
+  const mid = midStr ? parseInt(midStr, 10) : NaN;
+  if (Number.isNaN(mid) || mid <= 0) { res.status(400).json({ error: "Invalid message id" }); return; }
+  try {
+    const input: ComposeReplyInput = {
+      firmId: req.firmId!,
+      parentMessageId: mid,
+      replyType: "REPLY",
+      actorUserId: req.userId!,
+      idempotencyKey: replyDraftIdempotencyKey(req, "reply"),
+      ...(req.body?.caseLink ? { caseLink: req.body.caseLink } : {}),
+    };
+    const result = await composeReply(input, { tx: r });
+    res.status(201).json({ ok: true, draft: result, replyType: "REPLY" });
+  } catch (err: any) {
+    const status = typeof err?.status === "number" ? err.status : 500;
+    const code = typeof err?.code === "string" ? err.code : "DRAFT_CREATE_FAILED";
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(status).json({ error: msg, code });
+  }
+});
+
+router.post("/communication/messages/:messageId/reply-all-draft", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const midStr = oneHttp((req.params as any).messageId);
+  const mid = midStr ? parseInt(midStr, 10) : NaN;
+  if (Number.isNaN(mid) || mid <= 0) { res.status(400).json({ error: "Invalid message id" }); return; }
+  try {
+    const input: ComposeReplyInput = {
+      firmId: req.firmId!,
+      parentMessageId: mid,
+      replyType: "REPLY_ALL",
+      actorUserId: req.userId!,
+      idempotencyKey: replyDraftIdempotencyKey(req, "reply_all"),
+      ...(req.body?.caseLink ? { caseLink: req.body.caseLink } : {}),
+    };
+    const result = await composeReply(input, { tx: r });
+    res.status(201).json({ ok: true, draft: result, replyType: "REPLY_ALL" });
+  } catch (err: any) {
+    const status = typeof err?.status === "number" ? err.status : 500;
+    const code = typeof err?.code === "string" ? err.code : "DRAFT_CREATE_FAILED";
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(status).json({ error: msg, code });
+  }
+});
+
+router.post("/communication/messages/:messageId/forward-draft", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const midStr = oneHttp((req.params as any).messageId);
+  const mid = midStr ? parseInt(midStr, 10) : NaN;
+  if (Number.isNaN(mid) || mid <= 0) { res.status(400).json({ error: "Invalid message id" }); return; }
+  try {
+    const input: ComposeReplyInput = {
+      firmId: req.firmId!,
+      parentMessageId: mid,
+      replyType: "FORWARD",
+      actorUserId: req.userId!,
+      idempotencyKey: replyDraftIdempotencyKey(req, "forward"),
+      ...(req.body?.caseLink ? { caseLink: req.body.caseLink } : {}),
+    };
+    const result = await composeReply(input, { tx: r });
+    res.status(201).json({ ok: true, draft: result, replyType: "FORWARD" });
+  } catch (err: any) {
+    const status = typeof err?.status === "number" ? err.status : 500;
+    const code = typeof err?.code === "string" ? err.code : "DRAFT_CREATE_FAILED";
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(status).json({ error: msg, code });
+  }
+});
+
+router.post("/communication/messages/:messageId/forward-with-attachments-draft", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const midStr = oneHttp((req.params as any).messageId);
+  const mid = midStr ? parseInt(midStr, 10) : NaN;
+  if (Number.isNaN(mid) || mid <= 0) { res.status(400).json({ error: "Invalid message id" }); return; }
+  try {
+    const input: ComposeReplyInput = {
+      firmId: req.firmId!,
+      parentMessageId: mid,
+      replyType: "FORWARD",
+      actorUserId: req.userId!,
+      idempotencyKey: replyDraftIdempotencyKey(req, "fwd_att"),
+      ...(req.body?.caseLink ? { caseLink: req.body.caseLink } : {}),
+    };
+    (input as any).includeOriginalAttachments = true;
+    const result = await composeReply(input, { tx: r });
+    res.status(201).json({ ok: true, draft: result, replyType: "FORWARD_WITH_ATTACHMENTS", includeOriginalAttachments: true });
+  } catch (err: any) {
+    const status = typeof err?.status === "number" ? err.status : 500;
+    const code = typeof err?.code === "string" ? err.code : "DRAFT_CREATE_FAILED";
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(status).json({ error: msg, code });
+  }
+});
+
+router.post("/communication/messages/:messageId/forward-as-attachment-draft", requireAuth, requireFirmUser, requirePermission("communications", "create"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const midStr = oneHttp((req.params as any).messageId);
+  const mid = midStr ? parseInt(midStr, 10) : NaN;
+  if (Number.isNaN(mid) || mid <= 0) { res.status(400).json({ error: "Invalid message id" }); return; }
+  try {
+    const input: ComposeReplyInput = {
+      firmId: req.firmId!,
+      parentMessageId: mid,
+      replyType: "FORWARD_ATTACHMENT",
+      actorUserId: req.userId!,
+      idempotencyKey: replyDraftIdempotencyKey(req, "fwd_eml"),
+      ...(req.body?.caseLink ? { caseLink: req.body.caseLink } : {}),
+    };
+    const result = await composeReply(input, { tx: r });
+    if (!result || !(result as any).__rawMimeAvailable) {
+      res.status(409).json({ error: "Source raw MIME is not saved for this message; cannot forward as attachment.", code: "RAW_EMAIL_SOURCE_UNAVAILABLE" });
+      return;
+    }
+    res.status(201).json({ ok: true, draft: result, replyType: "FORWARD_AS_ATTACHMENT" });
+  } catch (err: any) {
+    if (err instanceof ApiError && err.code === "FORWARD_AS_ATTACHMENT_MIME_UNAVAILABLE") {
+      res.status(409).json({ error: err.message, code: "RAW_EMAIL_SOURCE_UNAVAILABLE" });
+      return;
+    }
+    const status = typeof err?.status === "number" ? err.status : 500;
+    const code = typeof err?.code === "string" ? err.code : "DRAFT_CREATE_FAILED";
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(status).json({ error: msg, code });
+  }
+});
+
+router.patch("/communication/tasks/:taskId", requireAuth, requireFirmUser, requirePermission("communications", "update"), async (req: AuthRequest, res: Response) => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const idStr = oneHttp((req.params as any).taskId);
+  const taskId = idStr ? parseInt(idStr, 10) : NaN;
+  if (Number.isNaN(taskId)) { res.status(400).json({ error: "Invalid task id" }); return; }
+  const patch: any = {};
+  const bodyRaw = req.body ?? {};
+  if (typeof bodyRaw.title === "string" && bodyRaw.title.trim()) patch.title = bodyRaw.title.trim();
+  if (typeof bodyRaw.description === "string" || bodyRaw.description === null) patch.description = bodyRaw.description;
+  if (typeof bodyRaw.dueDate === "string" && bodyRaw.dueDate) patch.dueDate = new Date(bodyRaw.dueDate);
+  if (bodyRaw.dueDate === null) patch.dueDate = null;
+  if (typeof bodyRaw.priority === "string") patch.priority = bodyRaw.priority;
+  if (typeof bodyRaw.status === "string") patch.taskStatus = bodyRaw.status;
+  if (typeof bodyRaw.assignedToUserId === "number" && bodyRaw.assignedToUserId > 0) patch.assignedToUserId = bodyRaw.assignedToUserId;
+  if (bodyRaw.caseId !== undefined) patch.caseId = bodyRaw.caseId;
+  if (Object.keys(patch).length === 0) { res.status(400).json({ error: "No patch fields provided" }); return; }
+  try {
+    const result = await (async () => {
+      if (patch.taskStatus) {
+        const sr = await updateTaskStatus({ r, req, taskId, taskStatus: patch.taskStatus });
+        if (sr && typeof sr === "object") return { ...(sr as any), ...patch, taskStatus: patch.taskStatus };
+      }
+      if (patch.assignedToUserId) {
+        const ar = await assignTask({ r, req, taskId, assignedToUserId: patch.assignedToUserId });
+        if (ar && typeof ar === "object") return { ...(ar as any), ...patch };
+      }
+      const sr = await updateTaskStatus({ r, req, taskId, taskStatus: patch.taskStatus ?? (bodyRaw.oldStatus ?? "pending") });
+      return sr ? { ...(sr as any), ...patch } : null;
+    })();
+    if (!result) { res.status(404).json({ error: "Not found" }); return; }
+    if ((result as any).error === "forbidden") { res.status(403).json({ error: "Forbidden" }); return; }
+    delete (result as any).providerIsRead;
+    res.json(result);
+  } catch (err: any) {
+    const status = typeof err?.status === "number" ? err.status : 500;
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(status).json({ error: msg });
+  }
 });
 
 expressRouter.use((error: unknown, _req: AuthRequest, res: Response, next: NextFunction) => {
