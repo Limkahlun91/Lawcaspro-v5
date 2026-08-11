@@ -1070,7 +1070,7 @@ export async function finalizeFirmUserTransaction(
   intent: "commit" | "rollback",
 ): Promise<{
   ok: boolean;
-  code: "COMMIT_OK" | "COMMIT_FAILED" | "ROLLBACK_OK" | "ROLLBACK_FAILED" | "NO_CLIENT";
+  code: "COMMIT_OK" | "COMMIT_FAILED" | "COMMIT_CLIENT_MISSING" | "ROLLBACK_OK" | "ROLLBACK_FAILED" | "NO_CLIENT";
   sqlState: string | null;
   releaseMs: number;
   commitOrRollbackMs: number;
@@ -1078,6 +1078,9 @@ export async function finalizeFirmUserTransaction(
   const t0 = Date.now();
   const client = req.rlsClient ?? null;
   if (!client) {
+    if (intent === "commit") {
+      return { ok: false, code: "COMMIT_CLIENT_MISSING", sqlState: null, releaseMs: 0, commitOrRollbackMs: 0 };
+    }
     return { ok: true, code: "NO_CLIENT", sqlState: null, releaseMs: 0, commitOrRollbackMs: 0 };
   }
   const sqlStateFrom = (err: unknown): string | null => {
@@ -1089,7 +1092,7 @@ export async function finalizeFirmUserTransaction(
     return null;
   };
 
-  type FinalizeCode = "COMMIT_OK" | "COMMIT_FAILED" | "ROLLBACK_OK" | "ROLLBACK_FAILED" | "NO_CLIENT";
+  type FinalizeCode = "COMMIT_OK" | "COMMIT_FAILED" | "COMMIT_CLIENT_MISSING" | "ROLLBACK_OK" | "ROLLBACK_FAILED" | "NO_CLIENT";
   const needDestroy = new WeakSet<PoolClient>();
   let commitMs = 0;
   let code: FinalizeCode = intent === "commit" ? "COMMIT_OK" : "ROLLBACK_OK";
@@ -1283,6 +1286,183 @@ export async function requireFirmUserSession(
     }
     const message = err instanceof Error ? err.message : String(err);
     logger.error({ err, message, userId: req.userId, firmId: req.firmId }, "auth.firm_context_error");
+    res.status(503).json({
+      error: "Tenant context temporarily unavailable",
+      code: "RLS_CONTEXT",
+      meta: {
+        request_id: getReqId(req) ?? null,
+        route: req.path,
+        method: req.method,
+        phase: "set_tenant_context",
+        jobId: getJobId(req) ?? null,
+        firmUserLookupStatus: req.userType === "firm_user" ? "ok" : "not_firm_user",
+        userId: req.userId ?? null,
+        firmId: req.firmId ?? null,
+        authTokenPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        authHeaderPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        cookiePresent: typeof req.headers.cookie === "string" && req.headers.cookie.length > 0,
+      },
+    });
+    return;
+  }
+
+  res.on("finish", () => { releaseClient(true); });
+  res.on("close", () => { releaseClient(false); });
+  next();
+}
+
+/**
+ * Financial session middleware (for high-value accounting endpoints such as
+ * POST /payment-vouchers).  DIFFERS FROM requireFirmUserSession:
+ *
+ *   1. Sets BOTH req.rlsDb = makeRlsDb(client) AND req.rlsClient = client
+ *      so handlers / helpers that perform explicit BEGIN/COMMIT (e.g.
+ *      withTenantScopedTx for durable financial writes) work out-of-the-box
+ *      with owner-owned connection management.
+ *
+ *   2. ClearTenantContext cleanup is FAIL-SAFE:
+ *        clearTenantContext SUCCESS → release(false) (return to pool clean)
+ *        clearTenantContext FAILURE → release(true) (DESTROY connection)
+ *      NEVER return a connection that may have stale tenant-context state to
+ *      the next tenant request (tenant isolation guard).
+ *
+ *   3. Lifecycle is exactly-once: double release in finish/close is
+ *      idempotent (guarded by released flag).
+ *
+ * DO NOT use this middleware on low-value read endpoints.  The extra destroy
+ * on cleanup-failure is deliberate isolation protection.
+ */
+export async function requireFirmUserFinancialSession(
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  if (req.userType !== "firm_user" || !req.firmId) {
+    writeAuditLog({ actorId: req.userId, firmId: req.firmId, actorType: req.userType ?? "unknown", action: "auth.forbidden.firm_user_required", detail: `${req.method} ${req.path}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+    res.status(403).json({ error: "Firm user access required" });
+    return;
+  }
+
+  let released = false;
+  let client: PoolClient | null = null;
+  let clearTenantFailed: Error | null = null;
+  try {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const connStart = Date.now();
+        client = await pool.connect();
+        const connMs = Date.now() - connStart;
+        if (req.timing?.sections) {
+          req.timing.sections["db_pool_connect"] = connMs;
+          if (typeof (pool as any)?.totalCount !== undefined) {
+            req.timing.sections["pool.totalCount"] = (pool as any).totalCount;
+            req.timing.sections["pool.idleCount"] = (pool as any).idleCount;
+            req.timing.sections["pool.waitingCount"] = (pool as any).waitingCount;
+          }
+        }
+        break;
+      } catch (err) {
+        const transient = isTransientDbConnectionError(err);
+        if (!transient || attempt >= 2) throw err;
+        await new Promise<void>((r) => setTimeout(r, 50 * attempt));
+      }
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, message, userId: req.userId ?? null, firmId: req.firmId ?? null }, "auth.firm_user_financial.connect_failed");
+    res.status(503).json({
+      error: "Tenant context temporarily unavailable",
+      code: "DB_CONNECT",
+      meta: {
+        request_id: getReqId(req) ?? null,
+        route: req.path,
+        method: req.method,
+        phase: "db_connect",
+        jobId: getJobId(req) ?? null,
+        firmUserLookupStatus: req.userType === "firm_user" ? "ok" : "not_firm_user",
+        userId: req.userId ?? null,
+        firmId: req.firmId ?? null,
+        authTokenPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        authHeaderPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        cookiePresent: typeof req.headers.cookie === "string" && req.headers.cookie.length > 0,
+      },
+    });
+    return;
+  }
+  if (!client) {
+    res.status(503).json({
+      error: "Tenant context temporarily unavailable",
+      code: "DB_CONNECT",
+      meta: {
+        request_id: getReqId(req) ?? null,
+        route: req.path,
+        method: req.method,
+        phase: "db_connect",
+        jobId: getJobId(req) ?? null,
+        firmUserLookupStatus: req.userType === "firm_user" ? "ok" : "not_firm_user",
+        userId: req.userId ?? null,
+        firmId: req.firmId ?? null,
+        authTokenPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        authHeaderPresent: typeof req.headers.authorization === "string" && req.headers.authorization.length > 0,
+        cookiePresent: typeof req.headers.cookie === "string" && req.headers.cookie.length > 0,
+      },
+    });
+    return;
+  }
+
+  const releaseClient = async (ok: boolean) => {
+    if (released) return;
+    released = true;
+    let destroyDueToClearTenantError = false;
+    try {
+      await clearTenantContext(client);
+    } catch (e: any) {
+      clearTenantFailed = e instanceof Error ? e : new Error(String(e));
+      destroyDueToClearTenantError = true;
+      logger.error(
+        {
+          err: clearTenantFailed,
+          event: "auth.financial_session.clear_tenant_context_failed_destroyed",
+          userId: req.userId ?? null,
+          firmId: req.firmId ?? null,
+          route: req.path,
+          method: req.method,
+        },
+        "financial session clearTenantContext FAILED → destroying DB connection to prevent tenant state leakage",
+      );
+    } finally {
+      const shouldDestroy = destroyDueToClearTenantError || !ok;
+      (client as any)._financialSessionReleaseContext = { ok, destroyed: shouldDestroy, clearTenantFailed: !!clearTenantFailed };
+      client.release(shouldDestroy);
+    }
+  };
+
+  try {
+    const originalQuery = client.query.bind(client);
+    let chain = Promise.resolve();
+    (client as any).query = (...args: unknown[]) => {
+      const run = () => (originalQuery as any)(...args);
+      const p = chain.then(run, run);
+      chain = p.then(
+        () => undefined,
+        () => undefined,
+      );
+      return p;
+    };
+    await setTenantContextSession(client, req.firmId, req.userId ?? undefined);
+    req.rlsDb = makeRlsDb(client);
+    req.rlsClient = client;
+    (req as any)._financialSession = {
+      establishedAt: Date.now(),
+      poolConnectMs: req.timing?.sections?.["db_pool_connect"] ?? null,
+      clearTenantFailed,
+    };
+  } catch (err) {
+    try {
+      await releaseClient(false);
+    } catch {}
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error({ err, message, userId: req.userId, firmId: req.firmId }, "auth.firm_context_error.financial");
     res.status(503).json({
       error: "Tenant context temporarily unavailable",
       code: "RLS_CONTEXT",
