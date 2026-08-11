@@ -1567,5 +1567,124 @@ routerInternal.get("/platform/messages/:msgId/attachments/:attachmentId/download
   }
 });
 
+const FIRM_RESET_SCOPES = [
+  "cases",
+  "documents",
+  "accounting",
+  "email",
+  "hr",
+  "notifications",
+  "logs",
+  "settings",
+  "operational",
+] as const;
+type FirmResetScope = typeof FIRM_RESET_SCOPES[number];
+const PROTECTED_NEVER_RESET = new Set<FirmResetScope>([]);
+function validateResetScopes(value: unknown): FirmResetScope[] {
+  if (!Array.isArray(value)) {
+    throw new ApiError({ status: 400, code: "INVALID_SCOPE", message: "scopes must be array of strings" });
+  }
+  const result: FirmResetScope[] = [];
+  const seen = new Set<string>();
+  for (const raw of value) {
+    const s = String(raw);
+    if (!(FIRM_RESET_SCOPES as readonly string[]).includes(s)) {
+      throw new ApiError({ status: 400, code: "INVALID_SCOPE", message: `Invalid reset scope: ${s}` });
+    }
+    if (seen.has(s)) continue;
+    seen.add(s);
+    if (PROTECTED_NEVER_RESET.has(s as FirmResetScope)) {
+      throw new ApiError({ status: 403, code: "SCOPE_PROTECTED", message: "Reset scope not allowed: " + s });
+    }
+    result.push(s as FirmResetScope);
+  }
+  if (result.length === 0) {
+    throw new ApiError({ status: 400, code: "MISSING_SCOPE", message: "At least one reset scope is required" });
+  }
+  return result;
+}
+
+routerInternal.post("/platform/firms/:firmId/reset/preview", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const firmIdStr = one(req.params?.firmId) as string | undefined;
+  const firmId = parseInt(firmIdStr ?? "", 10);
+  if (!Number.isFinite(firmId) || firmId <= 0) { res.status(400).json({ error: "Invalid firmId", code: "INVALID_FIRM_ID" }); return; }
+
+  const body = one(req.body) as { scopes?: unknown } ?? {};
+  let scopes: FirmResetScope[];
+  try { scopes = validateResetScopes(body.scopes); } catch (err) { sendError(res, err); return; }
+
+  const [firm] = await db.select({ id: firmsTable.id, slug: firmsTable.slug, name: firmsTable.name, status: firmsTable.status }).from(firmsTable).where(eq(firmsTable.id, firmId));
+  if (!firm) { res.status(404).json({ error: "Firm not found", code: "FIRM_NOT_FOUND" }); return; }
+
+  const scopeCounts: Record<string, { tables: Record<string, number>; totalRows: number }> = {};
+  for (const s of scopes) {
+    const tables: Record<string, number> = {};
+    switch (s) {
+      case "cases": tables["cases"] = (await db.select({ n: count() }).from(casesTable).where(eq(casesTable.firmId, firmId)))[0]?.n ?? 0; break;
+      case "documents": break;
+      case "accounting": break;
+      case "email": break;
+      case "hr": break;
+      case "notifications": break;
+      case "logs": break;
+      case "settings": break;
+      case "operational": break;
+    }
+    const totalRows = Object.values(tables).reduce((a, b) => a + b, 0);
+    scopeCounts[s] = { tables, totalRows };
+  }
+
+  res.json({
+    firmId,
+    firmSlug: firm.slug,
+    firmName: firm.name,
+    scopesRequested: scopes,
+    requiresConfirmationCode: firm.slug ?? null,
+    protectedTables: ["firms", "billing_ledger", "firm_subscriptions", "firm_feature_overrides", "subscription_plans"],
+    preview: scopeCounts,
+    note: "PART 1C skeleton preview — execute endpoint enforces typed slug confirmation and audit; destructive writes require explicit re-auth boundary.",
+  });
+});
+
+routerInternal.post("/platform/firms/:firmId/reset/execute", requireAuth, requireFounder, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const firmIdStr = one(req.params?.firmId) as string | undefined;
+  const firmId = parseInt(firmIdStr ?? "", 10);
+  if (!Number.isFinite(firmId) || firmId <= 0) { res.status(400).json({ error: "Invalid firmId", code: "INVALID_FIRM_ID" }); return; }
+
+  const body = one(req.body) as { scopes?: unknown; confirmation?: unknown } ?? {};
+  let scopes: FirmResetScope[];
+  try { scopes = validateResetScopes(body.scopes); } catch (err) { sendError(res, err); return; }
+  const confirmation = typeof body.confirmation === "string" ? body.confirmation.trim() : "";
+
+  const [firm] = await db.select({ id: firmsTable.id, slug: firmsTable.slug, name: firmsTable.name }).from(firmsTable).where(eq(firmsTable.id, firmId));
+  if (!firm) { res.status(404).json({ error: "Firm not found", code: "FIRM_NOT_FOUND" }); return; }
+
+  const expected = (firm.slug ?? "").trim();
+  if (!expected || confirmation !== expected) {
+    res.status(400).json({ error: "confirmation must match firm slug", code: "CONFIRMATION_MISMATCH", expectedScope: "slug" });
+    return;
+  }
+
+  await writeAuditLog({
+    firmId,
+    actorId: req.userId,
+    actorType: req.userType ?? "founder",
+    action: "platform.firm_reset.execute_request",
+    entityType: "firm",
+    entityId: firmId,
+    detail: JSON.stringify({ scopes, confirmedSlug: expected }),
+    ipAddress: req.ip,
+    userAgent: req.headers["user-agent"],
+  });
+
+  res.json({
+    firmId,
+    scopesExecuted: scopes,
+    status: "noop_part1c_skeleton",
+    result: { rowsDeleted: {}, filesDeleted: 0 },
+    warning: "Execute destructive reset disabled in PART 1C skeleton; will require explicit full destructive scope and additional re-auth boundary with support consent log.",
+  });
+});
+
 const exportedRouter = expressRouter as unknown as ExpressRouter;
 export default exportedRouter;
