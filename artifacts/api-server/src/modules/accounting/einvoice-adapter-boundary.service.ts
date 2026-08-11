@@ -1,59 +1,19 @@
 import { and, eq, desc } from "drizzle-orm";
-import { pgTable, serial, integer, text, timestamp, jsonb, boolean, index, uniqueIndex, numeric } from "drizzle-orm/pg-core";
-import { sql } from "drizzle-orm";
 import {
   db,
   type AppDb,
   type RlsDb,
   invoicesTable,
   einvoiceIntegrationsTable,
+  einvoiceSubmissionAuditTable,
   type EinvoiceIntegrationStatus,
 } from "@workspace/db";
 import { ApiError } from "../../lib/api-response.js";
 import { appendInvoiceAuditTrail } from "./invoice-audit-writer.service.js";
+import { logger } from "../../lib/logger.js";
 
 type DbConnLike = AppDb | RlsDb;
 const pickDbConn = (tx?: unknown): DbConnLike => (tx && typeof (tx as any).select === "function" ? (tx as DbConnLike) : db);
-
-const einvoiceSubmissionAuditTable = pgTable("einvoice_submission_audit", {
-  id: serial("id").primaryKey(),
-  firmId: integer("firm_id").notNull(),
-  invoiceId: integer("invoice_id").notNull(),
-  integrationId: integer("integration_id"),
-  actionType: text("action_type").notNull().default("SUBMIT"),
-  submissionStatus: text("submission_status").notNull().default("BOUNDARY_CHECK"),
-  boundaryPassed: boolean("boundary_passed").notNull().default(false),
-  boundaryErrorCode: text("boundary_error_code"),
-  boundaryErrorMessage: text("boundary_error_message"),
-  provider: text("provider"),
-  einvoiceIntegrationStatus: text("einvoice_integration_status"),
-  idempotencyKey: text("idempotency_key"),
-  submissionRequestJson: jsonb("submission_request_json"),
-  submissionResponseJson: jsonb("submission_response_json"),
-  externalSubmissionUid: text("external_submission_uid"),
-  externalEinvoiceUuid: text("external_einvoice_uuid"),
-  externalStatusUrl: text("external_status_url"),
-  externalQrCodeData: text("external_qr_code_data"),
-  requestSentAt: timestamp("request_sent_at", { withTimezone: true }),
-  responseReceivedAt: timestamp("response_received_at", { withTimezone: true }),
-  retryAttempt: integer("retry_attempt").notNull().default(0),
-  scheduledRetryAt: timestamp("scheduled_retry_at", { withTimezone: true }),
-  actorUserId: integer("actor_user_id"),
-  actorRole: text("actor_role"),
-  clientRequestId: text("client_request_id"),
-  ipAddress: text("ip_address"),
-  userAgent: text("user_agent"),
-  invoiceNoSnapshot: text("invoice_no_snapshot"),
-  grandTotalSnapshot: numeric("grand_total_snapshot", { precision: 20, scale: 2 }),
-  invoiceStatusSnapshot: text("invoice_status_snapshot"),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
-}, (t) => ({
-  firmIdx: index("idx_einvoice_sub_audit_firm").on(t.firmId),
-  firmInvoiceIdx: index("idx_einvoice_sub_audit_firm_invoice").on(t.firmId, t.invoiceId),
-  firmStatusIdx: index("idx_einvoice_sub_audit_firm_status").on(t.firmId, t.submissionStatus, t.createdAt),
-  uqIdem: uniqueIndex("uq_einvoice_sub_audit_idem").on(t.firmId, t.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
-}));
 
 export type EinvoiceAdapterAction = "SUBMIT" | "CANCEL" | "VALIDATE" | "DOWNLOAD_PDF" | "DOWNLOAD_XML" | "CHECK_STATUS" | "RETRY";
 export type EinvoiceSubmissionStatus =
@@ -73,17 +33,17 @@ export type EinvoiceSubmissionStatus =
   | "CANCELLED"
   | "EXPIRED";
 
-export interface SubmitEinvoiceInput {
+export type SubmitEinvoiceInput = {
   firmId: number;
   invoiceId: number;
+  idempotencyKey: string;
   actorUserId?: number | null;
   actorRole?: string | null;
   clientRequestId?: string | null;
-  idempotencyKey?: string | null;
   ipAddress?: string | null;
   userAgent?: string | null;
   requestedAt?: Date | null;
-}
+};
 
 export interface SubmitEinvoiceBoundaryResult {
   auditId: number;
@@ -103,6 +63,96 @@ export interface SubmitEinvoiceBoundaryResult {
   queueToken: string | null;
 }
 
+function requireIdempotencyKey(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length < 8) {
+    throw new ApiError({
+      status: 400,
+      code: "EINVOICE_IDEMPOTENCY_KEY_REQUIRED",
+      message: "A stable idempotency key is required for e-Invoice submission (min 8 chars)",
+      retryable: false,
+    });
+  }
+  return value.trim();
+}
+
+async function findActiveEinvoiceIntegration(
+  conn: DbConnLike,
+  firmId: number,
+): Promise<{
+  integrationId: number | null;
+  integrationStatus: EinvoiceIntegrationStatus | null;
+  integrationProvider: string | null;
+  enableAutoSubmit: boolean;
+}> {
+  let integrationRow: any = null;
+  try {
+    integrationRow = (await conn
+      .select()
+      .from(einvoiceIntegrationsTable as any)
+      .where(and(
+        eq(einvoiceIntegrationsTable.firmId, firmId),
+        eq(einvoiceIntegrationsTable.status, "active"),
+      ))
+      .limit(1))?.[0] as any;
+  } catch (err) {
+    logger.error(
+      { err, firmId, event: "einvoice.integration_lookup_failed" },
+      "e-Invoice integration active lookup DB error",
+    );
+    throw new ApiError({
+      status: 503,
+      code: "EINVOICE_INTEGRATION_LOOKUP_FAILED",
+      message: "Unable to verify e-Invoice integration",
+      retryable: true,
+    });
+  }
+
+  if (!integrationRow) {
+    try {
+      const fallbackAny = (await conn
+        .select()
+        .from(einvoiceIntegrationsTable as any)
+        .where(eq(einvoiceIntegrationsTable.firmId, firmId))
+        .orderBy(desc(einvoiceIntegrationsTable.updatedAt))
+        .limit(1))?.[0] as any;
+
+      if (fallbackAny) {
+        return {
+          integrationId: Number(fallbackAny.id),
+          integrationStatus: (fallbackAny.status as EinvoiceIntegrationStatus) ?? "not_configured",
+          integrationProvider: fallbackAny.provider ?? null,
+          enableAutoSubmit: Boolean(fallbackAny.enableAutoSubmit),
+        };
+      }
+    } catch (err) {
+      logger.error(
+        { err, firmId, event: "einvoice.integration_lookup_fallback_failed" },
+        "e-Invoice integration fallback lookup DB error",
+      );
+      throw new ApiError({
+        status: 503,
+        code: "EINVOICE_INTEGRATION_LOOKUP_FAILED",
+        message: "Unable to verify e-Invoice integration",
+        retryable: true,
+      });
+    }
+
+    return {
+      integrationId: null,
+      integrationStatus: null,
+      integrationProvider: null,
+      enableAutoSubmit: false,
+    };
+  }
+
+  return {
+    integrationId: Number(integrationRow.id),
+    integrationStatus: (integrationRow.status as EinvoiceIntegrationStatus) ?? "active",
+    integrationProvider: integrationRow.provider ?? null,
+    enableAutoSubmit: Boolean(integrationRow.enableAutoSubmit),
+  };
+}
+
 export async function submitEinvoice(
   input: SubmitEinvoiceInput,
   opts: { tx?: unknown } = {},
@@ -110,20 +160,20 @@ export async function submitEinvoice(
   const conn = pickDbConn(opts.tx);
 
   if (!input.invoiceId || typeof input.invoiceId !== "number") {
-    throw new ApiError({ status: 400, code: "EINVOICE_INVOICE_REQUIRED", message: "Invoice id is required for eInvoice submission", retryable: false });
+    throw new ApiError({
+      status: 400,
+      code: "EINVOICE_INVOICE_REQUIRED",
+      message: "Invoice id is required for eInvoice submission",
+      retryable: false,
+    });
   }
 
   const now = new Date();
-  const idemKey = input.idempotencyKey ?? `EINVOICE_SUBMIT:${input.firmId}:${input.invoiceId}:${Date.now()}`;
-
-  let integrationId: number | null = null;
-  let integrationStatus: EinvoiceIntegrationStatus | null = null;
-  let integrationProvider: string | null = null;
-  let enableAutoSubmit: boolean = false;
+  const idemKey = requireIdempotencyKey(input.idempotencyKey);
 
   const existingIdemAudit = (await conn
     .select({ id: einvoiceSubmissionAuditTable.id })
-    .from(einvoiceSubmissionAuditTable as any)
+    .from(einvoiceSubmissionAuditTable)
     .where(and(
       eq(einvoiceSubmissionAuditTable.firmId, input.firmId),
       eq(einvoiceSubmissionAuditTable.idempotencyKey, idemKey),
@@ -133,7 +183,7 @@ export async function submitEinvoice(
   if (existingIdemAudit) {
     const prior = (await conn
       .select()
-      .from(einvoiceSubmissionAuditTable as any)
+      .from(einvoiceSubmissionAuditTable)
       .where(eq(einvoiceSubmissionAuditTable.id, Number(existingIdemAudit.id)))
       .limit(1))?.[0] as any;
 
@@ -158,41 +208,51 @@ export async function submitEinvoice(
     }
   }
 
+  let integration: {
+    integrationId: number | null;
+    integrationStatus: EinvoiceIntegrationStatus | null;
+    integrationProvider: string | null;
+    enableAutoSubmit: boolean;
+  };
   try {
-    const integrationRow = (await conn
-      .select()
-      .from(einvoiceIntegrationsTable as any)
-      .where(and(
-        eq(einvoiceIntegrationsTable.firmId, input.firmId),
-        eq(einvoiceIntegrationsTable.status, "active"),
-      ))
-      .limit(1))?.[0] as any;
-
-    if (!integrationRow) {
-      const fallbackAny = (await conn
-        .select()
-        .from(einvoiceIntegrationsTable as any)
-        .where(eq(einvoiceIntegrationsTable.firmId, input.firmId))
-        .orderBy(desc(einvoiceIntegrationsTable.updatedAt))
-        .limit(1))?.[0] as any;
-
-      if (fallbackAny) {
-        integrationId = Number(fallbackAny.id);
-        integrationStatus = (fallbackAny.status as EinvoiceIntegrationStatus) ?? "not_configured";
-        integrationProvider = fallbackAny.provider ?? null;
-        enableAutoSubmit = Boolean(fallbackAny.enableAutoSubmit);
+    integration = await findActiveEinvoiceIntegration(conn, input.firmId);
+  } catch (err) {
+    if (err instanceof ApiError && err.code === "EINVOICE_INTEGRATION_LOOKUP_FAILED") {
+      try {
+        await conn
+          .insert(einvoiceSubmissionAuditTable as any)
+          .values({
+            firmId: input.firmId,
+            invoiceId: input.invoiceId,
+            integrationId: null,
+            actionType: "SUBMIT",
+            submissionStatus: "INTEGRATION_ERROR",
+            boundaryPassed: false,
+            boundaryErrorCode: "EINVOICE_INTEGRATION_LOOKUP_FAILED",
+            boundaryErrorMessage: "Unable to verify e-Invoice integration",
+            provider: null,
+            einvoiceIntegrationStatus: "error",
+            idempotencyKey: idemKey,
+            retryAttempt: 0,
+            responseReceivedAt: now,
+            actorUserId: typeof input.actorUserId === "number" ? input.actorUserId : null,
+            actorRole: input.actorRole ?? null,
+            clientRequestId: input.clientRequestId ?? null,
+            ipAddress: input.ipAddress ?? null,
+            userAgent: input.userAgent ?? null,
+            createdAt: now,
+            updatedAt: now,
+          } as any)
+          .onConflictDoNothing();
+      } catch {
+        // best-effort audit
       }
-    } else {
-      integrationId = Number(integrationRow.id);
-      integrationStatus = (integrationRow.status as EinvoiceIntegrationStatus) ?? "active";
-      integrationProvider = integrationRow.provider ?? null;
-      enableAutoSubmit = Boolean(integrationRow.enableAutoSubmit);
+      throw err;
     }
-  } catch {
-    integrationId = null;
-    integrationStatus = null;
-    integrationProvider = null;
+    throw err;
   }
+
+  const { integrationId, integrationStatus, integrationProvider, enableAutoSubmit } = integration;
 
   if (integrationId == null || !integrationStatus || integrationStatus !== "active") {
     const noConfigErrorCode = "EINVOICE_INTEGRATION_NOT_CONFIGURED";
@@ -438,7 +498,7 @@ export async function submitEinvoice(
     // non-fatal; try fallback lookup
     const fallback = (await conn
       .select({ id: einvoiceSubmissionAuditTable.id })
-      .from(einvoiceSubmissionAuditTable as any)
+      .from(einvoiceSubmissionAuditTable)
       .where(and(
         eq(einvoiceSubmissionAuditTable.firmId, input.firmId),
         eq(einvoiceSubmissionAuditTable.idempotencyKey, idemKey),

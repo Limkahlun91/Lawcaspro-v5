@@ -48,3 +48,4 @@ export * from "./hims-connections";
 export * from "./hims-status-checks";
 export * from "./hims-data-comparisons";
 export * from "./einvoice-integrations";
+export * from "./integration-audits";

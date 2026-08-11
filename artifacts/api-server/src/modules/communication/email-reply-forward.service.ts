@@ -14,13 +14,22 @@ type DbConnLike = AppDb | RlsDb;
 const pickDbConn = (tx?: unknown): DbConnLike => (tx && typeof (tx as any).select === "function" ? (tx as DbConnLike) : db);
 
 export type ReplyType = "REPLY" | "REPLY_ALL" | "FORWARD" | "FORWARD_ATTACHMENT";
-export type DraftType = "consolidated" | "partial" | "split_case" | "normal_reply" | "reply" | "reply_all" | "forward" | "forward_attachment";
+export type DraftType =
+  | "consolidated"
+  | "partial"
+  | "split_case"
+  | "normal_reply"
+  | "reply"
+  | "reply_all"
+  | "forward"
+  | "forward_attachment";
 
 export interface ComposeReplyInput {
   firmId: number;
   parentMessageId: number;
   replyType: ReplyType;
   actorUserId: number;
+  idempotencyKey: string;
   caseLink?: {
     caseId?: number | null;
     caseRef?: string | null;
@@ -32,7 +41,6 @@ export interface ComposeReplyInput {
   subjectPrefix?: string | null;
   bodyPrefixHtml?: string | null;
   bodyPrefixText?: string | null;
-  idempotencyKey?: string | null;
   mailboxId?: number | null;
   assignedToUserId?: number | null;
 }
@@ -64,7 +72,7 @@ export interface ComposeReplyResult {
   forwardedAttachmentRefs: ComposeReplyAttachmentRef[];
   mailboxId: number | null;
   assignedToUserId: number | null;
-  idempotencyKey: string | null;
+  idempotencyKey: string;
   createdFromDuplicate: boolean;
 }
 
@@ -84,13 +92,29 @@ function extractEmail(addr: string): string {
   return String(addr ?? "").trim().toLowerCase();
 }
 
-function excludeOwnMailbox(recipients: string[], ownEmail: string | null): string[] {
-  if (!ownEmail) return recipients;
-  const ownLower = ownEmail.toLowerCase();
-  return recipients.filter((r) => {
-    const rEmail = extractEmail(r);
-    return rEmail && rEmail !== ownLower;
-  });
+function sanitizeRecipients(recipients: string[], ownAddress: string): string[] {
+  const own = ownAddress.trim().toLowerCase();
+  return [
+    ...new Map(
+      recipients
+        .map((v) => v.trim())
+        .filter(Boolean)
+        .filter((v) => extractEmail(v) !== own)
+        .map((v) => [extractEmail(v), v]),
+    ).values(),
+  ];
+}
+
+function requireStableActionKey(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length < 8) {
+    throw new ApiError({
+      status: 400,
+      code: "EMAIL_DRAFT_IDEMPOTENCY_KEY_REQUIRED",
+      message: "A stable idempotency key is required for email draft creation (min 8 chars)",
+      retryable: false,
+    });
+  }
+  return value.trim();
 }
 
 function buildReplySubject(original: string | null | undefined, replyType: ReplyType, explicitPrefix?: string | null): string {
@@ -135,8 +159,15 @@ export async function composeReply(
   const conn = pickDbConn(opts.tx);
 
   if (!input.parentMessageId || typeof input.parentMessageId !== "number") {
-    throw new ApiError({ status: 400, code: "EMAIL_PARENT_MSG_REQUIRED", message: "Parent message id is required", retryable: false });
+    throw new ApiError({
+      status: 400,
+      code: "EMAIL_PARENT_MSG_REQUIRED",
+      message: "Parent message id is required",
+      retryable: false,
+    });
   }
+
+  const idemKey = requireStableActionKey(input.idempotencyKey);
 
   const parentMsg = (await conn
     .select()
@@ -148,7 +179,12 @@ export async function composeReply(
     .limit(1))?.[0] as any;
 
   if (!parentMsg) {
-    throw new ApiError({ status: 404, code: "EMAIL_PARENT_MSG_NOT_FOUND", message: "Parent email message not found in firm scope", retryable: false });
+    throw new ApiError({
+      status: 404,
+      code: "EMAIL_PARENT_MSG_NOT_FOUND",
+      message: "Parent email message not found in firm scope",
+      retryable: false,
+    });
   }
 
   let mailboxId: number | null = typeof input.mailboxId === "number" ? input.mailboxId : null;
@@ -185,8 +221,8 @@ export async function composeReply(
   }
 
   const originalFromList = parseAddressList(parentMsg.fromAddress ?? parentMsg.from);
-  const originalToList = parseAddressList(parentMsg.toAddress ?? parentMsg.to);
-  const originalCcList = parseAddressList(parentMsg.ccAddress ?? parentMsg.cc);
+  const originalToList = parseAddressList(parentMsg.toAddresses ?? parentMsg.toAddress ?? parentMsg.to);
+  const originalCcList = parseAddressList(parentMsg.ccAddresses ?? parentMsg.ccAddress ?? parentMsg.cc);
 
   let to: string[] = [];
   let cc: string[] = [];
@@ -208,15 +244,24 @@ export async function composeReply(
         cc.push(r);
       }
     }
-    to = excludeOwnMailbox(to, ownEmailAddress);
-    cc = excludeOwnMailbox(cc, ownEmailAddress);
   } else if (replyType === "FORWARD" || replyType === "FORWARD_ATTACHMENT") {
     to = [];
     cc = [];
   }
 
-  if (Array.isArray(input.toOverrides)) to = input.toOverrides.filter((x) => typeof x === "string" && x.trim());
-  if (Array.isArray(input.ccOverrides)) cc = input.ccOverrides.filter((x) => typeof x === "string" && x.trim());
+  if (ownEmailAddress) {
+    to = sanitizeRecipients(to, ownEmailAddress);
+    cc = sanitizeRecipients(cc, ownEmailAddress);
+  }
+
+  if (Array.isArray(input.toOverrides)) {
+    const raw = input.toOverrides.filter((x) => typeof x === "string" && x.trim());
+    to = ownEmailAddress ? sanitizeRecipients(raw, ownEmailAddress) : raw;
+  }
+  if (Array.isArray(input.ccOverrides)) {
+    const raw = input.ccOverrides.filter((x) => typeof x === "string" && x.trim());
+    cc = ownEmailAddress ? sanitizeRecipients(raw, ownEmailAddress) : raw;
+  }
 
   const subject = buildReplySubject(parentMsg.subject, replyType, input.subjectPrefix);
 
@@ -248,10 +293,10 @@ export async function composeReply(
 
   const linkedCaseId: number | null = typeof input.caseLink?.caseId === "number"
     ? input.caseLink.caseId
-    : (typeof parentMsg.linkedCaseId === "number" ? parentMsg.linkedCaseId : null);
+    : typeof parentMsg.linkedCaseId === "number" ? parentMsg.linkedCaseId : null;
   const linkedCaseRef: string | null = typeof input.caseLink?.caseRef === "string"
     ? input.caseLink.caseRef
-    : (typeof parentMsg.caseRef === "string" ? parentMsg.caseRef : null);
+    : typeof parentMsg.caseRef === "string" ? parentMsg.caseRef : null;
 
   const explicitDraftType = input.draftType
     ? input.draftType
@@ -289,10 +334,6 @@ export async function composeReply(
     }
   }
 
-  const idemKey = input.idempotencyKey ?? (replyType === "FORWARD_ATTACHMENT" && forwardedAttachmentRefs.length
-    ? `EMAIL_DRAFT:${replyType}:${input.parentMessageId}:${Date.now()}:${forwardedAttachmentRefs.map(r => r.attachmentId ?? r.filename ?? "f").join(",")}`
-    : `EMAIL_DRAFT:${replyType}:${input.parentMessageId}:${Date.now()}`);
-
   const now = new Date();
   let draftId: number | null = null;
   let createdFromDuplicate = false;
@@ -308,6 +349,9 @@ export async function composeReply(
         caseRef: linkedCaseRef,
         draftType: explicitDraftType,
         replyType,
+        toAddresses: to as any,
+        ccAddresses: cc as any,
+        bccAddresses: bcc as any,
         to: to as any,
         cc: cc as any,
         bcc: bcc as any,
@@ -333,13 +377,10 @@ export async function composeReply(
     } else {
       const existingDraft = (await conn
         .select({ id: communicationDraftsTable.id })
-        .from(communicationDraftsTable as any)
+        .from(communicationDraftsTable)
         .where(and(
           eq(communicationDraftsTable.firmId, input.firmId),
-          eq(communicationDraftsTable.parentMessageId as any, input.parentMessageId),
-          eq(communicationDraftsTable.replyType as any, replyType),
-          eq(communicationDraftsTable.createdBy as any, input.actorUserId),
-          eq(communicationDraftsTable.status as any, "draft"),
+          eq(communicationDraftsTable.idempotencyKey, idemKey),
         ))
         .limit(1))?.[0] as any;
       if (existingDraft) {
@@ -353,13 +394,10 @@ export async function composeReply(
     if (!isUnique) throw err;
     const existingDraft = (await conn
       .select({ id: communicationDraftsTable.id })
-      .from(communicationDraftsTable as any)
+      .from(communicationDraftsTable)
       .where(and(
         eq(communicationDraftsTable.firmId, input.firmId),
-        eq(communicationDraftsTable.parentMessageId as any, input.parentMessageId),
-        eq(communicationDraftsTable.replyType as any, replyType),
-        eq(communicationDraftsTable.createdBy as any, input.actorUserId),
-        eq(communicationDraftsTable.status as any, "draft"),
+        eq(communicationDraftsTable.idempotencyKey, idemKey),
       ))
       .limit(1))?.[0] as any;
     if (existingDraft) {
@@ -369,7 +407,12 @@ export async function composeReply(
   }
 
   if (draftId == null) {
-    throw new ApiError({ status: 500, code: "EMAIL_DRAFT_CREATE_FAILED", message: "Email draft insert failed", retryable: true });
+    throw new ApiError({
+      status: 500,
+      code: "EMAIL_DRAFT_CREATE_FAILED",
+      message: "Email draft insert failed",
+      retryable: true,
+    });
   }
 
   return {

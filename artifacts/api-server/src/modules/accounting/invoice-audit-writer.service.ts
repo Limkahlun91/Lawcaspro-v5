@@ -1,10 +1,11 @@
-import { and, eq, desc } from "drizzle-orm";
+import { and, eq, desc, sql } from "drizzle-orm";
 import {
   db,
   invoiceAuditTrailTable,
   invoicesTable,
   receiptsTable,
   receiptAllocationsTable,
+  caseLedgersTable,
   type AppDb,
   type RlsDb,
 } from "@workspace/db";
@@ -114,75 +115,76 @@ export interface MarkInvoicePaidInput {
 export async function markInvoicePaid(
   input: MarkInvoicePaidInput,
   opts: { tx?: unknown } = {},
-): Promise<{ invoice: any; receiptId: number | null; auditId: number }> {
-  const conn = pickDbConn(opts.tx);
-
-  const currentRow = (await conn
-    .select({
-      id: invoicesTable.id,
-      firmId: invoicesTable.firmId,
-      caseId: invoicesTable.caseId,
-      quotationId: invoicesTable.quotationId,
-      invoiceNo: invoicesTable.invoiceNo,
-      status: invoicesTable.status,
-      subtotal: invoicesTable.subtotal,
-      taxTotal: invoicesTable.taxTotal,
-      grandTotal: invoicesTable.grandTotal,
-      amountPaid: invoicesTable.amountPaid,
-      amountDue: invoicesTable.amountDue,
-      issuedDate: invoicesTable.issuedDate,
-      dueDate: invoicesTable.dueDate,
-      notes: invoicesTable.notes,
-      version: invoicesTable.version,
-      deletedAt: invoicesTable.deletedAt,
-      createdBy: invoicesTable.createdBy,
-      createdAt: invoicesTable.createdAt,
-      updatedAt: invoicesTable.updatedAt,
-      einvoiceStatus: invoicesTable.einvoiceStatus,
-    })
-    .from(invoicesTable)
-    .where(and(eq(invoicesTable.firmId, input.firmId), eq(invoicesTable.id, input.invoiceId)))
-    .limit(1))?.[0];
-
-  if (!currentRow) {
-    throw new ApiError({ status: 404, code: "INVOICE_NOT_FOUND", message: "Invoice not found in firm scope [INVOICE_NOT_FOUND]", retryable: false });
-  }
-  const cur = currentRow as any;
-  if (cur.deletedAt) {
-    throw new ApiError({ status: 409, code: "INVOICE_DELETED", message: "Invoice is soft-deleted; restore first", retryable: false });
-  }
-  if (cur.status === "void") {
-    throw new ApiError({ status: 409, code: "INVOICE_VOID", message: "Void invoices cannot be marked paid", retryable: false });
-  }
-
+): Promise<{ invoiceId: number; invoice: any; receiptId: number; auditId: number }> {
+  const rootConn = pickDbConn(opts.tx);
   const numeric = (v: unknown): string => {
     const n = typeof v === "number" ? v : Number(String(v ?? "0").replace(/,/g, ""));
     return (Number.isFinite(n) ? n : 0).toFixed(2);
   };
-  const grandTotal = numeric(cur.grandTotal);
-  const amountPaidPrev = numeric(cur.amountPaid);
-  const payAmount = numeric(input.paidAmount ?? grandTotal);
-  const newAmountPaid = (Number(amountPaidPrev) + Number(payAmount)).toFixed(2);
-  const newAmountDue = Math.max(0, Number(grandTotal) - Number(newAmountPaid)).toFixed(2);
 
-  const diffGrand = Number(grandTotal) - Number(newAmountPaid);
-  const tolerance = 0.009;
-  const newStatus: "draft" | "issued" | "paid" | "partial_paid" | "overpaid" | "void" | "pending_payment" =
-    Math.abs(diffGrand) <= tolerance
-      ? "paid"
-      : diffGrand < -tolerance
-        ? "overpaid"
-        : "partial_paid";
+  return (rootConn as any).transaction(async (tx: any) => {
+    const lockedRows = await tx
+      .select({
+        id: invoicesTable.id,
+        firmId: invoicesTable.firmId,
+        caseId: invoicesTable.caseId,
+        quotationId: invoicesTable.quotationId,
+        invoiceNo: invoicesTable.invoiceNo,
+        status: invoicesTable.status,
+        subtotal: invoicesTable.subtotal,
+        taxTotal: invoicesTable.taxTotal,
+        grandTotal: invoicesTable.grandTotal,
+        amountPaid: invoicesTable.amountPaid,
+        amountDue: invoicesTable.amountDue,
+        issuedDate: invoicesTable.issuedDate,
+        dueDate: invoicesTable.dueDate,
+        notes: invoicesTable.notes,
+        version: invoicesTable.version,
+        deletedAt: invoicesTable.deletedAt,
+        createdBy: invoicesTable.createdBy,
+        createdAt: invoicesTable.createdAt,
+        updatedAt: invoicesTable.updatedAt,
+        einvoiceStatus: invoicesTable.einvoiceStatus,
+      })
+      .from(invoicesTable)
+      .where(and(eq(invoicesTable.firmId, input.firmId), eq(invoicesTable.id, input.invoiceId)))
+      .for("update")
+      .limit(1);
 
-  const paidDateObj = input.paidDate instanceof Date ? input.paidDate : (typeof input.paidDate === "string" && input.paidDate ? new Date(input.paidDate) : new Date());
+    const cur = (lockedRows ?? [])[0] as any;
+    if (!cur) {
+      throw new ApiError({ status: 404, code: "INVOICE_NOT_FOUND", message: "Invoice not found in firm scope [INVOICE_NOT_FOUND]", retryable: false });
+    }
+    if (cur.deletedAt) {
+      throw new ApiError({ status: 409, code: "INVOICE_DELETED", message: "Invoice is soft-deleted; restore first", retryable: false });
+    }
+    if (cur.status === "void") {
+      throw new ApiError({ status: 409, code: "INVOICE_VOID", message: "Void invoices cannot be marked paid", retryable: false });
+    }
 
-  let receiptId: number | null = null;
-  try {
-    const receiptNo = await nextReceiptNo(conn as any, input.firmId).catch(async (err) => {
-      logger.warn({ err, firmId: input.firmId, invoiceId: input.invoiceId }, "invoice_paid.sequence_fallback");
-      return `REC-${new Date().getFullYear()}-${String(input.firmId)}-${Date.now()}`;
+    const grandTotal = numeric(cur.grandTotal);
+    const amountPaidPrev = numeric(cur.amountPaid);
+    const payAmount = numeric(input.paidAmount ?? grandTotal);
+    const newAmountPaid = (Number(amountPaidPrev) + Number(payAmount)).toFixed(2);
+    const newAmountDue = Math.max(0, Number(grandTotal) - Number(newAmountPaid)).toFixed(2);
+
+    const diffGrand = Number(grandTotal) - Number(newAmountPaid);
+    const tolerance = 0.009;
+    const newStatus: "draft" | "issued" | "paid" | "partial_paid" | "overpaid" | "void" | "pending_payment" =
+      Math.abs(diffGrand) <= tolerance
+        ? "paid"
+        : diffGrand < -tolerance
+          ? "overpaid"
+          : "partial_paid";
+
+    const paidDateObj = input.paidDate instanceof Date ? input.paidDate : (typeof input.paidDate === "string" && input.paidDate ? new Date(input.paidDate) : new Date());
+
+    const receiptNo = await nextReceiptNo(tx, input.firmId).catch((err) => {
+      logger.error({ err, firmId: input.firmId, invoiceId: input.invoiceId }, "invoice_paid.sequence_failed");
+      throw new ApiError({ status: 500, code: "INVOICE_PAID_RECEIPT_SEQ_FAILED", message: "Unable to allocate receipt number", retryable: true });
     });
-    const receiptRows = await conn
+
+    const receiptRows = await tx
       .insert(receiptsTable as any)
       .values({
         firmId: input.firmId,
@@ -196,88 +198,123 @@ export async function markInvoicePaid(
         notes: input.notes ?? null,
         createdBy: input.actorUserId,
       } as any)
-      .returning({ id: (receiptsTable as any).id });
-    receiptId = Number(receiptRows?.[0]?.id ?? 0) || null;
+      .returning({ id: receiptsTable.id });
 
-    if (receiptId) {
-      await conn
-        .insert(receiptAllocationsTable as any)
-        .values({
-          receiptId,
-          invoiceId: input.invoiceId,
-          amount: payAmount as any,
-          notes: input.notes ?? null,
-        } as any)
-        .returning({ id: (receiptAllocationsTable as any).id })
-        .catch((err) => logger.warn({ err, firmId: input.firmId, invoiceId: input.invoiceId, receiptId }, "invoice_paid.receipt_allocation_skipped"));
+    const receiptId = Number(receiptRows?.[0]?.id ?? 0);
+    if (!receiptId) {
+      throw new ApiError({ status: 500, code: "INVOICE_PAID_RECEIPT_CREATE_FAILED", message: "Receipt insert returned no id; rollback", retryable: true });
     }
-  } catch (err) {
-    logger.error({ err, firmId: input.firmId, invoiceId: input.invoiceId }, "invoice_paid.receipt_creation_failed");
-  }
 
-  const updatedRows = await conn
-    .update(invoicesTable as any)
-    .set({
-      amountPaid: newAmountPaid as any,
-      amountDue: newAmountDue as any,
-      status: newStatus,
-      updatedAt: new Date(),
-    })
-    .where(and(eq(invoicesTable.firmId, input.firmId), eq(invoicesTable.id, input.invoiceId)))
-    .returning({
-      id: invoicesTable.id,
-      firmId: invoicesTable.firmId,
-      caseId: invoicesTable.caseId,
-      status: invoicesTable.status,
-      amountPaid: invoicesTable.amountPaid,
-      amountDue: invoicesTable.amountDue,
-      grandTotal: invoicesTable.grandTotal,
-      deletedAt: invoicesTable.deletedAt,
-    });
+    const allocRows = await tx
+      .insert(receiptAllocationsTable as any)
+      .values({
+        receiptId,
+        invoiceId: input.invoiceId,
+        amount: payAmount as any,
+        notes: input.notes ?? null,
+      } as any)
+      .returning({ id: receiptAllocationsTable.id });
+    if (!allocRows?.[0]) {
+      throw new ApiError({ status: 500, code: "INVOICE_PAID_ALLOC_CREATE_FAILED", message: "Receipt allocation insert failed; rollback", retryable: true });
+    }
 
-  const updatedInvoice = updatedRows?.[0];
+    const updatedRows = await tx
+      .update(invoicesTable as any)
+      .set({
+        amountPaid: newAmountPaid as any,
+        amountDue: newAmountDue as any,
+        status: newStatus,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(invoicesTable.firmId, input.firmId), eq(invoicesTable.id, input.invoiceId)))
+      .returning({
+        id: invoicesTable.id,
+        firmId: invoicesTable.firmId,
+        caseId: invoicesTable.caseId,
+        status: invoicesTable.status,
+        amountPaid: invoicesTable.amountPaid,
+        amountDue: invoicesTable.amountDue,
+        grandTotal: invoicesTable.grandTotal,
+        deletedAt: invoicesTable.deletedAt,
+      });
 
-  try {
+    const updatedInvoice = updatedRows?.[0] ?? cur;
+
     if (typeof cur.caseId === "number") {
-      await syncCaseFinancialTotals(conn as any, { firmId: input.firmId, caseId: cur.caseId }).catch(() => undefined);
-    }
-  } catch { /* non-fatal */ }
+      const txnDateOnly = new Date(paidDateObj.getFullYear(), paidDateObj.getMonth(), paidDateObj.getDate());
+      const eventKey = `INVOICE_PAID:${input.invoiceId}`;
+      const description = `Invoice ${cur.invoiceNo ?? `#${cur.id}`} paid (${payAmount}) via ${input.paymentMethod ?? "bank_transfer"}`;
+      const amountNum = Number(payAmount);
+      const cents = Math.round(amountNum * 100);
+      try {
+        await tx
+          .insert(caseLedgersTable as any)
+          .values({
+            firmId: input.firmId,
+            caseId: cur.caseId,
+            transactionDate: txnDateOnly,
+            entryCategory: "income",
+            entryType: "receipt",
+            description,
+            amount: payAmount as any,
+            debitCents: cents,
+            creditCents: 0,
+            sourceType: "invoice_paid",
+            sourceId: input.invoiceId,
+            sourceReference: receiptNo,
+            eventKey,
+          } as any)
+          .onConflictDoNothing({ target: [caseLedgersTable.firmId, caseLedgersTable.eventKey] });
+      } catch (ledgerErr) {
+        logger.error({ err: ledgerErr, firmId: input.firmId, caseId: cur.caseId, eventKey }, "invoice_paid.case_ledger_upsert_failed");
+        throw new ApiError({ status: 500, code: "INVOICE_PAID_LEDGER_FAILED", message: "Case ledger upsert failed; rollback", retryable: true });
+      }
 
-  const auditId = (await appendInvoiceAuditTrail({
-    firmId: input.firmId,
-    invoiceId: input.invoiceId,
-    actionType: newStatus === "paid" ? "mark_paid" : "mark_partial_paid",
-    actorUserId: input.actorUserId,
-    beforeSnapshot: {
-      status: cur.status,
-      amountPaid: amountPaidPrev,
-      amountDue: numeric(cur.amountDue),
-      grandTotal,
-    },
-    afterSnapshot: {
-      status: newStatus,
-      amountPaid: newAmountPaid,
-      amountDue: newAmountDue,
-    },
-    delta: {
-      paidAmount: payAmount,
+      try {
+        await syncCaseFinancialTotals(tx as any, { firmId: input.firmId, caseId: cur.caseId });
+      } catch (syncErr) {
+        logger.error({ err: syncErr, firmId: input.firmId, caseId: cur.caseId, invoiceId: input.invoiceId }, "invoice_paid.case_financial_sync_failed");
+        throw new ApiError({ status: 500, code: "INVOICE_PAID_SYNC_FAILED", message: "Case financial totals sync failed; rollback", retryable: true });
+      }
+    }
+
+    const auditIdRes = await appendInvoiceAuditTrail({
+      firmId: input.firmId,
+      invoiceId: input.invoiceId,
+      actionType: newStatus === "paid" ? "mark_paid" : "mark_partial_paid",
+      actorUserId: input.actorUserId,
+      beforeSnapshot: {
+        status: cur.status,
+        amountPaid: amountPaidPrev,
+        amountDue: numeric(cur.amountDue),
+        grandTotal,
+      },
+      afterSnapshot: {
+        status: newStatus,
+        amountPaid: newAmountPaid,
+        amountDue: newAmountDue,
+      },
+      delta: {
+        paidAmount: payAmount,
+        paymentMethod: input.paymentMethod ?? null,
+        bankReference: input.bankReference ?? null,
+      },
+      amountChange: payAmount,
+      statusBefore: cur.status,
+      statusAfter: newStatus,
+      reAuthVerified: input.reAuthVerified === true,
+      clientRequestId: input.clientRequestId ?? null,
+      receiptId,
       paymentMethod: input.paymentMethod ?? null,
       bankReference: input.bankReference ?? null,
-    },
-    amountChange: payAmount,
-    statusBefore: cur.status,
-    statusAfter: newStatus,
-    reAuthVerified: input.reAuthVerified === true,
-    clientRequestId: input.clientRequestId ?? null,
-    receiptId,
-    paymentMethod: input.paymentMethod ?? null,
-    bankReference: input.bankReference ?? null,
-    paidAmount: payAmount,
-    paidDate: paidDateObj,
-    notes: input.notes ?? null,
-  }, { tx: conn })).auditId;
+      paidAmount: payAmount,
+      paidDate: paidDateObj,
+      notes: input.notes ?? null,
+    }, { tx });
+    const auditId = auditIdRes.auditId;
 
-  return { invoice: updatedInvoice ?? currentRow, receiptId, auditId };
+    return { invoiceId: input.invoiceId, invoice: updatedInvoice, receiptId, auditId };
+  });
 }
 
 export interface SoftDeleteInvoiceInput {

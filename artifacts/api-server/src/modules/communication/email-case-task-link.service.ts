@@ -1,6 +1,4 @@
 import { and, eq } from "drizzle-orm";
-import { pgTable, serial, integer, text, timestamp, jsonb, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
-import { sql } from "drizzle-orm";
 import {
   db,
   type AppDb,
@@ -9,38 +7,12 @@ import {
   communicationCaseTasksTable,
   communicationTaskAssigneesTable,
   casesTable,
+  communicationCaseTaskLinkAuditTable,
 } from "@workspace/db";
 import { ApiError } from "../../lib/api-response.js";
 
 type DbConnLike = AppDb | RlsDb;
 const pickDbConn = (tx?: unknown): DbConnLike => (tx && typeof (tx as any).select === "function" ? (tx as DbConnLike) : db);
-
-const communicationCaseTaskLinkAuditTable = pgTable("communication_case_task_link_audit", {
-  id: serial("id").primaryKey(),
-  firmId: integer("firm_id").notNull(),
-  messageId: integer("message_id").notNull(),
-  caseTaskId: integer("case_task_id"),
-  caseId: integer("case_id").notNull(),
-  actionType: text("action_type").notNull().default("LINK_TASK"),
-  beforeAssignedToUserId: integer("before_assigned_to_user_id"),
-  afterAssignedToUserId: integer("after_assigned_to_user_id"),
-  beforeTaskStatus: text("before_task_status"),
-  afterTaskStatus: text("after_task_status"),
-  beforeRequiredAction: text("before_required_action"),
-  afterRequiredAction: text("after_required_action"),
-  beforeDueAt: timestamp("before_due_at", { withTimezone: true }),
-  afterDueAt: timestamp("after_due_at", { withTimezone: true }),
-  readToggledOnMessage: boolean("read_toggled_on_message").notNull().default(false),
-  idempotencyKey: text("idempotency_key"),
-  actorUserId: integer("actor_user_id"),
-  actorRole: text("actor_role"),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-}, (t) => ({
-  firmIdx: index("idx_comm_task_link_audit_firm").on(t.firmId),
-  firmMsgIdx: index("idx_comm_task_link_audit_msg").on(t.firmId, t.messageId),
-  firmCaseIdx: index("idx_comm_task_link_audit_case").on(t.firmId, t.caseId),
-  uqIdem: uniqueIndex("uq_comm_task_link_audit_idem").on(t.firmId, t.idempotencyKey).where(sql`idempotency_key IS NOT NULL`),
-}));
 
 export type CommunicationTaskStatus =
   | "pending_owner_review"
