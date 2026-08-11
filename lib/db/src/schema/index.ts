@@ -39,3 +39,5 @@ export * from "./hrms-approvals";
 export * from "./platform-entitlements";
 export * from "./batch-operations";
 export * from "./supporting-documents";
+export * from "./ai-draft";
+export * from "./billing-audit";
