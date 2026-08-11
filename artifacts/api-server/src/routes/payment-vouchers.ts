@@ -18,6 +18,7 @@ import {
   paymentVoucherItemsTable,
   paymentVouchersTable,
   permissionsTable,
+  pool,
   quotationItemsTable,
   quotationsTable,
   rolesTable,
@@ -104,8 +105,11 @@ const createSectionTimer = (req: AuthRequest, key: string) => {
   };
 };
 
-const PV_CREATE_TX_LOCK_TIMEOUT_MS = 5_000;
-const PV_CREATE_TX_STATEMENT_TIMEOUT_MS = 45_000;
+const PV_CREATE_REQUEST_BUDGET_MS = 25_000;
+const PV_CREATE_SMALL_QUERY_TIMEOUT_MS = 3_000;
+const PV_CREATE_AGGREGATE_TIMEOUT_MS = 5_000;
+const PV_CREATE_TX_LOCK_TIMEOUT_MS = 2_000;
+const PV_CREATE_TX_STATEMENT_TIMEOUT_MS = 15_000;
 
 type PvCreateTimingStage =
   | "request_received"
@@ -125,6 +129,50 @@ type PvCreateTimingStage =
   | "response_sent"
   | "failed";
 
+function getPoolStatsSnapshot() {
+  try {
+    return {
+      poolTotalCount: pool.totalCount ?? 0,
+      poolIdleCount: pool.idleCount ?? 0,
+      poolWaitingCount: pool.waitingCount ?? 0,
+    };
+  } catch {
+    return { poolTotalCount: 0, poolIdleCount: 0, poolWaitingCount: 0 };
+  }
+}
+
+const getReqIdForLog = (req: AuthRequest): string | null => {
+  const id = (req as unknown as { id?: unknown } | null)?.id;
+  return typeof id === "string" ? id : null;
+};
+
+async function setRlsClientStatementTimeout(
+  req: AuthRequest,
+  timeoutMs: number,
+): Promise<void> {
+  const client = req.rlsClient;
+  if (!client) return;
+  const safeMs = Math.max(100, Math.floor(timeoutMs));
+  try {
+    await client.query({
+      text: `SET LOCAL statement_timeout = '${safeMs}ms'`,
+    });
+  } catch {
+  }
+}
+
+function checkPvCreateBudget(
+  req: AuthRequest,
+  stage: PvCreateTimingStage,
+): { exceeded: boolean; elapsedMs: number } {
+  const startedAt = (req as { pvCreateStartedAt?: number }).pvCreateStartedAt ?? Date.now();
+  const elapsedMs = Math.max(0, Date.now() - startedAt);
+  if (elapsedMs >= PV_CREATE_REQUEST_BUDGET_MS) {
+    return { exceeded: true, elapsedMs };
+  }
+  return { exceeded: false, elapsedMs };
+}
+
 function emitPvCreateTiming(
   req: AuthRequest,
   stage: PvCreateTimingStage,
@@ -140,12 +188,14 @@ function emitPvCreateTiming(
     req.timing.sections[`pv.stage.${stage}`] = (req.timing.sections[`pv.stage.${stage}`] ?? 0) + stageMs;
   }
   const event = {
+    reqId: getReqIdForLog(req),
     clientRequestId: (req as { pvClientRequestId?: string }).pvClientRequestId ?? null,
     firmId: req.firmId ?? null,
     userId: req.userId ?? null,
     stage,
     elapsedMs,
     stageMs,
+    ...getPoolStatsSnapshot(),
     ...meta,
   };
   if (elapsedMs >= 2000 || stage === "failed") {
@@ -813,6 +863,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       : purpose;
 
   const stopPermissions = createSectionTimer(req, "pv.create.permissions");
+  await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS);
   const roleName = await getRoleName(req);
   const roleKind = classifyCaseWorkflowRole(roleName);
   const canCreateAccountingRequest = await roleHasPermission(req, "accounting", "create");
@@ -848,14 +899,25 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   }
   stopPermissions();
   emitPvCreateTiming(req, "permission_checked");
+  {
+    const budget = checkPvCreateBudget(req, "permission_checked");
+    if (budget.exceeded) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "REQUEST_BUDGET_EXCEEDED:permission_checked", "permission_checked");
+      emitPvCreateTiming(req, "failed", { code: "REQUEST_BUDGET_EXCEEDED", elapsedMs: budget.elapsedMs });
+      res.status(503).json({ error: "Service unavailable - request timeout budget exceeded", code: "REQUEST_BUDGET_EXCEEDED" });
+      return;
+    }
+  }
 
   let idempotencyConflictResponse: { httpStatus: number; body: any } | null = null;
   if (normalizedClientRequestId) {
     const stopIdempotency = createSectionTimer(req, "pv.create.early_idempotency");
     emitPvCreateTiming(req, "idempotency_tracking_started");
     try {
+      await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS);
       const inserted = await r.transaction(async (tx) => {
         await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_PRELOCK_TIMEOUT_MS}ms'`));
+        await (tx as any).execute(sql.raw(`SET LOCAL statement_timeout = '${PV_CREATE_SMALL_QUERY_TIMEOUT_MS}ms'`));
         return await tx
           .insert(paymentVoucherCreateRequestsTable)
           .values({
@@ -870,6 +932,16 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       });
       const thisRequestJustReservedTheRow = inserted.length === 1;
       emitPvCreateTiming(req, "idempotency_tracking_inserted", { reserved: thisRequestJustReservedTheRow });
+      {
+        const budget = checkPvCreateBudget(req, "idempotency_tracking_inserted");
+        if (budget.exceeded) {
+          await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "REQUEST_BUDGET_EXCEEDED:idempotency", "idempotency");
+          emitPvCreateTiming(req, "failed", { code: "REQUEST_BUDGET_EXCEEDED", elapsedMs: budget.elapsedMs });
+          stopIdempotency();
+          res.status(503).json({ error: "Service unavailable - request timeout budget exceeded", code: "REQUEST_BUDGET_EXCEEDED" });
+          return;
+        }
+      }
 
       if (thisRequestJustReservedTheRow) {
         idempotencyConflictResponse = null;
@@ -936,6 +1008,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
             } else {
               const reclaimed = await r.transaction(async (tx) => {
                 await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_PRELOCK_TIMEOUT_MS}ms'`));
+                await (tx as any).execute(sql.raw(`SET LOCAL statement_timeout = '${PV_CREATE_SMALL_QUERY_TIMEOUT_MS}ms'`));
                 return await tx
                   .update(paymentVoucherCreateRequestsTable)
                   .set({
@@ -986,6 +1059,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
                   if (!activeLockHeld) {
                     const reclaimed = await r.transaction(async (tx) => {
                       await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_PRELOCK_TIMEOUT_MS}ms'`));
+                      await (tx as any).execute(sql.raw(`SET LOCAL statement_timeout = '${PV_CREATE_SMALL_QUERY_TIMEOUT_MS}ms'`));
                       return await tx
                         .update(paymentVoucherCreateRequestsTable)
                         .set({
@@ -1060,6 +1134,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   const stopSettings = createSectionTimer(req, "pv.create.settings");
   let settings: AccountingSettingsRecord;
   try {
+    await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS);
     const loaded = await safeLoadAccountingSettings({
       firmId: req.firmId!,
       db: rdb(req) as any,
@@ -1089,8 +1164,18 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   });
   stopSettings();
   emitPvCreateTiming(req, "accounting_settings_loaded");
+  {
+    const budget = checkPvCreateBudget(req, "accounting_settings_loaded");
+    if (budget.exceeded) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "REQUEST_BUDGET_EXCEEDED:accounting_settings", "accounting_settings");
+      emitPvCreateTiming(req, "failed", { code: "REQUEST_BUDGET_EXCEEDED", elapsedMs: budget.elapsedMs });
+      res.status(503).json({ error: "Service unavailable - request timeout budget exceeded", code: "REQUEST_BUDGET_EXCEEDED" });
+      return;
+    }
+  }
 
   const stopCaseCheck = createSectionTimer(req, "pv.create.case_check");
+  await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS);
   const caseIdValue = typeof caseId === "number" && Number.isFinite(caseId) ? Number(caseId) : null;
   const targetCaseIdValue = typeof targetCaseId === "number" && Number.isFinite(targetCaseId) ? Number(targetCaseId) : null;
   if (caseIdValue) {
@@ -1193,10 +1278,29 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   }
   stopCaseCheck();
   emitPvCreateTiming(req, "case_and_reference_loaded");
+  {
+    const budget = checkPvCreateBudget(req, "case_and_reference_loaded");
+    if (budget.exceeded) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "REQUEST_BUDGET_EXCEEDED:case_and_reference", "case_and_reference");
+      emitPvCreateTiming(req, "failed", { code: "REQUEST_BUDGET_EXCEEDED", elapsedMs: budget.elapsedMs });
+      res.status(503).json({ error: "Service unavailable - request timeout budget exceeded", code: "REQUEST_BUDGET_EXCEEDED" });
+      return;
+    }
+  }
   emitPvCreateTiming(req, "preflight_validation_passed");
+  {
+    const budget = checkPvCreateBudget(req, "preflight_validation_passed");
+    if (budget.exceeded) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "REQUEST_BUDGET_EXCEEDED:preflight", "preflight");
+      emitPvCreateTiming(req, "failed", { code: "REQUEST_BUDGET_EXCEEDED", elapsedMs: budget.elapsedMs });
+      res.status(503).json({ error: "Service unavailable - request timeout budget exceeded", code: "REQUEST_BUDGET_EXCEEDED" });
+      return;
+    }
+  }
 
   const voucherNo = generateVoucherNo(now);
   if (voucherType === "account_transfer") {
+    await setRlsClientStatementTimeout(req, PV_CREATE_SMALL_QUERY_TIMEOUT_MS);
     const rows = await r
       .select({ id: firmBankAccountsTable.id })
       .from(firmBankAccountsTable)
@@ -1235,6 +1339,7 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       res.status(400).json({ error: "caseId is required when deducting from Client Account" });
       return;
     }
+    await setRlsClientStatementTimeout(req, PV_CREATE_AGGREGATE_TIMEOUT_MS);
     const [row] = await r.select({ bal: sql<string>`COALESCE(SUM(credit - debit), 0)` }).from(ledgerEntriesTable).where(and(
       eq(ledgerEntriesTable.firmId, req.firmId!),
       eq(ledgerEntriesTable.caseId, cid),
@@ -1248,6 +1353,16 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       return;
     }
     stopBalance();
+  }
+
+  {
+    const budget = checkPvCreateBudget(req, "transaction_started");
+    if (budget.exceeded) {
+      if (normalizedClientRequestId) await updatePvTrackingFailed(r, req.firmId!, req.userId!, normalizedClientRequestId, "REQUEST_BUDGET_EXCEEDED:before_main_tx", "before_main_tx");
+      emitPvCreateTiming(req, "failed", { code: "REQUEST_BUDGET_EXCEEDED", elapsedMs: budget.elapsedMs });
+      res.status(503).json({ error: "Service unavailable - request timeout budget exceeded", code: "REQUEST_BUDGET_EXCEEDED" });
+      return;
+    }
   }
 
   let pv: typeof paymentVouchersTable.$inferSelect;
@@ -1391,7 +1506,20 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   res.status(201).json(pv);
   const durationMs = Date.now() - startedAt;
   if (durationMs >= 2000) {
-    logger.warn({ durationMs, firmId: req.firmId, userId: req.userId, voucherType, sections: req.timing?.sections ?? null }, "payment_voucher.create_slow");
+    logger.warn(
+      {
+        reqId: getReqIdForLog(req),
+        clientRequestId: normalizedClientRequestId,
+        durationMs,
+        firmId: req.firmId,
+        userId: req.userId,
+        voucherType,
+        voucherId: pv.id,
+        sections: req.timing?.sections ?? null,
+        ...getPoolStatsSnapshot(),
+      },
+      "payment_voucher.create_slow",
+    );
   }
 });
 

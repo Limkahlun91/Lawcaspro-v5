@@ -5,6 +5,12 @@ import { logger } from "../../lib/logger.js";
 /** Timeout for the single-tracking-row UPDATE (ms). Should be fast. */
 export const PV_CREATE_PRELOCK_TIMEOUT_MS = 2_000;
 
+/** Hard statement timeout for the tracking UPDATE transaction (ms). */
+export const PV_CREATE_TRACKING_UPDATE_STATEMENT_TIMEOUT_MS = 2_000;
+
+/** Hard statement timeout for the diagnostic SELECT after zero-rows UPDATE (ms). */
+export const PV_CREATE_TRACKING_DIAGNOSTIC_TIMEOUT_MS = 2_000;
+
 /** Type for a drizzle-like connection handle: has .transaction + CRUD + execute */
 export type TrackingDbConn = Pick<
   typeof db,
@@ -22,6 +28,8 @@ export type TrackingDbConn = Pick<
  *   - Idempotent against repeated invocations.
  *   - Catches DB errors and emits a structured WARN event (never propagates).
  *   - Zero rows updated triggers diagnostic SELECT + classification INFO/WARN.
+ *   - All DB operations inside bounded lock_timeout + statement_timeout so a
+ *     DB contention event CANNOT extend the caller request until Vercel kill.
  *
  * Used by the payment-voucher POST handler for:
  *   - idempotency/locking failure path
@@ -43,6 +51,7 @@ export async function updatePvTrackingFailed(
   try {
     const updated = await r.transaction(async (tx) => {
       await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_PRELOCK_TIMEOUT_MS}ms'`));
+      await (tx as any).execute(sql.raw(`SET LOCAL statement_timeout = '${PV_CREATE_TRACKING_UPDATE_STATEMENT_TIMEOUT_MS}ms'`));
       return await tx
         .update(paymentVoucherCreateRequestsTable)
         .set({
@@ -62,19 +71,23 @@ export async function updatePvTrackingFailed(
 
     if (updated.length === 0) {
       try {
-        const curr = await r
-          .select({
-            status: paymentVoucherCreateRequestsTable.status,
-            paymentVoucherId: paymentVoucherCreateRequestsTable.paymentVoucherId,
-            lastError: paymentVoucherCreateRequestsTable.lastError,
-          })
-          .from(paymentVoucherCreateRequestsTable)
-          .where(and(
-            eq(paymentVoucherCreateRequestsTable.firmId, firmId),
-            eq(paymentVoucherCreateRequestsTable.createdByUserId, userId),
-            eq(paymentVoucherCreateRequestsTable.clientRequestId, clientRequestId),
-          ))
-          .limit(1);
+        const curr = await r.transaction(async (tx) => {
+          await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_PRELOCK_TIMEOUT_MS}ms'`));
+          await (tx as any).execute(sql.raw(`SET LOCAL statement_timeout = '${PV_CREATE_TRACKING_DIAGNOSTIC_TIMEOUT_MS}ms'`));
+          return await tx
+            .select({
+              status: paymentVoucherCreateRequestsTable.status,
+              paymentVoucherId: paymentVoucherCreateRequestsTable.paymentVoucherId,
+              lastError: paymentVoucherCreateRequestsTable.lastError,
+            })
+            .from(paymentVoucherCreateRequestsTable)
+            .where(and(
+              eq(paymentVoucherCreateRequestsTable.firmId, firmId),
+              eq(paymentVoucherCreateRequestsTable.createdByUserId, userId),
+              eq(paymentVoucherCreateRequestsTable.clientRequestId, clientRequestId),
+            ))
+            .limit(1);
+        });
         if (curr.length === 0) {
           logger.warn(
             {
@@ -131,6 +144,7 @@ export async function updatePvTrackingFailed(
             stage,
             sqlstate: String(diagErr?.code ?? ""),
             code: "DIAGNOSTIC_SELECT_FAILED",
+            boundedTimeoutMs: PV_CREATE_TRACKING_DIAGNOSTIC_TIMEOUT_MS,
           },
           "diagnostic select failed after no tracking update",
         );
@@ -146,6 +160,8 @@ export async function updatePvTrackingFailed(
         stage,
         sqlstate: String(dbErr?.code ?? ""),
         code: "DB_ERROR",
+        boundedLockTimeoutMs: PV_CREATE_PRELOCK_TIMEOUT_MS,
+        boundedStatementTimeoutMs: PV_CREATE_TRACKING_UPDATE_STATEMENT_TIMEOUT_MS,
       },
       "tracking update DB error",
     );

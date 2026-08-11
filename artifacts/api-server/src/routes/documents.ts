@@ -25,6 +25,7 @@ import {
   writeAuditLog,
   type AuthRequest,
   hasCasesFirmwideScope,
+  enforceCaseAccessGeneric,
 } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
 import { withAuthSafeDb } from "../lib/auth-safe-db.js";
@@ -25803,6 +25804,9 @@ router.post(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "print_documents" });
+    if (!accessGranted) return;
 
     const body = req.body as Record<string, unknown>;
     const printKey = typeof body.printKey === "string" ? body.printKey : "";
