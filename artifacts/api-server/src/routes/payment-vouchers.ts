@@ -44,6 +44,11 @@ import {
 } from "../modules/accounting/accounting-settings.js";
 import { resolvePaymentVoucherApprovalStatus } from "../modules/accounting/payment-voucher-approval.js";
 import {
+  updatePvTrackingFailed,
+  PV_CREATE_PRELOCK_TIMEOUT_MS,
+  type TrackingDbConn,
+} from "../modules/accounting/payment-voucher-create-tracking.js";
+import {
   isPaymentVoucherCreateRequestStale,
   PAYMENT_VOUCHER_CREATE_STALE_MS,
   resolvePaymentVoucherCreateStatus,
@@ -64,7 +69,7 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
-type DbConn = Pick<typeof db, "select" | "insert" | "update" | "delete" | "transaction" | "execute">;
+type DbConn = TrackingDbConn;
 type DbTxConn = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 const rdb = (req: AuthRequest): DbConn => (req.rlsDb ?? db) as unknown as DbConn;
 
@@ -99,7 +104,6 @@ const createSectionTimer = (req: AuthRequest, key: string) => {
   };
 };
 
-const PV_CREATE_PRELOCK_TIMEOUT_MS = 2_000;
 const PV_CREATE_TX_LOCK_TIMEOUT_MS = 5_000;
 const PV_CREATE_TX_STATEMENT_TIMEOUT_MS = 45_000;
 
@@ -146,126 +150,6 @@ function emitPvCreateTiming(
   };
   if (elapsedMs >= 2000 || stage === "failed") {
     logger.info(event, "payment_voucher.create_timing");
-  }
-}
-
-async function updatePvTrackingFailed(
-  r: DbConn,
-  firmId: number,
-  userId: number,
-  clientRequestId: string,
-  error: string,
-  stage: string = "unknown",
-): Promise<void> {
-  try {
-    const updated = await r.transaction(async (tx) => {
-      await (tx as any).execute(sql.raw(`SET LOCAL lock_timeout = '${PV_CREATE_PRELOCK_TIMEOUT_MS}ms'`));
-      return await tx
-        .update(paymentVoucherCreateRequestsTable)
-        .set({
-          status: "failed",
-          lastError: String(error ?? "").slice(0, 500),
-          updatedAt: new Date(),
-        })
-        .where(and(
-          eq(paymentVoucherCreateRequestsTable.firmId, firmId),
-          eq(paymentVoucherCreateRequestsTable.createdByUserId, userId),
-          eq(paymentVoucherCreateRequestsTable.clientRequestId, clientRequestId),
-          eq(paymentVoucherCreateRequestsTable.status, "processing"),
-          isNull(paymentVoucherCreateRequestsTable.paymentVoucherId),
-        ))
-        .returning({ id: paymentVoucherCreateRequestsTable.id });
-    });
-
-    if (updated.length === 0) {
-      try {
-        const curr = await r
-          .select({
-            status: paymentVoucherCreateRequestsTable.status,
-            paymentVoucherId: paymentVoucherCreateRequestsTable.paymentVoucherId,
-            lastError: paymentVoucherCreateRequestsTable.lastError,
-          })
-          .from(paymentVoucherCreateRequestsTable)
-          .where(and(
-            eq(paymentVoucherCreateRequestsTable.firmId, firmId),
-            eq(paymentVoucherCreateRequestsTable.createdByUserId, userId),
-            eq(paymentVoucherCreateRequestsTable.clientRequestId, clientRequestId),
-          ))
-          .limit(1);
-        if (curr.length === 0) {
-          logger.warn(
-            {
-              event: "payment_voucher.tracking_failure_update_failed",
-              firmId,
-              userId,
-              clientRequestId,
-              stage,
-              reason: "row_not_found",
-              code: "TRACKING_MISSING",
-            },
-            "payment_voucher tracking row missing on failure transition",
-          );
-        } else {
-          const row = curr[0];
-          if (row.status === "completed") {
-            logger.info(
-              {
-                event: "payment_voucher.tracking_failure_update_skipped",
-                firmId,
-                userId,
-                clientRequestId,
-                stage,
-                reason: "completed_preserved",
-                paymentVoucherId: row.paymentVoucherId,
-              },
-              "not downgrading completed tracking to failed",
-            );
-          } else if (row.status === "failed") {
-            // idempotent; no warning
-          } else {
-            logger.warn(
-              {
-                event: "payment_voucher.tracking_failure_update_failed",
-                firmId,
-                userId,
-                clientRequestId,
-                stage,
-                currentStatus: row.status,
-                paymentVoucherId: row.paymentVoucherId,
-                code: "UNEXPECTED_STATE",
-              },
-              "unexpected state when attempting failed transition",
-            );
-          }
-        }
-      } catch (diagErr: any) {
-        logger.warn(
-          {
-            event: "payment_voucher.tracking_failure_update_failed",
-            firmId,
-            userId,
-            clientRequestId,
-            stage,
-            sqlstate: String(diagErr?.code ?? ""),
-            code: "DIAGNOSTIC_SELECT_FAILED",
-          },
-          "diagnostic select failed after no tracking update",
-        );
-      }
-    }
-  } catch (dbErr: any) {
-    logger.warn(
-      {
-        event: "payment_voucher.tracking_failure_update_failed",
-        firmId,
-        userId,
-        clientRequestId,
-        stage,
-        sqlstate: String(dbErr?.code ?? ""),
-        code: "DB_ERROR",
-      },
-      "tracking update DB error",
-    );
   }
 }
 

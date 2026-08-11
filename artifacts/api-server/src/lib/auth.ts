@@ -1606,8 +1606,7 @@ export function resolveFirmAccessScopeFromInputs(args: {
   const hrPerm =
     HR_PRIV_ACTIONS.some((a) => hasPerm("hr", a)) ||
     hasPerm("hr", "read") ||
-    hrRoleKind === "manager" ||
-    hrRoleKind === "admin";
+    hrRoleKind !== null;
 
   const canAccessFirmDashboard: boolean = (() => {
     if (isFounder || isDeveloper) return true;

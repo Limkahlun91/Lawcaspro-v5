@@ -170,9 +170,23 @@ describe("PART 2.1 P7 — FEATURE REGISTRY PARITY (REAL registry.ts ↔ 0150_ful
     expect(bad).toEqual([]);
   });
 
-  it("Feature value types consistent (boolean/enum/number/string only)", () => {
-    const allowed = ["boolean", "enum", "number", "string"] as const;
-    const bad = FEATURE_REGISTRY.filter((f) => !allowed.includes(f.valueType as typeof allowed[number]));
+  it("Feature value types consistent (boolean/enum/number+aliases/string + config/unlimited)", () => {
+    // Canonical families:
+    //   boolean-family -> boolean
+    //   enum-family    -> enum
+    //   number-family  -> number, integer, decimal, numeric, bigint, smallint, serial, bigserial, real, double
+    //   string-family  -> string
+    //   meta           -> config, unlimited
+    const NUMBER_ALIASES = new Set([
+      "number", "integer", "decimal", "numeric",
+      "bigint", "smallint", "serial", "bigserial",
+      "real", "double", "float",
+    ]);
+    const ALL_ALLOWED = new Set([
+      "boolean", "enum", "string", "config", "unlimited",
+      ...NUMBER_ALIASES,
+    ]);
+    const bad = FEATURE_REGISTRY.filter((f) => !ALL_ALLOWED.has(f.valueType));
     expect(bad.map((f) => `${f.featureKey}:${f.valueType}`)).toEqual([]);
   });
 

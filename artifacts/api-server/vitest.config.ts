@@ -1,7 +1,26 @@
 import { defineConfig } from "vitest/config";
 
-const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
-
+/**
+ * PART 2.4 G1 — FIX TEST DISCOVERY.
+ *
+ * PREVIOUS (broken):
+ *   No DATABASE_URL set? → restrictive hardcoded whitelist of ~50 files, which
+ *   silently dropped 70+ tests including every new P0 regression test (authz,
+ *   case-access centralized, billing locks, G13 baseline matrix,
+ *   feature-registry parity).
+ *
+ * NOW (correct):
+ *   include ALL src/__tests__/** / *.test.ts files regardless of DATABASE_URL.
+ *   Tests that genuinely require a live external Postgres (LIVE_DB_REQUIRED)
+ *   already contain internal `skipDb = !process.env.DATABASE_URL` guards and
+ *   will simply skip their suites — they are still "accounted for" in the
+ *   vitest test-file report (not silently dropped from discovery).
+ *
+ * See classification test: src/__tests__/test-file-classification.guard.test.ts
+ * for the explicit per-file manifest with classes:
+ *   DB_INDEPENDENT | PGLITE_IN_PROCESS | LIVE_DB_REQUIRED
+ * and the guard UNACCOUNTED = 0 assertion.
+ */
 export default defineConfig({
   test: {
     environment: "node",
@@ -9,61 +28,7 @@ export default defineConfig({
     testTimeout: 15000,
     hookTimeout: 60000,
     setupFiles: ["./src/__tests__/setup.ts"],
-    include: hasDatabaseUrl
-      ? ["src/__tests__/**/*.test.ts"]
-      : [
-        "src/__tests__/auth-founder-bcrypt-regression.test.ts",
-        "src/__tests__/auth-mocked-regression.test.ts",
-        "src/__tests__/auth-me-admin-session-lookup.test.ts",
-        "src/__tests__/users-hub-regression.test.ts",
-        "src/__tests__/sql-regression.test.ts",
-        "src/__tests__/runtime-500-regression.test.ts",
-        "src/__tests__/not-found-json.test.ts",
-        "src/__tests__/dateOnly.test.ts",
-        "src/__tests__/caseVariableResolver.test.ts",
-        "src/__tests__/documentVariables.inlineList.test.ts",
-        "src/__tests__/customVariables.unit.test.ts",
-        "src/__tests__/caseWorkflowDocuments.unit.test.ts",
-        "src/__tests__/loanStamping.unit.test.ts",
-        "src/__tests__/workflowAutomation.unit.test.ts",
-        "src/__tests__/documentApplicability.unit.test.ts",
-        "src/__tests__/documentReadiness.unit.test.ts",
-        "src/__tests__/documentNaming.unit.test.ts",
-        "src/__tests__/fileReferenceSequence.unit.test.ts",
-        "src/__tests__/accounting-settings.unit.test.ts",
-        "src/__tests__/reference-suggestions.test.ts",
-        "src/__tests__/dashboard.milestone-drilldown.test.ts",
-        "src/__tests__/caseListLogic.milestone.unit.test.ts",
-        "src/__tests__/create-case.test.ts",
-        "src/__tests__/communication-hub.test.ts",
-        "src/__tests__/case-monitor.unit.test.ts",
-        "src/__tests__/payment-voucher-create-status.unit.test.ts",
-        "src/__tests__/payment-voucher-create-request.unit.test.ts",
-        "src/__tests__/payment-voucher-case-attachment-isolation.test.ts",
-        "src/__tests__/accounting-case-search.contract.test.ts",
-        "src/__tests__/hr-phase1.unit.test.ts",
-        "src/__tests__/hr-blocker-services.unit.test.ts",
-        "src/__tests__/hr-settings-boundary.test.ts",
-        "src/__tests__/hr-role-permission-matrix.test.ts",
-        "src/__tests__/hr-scaffold-f36-f42.unit.test.ts",
-        "src/__tests__/notification-corrective-t3-t4-t5-t7-t8.unit.test.ts",
-        "src/__tests__/firm-number-sequence-concurrency.unit.test.ts",
-        "src/__tests__/file-custody-invariants.unit.test.ts",
-        "src/__tests__/quotations-pagination-filters.unit.test.ts",
-        "src/__tests__/statement-timeout.unit.test.ts",
-        "src/__tests__/ledger-money.unit.test.ts",
-        "src/__tests__/pagination-invoices.unit.test.ts",
-        "src/__tests__/f5-f6-cron-targeted.unit.test.ts",
-        "src/__tests__/f7-file-custody-targeted.unit.test.ts",
-        "src/__tests__/f8-f9-f10-case-reference.unit.test.ts",
-        "src/__tests__/quotation-extended.unit.test.ts",
-        "src/__tests__/docgen-classify.targeted.unit.test.ts",
-        "src/__tests__/docgen-finalize-status.targeted.unit.test.ts",
-        "src/__tests__/docgen-logging.targeted.unit.test.ts",
-        "src/__tests__/audit-redact.targeted.unit.test.ts",
-        "src/__tests__/p0-runtime-addendum-regression.test.ts",
-        "src/__tests__/part2-canonical-progress.unit.test.ts",
-      ],
+    include: ["src/__tests__/**/*.test.ts"],
     pool: "forks",
     forks: {
       singleFork: true,
