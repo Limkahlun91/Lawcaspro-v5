@@ -1980,8 +1980,17 @@ router.post("/payment-vouchers/preflight", sensitiveRateLimiter, requireAuth, re
   }
 
   const unclaimedWarnings = await buildQuotationUnclaimedWarnings(r, req.firmId!, caseIdValue, explicitQuotationId, effectiveItems);
+  const structuredItemWarnings = unclaimedWarnings.map((w) => ({
+    code: "PV_ITEM_NOT_IN_QUOTATION",
+    severity: "warning",
+    blocking: false,
+    message: `Item \"${w.item}\" not found in quotation claims`,
+    item: w.item,
+    matchedQuotationId: w.matchedQuotationId ?? null,
+    matchedQuotationRef: w.matchedQuotationRef ?? null,
+  }));
   res.status(200).json({
-    warnings: unclaimedWarnings,
+    warnings: structuredItemWarnings,
     unclaimedWarnings,
     quotationClaimWarnings: quotationClaimWarning ? [quotationClaimWarning] : [],
     quotationClaimWarning,
