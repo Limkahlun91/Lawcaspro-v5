@@ -2499,14 +2499,22 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
         const entryType = fundStatus === "request_advance" ? "disbursement_paid" : "trust_paid";
 
         if (pv.voucherType !== "internal_transfer" && pv.voucherType !== "account_transfer" && Number.isFinite(pvCaseId) && pvCaseId > 0) {
+          const amtCents = Math.round(parseFloat(String(amt ?? "0")) * 100);
+          const evtKey = `PV:${id}:${fundStatus}`;
           const [existing] = await tx
             .select({ id: caseLedgersTable.id })
             .from(caseLedgersTable)
-            .where(and(
-              eq(caseLedgersTable.firmId, req.firmId!),
-              eq(caseLedgersTable.caseId, pvCaseId),
-              eq(caseLedgersTable.sourceType, "payment_voucher"),
-              eq(caseLedgersTable.sourceId, id),
+            .where(or(
+              and(
+                eq(caseLedgersTable.firmId, req.firmId!),
+                eq(caseLedgersTable.caseId, pvCaseId),
+                eq(caseLedgersTable.sourceType, "payment_voucher"),
+                eq(caseLedgersTable.sourceId, id),
+              ),
+              and(
+                eq(caseLedgersTable.firmId, req.firmId!),
+                eq(caseLedgersTable.eventKey, evtKey),
+              ),
             ))
             .limit(1);
           if (!existing) {
@@ -2518,21 +2526,33 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
               entryType,
               description: `PV ${pv.voucherNo} — ${String(pv.purpose ?? "").trim()}`,
               amount: amt,
+              debitCents: 0,
+              creditCents: Math.max(0, amtCents),
               sourceType: "payment_voucher",
               sourceId: id,
+              sourceReference: pv.voucherNo,
+              eventKey: evtKey,
             } as any);
           }
         }
 
         if (pv.isAdvance && Number.isFinite(pvCaseId) && pvCaseId > 0) {
+          const amtCents = Math.round(parseFloat(String(amt ?? "0")) * 100);
+          const evtKey = `PV:${id}:ADVANCE`;
           const [existing] = await tx
             .select({ id: caseLedgersTable.id })
             .from(caseLedgersTable)
-            .where(and(
-              eq(caseLedgersTable.firmId, req.firmId!),
-              eq(caseLedgersTable.caseId, pvCaseId),
-              eq(caseLedgersTable.sourceType, "payment_voucher_advance"),
-              eq(caseLedgersTable.sourceId, id),
+            .where(or(
+              and(
+                eq(caseLedgersTable.firmId, req.firmId!),
+                eq(caseLedgersTable.caseId, pvCaseId),
+                eq(caseLedgersTable.sourceType, "payment_voucher_advance"),
+                eq(caseLedgersTable.sourceId, id),
+              ),
+              and(
+                eq(caseLedgersTable.firmId, req.firmId!),
+                eq(caseLedgersTable.eventKey, evtKey),
+              ),
             ))
             .limit(1);
           if (!existing) {
@@ -2544,8 +2564,12 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
               entryType: "advance_paid",
               description: `Advance PV ${pv.voucherNo} — ${String(pv.purpose ?? "").trim()}`,
               amount: amt,
+              debitCents: 0,
+              creditCents: Math.max(0, amtCents),
               sourceType: "payment_voucher_advance",
               sourceId: id,
+              sourceReference: pv.voucherNo,
+              eventKey: evtKey,
             } as any);
           }
         }
@@ -2553,14 +2577,22 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
         if ((pv.voucherType === "file_transfer" || pv.voucherType === "file_to_file_transfer") && entryType === "trust_paid") {
         const targetCaseId = pv.targetCaseId ? Number(pv.targetCaseId) : NaN;
         if (Number.isFinite(targetCaseId) && targetCaseId > 0) {
+          const amtCents = Math.round(parseFloat(String(amt ?? "0")) * 100);
+          const evtKey = `PV:${id}:FILE_TRANSFER_IN:${targetCaseId}`;
           const [existing] = await tx
             .select({ id: caseLedgersTable.id })
             .from(caseLedgersTable)
-            .where(and(
-              eq(caseLedgersTable.firmId, req.firmId!),
-              eq(caseLedgersTable.caseId, targetCaseId),
-              eq(caseLedgersTable.sourceType, "payment_voucher"),
-              eq(caseLedgersTable.sourceId, id),
+            .where(or(
+              and(
+                eq(caseLedgersTable.firmId, req.firmId!),
+                eq(caseLedgersTable.caseId, targetCaseId),
+                eq(caseLedgersTable.sourceType, "payment_voucher"),
+                eq(caseLedgersTable.sourceId, id),
+              ),
+              and(
+                eq(caseLedgersTable.firmId, req.firmId!),
+                eq(caseLedgersTable.eventKey, evtKey),
+              ),
             ))
             .limit(1);
           if (!existing) {
@@ -2572,8 +2604,12 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
               entryType: "trust_received",
               description: `PV ${pv.voucherNo} — File Transfer In`,
               amount: amt,
+              debitCents: Math.max(0, amtCents),
+              creditCents: 0,
               sourceType: "payment_voucher",
               sourceId: id,
+              sourceReference: pv.voucherNo,
+              eventKey: evtKey,
             } as any);
           }
         }

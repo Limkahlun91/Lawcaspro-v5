@@ -50,6 +50,9 @@ import {
 } from "../lib/auth.js";
 import { ApiError, sendError, sendOk, parseIntParam, type ResLike } from "../lib/api-response.js";
 
+const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+type FirmFeatureStateSrc = "plan" | "founder_override" | "temporary_override" | "registry_default";
+
 const expressRouter = express.Router();
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -623,6 +626,156 @@ router.post("/founder/firms/:firmId/entitlements/bulk-override", requireAuth, re
     });
     setFirmEntitlementsCacheDirty(firmId);
     sendOk(res, { firmId, mode: parsed.data.mode, count: parsed.data.featureKeys.length });
+  } catch (err) { sendError(res, err); }
+});
+
+// ---------------------------------------------------------------------------
+// Lb. Single-feature override — enabled / disabled / inherit (plan default)
+// Contract (Part 1A):
+//   PATCH /api/platform/firms/:firmId/features/:featureKey
+//   body: { mode: "enabled" | "disabled" | "inherit" }
+//   response: { featureKey, effectiveEnabled, source }
+// ---------------------------------------------------------------------------
+router.patch("/founder/firms/:firmId/features/:featureKey", requireAuth, requireFounder, requireFounderPermission("founder.firms.manage"), async (req: AuthRequest, res: ResLike) => {
+  try {
+    const firmId = parseIntParam("firmId", (req.params as any)?.firmId, { required: true, min: 1 })!;
+    const featureKeyRaw = one((req.params as any)?.featureKey);
+    const featureKey = featureKeyRaw ? String(featureKeyRaw).trim() : "";
+    if (!featureKey) { sendError(res, new ApiError({ status: 400, code: "VALIDATION_ERROR", message: "featureKey is required", retryable: false })); return; }
+    if (!isFeatureRegistered(featureKey)) {
+      sendError(res, new ApiError({ status: 400, code: "VALIDATION_ERROR", message: `Unknown feature: ${featureKey}`, retryable: false }));
+      return;
+    }
+    const modeRaw = String((req.body as any)?.mode ?? "").trim() as "enabled" | "disabled" | "inherit";
+    if (!["enabled", "disabled", "inherit"].includes(modeRaw)) {
+      sendError(res, new ApiError({ status: 400, code: "VALIDATION_ERROR", message: `mode must be one of: enabled, disabled, inherit (got: ${modeRaw})`, retryable: false }));
+      return;
+    }
+    const reason = String((req.body as any)?.reason ?? "single_feature_set").slice(0, 500);
+
+    if (modeRaw === "inherit") {
+      const now = new Date();
+      await db
+        .update(firmEntitlementOverridesTable)
+        .set({ expiresAt: now, updatedAt: now })
+        .where(and(
+          eq(firmEntitlementOverridesTable.firmId, firmId),
+          eq(firmEntitlementOverridesTable.featureKey, featureKey),
+          or(isNull(firmEntitlementOverridesTable.expiresAt), gte(firmEntitlementOverridesTable.expiresAt, now)),
+        ));
+    } else {
+      const now = new Date();
+      await db
+        .update(firmEntitlementOverridesTable)
+        .set({ expiresAt: now, updatedAt: now })
+        .where(and(
+          eq(firmEntitlementOverridesTable.firmId, firmId),
+          eq(firmEntitlementOverridesTable.featureKey, featureKey),
+          or(isNull(firmEntitlementOverridesTable.expiresAt), gte(firmEntitlementOverridesTable.expiresAt, now)),
+        ));
+      await db.insert(firmEntitlementOverridesTable).values({
+        firmId,
+        featureKey,
+        overrideKind: "permanent",
+        overrideMode: modeRaw === "enabled" ? "enabled" : "disabled",
+        effectiveFrom: null,
+        expiresAt: null,
+        reason,
+        createdBy: req.userId ?? null,
+      }).onConflictDoNothing({ target: [firmEntitlementOverridesTable.firmId, firmEntitlementOverridesTable.featureKey] });
+    }
+    await writeAuditLog({
+      firmId, actorId: req.userId, actorType: req.userType,
+      action: "founder.firm.entitlements.set_feature",
+      entityType: "firm_entitlement_override", entityId: firmId,
+      detail: `featureKey=${featureKey} mode=${modeRaw}`,
+      ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"],
+    });
+    setFirmEntitlementsCacheDirty(firmId);
+
+    const effective = await getEffectiveEntitlement(firmId, featureKey);
+    const source: FirmFeatureStateSrc =
+      effective.source === "firm_override_temporary" ? "temporary_override" :
+      effective.source === "firm_override_permanent" ? "founder_override" :
+      effective.source === "plan_entitlement" ? "plan" :
+      "registry_default";
+    res.json({
+      featureKey,
+      effectiveEnabled: !!effective.enabled,
+      source,
+    } satisfies { featureKey: string; effectiveEnabled: boolean; source: FirmFeatureStateSrc });
+  } catch (err) { sendError(res, err); }
+});
+
+// ---------------------------------------------------------------------------
+// Lc. Shorthand — /api/platform/firms/:firmId/features/:featureKey (alias)
+// ---------------------------------------------------------------------------
+router.patch("/platform/firms/:firmId/features/:featureKey", requireAuth, requireFounder, requireFounderPermission("founder.firms.manage"), async (req: AuthRequest, res: ResLike) => {
+  try {
+    const firmId = parseIntParam("firmId", (req.params as any)?.firmId, { required: true, min: 1 })!;
+    const featureKeyRaw = one((req.params as any)?.featureKey);
+    const featureKey = featureKeyRaw ? String(featureKeyRaw).trim() : "";
+    if (!featureKey) { sendError(res, new ApiError({ status: 400, code: "VALIDATION_ERROR", message: "featureKey is required", retryable: false })); return; }
+    if (!isFeatureRegistered(featureKey)) {
+      sendError(res, new ApiError({ status: 400, code: "VALIDATION_ERROR", message: `Unknown feature: ${featureKey}`, retryable: false }));
+      return;
+    }
+    const modeRaw = String((req.body as any)?.mode ?? "").trim() as "enabled" | "disabled" | "inherit";
+    if (!["enabled", "disabled", "inherit"].includes(modeRaw)) {
+      sendError(res, new ApiError({ status: 400, code: "VALIDATION_ERROR", message: `mode must be one of: enabled, disabled, inherit`, retryable: false }));
+      return;
+    }
+    const reason = String((req.body as any)?.reason ?? "single_feature_set").slice(0, 500);
+    if (modeRaw === "inherit") {
+      const now = new Date();
+      await db
+        .update(firmEntitlementOverridesTable)
+        .set({ expiresAt: now, updatedAt: now })
+        .where(and(
+          eq(firmEntitlementOverridesTable.firmId, firmId),
+          eq(firmEntitlementOverridesTable.featureKey, featureKey),
+          or(isNull(firmEntitlementOverridesTable.expiresAt), gte(firmEntitlementOverridesTable.expiresAt, now)),
+        ));
+    } else {
+      const now = new Date();
+      await db
+        .update(firmEntitlementOverridesTable)
+        .set({ expiresAt: now, updatedAt: now })
+        .where(and(
+          eq(firmEntitlementOverridesTable.firmId, firmId),
+          eq(firmEntitlementOverridesTable.featureKey, featureKey),
+          or(isNull(firmEntitlementOverridesTable.expiresAt), gte(firmEntitlementOverridesTable.expiresAt, now)),
+        ));
+      await db.insert(firmEntitlementOverridesTable).values({
+        firmId,
+        featureKey,
+        overrideKind: "permanent",
+        overrideMode: modeRaw === "enabled" ? "enabled" : "disabled",
+        effectiveFrom: null,
+        expiresAt: null,
+        reason,
+        createdBy: req.userId ?? null,
+      }).onConflictDoNothing({ target: [firmEntitlementOverridesTable.firmId, firmEntitlementOverridesTable.featureKey] });
+    }
+    await writeAuditLog({
+      firmId, actorId: req.userId, actorType: req.userType,
+      action: "founder.firm.entitlements.set_feature",
+      entityType: "firm_entitlement_override", entityId: firmId,
+      detail: `featureKey=${featureKey} mode=${modeRaw}`,
+      ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"],
+    });
+    setFirmEntitlementsCacheDirty(firmId);
+    const effective = await getEffectiveEntitlement(firmId, featureKey);
+    const source: FirmFeatureStateSrc =
+      effective.source === "firm_override_temporary" ? "temporary_override" :
+      effective.source === "firm_override_permanent" ? "founder_override" :
+      effective.source === "plan_entitlement" ? "plan" :
+      "registry_default";
+    res.json({
+      featureKey,
+      effectiveEnabled: !!effective.enabled,
+      source,
+    } satisfies { featureKey: string; effectiveEnabled: boolean; source: FirmFeatureStateSrc });
   } catch (err) { sendError(res, err); }
 });
 

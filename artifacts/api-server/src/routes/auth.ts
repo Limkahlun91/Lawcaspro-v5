@@ -947,7 +947,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
     const defaultRouteHint: string = (() => {
       if (user.userType === "founder") return "/platform/dashboard";
       if (user.userType === "developer_user" || roleName === "Developer_User") return "/developer/dashboard";
-      return accessScope.canAccessFirmDashboard ? "/app/dashboard" : "/app/workbench";
+      return accessScope.canAccessFirmDashboard ? "/app/dashboard" : "/app/my-work";
     })();
 
     const payload = {

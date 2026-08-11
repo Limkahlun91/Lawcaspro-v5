@@ -1,5 +1,5 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
-import { eq, and, desc, count } from "drizzle-orm";
+import { eq, and, desc, count, or } from "drizzle-orm";
 import { db, firmBankAccountsTable, invoicesTable, ledgerEntriesTable, receiptAllocationsTable, receiptsTable, sql, quotationsTable, clientsTable, casePurchasersTable, caseLedgersTable, casesTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
@@ -52,12 +52,20 @@ async function applyAdvanceRecovery(tx: typeof db, args: { firmId: number; caseI
   const applied = Math.min(outstanding, args.amount);
   if (!Number.isFinite(applied) || applied <= 0) return;
 
-  const [exists] = await tx.select({ id: caseLedgersTable.id }).from(caseLedgersTable).where(and(
-    eq(caseLedgersTable.firmId, args.firmId),
-    eq(caseLedgersTable.caseId, args.caseId),
-    eq(caseLedgersTable.sourceType, "receipt"),
-    eq(caseLedgersTable.sourceId, args.receiptId),
-    eq(caseLedgersTable.entryType, "advance_recovered"),
+  const cents = Math.round(applied * 100);
+  const evtKey = `RECEIPT:${args.receiptId}:ADV_RECOVERED`;
+  const [exists] = await tx.select({ id: caseLedgersTable.id }).from(caseLedgersTable).where(or(
+    and(
+      eq(caseLedgersTable.firmId, args.firmId),
+      eq(caseLedgersTable.caseId, args.caseId),
+      eq(caseLedgersTable.sourceType, "receipt"),
+      eq(caseLedgersTable.sourceId, args.receiptId),
+      eq(caseLedgersTable.entryType, "advance_recovered"),
+    ),
+    and(
+      eq(caseLedgersTable.firmId, args.firmId),
+      eq(caseLedgersTable.eventKey, evtKey),
+    ),
   )).limit(1);
   if (exists) return;
   await tx.insert(caseLedgersTable).values({
@@ -68,8 +76,12 @@ async function applyAdvanceRecovery(tx: typeof db, args: { firmId: number; caseI
     entryType: "advance_recovered",
     description: `Advance recovered via Receipt ${args.receiptNo}`,
     amount: applied.toFixed(2),
+    debitCents: cents,
+    creditCents: 0,
     sourceType: "receipt",
     sourceId: args.receiptId,
+    sourceReference: args.receiptNo,
+    eventKey: evtKey,
   } satisfies typeof caseLedgersTable.$inferInsert);
 }
 
@@ -364,11 +376,19 @@ router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, req
     });
 
     if (effectiveCaseId) {
-      const [exists] = await tx.select({ id: caseLedgersTable.id }).from(caseLedgersTable).where(and(
-        eq(caseLedgersTable.firmId, req.firmId!),
-        eq(caseLedgersTable.caseId, effectiveCaseId),
-        eq(caseLedgersTable.sourceType, "receipt"),
-        eq(caseLedgersTable.sourceId, rec.id),
+      const amountNumCents = Math.round(amountNum * 100);
+      const evtKey = `RECEIPT:${rec.id}:CONFIRM`;
+      const [exists] = await tx.select({ id: caseLedgersTable.id }).from(caseLedgersTable).where(or(
+        and(
+          eq(caseLedgersTable.firmId, req.firmId!),
+          eq(caseLedgersTable.caseId, effectiveCaseId),
+          eq(caseLedgersTable.sourceType, "receipt"),
+          eq(caseLedgersTable.sourceId, rec.id),
+        ),
+        and(
+          eq(caseLedgersTable.firmId, req.firmId!),
+          eq(caseLedgersTable.eventKey, evtKey),
+        ),
       )).limit(1);
       if (!exists) {
         await tx.insert(caseLedgersTable).values({
@@ -379,8 +399,12 @@ router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, req
           entryType: "payment_received",
           description: `Receipt ${receiptNo}`,
           amount: amountStr,
+          debitCents: Math.max(0, amountNumCents),
+          creditCents: 0,
           sourceType: "receipt",
           sourceId: rec.id,
+          sourceReference: receiptNo,
+          eventKey: evtKey,
         } satisfies typeof caseLedgersTable.$inferInsert);
       }
       await applyAdvanceRecovery(tx, {
@@ -429,6 +453,8 @@ router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireF
 
     const caseIdResolved = rec.caseId ? Number(rec.caseId) : null;
     if (caseIdResolved) {
+      const revCents = Math.round(Number(rec.amount) * 100);
+      const revEvtKey = `RECEIPT:${id}:REVERSAL:1`;
       await tx.insert(caseLedgersTable).values({
         firmId: req.firmId!,
         caseId: caseIdResolved,
@@ -437,8 +463,12 @@ router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireF
         entryType: "payment_received",
         description: `Reversal of Receipt ${rec.receiptNo}`,
         amount: (-Number(rec.amount)).toFixed(2),
+        debitCents: 0,
+        creditCents: revCents,
         sourceType: "receipt_reversal",
         sourceId: id,
+        sourceReference: rec.receiptNo,
+        eventKey: revEvtKey,
       } satisfies typeof caseLedgersTable.$inferInsert);
       const [recovery] = await tx
         .select({ amount: caseLedgersTable.amount })
@@ -452,6 +482,8 @@ router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireF
         ))
         .limit(1);
       if (recovery) {
+        const revRecovCents = Math.round(Math.abs(Number(recovery.amount ?? 0)) * 100);
+        const revRecovKey = `RECEIPT:${id}:REVERSAL:ADV_RECOVERED`;
         await tx.insert(caseLedgersTable).values({
           firmId: req.firmId!,
           caseId: caseIdResolved,
@@ -460,8 +492,12 @@ router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireF
           entryType: "advance_recovered",
           description: `Reversal of advance recovery via Receipt ${rec.receiptNo}`,
           amount: (-Number(recovery.amount ?? 0)).toFixed(2),
+          debitCents: 0,
+          creditCents: revRecovCents,
           sourceType: "receipt_reversal",
           sourceId: id,
+          sourceReference: rec.receiptNo,
+          eventKey: revRecovKey,
         } satisfies typeof caseLedgersTable.$inferInsert);
       }
       await syncCaseFinancialTotals(tx, { firmId: req.firmId!, caseId: caseIdResolved });

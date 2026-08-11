@@ -406,13 +406,19 @@ export const caseLedgersTable = pgTable("case_ledgers", {
   entryType: text("entry_type").notNull(),
   description: text("description").notNull(),
   amount: numeric("amount", { precision: 12, scale: 2 }).notNull(),
+  debitCents: integer("debit_cents").notNull().default(0),
+  creditCents: integer("credit_cents").notNull().default(0),
   sourceType: text("source_type"),
   sourceId: integer("source_id"),
+  sourceReference: text("source_reference"),
+  eventKey: text("event_key"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
   firmCaseIdx: index("idx_case_ledgers_firm_case").on(t.firmId, t.caseId, t.transactionDate),
   firmCaseSourceIdx: index("idx_case_ledgers_source").on(t.firmId, t.caseId, t.sourceType, t.sourceId),
+  firmEventIdx: index("idx_case_ledgers_firm_event").on(t.firmId, t.eventKey),
+  firmEventUq: uniqueIndex("uq_case_ledgers_firm_event_key").on(t.firmId, t.eventKey),
 }));
 
 export const firmNumberSequencesTable = pgTable("firm_number_sequences", {

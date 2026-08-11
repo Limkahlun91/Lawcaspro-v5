@@ -153,12 +153,15 @@ const CASES: FeatureDefinition[] = asFeat("cases", null, { routeHint: "/app/case
   { featureKey: "cases.tasks", name: "Case Tasks", parentFeatureKey: "module.cases", routeHint: "/app/cases/:id/tasks", backendGuardKey: "cases:update" },
   { featureKey: "cases.timeline", name: "Case Timeline", parentFeatureKey: "module.cases" },
   { featureKey: "cases.documents", name: "Case Documents Tab", parentFeatureKey: "module.cases", dependencies: ["module.documents"], backendGuardKey: "documents:read" },
+  { featureKey: "cases.supporting_documents", name: "Case Supporting Documents Tab", parentFeatureKey: "module.cases", dependencies: ["module.documents"] },
   { featureKey: "cases.notes", name: "Case Notes", parentFeatureKey: "module.cases" },
   { featureKey: "cases.assignment", name: "Case Assignment + Bulk Assign", parentFeatureKey: "module.cases", backendGuardKey: "cases:update" },
   { featureKey: "cases.approval", name: "Case Approval (approve/reject/resubmit)", parentFeatureKey: "module.cases", backendGuardKey: "cases:update" },
   { featureKey: "cases.amendment", name: "Case Amendment / Edit key fields", parentFeatureKey: "module.cases", backendGuardKey: "cases:update" },
   { featureKey: "cases.key_dates", name: "Key Dates / Milestones", parentFeatureKey: "module.cases" },
   { featureKey: "cases.workflow", name: "Workflow Steps + Attachments", parentFeatureKey: "module.cases" },
+  { featureKey: "cases.batch_update", name: "Batch Update (cases)", parentFeatureKey: "module.cases", backendGuardKey: "cases:update" },
+  { featureKey: "cases.batch_print", name: "Batch Print (case documents)", parentFeatureKey: "module.cases", backendGuardKey: "documents:read" },
   // Sub-types
   { featureKey: "cases.developer_sales", name: "Developer Sales Cases (perfection)", parentFeatureKey: "module.cases" },
   { featureKey: "cases.subsale", name: "Subsale Cases", parentFeatureKey: "module.cases" },
@@ -448,8 +451,8 @@ const SETTINGS: FeatureDefinition[] = asFeat("settings", null, { routeHint: "/ap
 // -----------------------------------------------------------------------------
 
 const STORAGE: FeatureDefinition[] = asFeat("storage", null, {}, [
-  { featureKey: "module.storage", name: "Storage / File Custody", valueType: "boolean" },
-  { featureKey: "storage.file_custody", name: "File Custody Registry", parentFeatureKey: "module.storage", routeHint: "/app/file-custody" },
+  { featureKey: "module.storage", name: "Storage / File Custody", valueType: "boolean", status: "active" },
+  { featureKey: "storage.file_custody", name: "File Custody Registry (Phase 2/3 candidate)", parentFeatureKey: "module.storage", routeHint: "/app/file-custody", defaultValue: false, status: "inactive", firmControlledOverride: false, description: "Future: Phase 2/3 candidate. Default disabled for all firms; currently hidden from navigation and route-gated." },
   { featureKey: "storage.uploads", name: "General File Uploads", parentFeatureKey: "module.storage" },
   { featureKey: "limit.storage.gb", name: "Storage (GB)", parentFeatureKey: "module.storage", valueType: "integer", defaultValue: 100 },
 ]);
