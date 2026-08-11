@@ -27,7 +27,7 @@ import {
   usersTable,
 } from "@workspace/db";
 import { CreatePaymentVoucherBody, PaymentVoucherTransitionBody } from "@workspace/api-zod";
-import { requireAuth, requireFirmUser, requireFirmUserSession, requireFirmUserFinancialSession, requirePermission, requireReAuth, type AuthRequest, writeAuditLog, finalizeFirmUserTransaction } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requireFirmUserSession, requireFirmUserFinancialSession, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { queryOne } from "../lib/http.js";
 import { logger } from "../lib/logger.js";
@@ -200,7 +200,7 @@ export async function setRlsClientStatementTimeout(
   }
 }
 
-import { clearTenantContext, makeRlsDb } from "@workspace/db";
+import { makeRlsDb } from "@workspace/db";
 import type { RlsDb, PoolClient } from "@workspace/db";
 
 export async function setSessionStatementTimeout(
@@ -208,27 +208,66 @@ export async function setSessionStatementTimeout(
   timeoutMs: number,
   stage: string,
 ): Promise<void> {
-  const client = req.rlsClient;
-  if (!client) return;
   const safeMs = Math.max(100, Math.floor(timeoutMs));
+  const client = req.rlsClient;
+
+  if (!client) {
+    logger.error(
+      {
+        event:
+          "payment_voucher.session_timeout_client_missing",
+        reqId: getReqIdForLog(req),
+        firmId: req.firmId ?? null,
+        userId: req.userId ?? null,
+        clientRequestId:
+          (req as { pvClientRequestId?: string })
+            .pvClientRequestId ?? null,
+        stage,
+        timeoutMs: safeMs,
+      },
+      "PV financial session client missing while installing timeout",
+    );
+
+    throw new PvTimeoutSetupFailed(
+      "CLIENT_MISSING",
+      stage,
+      safeMs,
+    );
+  }
+
   try {
     await client.query({
-      text: `SET SESSION statement_timeout = '${safeMs}ms'`,
+      text:
+        `SET SESSION statement_timeout = '${safeMs}ms'`,
     });
   } catch (err) {
     const sqlState = (() => {
       if (!err || typeof err !== "object") return null;
-      const c = err as { code?: unknown; sqlState?: unknown; sqlstate?: unknown };
-      for (const v of [c.sqlState, c.sqlstate, c.code]) {
+
+      const c = err as {
+        code?: unknown;
+        sqlState?: unknown;
+        sqlstate?: unknown;
+      };
+
+      for (const v of [
+        c.sqlState,
+        c.sqlstate,
+        c.code,
+      ]) {
         if (typeof v === "string") return v;
       }
+
       return null;
     })();
+
     logger.warn(
       {
         reqId: getReqIdForLog(req),
         firmId: req.firmId ?? null,
-        clientRequestId: (req as { pvClientRequestId?: string }).pvClientRequestId ?? null,
+        clientRequestId:
+          (req as { pvClientRequestId?: string })
+            .pvClientRequestId ?? null,
         userId: req.userId ?? null,
         stage,
         timeoutMs: safeMs,
@@ -237,7 +276,12 @@ export async function setSessionStatementTimeout(
       },
       "payment_voucher.set_session_statement_timeout_failed",
     );
-    throw new PvTimeoutSetupFailed(sqlState, stage, safeMs);
+
+    throw new PvTimeoutSetupFailed(
+      sqlState,
+      stage,
+      safeMs,
+    );
   }
 }
 

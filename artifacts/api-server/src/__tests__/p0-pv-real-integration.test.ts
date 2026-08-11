@@ -1994,6 +1994,92 @@ describe("P0 PAYMENT VOUCHER — REAL HTTP + POSTGRES INTEGRATION TESTS (A–L)"
     }
   }, 60_000);
 
+  it("W (P0-10-A): FAILURE path exact contract — commit=2, rollback=1 (reservation+tracking commit, financial ROLLBACK)", async () => {
+    const crid = newClientRequestId();
+    const payload = basePayload(crid);
+    pvHarnessControls.injectWorkErrorAfterReservation = {
+      code: "55P03", sqlstate: "55P03", message: "INJECTED_FAIL_AFTER_RESERVATION",
+    };
+    try {
+      const res = await request(app)
+        .post("/payment-vouchers")
+        .send(payload)
+        .set("Content-Type", "application/json");
+      expect(res.status).toBe(503);
+      const snap = getLastCounters(app);
+      // Exact 3-stage durable tx contract:
+      //   1. reservation tx: BEGIN → COMMIT (+1)
+      //   2. financial tx: BEGIN → ROLLBACK (+1 rollback)
+      //   3. tracking-failed tx: BEGIN → COMMIT (+1 commit)
+      // Total COMMIT = 2, ROLLBACK = 1, no SAVEPOINT nesting.
+      expect(snap.commitCount).toBe(2);
+      expect(snap.rollbackCount).toBe(1);
+      // Source-of-truth: voucher NOT durable; tracking IS durable as failed.
+      const voucherCount = await countVouchersFor(crid);
+      expect(voucherCount).toBe(0);
+      const tracking = await getTracking(crid);
+      expect(tracking?.status).toBe("failed");
+    } finally {
+      pvHarnessControls.injectWorkErrorAfterReservation = undefined;
+      pvHarnessControls.sawReservationInsert = false;
+      pvHarnessControls._afterReservationFired = false;
+      pvHarnessControls.forceVoucherInsertAfterReservation = null;
+    }
+  }, 60_000);
+
+  it("X (P0-10-B): SUCCESS path exact contract — commit=2, rollback=0 (reservation+financial commit only)", async () => {
+    const crid = newClientRequestId();
+    const payload = basePayload(crid);
+    const res = await request(app)
+      .post("/payment-vouchers")
+      .send(payload)
+      .set("Content-Type", "application/json");
+    expect(res.status).toBe(201);
+    const snap = getLastCounters(app);
+    expect(snap.commitCount).toBe(2);
+    expect(snap.rollbackCount).toBe(0);
+    const voucherCount = await countVouchersFor(crid);
+    expect(voucherCount).toBe(1);
+  }, 30_000);
+
+  it("Y (P0-10-C): updatePvTrackingFailedInTx source invariant — no .transaction/BEGIN/COMMIT/ROLLBACK", async () => {
+    const trackingModulePath = path.resolve(
+      __dirname,
+      "../modules/accounting/payment-voucher-create-tracking.ts",
+    );
+    const source = fs.readFileSync(trackingModulePath, "utf8");
+    const extractFunctionSource = (src: string, fnName: string): string => {
+      const exportRegex = new RegExp(
+        `(?:export\\s+(?:async\\s+)?function\\s+${fnName}\\b|export\\s+const\\s+${fnName}\\s*=\\s*(?:async\\s+)?\\()`,
+        "s",
+      );
+      const startMatch = src.match(exportRegex);
+      if (!startMatch || typeof startMatch.index !== "number") return "";
+      let i = startMatch.index;
+      // Find the opening brace/paren
+      let depth = 0;
+      let opened = false;
+      let start = i;
+      for (; i < src.length; i++) {
+        const ch = src[i];
+        if (ch === "{" || ch === "(") { if (!opened) { start = i; opened = true; depth = 1; } else depth++; }
+        else if (ch === "}" || ch === ")") {
+          if (opened) {
+            depth--;
+            if (depth === 0) return src.slice(startMatch.index, i + 1);
+          }
+        }
+      }
+      return src.slice(startMatch.index);
+    };
+    const fnSource = extractFunctionSource(source, "updatePvTrackingFailedInTx");
+    expect(fnSource.length).toBeGreaterThan(20);
+    expect(fnSource).not.toContain(".transaction(");
+    expect(fnSource).not.toMatch(/\bBEGIN\b/);
+    expect(fnSource).not.toMatch(/\bCOMMIT\b/);
+    expect(fnSource).not.toMatch(/\bROLLBACK\b/);
+  }, 15_000);
+
   // ============================================================
   // P0-H (minimal): last-resort timer release is idempotent
   // ============================================================
