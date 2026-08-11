@@ -122,6 +122,7 @@ export { auditLogsTable } from "./schema";
 
 export {
   clearTenantContext,
+  clearTenantContextStrict,
   makeRlsDb,
   assertSafeRlsRole,
   setFounderContextSession,

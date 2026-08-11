@@ -107,6 +107,18 @@ vi.mock("@workspace/db", async (importOriginal) => {
         throw e;
       }
     },
+    clearTenantContextStrict: async (client: any) => {
+      if (client && (client as any)._lcInjectClearTenantFailure) {
+        const e: any = new Error("STRICT_TENANT_CLEANUP_FAILED: role_reset:LC001");
+        e.code = "STRICT_TENANT_CLEANUP_FAILED";
+        e.cleanupFailures = [{
+          step: "role_reset",
+          message: "INJECTED_CLEAR_TENANT_CONTEXT_FAILED",
+          code: "LC001",
+        }];
+        throw e;
+      }
+    },
     setTenantContext: async (_client: any, _firmId: any, _userId?: any) => { /* noop for harness */ },
     pool: {
       ...(actual.pool && typeof actual.pool === "object" ? (actual.pool as any) : {}),

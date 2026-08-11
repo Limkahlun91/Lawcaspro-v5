@@ -172,6 +172,85 @@ export async function clearTenantContext(client: PoolClient): Promise<void> {
 }
 
 /**
+ * STRICT tenant context cleanup for financial routes.
+ *
+ * Guarantees:
+ *   1. Attempts ALL cleanup steps (no early-exit on first failure).
+ *   2. Throws an aggregate error if ANY step fails.
+ *   3. Callers MUST treat any thrown error as a "destroy the pooled connection"
+ *      signal to avoid tenant-state leakage between requests.
+ *
+ * This is intentionally more aggressive than clearTenantContext() because
+ * financial routes modify session-level GUCs (statement_timeout) and we
+ * must never return a connection with partially-cleaned state to the pool.
+ */
+export async function clearTenantContextStrict(
+  client: PoolClient,
+): Promise<void> {
+  const failures: Array<{
+    step: string;
+    message: string;
+    code?: string | null;
+  }> = [];
+
+  const attempt = async (
+    step: string,
+    fn: () => Promise<unknown>,
+  ): Promise<void> => {
+    try {
+      await fn();
+    } catch (err: any) {
+      failures.push({
+        step,
+        message:
+          err instanceof Error
+            ? err.message
+            : String(err ?? "unknown error"),
+        code:
+          typeof err?.code === "string"
+            ? err.code
+            : null,
+      });
+    }
+  };
+
+  await attempt("tenant_guc_reset", async () => {
+    await client.query(
+      "SELECT " +
+        "set_config('app.current_firm_id', '0', false), " +
+        "set_config('app.firm_id', '0', false), " +
+        "set_config('app.is_founder', 'false', false), " +
+        "set_config('app.current_user_id', '0', false)",
+    );
+  });
+
+  await attempt("statement_timeout_reset", async () => {
+    await client.query("RESET statement_timeout");
+  });
+
+  await attempt("lock_timeout_reset", async () => {
+    await client.query("RESET lock_timeout");
+  });
+
+  await attempt("role_reset", async () => {
+    await client.query("RESET ROLE");
+  });
+
+  if (failures.length > 0) {
+    const error = new Error(
+      `STRICT_TENANT_CLEANUP_FAILED: ${failures
+        .map((x) => `${x.step}:${x.code ?? "NO_CODE"}`)
+        .join(",")}`,
+    );
+
+    (error as any).code = "STRICT_TENANT_CLEANUP_FAILED";
+    (error as any).cleanupFailures = failures;
+
+    throw error;
+  }
+}
+
+/**
  * Build a Drizzle instance bound to a specific PoolClient.
  * All queries run on the same connection (with the tenant context already set).
  */

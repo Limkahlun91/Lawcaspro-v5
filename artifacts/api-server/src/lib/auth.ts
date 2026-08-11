@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { clearTenantContext, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContext, setTenantContextSession, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable, caseAssignmentsTable, casesTable, type PoolClient } from "@workspace/db";
+import { clearTenantContext, clearTenantContextStrict, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContext, setTenantContextSession, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable, caseAssignmentsTable, casesTable, type PoolClient } from "@workspace/db";
 import { and, eq, inArray } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
@@ -861,11 +861,18 @@ export async function requireFirmUser(
         client = await pool.connect();
         const connMs = Date.now() - connStart;
         if (req.timing?.sections) {
-          req.timing.sections["db_pool_connect"] = connMs;
-          if (typeof (pool as any)?.totalCount !== undefined) {
-            req.timing.sections["pool.totalCount"] = (pool as any).totalCount;
-            req.timing.sections["pool.idleCount"] = (pool as any).idleCount;
-            req.timing.sections["pool.waitingCount"] = (pool as any).waitingCount;
+          req.timing.sections.tenantContextDbConnectMs = connMs;
+          req.timing.sections.db_pool_connect = connMs;
+
+          if (typeof (pool as any)?.totalCount === "number") {
+            req.timing.sections["pool.totalCount"] =
+              (pool as any).totalCount;
+
+            req.timing.sections["pool.idleCount"] =
+              (pool as any).idleCount;
+
+            req.timing.sections["pool.waitingCount"] =
+              (pool as any).waitingCount;
           }
         }
         break;
@@ -1197,11 +1204,18 @@ export async function requireFirmUserSession(
         client = await pool.connect();
         const connMs = Date.now() - connStart;
         if (req.timing?.sections) {
-          req.timing.sections["db_pool_connect"] = connMs;
-          if (typeof (pool as any)?.totalCount !== undefined) {
-            req.timing.sections["pool.totalCount"] = (pool as any).totalCount;
-            req.timing.sections["pool.idleCount"] = (pool as any).idleCount;
-            req.timing.sections["pool.waitingCount"] = (pool as any).waitingCount;
+          req.timing.sections.tenantContextDbConnectMs = connMs;
+          req.timing.sections.db_pool_connect = connMs;
+
+          if (typeof (pool as any)?.totalCount === "number") {
+            req.timing.sections["pool.totalCount"] =
+              (pool as any).totalCount;
+
+            req.timing.sections["pool.idleCount"] =
+              (pool as any).idleCount;
+
+            req.timing.sections["pool.waitingCount"] =
+              (pool as any).waitingCount;
           }
         }
         break;
@@ -1345,7 +1359,6 @@ export async function requireFirmUserFinancialSession(
 
   let released = false;
   let client: PoolClient | null = null;
-  let clearTenantFailed: Error | null = null;
   try {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
@@ -1353,11 +1366,18 @@ export async function requireFirmUserFinancialSession(
         client = await pool.connect();
         const connMs = Date.now() - connStart;
         if (req.timing?.sections) {
-          req.timing.sections["db_pool_connect"] = connMs;
-          if (typeof (pool as any)?.totalCount !== undefined) {
-            req.timing.sections["pool.totalCount"] = (pool as any).totalCount;
-            req.timing.sections["pool.idleCount"] = (pool as any).idleCount;
-            req.timing.sections["pool.waitingCount"] = (pool as any).waitingCount;
+          req.timing.sections.tenantContextDbConnectMs = connMs;
+          req.timing.sections.db_pool_connect = connMs;
+
+          if (typeof (pool as any)?.totalCount === "number") {
+            req.timing.sections["pool.totalCount"] =
+              (pool as any).totalCount;
+
+            req.timing.sections["pool.idleCount"] =
+              (pool as any).idleCount;
+
+            req.timing.sections["pool.waitingCount"] =
+              (pool as any).waitingCount;
           }
         }
         break;
@@ -1410,53 +1430,67 @@ export async function requireFirmUserFinancialSession(
     return;
   }
 
-  const releaseClient = async (ok: boolean) => {
+  const releaseClient = async (ok: boolean): Promise<void> => {
     if (released) return;
     released = true;
-    let destroyDueToClearTenantError = false;
+
+    let shouldDestroy = !ok;
+    let cleanupError: unknown = null;
+
     try {
-      await clearTenantContext(client);
-    } catch (e: any) {
-      clearTenantFailed = e instanceof Error ? e : new Error(String(e));
-      destroyDueToClearTenantError = true;
+      await clearTenantContextStrict(client!);
+    } catch (err) {
+      cleanupError = err;
+      shouldDestroy = true;
+
       logger.error(
         {
-          err: clearTenantFailed,
-          event: "auth.financial_session.clear_tenant_context_failed_destroyed",
+          err,
+          event:
+            "auth.financial_session.strict_cleanup_failed_destroyed",
           userId: req.userId ?? null,
           firmId: req.firmId ?? null,
           route: req.path,
           method: req.method,
         },
-        "financial session clearTenantContext FAILED → destroying DB connection to prevent tenant state leakage",
+        "financial session strict cleanup failed; destroying connection",
       );
-    } finally {
-      const shouldDestroy = destroyDueToClearTenantError || !ok;
-      (client as any)._financialSessionReleaseContext = { ok, destroyed: shouldDestroy, clearTenantFailed: !!clearTenantFailed };
-      client.release(shouldDestroy);
+    }
+
+    try {
+      client!.release(shouldDestroy);
+    } catch (releaseErr) {
+      logger.error(
+        {
+          err: releaseErr,
+          cleanupError,
+          shouldDestroy,
+          event: "auth.financial_session.release_failed",
+          userId: req.userId ?? null,
+          firmId: req.firmId ?? null,
+          route: req.path,
+          method: req.method,
+        },
+        "financial session client.release failed",
+      );
     }
   };
 
   try {
-    const originalQuery = client.query.bind(client);
-    let chain = Promise.resolve();
-    (client as any).query = (...args: unknown[]) => {
-      const run = () => (originalQuery as any)(...args);
-      const p = chain.then(run, run);
-      chain = p.then(
-        () => undefined,
-        () => undefined,
-      );
-      return p;
-    };
-    await setTenantContextSession(client, req.firmId, req.userId ?? undefined);
+    const tenantContextStartedAt = Date.now();
+
+    await setTenantContextSession(
+      client,
+      req.firmId,
+      req.userId ?? undefined,
+    );
     req.rlsDb = makeRlsDb(client);
     req.rlsClient = client;
-    (req as any)._financialSession = {
-      establishedAt: Date.now(),
-      poolConnectMs: req.timing?.sections?.["db_pool_connect"] ?? null,
-      clearTenantFailed,
-    };
+
+    if (req.timing?.sections) {
+      req.timing.sections.tenantContextMs =
+        Date.now() - tenantContextStartedAt;
+    }
   } catch (err) {
     try {
       await releaseClient(false);
@@ -1483,8 +1517,29 @@ export async function requireFirmUserFinancialSession(
     return;
   }
 
-  res.on("finish", () => { releaseClient(true); });
-  res.on("close", () => { releaseClient(false); });
+  const runRelease = (
+    ok: boolean,
+    source: "finish" | "close",
+  ): void => {
+    void releaseClient(ok).catch((err) => {
+      logger.error(
+        {
+          err,
+          event:
+            "auth.financial_session.release_callback_failed",
+          source,
+          userId: req.userId ?? null,
+          firmId: req.firmId ?? null,
+          route: req.path,
+          method: req.method,
+        },
+        "financial session asynchronous cleanup callback failed",
+      );
+    });
+  };
+
+  res.once("finish", () => runRelease(true, "finish"));
+  res.once("close", () => runRelease(false, "close"));
   next();
 }
 
