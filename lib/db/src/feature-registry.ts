@@ -145,6 +145,7 @@ const CASES: FeatureDefinition[] = asFeat("cases", null, { routeHint: "/app/case
   { featureKey: "module.cases", name: "Cases", valueType: "boolean" },
   { featureKey: "cases.read", name: "View / Search / Archive Cases", parentFeatureKey: "module.cases", backendGuardKey: "cases:read" },
   { featureKey: "cases.create", name: "Create New Case", parentFeatureKey: "module.cases", backendGuardKey: "cases:create", jobGuards: [] },
+  { featureKey: "cases.legacy_import", name: "Legacy Excel Import (Historical Cases)", parentFeatureKey: "module.cases", firmControlledOverride: true, backendGuardKey: "cases" },
   { featureKey: "cases.overview", name: "Case Overview Tab", parentFeatureKey: "module.cases", routeHint: "/app/cases/:id" },
   { featureKey: "cases.parties", name: "Parties Tab (purchasers/borrowers/vendors)", parentFeatureKey: "module.cases", backendGuardKey: "cases:read" },
   { featureKey: "cases.property", name: "Property Info Tab", parentFeatureKey: "module.cases" },

@@ -42,6 +42,7 @@ import supportSessionsRouter from "./support-sessions.js";
 import partiesRouter from "./parties.js";
 import complianceRouter from "./compliance.js";
 import conflictRouter from "./conflict.js";
+import legacyCaseImportRouter from "./legacy-case-import.js";
 import platformOpsRouter from "./platform-ops.js";
 import platformApprovalsRouter from "./platform-approvals.js";
 import platformOpsCenterRouter from "./platform-ops-center.js";
@@ -160,6 +161,7 @@ routerInternal.use(himsRouter);
 routerInternal.use(partiesRouter);
 routerInternal.use(complianceRouter);
 routerInternal.use(conflictRouter);
+routerInternal.use(legacyCaseImportRouter);
 
 const exportedRouter = expressRouter as unknown as ExpressRouter;
 export { exportedRouter as router };
