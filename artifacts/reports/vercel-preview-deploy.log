@@ -1,0 +1,18 @@
+Vercel CLI 58.7.1 (Node.js 25.3.0)
+Retrieving projectΓÇª
+Deploying limkahluns-projects/lawcaspro-v5
+Uploading [--------------------] (0.0B/37.4MB)
+Uploading [=====---------------] (9.4MB/37.4MB)
+Uploading [==========----------] (18.7MB/37.4MB)
+Uploading [===============-----] (28.1MB/37.4MB)
+Uploading [====================] (37.4MB/37.4MB)
+  Inspect         https://vercel.com/limkahluns-projects/lawcaspro-v5/E4q1CErjSvQ83t7tKi5EhGx5BdFK
+  Preview         https://lawcaspro-v5-5dcdgwsvl-limkahluns-projects.vercel.app
+BuildingΓÇª
+BuildingΓÇª
+Running build in Washington, D.C., USA (East) ΓÇô iad1
+Build machine configuration: 4 cores, 8 GB
+Retrieving list of deployment files...
+Downloading 767 deployment files...
+Error: ENOENT: no such file or directory, lstat '/vercel/path0/artifacts/api-server/node_modules/@napi-rs/canvas'
+https://lawcaspro-v5-5dcdgwsvl-limkahluns-projects.vercel.app

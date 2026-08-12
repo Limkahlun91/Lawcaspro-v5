@@ -1,0 +1,6 @@
+Vercel CLI 58.7.1 (Node.js 25.3.0)
+Retrieving projectΓÇª
+Deploying limkahluns-projects/lawcaspro-v5
+Error: Invalid request: `files` should NOT have more than 15000 items, received 20504.
+Try using `--archive=tgz` to limit the amount of files you upload.
+Learn More: https://vercel.com/docs/cli/deploy#archive
