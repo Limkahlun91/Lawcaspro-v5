@@ -49,3 +49,5 @@ export * from "./hims-status-checks";
 export * from "./hims-data-comparisons";
 export * from "./einvoice-integrations";
 export * from "./integration-audits";
+
+export * from "./legacy-case-import";

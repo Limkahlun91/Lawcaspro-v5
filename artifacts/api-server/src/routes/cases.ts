@@ -49,6 +49,14 @@ import { resolveSmartFilename } from "../lib/smartFileNaming.js";
 import { computeEffectiveNextNumber, extractRunningNumber, renderFileReferencePattern } from "../lib/fileReferenceSequence.js";
 import { computeDashboardStats } from "../services/dashboard-stats.js";
 import { computeMilestonesSummary } from "../services/milestones-summary.js";
+import {
+  createCaseCanonical,
+  CanonicalCaseCreateError,
+  type CanonicalCaseCreateContext,
+  type CanonicalCaseCreateInput,
+  type CanonicalPurchaserInput,
+  type CanonicalBorrowerInput,
+} from "../modules/cases/create-case-canonical.service.js";
 
 const router: ExpressRouter = express.Router();
 const supabaseStorage = new SupabaseStorageService();
@@ -3810,207 +3818,21 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
       }
     }
 
-    const landConditionNorm = typeof landCondition === "string" ? landCondition.trim().toLowerCase() : "";
-    const encumbrancesNorm = typeof encumbrances === "string" ? encumbrances.trim().toLowerCase() : "";
-    const actingForNorm = typeof actingFor === "string" ? actingFor.trim().toLowerCase() : "";
-    const perfectionTypeNorm = typeof perfectionType === "string" ? perfectionType.trim().toLowerCase() : "";
-
-    let effectiveProjectId: number | null = null;
-    let effectiveDeveloperId: number | null = null;
-    let effectiveTenure: "freehold" | "leasehold" = "freehold";
-    let effectiveIsEncumbered = false;
-
-    const normalizedTitleType = (() => {
-      if (normalizedCaseType === "developer_sales") {
-        const n = normalizeTitleType(titleType ?? "");
-        return n ?? "master";
-      }
-      if (normalizedCaseType === "subsale") {
-        const n = normalizeTitleType(titleType ?? "");
-        return n ?? "master";
-      }
-      return "master";
-    })();
-
-    if (normalizedCaseType === "developer_sales") {
-      if (!projectIdRaw) {
-        res.status(400).json({ error: "Project is required" });
-        return;
-      }
-      const [project] = await r.select().from(projectsTable).where(eq(projectsTable.id, projectIdRaw));
-      if (!project || project.firmId !== req.firmId) {
-        res.status(404).json({ error: "Project not found" });
-        return;
-      }
-      effectiveProjectId = projectIdRaw;
-      if (clientDeveloperId !== undefined) {
-        const [dev] = await r
-          .select({ id: developersTable.id })
-          .from(developersTable)
-          .where(and(eq(developersTable.firmId, req.firmId!), eq(developersTable.id, clientDeveloperId)))
-          .limit(1);
-        if (!dev) {
-          res.status(400).json({ error: "Developer not found" });
-          return;
-        }
-        effectiveDeveloperId = clientDeveloperId;
-      } else if (project.developerId) {
-        effectiveDeveloperId = project.developerId;
-      }
-      if (!effectiveDeveloperId) {
-        res.status(422).json({ error: "Developer is required" });
-        return;
-      }
-      effectiveIsEncumbered = Boolean((project as any).isEncumbered ?? false);
-      const projectTenure = String((project as any).tenure ?? "").trim().toLowerCase();
-      effectiveTenure = projectTenure === "leasehold" ? "leasehold" : "freehold";
-    } else if (normalizedCaseType === "subsale") {
-      effectiveTenure = landConditionNorm === "leasehold" ? "leasehold" : "freehold";
-      effectiveIsEncumbered = encumbrancesNorm === "has_encumbrance";
-    } else {
-      effectiveTenure = "freehold";
-      effectiveIsEncumbered = false;
-    }
-
-    const usersToCheck = [normalizedAssignedLawyerId, ...(normalizedAssignedClerkId ? [normalizedAssignedClerkId] : [])].filter((x): x is number => Number.isFinite(x));
-    if (usersToCheck.length > 0) {
-      const found = await r
-        .select({ id: usersTable.id })
-        .from(usersTable)
-        .where(and(eq(usersTable.firmId, req.firmId!), inArray(usersTable.id, usersToCheck)));
-      const foundIds = new Set(found.map((u) => u.id));
-      if (normalizedAssignedLawyerId !== undefined && !foundIds.has(normalizedAssignedLawyerId)) {
-        res.status(400).json({ error: "Assigned lawyer not found" });
-        return;
-      }
-      if (normalizedAssignedClerkId && !foundIds.has(normalizedAssignedClerkId)) {
-        res.status(400).json({ error: "Assigned clerk not found" });
-        return;
-      }
-    }
-
-    // ── 2. Resolve purchaser client IDs with dedupe ───────────────────────────
-    let resolvedPurchaserIds: number[] = purchaserIds ?? [];
-    let purchasersCreated = 0;
-    let purchasersReused = 0;
-    const responsePurchasers: Array<{
-      id: number;
-      clientId: number;
-      clientName: string;
-      icNo: string | null;
-      tin?: string | null;
-      phone?: string | null;
-      email?: string | null;
-      address?: string | null;
-      role: string;
-      orderNo: number;
-    }> = [];
-
-    if (resolvedPurchaserIds.length === 0 && purchasers && purchasers.length > 0) {
+    const canonicalPurchasers: CanonicalPurchaserInput[] = [];
+    if (Array.isArray(purchasers) && purchasers.length > 0) {
       for (const p of purchasers) {
-        const trimmedName = String(p.name ?? "").trim();
-        if (!trimmedName) continue;
-        const trimmedIc = typeof p.ic === "string" ? p.ic.trim() : null;
-        const trimmedTin = typeof (p as any).tin === "string" ? String((p as any).tin).trim() : null;
-        const trimmedPhone = typeof p.phone === "string" ? p.phone.trim() : null;
-        const trimmedEmail = typeof p.email === "string" ? p.email.trim() : null;
-        const trimmedAddress = typeof p.address === "string" ? p.address.trim() : null;
-
-        let existingClientId: number | null = null;
-
-        if (trimmedIc) {
-          // IC is present — look up by firmId + icNo (most reliable match)
-          const [byIc] = await r
-            .select()
-            .from(clientsTable)
-            .where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.icNo, trimmedIc)));
-          if (byIc) {
-            existingClientId = byIc.id;
-          }
-        }
-
-        if (!existingClientId) {
-          // No IC or no IC match — try exact case-insensitive name match
-          const byName = await r
-            .select()
-            .from(clientsTable)
-            .where(and(
-              eq(clientsTable.firmId, req.firmId!),
-              sql`LOWER(${clientsTable.name}) = LOWER(${trimmedName})`
-            ));
-          // Only reuse if exactly one match (ambiguous → create new)
-          if (byName.length === 1) {
-            existingClientId = byName[0].id;
-          }
-        }
-
-        if (existingClientId) {
-          resolvedPurchaserIds.push(existingClientId);
-          purchasersReused++;
-          responsePurchasers.push({
-            id: 0,
-            clientId: existingClientId,
-            clientName: trimmedName,
-            icNo: trimmedIc,
-            tin: trimmedTin,
-            phone: trimmedPhone,
-            email: trimmedEmail,
-            address: trimmedAddress,
-            role: "joint",
-            orderNo: resolvedPurchaserIds.length,
-          });
-          if (trimmedTin || trimmedPhone || trimmedEmail || trimmedAddress) {
-            const [existing] = await r
-              .select({ id: clientsTable.id, tin: clientsTable.tin, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
-              .from(clientsTable)
-              .where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.id, existingClientId)))
-              .limit(1);
-            if (existing) {
-              const patch: Record<string, unknown> = {};
-              if (trimmedTin && !String(existing.tin ?? "").trim()) patch.tin = trimmedTin;
-              if (trimmedPhone && !String(existing.phone ?? "").trim()) patch.phone = trimmedPhone;
-              if (trimmedEmail && !String(existing.email ?? "").trim()) patch.email = trimmedEmail;
-              if (trimmedAddress && !String(existing.address ?? "").trim()) patch.address = trimmedAddress;
-              if (Object.keys(patch).length > 0) {
-                await r.update(clientsTable).set(patch).where(and(eq(clientsTable.firmId, req.firmId!), eq(clientsTable.id, existingClientId)));
-              }
-            }
-          }
-        } else {
-          const insertBase = {
-            firmId: req.firmId!,
-            name: trimmedName,
-            icNo: trimmedIc,
-            tin: trimmedTin,
-            phone: trimmedPhone,
-            email: trimmedEmail,
-            address: trimmedAddress,
-            createdBy: req.userId ?? null,
-          } satisfies typeof clientsTable.$inferInsert;
-
-          let client: typeof clientsTable.$inferSelect;
-          [client] = await r
-            .insert(clientsTable)
-            .values(insertBase)
-            .returning();
-          resolvedPurchaserIds.push(client.id);
-          purchasersCreated++;
-          responsePurchasers.push({
-            id: 0,
-            clientId: client.id,
-            clientName: trimmedName,
-            icNo: trimmedIc,
-            tin: trimmedTin,
-            phone: trimmedPhone,
-            email: trimmedEmail,
-            address: trimmedAddress,
-            role: "joint",
-            orderNo: resolvedPurchaserIds.length,
-          });
-        }
+        canonicalPurchasers.push({
+          isCompany: typeof (p as any).isCompany === "boolean" ? (p as any).isCompany : undefined,
+          name: String(p.name ?? "").trim(),
+          ic: typeof p.ic === "string" ? p.ic.trim() : null,
+          phone: typeof p.phone === "string" ? p.phone.trim() : null,
+          email: typeof p.email === "string" ? p.email.trim() : null,
+          address: typeof p.address === "string" ? p.address.trim() : null,
+        });
       }
     }
 
+    const canonicalBorrowers: CanonicalBorrowerInput[] = [];
     const borrowerPayloadRaw = (
       Array.isArray(requestedBorrowers) && requestedBorrowers.length > 0
         ? requestedBorrowers
@@ -4018,258 +3840,171 @@ router.post("/cases", requireAuthHandler, requireFirmUserHandler, requirePermiss
           ? (loanDetailsRaw as any).borrowers
           : []
     );
-    const normalizedBorrowerPayload = normalizeCanonicalBorrowers(borrowerPayloadRaw);
-    const isLoan = purchaseMode === "loan";
-    const effectiveLoanPartyType: "1st_party" | "3rd_party" = isLoan ? (loanPartyType ?? "1st_party") : "1st_party";
-    let canonicalBorrowers: CanonicalBorrower[] = [];
-
-    if (isLoan) {
-      if (effectiveLoanPartyType === "1st_party") {
-        if (normalizedBorrowerPayload.length > 0) {
-          canonicalBorrowers = normalizedBorrowerPayload;
-        } else if (resolvedPurchaserIds.length === 0) {
-          canonicalBorrowers = [];
-        } else {
-        const rows = await r
-          .select({ id: clientsTable.id, name: clientsTable.name, ic: clientsTable.icNo, tin: clientsTable.tin, phone: clientsTable.phone, email: clientsTable.email, address: clientsTable.address })
-          .from(clientsTable)
-          .where(and(eq(clientsTable.firmId, req.firmId!), inArray(clientsTable.id, resolvedPurchaserIds)));
-        const byId = new Map<number, { name: string; ic: string | null; tin: string | null; phone: string | null; email: string | null; address: string | null }>();
-        for (const row of rows) byId.set(row.id, { name: String(row.name ?? ""), ic: row.ic ?? null, tin: (row as any).tin ?? null, phone: row.phone ?? null, email: row.email ?? null, address: row.address ?? null });
-        canonicalBorrowers = resolvedPurchaserIds
-          .map((id): CanonicalBorrower | null => {
-            const v = byId.get(id);
-            const name = v?.name?.trim() ?? "";
-            if (!name) return null;
-            const ic = v?.ic ? String(v.ic).trim() : null;
-            const tin = v?.tin ? String(v.tin).trim() : null;
-            const hp = v?.phone ? String(v.phone).trim() : null;
-            const email = v?.email ? String(v.email).trim() : null;
-            const address = v?.address ? String(v.address).trim() : "";
-            const out: CanonicalBorrower = { name, address };
-            if (ic) out.ic = ic;
-            if (tin) out.tin = tin;
-            if (hp) { out.hp = hp; out.phone = hp; }
-            if (email) out.email = email;
-            return out;
-          })
-          .filter((b): b is CanonicalBorrower => b !== null);
-        }
-      } else {
-        canonicalBorrowers = normalizedBorrowerPayload;
-        if (canonicalBorrowers.length === 0 && loanDetailsRaw && typeof loanDetailsRaw === "object") {
-          const ld: any = loanDetailsRaw as any;
-          const b1 = typeof ld.borrower1Name === "string" ? ld.borrower1Name.trim() : "";
-          const i1 = typeof ld.borrower1Ic === "string" ? ld.borrower1Ic.trim() : "";
-          const b2 = typeof ld.borrower2Name === "string" ? ld.borrower2Name.trim() : "";
-          const i2 = typeof ld.borrower2Ic === "string" ? ld.borrower2Ic.trim() : "";
-          const fallback: CanonicalBorrower[] = [];
-          if (b1) fallback.push(i1 ? { name: b1, ic: i1, address: "" } : { name: b1, address: "" });
-          if (b2) fallback.push(i2 ? { name: b2, ic: i2, address: "" } : { name: b2, address: "" });
-          canonicalBorrowers = fallback;
-        }
+    if (Array.isArray(borrowerPayloadRaw) && borrowerPayloadRaw.length > 0) {
+      for (const b of borrowerPayloadRaw) {
+        const bName = String(b?.name ?? "").trim();
+        if (!bName) continue;
+        const cb: CanonicalBorrowerInput = {
+          name: bName,
+          ic: typeof b?.ic === "string" ? b.ic.trim() : null,
+          tin: typeof b?.tin === "string" ? b.tin.trim() : null,
+          hp: typeof b?.hp === "string" ? b.hp.trim() : (typeof b?.phone === "string" ? b.phone.trim() : null),
+          email: typeof b?.email === "string" ? b.email.trim() : null,
+          address: typeof b?.address === "string" ? b.address.trim() : null,
+        };
+        canonicalBorrowers.push(cb);
       }
     }
 
-    const normalizedPropertyDetails = (() => {
+    const borrowerMode: "same_as_purchaser" | "separate" | "none" = (() => {
+      if (purchaseMode !== "loan") return "none";
+      const party = loanPartyType ?? "1st_party";
+      if (party === "3rd_party") return "separate";
+      return "same_as_purchaser";
+    })();
+
+    const normalizedPropertyDetails: Record<string, unknown> | null = (() => {
       if (!propertyDetailsRaw || typeof propertyDetailsRaw !== "object" || Array.isArray(propertyDetailsRaw)) {
-        return propertyAddress ? ({ propertyAddress: String(propertyAddress).trim() } as Record<string, unknown>) : null;
+        return propertyAddress ? { propertyAddress: String(propertyAddress).trim() } : null;
       }
       const base = { ...(propertyDetailsRaw as Record<string, unknown>) };
       if (propertyAddress !== undefined) base.propertyAddress = String(propertyAddress).trim();
       return base;
     })();
 
-    const incomingLoanDetails = (loanDetailsRaw && typeof loanDetailsRaw === "object" && !Array.isArray(loanDetailsRaw))
-      ? { ...(loanDetailsRaw as Record<string, unknown>) }
-      : {};
-    const mirroredLoanBorrowers = mirrorCanonicalToLoanBorrowers(canonicalBorrowers);
-    if (mirroredLoanBorrowers.length > 0 || canonicalBorrowers.length > 0) {
-      incomingLoanDetails.borrowers = mirroredLoanBorrowers;
-    }
-    const normalizedLoanDetails = Object.keys(incomingLoanDetails).length > 0 ? incomingLoanDetails : null;
+    const normalizedLoanDetails: Record<string, unknown> | null = (() => {
+      const incoming = (loanDetailsRaw && typeof loanDetailsRaw === "object" && !Array.isArray(loanDetailsRaw))
+        ? { ...(loanDetailsRaw as Record<string, unknown>) }
+        : null;
+      if (!incoming) return null;
+      return incoming;
+    })();
 
-    const spaPriceToInsert = spaPrice !== undefined && spaPrice !== null ? String(spaPrice) : null;
-    const apdlPriceToInsert = apdlPrice !== undefined && apdlPrice !== null ? String(apdlPrice) : null;
-    const developerDiscountToInsert = developerDiscount !== undefined && developerDiscount !== null ? String(developerDiscount) : null;
-    const bumiputraDiscountToInsert = bumiputraDiscount !== undefined && bumiputraDiscount !== null ? String(bumiputraDiscount) : null;
-
-    const insertCaseBase = {
+    const ctx: CanonicalCaseCreateContext = {
+      db: r,
       firmId: req.firmId!,
-      projectId: effectiveProjectId,
-      developerId: effectiveDeveloperId,
-      proposedReferenceNo: proposedReferenceNo ? proposedReferenceNo.trim() : null,
-      purchaseMode,
-      titleType: normalizedTitleType,
-      isEncumbered: effectiveIsEncumbered,
-      tenure: effectiveTenure,
-      spaPrice: spaPriceToInsert,
-      apdlPrice: apdlPriceToInsert,
-      developerDiscount: developerDiscountToInsert,
-      bumiputraDiscount: bumiputraDiscountToInsert,
-      status: "Pending Approval",
+      actorUserId: req.userId!,
+      actorRoleId: req.roleId ?? null,
+      canAssignAny,
+      source: "web_create",
+      logger: req.log,
+      ipAddress: typeof req.ip === "string" ? req.ip : null,
+      userAgent: typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"] : null,
+    };
+
+    const canonicalInput: CanonicalCaseCreateInput = {
       caseType: normalizedCaseType,
+      projectId: projectIdRaw ?? null,
+      developerId: clientDeveloperId ?? null,
+      referenceNo: parsed.data.referenceNo ?? null,
+      proposedReferenceNo: proposedReferenceNo ?? null,
+      trackingToken: trackingToken ?? null,
+      purchaseMode: purchaseMode === "loan" ? "loan" : "cash",
+      titleType: titleType ?? null,
+      landCondition: landCondition ?? null,
+      encumbrances: encumbrances ?? null,
+      actingFor: actingFor ?? null,
+      perfectionType: perfectionType ?? null,
+      assignedLawyerId: normalizedAssignedLawyerId ?? null,
+      assignedClerkId: normalizedAssignedClerkId ?? null,
+      purchaserIds: purchaserIds ?? null,
+      purchasers: canonicalPurchasers,
+      borrowerMode,
+      borrowers: canonicalBorrowers.length > 0 ? canonicalBorrowers : undefined,
+      loanPartyType: purchaseMode === "loan" ? (loanPartyType ?? "1st_party") : undefined,
       parcelNo: parcelNo ?? null,
-      spaDetails: spaDetails ? JSON.stringify(spaDetails) : null,
+      propertyAddress: propertyAddress ?? null,
       propertyDetails: normalizedPropertyDetails,
       loanDetails: normalizedLoanDetails,
-      loanPartyType: purchaseMode === "loan" ? (loanPartyType ?? "1st_party") : "1st_party",
-      borrowers: canonicalBorrowers,
-      companyDetails: companyDetails ? JSON.stringify(companyDetails) : null,
-      createdBy: req.userId ?? null,
-      approvalStatus: "pending_approval",
-      submittedBy: req.userId ?? null,
-      submittedAt: new Date(),
-      encumbrances: normalizedCaseType === "subsale" ? (encumbrancesNorm || null) : null,
-      actingFor: normalizedCaseType === "subsale" ? (actingForNorm || null) : null,
-      perfectionType: normalizedCaseType === "perfection" ? (perfectionTypeNorm || null) : null,
-    } satisfies Omit<typeof casesTable.$inferInsert, "referenceNo">;
+      spaPrice: spaPrice ?? null,
+      apdlPrice: apdlPrice ?? null,
+      developerDiscount: developerDiscount ?? null,
+      bumiputraDiscount: bumiputraDiscount ?? null,
+      spaDetails: spaDetails ?? null,
+      companyDetails: companyDetails ?? null,
+      migration: null,
+    };
 
-    let ctxFirmId: string | null = null;
-    let ctxIsFounder: string | null = null;
     try {
-      const result = await r.execute(sql`
-        select
-          current_setting('app.current_firm_id', true) as firm_id,
-          current_setting('app.is_founder', true) as is_founder
-      `);
-      const rows = Array.isArray(result)
-        ? result
-        : ("rows" in (result as any) ? (result as any).rows : []);
-      const row = rows?.[0] as any;
-      ctxFirmId = typeof row?.firm_id === "string" ? row.firm_id : null;
-      ctxIsFounder = typeof row?.is_founder === "string" ? row.is_founder : null;
-    } catch {
-    }
-    req.log.info({
-      route: "POST /api/cases",
-      userId: req.userId,
-      firmId: req.firmId,
-      insertFirmId: insertCaseBase.firmId,
-      ctxFirmId,
-      ctxIsFounder,
-    }, "create route tenant context");
-
-    const [newCase] = await r
-      .insert(casesTable)
-      .values({ ...insertCaseBase, referenceNo: null, trackingToken: trackingToken ?? undefined } satisfies typeof casesTable.$inferInsert)
-      .returning();
-    if (!newCase) {
-      res.status(500).json({ error: "Internal Server Error" });
+      const result = await createCaseCanonical(ctx, canonicalInput);
+      if (result.duplicate) {
+        res.status(200).json(buildCreateCaseResponse(result.case, {
+          purchasersCreated: 0,
+          purchasersReused: 0,
+          duplicate: true,
+        }));
+        return;
+      }
+      res.status(201).json(buildCreateCaseResponse(result.case, {
+        purchasersCreated: result.purchasersCreated,
+        purchasersReused: result.purchasersReused,
+        purchasers: result.purchasers,
+        assignments: result.assignments,
+      }));
       return;
-    }
-
-    try {
-      const approverUserIds = await listCaseApproverUserIds(r, req.firmId!);
-      const recipients = approverUserIds.filter((id) => id !== req.userId);
-      await insertCaseNotifications(r, {
-        firmId: req.firmId!,
-        caseId: newCase.id,
-        recipientUserIds: recipients,
-        actorUserId: req.userId ?? null,
-        type: "OPEN_FILE_PENDING_APPROVAL",
-        title: "Open file pending approval",
-        message: `Case #${newCase.id} submitted for approval`,
-        meta: { caseId: newCase.id, approvalStatus: "pending_approval" },
-      });
-    } catch (err) {
-      req.log.error({ err, route: "POST /api/cases", firmId: req.firmId, userId: req.userId }, "failed to create case notifications");
-    }
-
-    const responseAssignments: Array<{
-      id: number;
-      userId: number;
-      userName: string;
-      roleInCase: string;
-      assignedAt: string | null;
-    }> = [];
-
-    for (let i = 0; i < resolvedPurchaserIds.length; i++) {
-      const [casePurchaser] = await r.insert(casePurchasersTable).values({
-        caseId: newCase.id,
-        clientId: resolvedPurchaserIds[i],
-        role: i === 0 ? "main" : "joint",
-        orderNo: i + 1,
-      }).returning({ id: casePurchasersTable.id });
-      if (responsePurchasers[i]) {
-        responsePurchasers[i] = {
-          ...responsePurchasers[i],
-          id: casePurchaser?.id ?? 0,
-          role: i === 0 ? "main" : "joint",
-          orderNo: i + 1,
-        };
+    } catch (svcErr) {
+      if (svcErr instanceof CanonicalCaseCreateError) {
+        switch (svcErr.code) {
+          case "INVALID_CASE_TYPE":
+            res.status(400).json({ error: "Invalid caseType" });
+            return;
+          case "PROJECT_REQUIRED":
+            res.status(400).json({ error: "Project is required" });
+            return;
+          case "PROJECT_NOT_FOUND":
+            res.status(404).json({ error: "Project not found" });
+            return;
+          case "DEVELOPER_REQUIRED":
+            res.status(422).json({ error: "Developer is required" });
+            return;
+          case "DEVELOPER_NOT_FOUND":
+            res.status(400).json({ error: "Developer not found" });
+            return;
+          case "TITLE_TYPE_REQUIRED":
+            res.status(400).json({ error: "Title Category is required", field: "titleType" });
+            return;
+          case "LAND_CONDITION_REQUIRED":
+            res.status(400).json({ error: "Land Condition is required", field: "landCondition" });
+            return;
+          case "ENCUMBRANCES_REQUIRED":
+            res.status(400).json({ error: "Encumbrances is required", field: "encumbrances" });
+            return;
+          case "ACTING_FOR_REQUIRED":
+            res.status(400).json({ error: "Acting is required", field: "actingFor" });
+            return;
+          case "PERFECTION_TYPE_REQUIRED":
+            res.status(400).json({ error: "Perfection Type is required", field: "perfectionType" });
+            return;
+          case "SPA_PRICE_MISMATCH":
+            res.status(400).json({ error: "spaPrice must equal apdlPrice - developerDiscount - bumiputraDiscount", field: "spaPrice" });
+            return;
+          case "BORROWER_REQUIRED_FOR_3RD_PARTY":
+            res.status(400).json({ error: "At least one borrower name is required for 3rd-party loan", field: "borrowers" });
+            return;
+          case "CANNOT_ASSIGN_OTHER_USERS":
+            res.status(403).json({ error: "You cannot assign cases to other users" });
+            return;
+          case "ASSIGNED_LAWYER_NOT_FOUND":
+            res.status(400).json({ error: "Assigned lawyer not found" });
+            return;
+          case "ASSIGNED_CLERK_NOT_FOUND":
+            res.status(400).json({ error: "Assigned clerk not found" });
+            return;
+          case "TRACKING_TOKEN_DUPLICATE":
+          case "REFERENCE_NO_DUPLICATE":
+            res.status(409).json({ error: svcErr.message, code: svcErr.code });
+            return;
+          case "QUOTA_EXCEEDED":
+            res.status(402).json({ error: svcErr.message, code: svcErr.code });
+            return;
+          case "INTERNAL":
+          default:
+            throw svcErr;
+        }
       }
+      throw svcErr;
     }
 
-    const wantsExplicitAssignments = Boolean(canAssignAny && (normalizedAssignedLawyerId || normalizedAssignedClerkId));
-    if (!wantsExplicitAssignments) {
-      const [assignment] = await r.insert(caseAssignmentsTable).values({
-        caseId: newCase.id,
-        userId: req.userId!,
-        roleInCase: "clerk",
-        assignedBy: req.userId,
-      }).returning({ id: caseAssignmentsTable.id, assignedAt: caseAssignmentsTable.assignedAt });
-      responseAssignments.push({
-        id: assignment?.id ?? 0,
-        userId: req.userId!,
-        userName: "",
-        roleInCase: "clerk",
-        assignedAt: assignment?.assignedAt ? toIsoStringSafe(assignment.assignedAt) : null,
-      });
-    } else {
-      if (normalizedAssignedLawyerId) {
-        const [assignment] = await r.insert(caseAssignmentsTable).values({
-          caseId: newCase.id,
-          userId: normalizedAssignedLawyerId,
-          roleInCase: "lawyer",
-          assignedBy: req.userId,
-        }).returning({ id: caseAssignmentsTable.id, assignedAt: caseAssignmentsTable.assignedAt });
-        responseAssignments.push({
-          id: assignment?.id ?? 0,
-          userId: normalizedAssignedLawyerId,
-          userName: "",
-          roleInCase: "lawyer",
-          assignedAt: assignment?.assignedAt ? toIsoStringSafe(assignment.assignedAt) : null,
-        });
-      }
-      if (normalizedAssignedClerkId) {
-        const [assignment] = await r.insert(caseAssignmentsTable).values({
-          caseId: newCase.id,
-          userId: normalizedAssignedClerkId,
-          roleInCase: "clerk",
-          assignedBy: req.userId,
-        }).returning({ id: caseAssignmentsTable.id, assignedAt: caseAssignmentsTable.assignedAt });
-        responseAssignments.push({
-          id: assignment?.id ?? 0,
-          userId: normalizedAssignedClerkId,
-          userName: "",
-          roleInCase: "clerk",
-          assignedAt: assignment?.assignedAt ? toIsoStringSafe(assignment.assignedAt) : null,
-        });
-      }
-    }
-
-    res.status(201).json(buildCreateCaseResponse(newCase, {
-      purchasersCreated,
-      purchasersReused,
-      purchasers: responsePurchasers,
-      assignments: responseAssignments,
-    }));
-
-    void writeAuditLog({
-      firmId: req.firmId,
-      actorId: req.userId,
-      actorType: "firm_user",
-      action: "cases.create",
-      entityType: "case",
-      entityId: newCase.id,
-      detail: `referenceNo=null purchasersCreated=${purchasersCreated} purchasersReused=${purchasersReused} approvalStatus=pending_approval`,
-      ipAddress: req.ip,
-      userAgent: req.headers["user-agent"],
-    }).catch((auditErr) => {
-      req.log.error({ err: auditErr, caseId: newCase.id, firmId: req.firmId, userId: req.userId }, "cases.create audit log failed");
-    });
-    return;
   } catch (e) {
     const pg = (() => {
       let cur: any = e;
