@@ -874,8 +874,16 @@ export async function createCaseCanonicalInTx(
       }
     }
   } catch (err) {
-    if (context.logger?.error) {
-      context.logger.error({ err, caseId: newCase.id, firmId, userId: actorUserId }, "cases canonical: notification create failed");
+    if (legacy && legacy.suppressNewCaseNotifications) {
+      if (context.logger?.warn) {
+        context.logger.warn({ err, caseId: newCase.id, firmId, userId: actorUserId }, "cases canonical: suppressed notifications had error (ignored)");
+      }
+    } else {
+      throw new CanonicalCaseCreateError({
+        code: "INTERNAL",
+        message: "Notification insert failed during case creation; see inner error for details.",
+        detail: { cause: err as Error },
+      });
     }
   }
 
@@ -963,16 +971,10 @@ export async function createCaseCanonicalInTx(
     if (kd.letter_of_offer_date) kdInsert.letterOfOfferDate = kd.letter_of_offer_date;
     if (kd.loan_docs_signed_date) kdInsert.loanDocsSignedDate = kd.loan_docs_signed_date;
     if (kd.completion_date) kdInsert.completionDate = kd.completion_date;
-    try {
-      await r.insert(caseKeyDatesTable).values(kdInsert as any);
-    } catch (kdErr) {
-      if (context.logger?.warn) {
-        context.logger.warn({ err: kdErr, caseId: newCase.id }, "cases canonical: key-dates insert failed (non-fatal)");
-      }
-    }
+    await r.insert(caseKeyDatesTable).values(kdInsert as any);
   }
 
-  try {
+  {
     const auditAction = legacy ? "cases.legacy_import" : "cases.create";
     const auditDetail = legacy
       ? `source=legacy_excel_import batch=${legacy.sourceBatchId} row=${legacy.sourceRowNo} preserveRef=${legacy.preserveReferenceNo} approval=${legacy.approvalMode} purchasersCreated=${purchasersCreated} purchasersReused=${purchasersReused} approvalStatus=${isAlreadyApproved ? "approved" : "pending_approval"}`
@@ -1000,10 +1002,6 @@ export async function createCaseCanonicalInTx(
         ipAddress: context.ipAddress ?? null,
         userAgent: context.userAgent ?? null,
       });
-    }
-  } catch (auditErr) {
-    if (context.logger?.error) {
-      context.logger.error({ err: auditErr, caseId: newCase.id }, "cases canonical: audit write failed (non-fatal)");
     }
   }
 

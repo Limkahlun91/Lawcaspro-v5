@@ -104,10 +104,16 @@ export async function detectLegacyDuplicates(
   if (idemOrAlready.length > 0) {
     const row = idemOrAlready[0];
     const isIdem = row.idempotencyKey === idempotencyKey;
-    hard = {
-      type: isIdem ? "idempotency_key" : "already_created",
-      caseId: row.createdCaseId ?? undefined,
-    };
+    // Only flag as hard duplicate if a case was already created (not just a self-match
+    // of the current legacy row sitting in DB awaiting first dry run).
+    if (row.createdCaseId != null) {
+      hard = {
+        type: isIdem ? "idempotency_key" : "already_created",
+        caseId: row.createdCaseId ?? undefined,
+      };
+    } else if (!isIdem) {
+      // Different row in same batch/row-no but also not created yet: not a real dup.
+    }
   }
 
   if (!hard && normalizedRef.length > 0) {

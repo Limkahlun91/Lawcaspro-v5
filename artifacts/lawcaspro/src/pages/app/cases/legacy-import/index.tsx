@@ -229,13 +229,16 @@ export default function LegacyCaseImportPage() {
         if (cancelled) return;
         setPreviewRows(payload.rows ?? []);
         setPreviewTotal(payload.total ?? (payload.rows?.length ?? 0));
-      } catch {
+      } catch (err) {
+        if (cancelled) return;
+        setPreviewRows([]);
+        toastError(toast, err, "Unable to load preview page");
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [step, uploadData, previewPage, previewTab, fetchRowsForPage]);
+  }, [step, uploadData, previewPage, previewTab, fetchRowsForPage, toast]);
 
   const projectsQuery = useQuery({
     queryKey: getListProjectsQueryKey({ page: 1, limit: 200 }),
@@ -505,6 +508,28 @@ export default function LegacyCaseImportPage() {
     const f = e.dataTransfer.files?.[0];
     if (f) handleFile(f);
   };
+
+  const batchSummaryCounts = useMemo(() => {
+    const s = dryRunMutation.data?.dryRun.summary;
+    if (s) {
+      return {
+        ready: s.ready ?? 0,
+        warning: s.warnings ?? 0,
+        review: s.reviewRequired ?? 0,
+        duplicate: s.hardDuplicates ?? 0,
+        invalid: s.invalid ?? 0,
+        total: s.total ?? 0,
+      };
+    }
+    return {
+      ready: 0,
+      warning: 0,
+      review: 0,
+      duplicate: 0,
+      invalid: 0,
+      total: 0,
+    };
+  }, [dryRunMutation.data?.dryRun.summary]);
 
   const previewCounts = useMemo(() => {
     const counts: Record<UiRowStatus, number> = {
@@ -907,7 +932,6 @@ export default function LegacyCaseImportPage() {
                       <SelectValue placeholder="Select Project *" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="">— None —</SelectItem>
                       {projects.map((p) => (
                         <SelectItem key={p.id} value={String(p.id)}>
                           {p.name}
@@ -930,7 +954,6 @@ export default function LegacyCaseImportPage() {
                       <SelectValue placeholder="Select Developer *" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="">— None —</SelectItem>
                       {developers.map((d) => (
                         <SelectItem key={d.id} value={String(d.id)}>
                           {d.name}
@@ -1192,28 +1215,28 @@ export default function LegacyCaseImportPage() {
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                 <span className="text-xs font-medium text-emerald-700">Ready</span>
               </div>
-              <div className="text-2xl font-bold text-emerald-800">{previewCounts.ready}</div>
+              <div className="text-2xl font-bold text-emerald-800">{batchSummaryCounts.ready || previewCounts.ready}</div>
             </div>
             <div className="p-4 rounded-lg border bg-amber-50/60 border-amber-100">
               <div className="flex items-center gap-2 mb-1">
                 <AlertTriangle className="w-4 h-4 text-amber-600" />
                 <span className="text-xs font-medium text-amber-700">Warnings</span>
               </div>
-              <div className="text-2xl font-bold text-amber-800">{previewCounts.warning}</div>
+              <div className="text-2xl font-bold text-amber-800">{batchSummaryCounts.warning || previewCounts.warning}</div>
             </div>
             <div className="p-4 rounded-lg border bg-orange-50/60 border-orange-100">
               <div className="flex items-center gap-2 mb-1">
                 <AlertCircle className="w-4 h-4 text-orange-600" />
                 <span className="text-xs font-medium text-orange-700">Needs Review</span>
               </div>
-              <div className="text-2xl font-bold text-orange-800">{previewCounts.review}</div>
+              <div className="text-2xl font-bold text-orange-800">{batchSummaryCounts.review || previewCounts.review}</div>
             </div>
             <div className="p-4 rounded-lg border bg-slate-50 border-slate-200">
               <div className="flex items-center gap-2 mb-1">
                 <XCircle className="w-4 h-4 text-slate-500" />
                 <span className="text-xs font-medium text-slate-600">Duplicates</span>
               </div>
-              <div className="text-2xl font-bold text-slate-800">{previewCounts.duplicate}</div>
+              <div className="text-2xl font-bold text-slate-800">{batchSummaryCounts.duplicate || previewCounts.duplicate}</div>
             </div>
           </div>
 
@@ -1243,7 +1266,7 @@ export default function LegacyCaseImportPage() {
                     >
                       Ready
                       <span className="ml-1.5 text-slate-400 text-[10px]">
-                        {previewCounts.ready}
+                        {batchSummaryCounts.ready || previewCounts.ready}
                       </span>
                     </TabsTrigger>
                     <TabsTrigger
@@ -1252,7 +1275,7 @@ export default function LegacyCaseImportPage() {
                     >
                       Warnings
                       <span className="ml-1.5 text-slate-400 text-[10px]">
-                        {previewCounts.warning}
+                        {batchSummaryCounts.warning || previewCounts.warning}
                       </span>
                     </TabsTrigger>
                     <TabsTrigger
@@ -1261,7 +1284,7 @@ export default function LegacyCaseImportPage() {
                     >
                       Review
                       <span className="ml-1.5 text-slate-400 text-[10px]">
-                        {previewCounts.review}
+                        {batchSummaryCounts.review || previewCounts.review}
                       </span>
                     </TabsTrigger>
                     <TabsTrigger
@@ -1270,7 +1293,7 @@ export default function LegacyCaseImportPage() {
                     >
                       Duplicates
                       <span className="ml-1.5 text-slate-400 text-[10px]">
-                        {previewCounts.duplicate}
+                        {batchSummaryCounts.duplicate || previewCounts.duplicate}
                       </span>
                     </TabsTrigger>
                   </TabsList>

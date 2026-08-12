@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, or, inArray } from "drizzle-orm";
+import { and, eq, isNotNull, or, inArray, sql, desc, asc } from "drizzle-orm";
 import {
   db,
   legacyCaseImportBatchesTable,
@@ -50,23 +50,41 @@ export function deriveLegacyPurchaseMode(
 ): "cash" | "loan" {
   if (Array.isArray(borrowers) && borrowers.length > 0) return "loan";
   if (!financing) return "cash";
-  const nonBlank = (v: unknown) =>
-    (typeof v === "string" && v.trim().length > 0) ||
-    (typeof v === "number" && Number.isFinite(v) && v > 0) ||
-    (typeof v === "number" && Number.isFinite(v));
-  if (nonBlank(financing.endFinancierBank ?? financing.end_financier ?? financing.endFinancier)) return "loan";
+  const nonBlankFinitePositive = (v: unknown) =>
+    typeof v === "number" && Number.isFinite(v) && v > 0;
+  const numericZeroOrNegativeAsString = (v: unknown) => {
+    if (typeof v !== "string") return false;
+    const s = v.trim();
+    if (s.length === 0) return false;
+    const n = Number(s);
+    return Number.isFinite(n) && n <= 0;
+  };
+  const stringField = (v: unknown) =>
+    typeof v === "string" && v.trim().length > 0 && !numericZeroOrNegativeAsString(v);
+  const numericField = (v: unknown) => nonBlankFinitePositive(v);
+  const bankA = financing.endFinancierBank ?? financing.end_financier ?? financing.endFinancier;
+  if (stringField(bankA)) return "loan";
   const financingSum = financing.propertyFinancingSum ?? financing.financingAmount ?? financing.loanAmount;
-  if (typeof financingSum === "number" && Number.isFinite(financingSum) && financingSum > 0) return "loan";
+  if (numericField(financingSum)) return "loan";
   const loanAmount = financing.loanAmount ?? financing.loan_amount ?? financing.totalLoan;
-  if (typeof loanAmount === "number" && Number.isFinite(loanAmount) && loanAmount > 0) return "loan";
-  if (nonBlank(financing.bankRef)) return "loan";
+  if (numericField(loanAmount)) return "loan";
+  const bankRef = financing.bankRef;
+  if (stringField(bankRef)) return "loan";
   return "cash";
 }
 
 function normalizeIdentityKey(p: { ic?: string | null; tin?: string | null; name: string }): string {
-  if (p.ic && String(p.ic).trim()) return `ic:${String(p.ic).trim().toLowerCase()}`;
-  if (p.tin && String(p.tin).trim()) return `tin:${String(p.tin).trim().toLowerCase()}`;
-  return `name:${String(p.name ?? "").trim().toLowerCase()}`;
+  if (p.ic != null) {
+    const canonical = normalizeLegacyNric(String(p.ic));
+    if (canonical && canonical.trim()) return `ic:${canonical}`;
+  }
+  if (p.tin != null) {
+    const raw = String(p.tin ?? "");
+    const canonical = raw.replace(/[\s-]/g, "").trim().toUpperCase();
+    if (canonical) return `tin:${canonical}`;
+  }
+  const canonicalName = normalizeLegacyName(String(p.name ?? ""));
+  return `name:${canonicalName || ""}`;
 }
 
 export function deriveLegacyLoanPartyType(
@@ -238,7 +256,7 @@ export async function refreshLegacyImportBatchStatus(
   const statusRows = await dbConn
     .select({
       rowStatus: legacyCaseImportRowsTable.rowStatus,
-      count: dbConn.$count(legacyCaseImportRowsTable.id),
+      count: sql<number>`count(${legacyCaseImportRowsTable.id})`.mapWith(Number),
     })
     .from(legacyCaseImportRowsTable)
     .where(
@@ -1125,7 +1143,7 @@ export async function runImport(
       const msg = err instanceof Error ? err.message : String(err);
       importError = {
         code: err instanceof Error && (err as any).code ? String((err as any).code) : "IMPORT_ERROR",
-        message: msg.length > 1000 ? msg.slice(0, 997) + "..." : msg,
+        message: msg.length > 8000 ? msg.slice(0, 7997) + "..." : msg,
       };
     }
 

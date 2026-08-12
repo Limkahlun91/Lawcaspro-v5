@@ -262,7 +262,7 @@ routerInternal.get(
       .select({
         batchId: legacyCaseImportRowsTable.batchId,
         rowStatus: legacyCaseImportRowsTable.rowStatus,
-        count: db.$count(legacyCaseImportRowsTable.id),
+        count: sql<number>`count(${legacyCaseImportRowsTable.id})`.mapWith(Number),
       })
       .from(legacyCaseImportRowsTable)
       .where(
@@ -323,7 +323,7 @@ routerInternal.get(
       await db
         .select({
           rowStatus: legacyCaseImportRowsTable.rowStatus,
-          count: db.$count(legacyCaseImportRowsTable.id),
+          count: sql<number>`count(${legacyCaseImportRowsTable.id})`.mapWith(Number),
         })
         .from(legacyCaseImportRowsTable)
         .where(
@@ -626,9 +626,13 @@ const PatchMappingBody = z.object({
   fixedValues: z.object({
     projectId: z.number().nullish(),
     developerId: z.number().nullish(),
-    caseType: z
-      .enum(["developer_sales", "subsale", "perfection"])
-      .optional(),
+    caseType: z.preprocess(
+      (v) => (v === undefined || v === null || v === "developer_sales" ? "developer_sales" : "__unsupported__"),
+      z.literal("developer_sales", {
+        required_error: "caseType unsupported in V1 legacy import (only developer_sales allowed)",
+        invalid_type_error: "LEGACY_CASE_TYPE_UNSUPPORTED",
+      })
+    ).optional(),
     preserveRef: z.boolean().optional(),
     solMapping: z.record(z.string(), z.number().nullable()),
   }),
