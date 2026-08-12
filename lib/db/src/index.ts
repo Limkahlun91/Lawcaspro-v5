@@ -163,3 +163,4 @@ export type { SQL } from "drizzle-orm";
 export type { Pool, PoolClient } from "pg";
 
 export * from "./feature-registry";
+export * from "./legacy-case-import.contract";

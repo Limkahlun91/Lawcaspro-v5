@@ -1,14 +1,15 @@
 import express, { type Router as ExpressRouter, type RequestHandler } from "express";
 import multer from "multer";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
-import { db, legacyCaseImportBatchesTable, legacyCaseImportRowsTable, legacyCaseImportMappingTemplatesTable, projectsTable, developersTable, usersTable } from "@workspace/db";
-import { eq, and, inArray, or, desc, asc } from "drizzle-orm";
+import { assertFirmFeatureEnabled } from "../modules/platform/firm-feature-service.js";
+import { db, legacyCaseImportBatchesTable, legacyCaseImportRowsTable, legacyCaseImportMappingTemplatesTable, projectsTable, developersTable, usersTable, auditLogsTable } from "@workspace/db";
+import { eq, and, inArray, or, desc, asc, sql } from "drizzle-orm";
 import { z } from "zod";
 import { parseExcelWorkbook, computeHeaderFingerprint, normalizeHeader, LEGACY_IMPORT_LIMITS } from "../modules/cases/legacy-import/excel-parser.js";
 import { M_LEGASI_PRESET_MAPPING, LEGACY_FIELD_CATALOG, type FieldMappingGroup } from "../modules/cases/legacy-import/legacy-case-field-catalog.js";
 import { autoMapHeaders, applyRowMapping, type ExcelColumnMapping, type MappingTemplateDefinition } from "../modules/cases/legacy-import/mapping-engine.js";
 import { buildIdempotencyKey } from "../modules/cases/legacy-import/legacy-case-duplicate-detector.js";
-import { runDryRun, runImport, retryFailedRows, validateFixedValues } from "../modules/cases/legacy-import/legacy-batch-pipeline.service.js";
+import { runDryRun, runImport, retryFailedRows, validateFixedValues, refreshLegacyImportBatchStatus } from "../modules/cases/legacy-import/legacy-batch-pipeline.service.js";
 import { writeLegacyErrorReportXlsxBuffer } from "../modules/cases/legacy-import/legacy-error-report.js";
 import crypto from "node:crypto";
 
@@ -37,6 +38,14 @@ const ri = routerInternal as unknown as RouterLike;
 ri.use(requireAuthHandler);
 ri.use(requireFirmUserHandler);
 ri.use(requirePermission("cases", "create") as RequestHandler);
+ri.use((async (req: any, _res: any, next: any) => {
+  try {
+    await assertFirmFeatureEnabled(db, req.firmId!, "cases.legacy_import");
+    next();
+  } catch (err) {
+    next(err);
+  }
+}) as RequestHandler);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -151,25 +160,27 @@ routerInternal.post(
     const rows = firstSheet?.rows ?? [];
     const totalRows = rows.length;
 
-    const [insertedBatch] = await (db as any)
-      .insert(legacyCaseImportBatchesTable)
-      .values({
-        firmId,
-        createdBy: actor,
-        sourceFileName: originalName,
-        sourceFileHash: sha256Hex(buffer),
-        sourceSheetName: suggestedSheet,
-        sourceFormat: detectedFormat,
-        headerFingerprint,
-        status: "uploaded",
-        optionsJson,
-        totalRows,
-      })
-      .returning();
-
-    const batchId = insertedBatch.id;
+    let batchId: number;
 
     await (db as any).transaction(async (tx: any) => {
+      const [insertedBatch] = await tx
+        .insert(legacyCaseImportBatchesTable)
+        .values({
+          firmId,
+          createdBy: actor,
+          sourceFileName: originalName,
+          sourceFileHash: sha256Hex(buffer),
+          sourceSheetName: suggestedSheet,
+          sourceFormat: detectedFormat,
+          headerFingerprint,
+          status: "uploaded",
+          optionsJson,
+          totalRows,
+        })
+        .returning();
+
+      batchId = insertedBatch.id;
+
       const inserts: Array<typeof legacyCaseImportRowsTable.$inferInsert> = [];
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
@@ -199,14 +210,12 @@ routerInternal.post(
       }
 
       if (inserts.length > 0) {
-          for (let i = 0; i < inserts.length; i += 200) {
-            await tx.insert(legacyCaseImportRowsTable).values(inserts.slice(i, i + 200));
-          }
+        for (let i = 0; i < inserts.length; i += 200) {
+          await tx.insert(legacyCaseImportRowsTable).values(inserts.slice(i, i + 200));
+        }
       }
-    });
 
-    await writeAuditLog(
-      {
+      await tx.insert(auditLogsTable).values({
         firmId,
         actorId: actor,
         actorType: req.userType ?? "firm_user",
@@ -214,20 +223,89 @@ routerInternal.post(
         entityType: "legacy_case_import_batch",
         entityId: batchId,
         detail: `batchId=${batchId} fileName=${originalName}`,
-        ipAddress: req.ip,
-        userAgent: req.headers["user-agent"],
-      },
-      { db: db as any }
-    );
+        ipAddress: req.ip ?? null,
+        userAgent: req.headers["user-agent"] ?? null,
+      });
+    });
 
     res.status(201).json({
-      batchId,
+      batchId: batchId!,
       fileName: originalName,
       sheetNames,
       suggestedSheet,
       detectedFormat,
       savedMappingAvailable,
+      totalRows,
     });
+  })
+);
+
+routerInternal.get(
+  "/recent",
+  authed(async (req, res) => {
+    const firmId = req.firmId!;
+
+    const recentBatches = await db
+      .select({
+        id: legacyCaseImportBatchesTable.id,
+        sourceFileName: legacyCaseImportBatchesTable.sourceFileName,
+        completedAt: legacyCaseImportBatchesTable.completedAt,
+        createdBy: legacyCaseImportBatchesTable.createdBy,
+        status: legacyCaseImportBatchesTable.status,
+      })
+      .from(legacyCaseImportBatchesTable)
+      .where(eq(legacyCaseImportBatchesTable.firmId, firmId))
+      .orderBy(desc(legacyCaseImportBatchesTable.createdAt))
+      .limit(20);
+
+    const rowCounts = await db
+      .select({
+        batchId: legacyCaseImportRowsTable.batchId,
+        rowStatus: legacyCaseImportRowsTable.rowStatus,
+        count: db.$count(legacyCaseImportRowsTable.id),
+      })
+      .from(legacyCaseImportRowsTable)
+      .where(
+        and(
+          eq(legacyCaseImportRowsTable.firmId, firmId),
+          inArray(
+            legacyCaseImportRowsTable.batchId,
+            recentBatches.map((b) => b.id)
+          )
+        )
+      )
+      .groupBy(
+        legacyCaseImportRowsTable.batchId,
+        legacyCaseImportRowsTable.rowStatus
+      );
+
+    const countsByBatch: Record<number, { imported: number; failed: number }> = {};
+    for (const rc of rowCounts) {
+      const bid = Number(rc.batchId);
+      if (!countsByBatch[bid]) {
+        countsByBatch[bid] = { imported: 0, failed: 0 };
+      }
+      if (rc.rowStatus === "imported") {
+        countsByBatch[bid].imported = Number(rc.count);
+      } else if (rc.rowStatus === "failed") {
+        countsByBatch[bid].failed = Number(rc.count);
+      }
+    }
+
+    const result = recentBatches.map((b) => {
+      const counts = countsByBatch[b.id] ?? { imported: 0, failed: 0 };
+      return {
+        batchId: b.id,
+        fileName: b.sourceFileName,
+        importedAt: b.completedAt,
+        importedBy: b.createdBy ?? null,
+        created: counts.imported,
+        failed: counts.failed,
+        status: b.status,
+      };
+    });
+
+    res.json(result);
   })
 );
 
@@ -281,6 +359,17 @@ routerInternal.get(
     const limit = Math.min(oneNum(req.query.limit as any) ?? 100, 500);
     const offset = oneNum(req.query.offset as any) ?? 0;
 
+    const [{ count: totalRaw }] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(legacyCaseImportRowsTable)
+      .where(
+        and(
+          eq(legacyCaseImportRowsTable.batchId, batchId),
+          eq(legacyCaseImportRowsTable.firmId, firmId)
+        )
+      );
+    const total = Number(totalRaw ?? 0);
+
     const rows = await db
       .select()
       .from(legacyCaseImportRowsTable)
@@ -294,27 +383,31 @@ routerInternal.get(
       .limit(limit)
       .offset(offset);
 
-    const previewRows = rows.map((r) => ({
-      id: r.id,
-      sourceRowNo: r.sourceRowNo,
-      sourceReference: r.sourceReference,
-      rowStatus: r.rowStatus,
-      createdCaseId: r.createdCaseId,
-      duplicateType: r.duplicateType,
-      duplicateCaseId: r.duplicateCaseId,
-      duplicateScore: r.duplicateScore,
-      possibleDuplicate: Boolean(r.duplicateType),
-      errorCode: r.errorCode,
-      errorMessage: r.errorMessage,
-      rawRowJson: r.rawRowJson,
-      validationJson: r.validationJson,
-    }));
+    const previewRows = rows.map((r) => {
+      const vj = (r.validationJson ?? {}) as Record<string, unknown>;
+      return {
+        id: r.id,
+        sourceRowNo: r.sourceRowNo,
+        sourceReference: r.sourceReference,
+        purchaserSummary: (vj.purchaserSummary as string | null | undefined) ?? null,
+        borrowerSummary: (vj.borrowerSummary as string | null | undefined) ?? null,
+        propertySummary: (vj.propertySummary as string | null | undefined) ?? null,
+        rowStatus: r.rowStatus,
+        warnings: (Array.isArray(vj.warnings) ? vj.warnings : []) as unknown[],
+        errors: (Array.isArray(vj.errors) ? vj.errors : []) as unknown[],
+        duplicateType: r.duplicateType,
+        duplicateCaseId: r.duplicateCaseId,
+        duplicateScore: r.duplicateScore,
+        createdCaseId: r.createdCaseId,
+      };
+    });
 
     res.json({
       batchId,
       limit,
       offset,
       rows: previewRows,
+      total,
     });
   })
 );
@@ -330,48 +423,191 @@ routerInternal.get(
     if (!batch) return res.status(404).json({ error: "Batch not found" });
 
     const optionsJson = (batch.optionsJson as Record<string, unknown>) ?? {};
-    const savedColumns = (optionsJson.columns as ExcelColumnMapping[]) ?? null;
+    const savedMappingAvailable = Boolean(optionsJson.savedMappingAvailable);
 
     let columns: ExcelColumnMapping[];
-    if (savedColumns && Array.isArray(savedColumns) && savedColumns.length > 0) {
-      columns = savedColumns;
-    } else {
-      const firstRow = (await db
-        .select({ rawRowJson: legacyCaseImportRowsTable.rawRowJson })
-        .from(legacyCaseImportRowsTable)
+    let savedMappingTemplateId: number | null = null;
+    let mappingSource: "saved_template" | "auto_detected" = "auto_detected";
+    let mappingSourceWarning: string | undefined;
+
+    let templateFixedValues: Record<string, unknown> = {};
+    let templateColumns: ExcelColumnMapping[] | null = null;
+
+    if (savedMappingAvailable) {
+      const [defaultTemplate] = await db
+        .select()
+        .from(legacyCaseImportMappingTemplatesTable)
         .where(
           and(
-            eq(legacyCaseImportRowsTable.batchId, batchId),
-            eq(legacyCaseImportRowsTable.firmId, firmId)
+            eq(legacyCaseImportMappingTemplatesTable.firmId, firmId),
+            eq(legacyCaseImportMappingTemplatesTable.isDefault, true),
+            eq(legacyCaseImportMappingTemplatesTable.headerFingerprint, batch.headerFingerprint)
           )
         )
-        .orderBy(legacyCaseImportRowsTable.sourceRowNo)
-        .limit(1))[0];
+        .limit(1);
 
-      const headerKeys = firstRow?.rawRowJson
-        ? Object.keys(firstRow.rawRowJson as Record<string, unknown>)
-        : [];
-      const autoMapped = autoMapHeaders(headerKeys, M_LEGASI_PRESET_MAPPING);
-      columns = autoMapped.columns;
+      if (defaultTemplate) {
+        savedMappingTemplateId = defaultTemplate.id;
+        mappingSource = "saved_template";
+
+        const mappingJson = (defaultTemplate.mappingJson ?? {}) as Record<string, unknown>;
+        templateColumns = Array.isArray(mappingJson.columns)
+          ? (mappingJson.columns as ExcelColumnMapping[])
+          : null;
+
+        const fixedValuesFromMappingJson =
+          (mappingJson.fixedValues as Record<string, unknown> | undefined) ?? {};
+        const fixedValuesFromTemplate =
+          (defaultTemplate.fixedValuesJson as Record<string, unknown> | undefined) ?? {};
+
+        templateFixedValues = {
+          ...fixedValuesFromTemplate,
+          ...fixedValuesFromMappingJson,
+        };
+
+        const validationWarnings: string[] = [];
+        const projectId =
+          typeof templateFixedValues.projectId === "number"
+            ? templateFixedValues.projectId
+            : null;
+        if (projectId !== null) {
+          const [proj] = await db
+            .select({ id: projectsTable.id })
+            .from(projectsTable)
+            .where(
+              and(
+                eq(projectsTable.id, projectId),
+                eq(projectsTable.firmId, firmId)
+              )
+            )
+            .limit(1);
+          if (!proj) {
+            templateFixedValues.projectId = null;
+            validationWarnings.push("Saved project no longer exists, cleared.");
+          }
+        }
+
+        const developerId =
+          typeof templateFixedValues.developerId === "number"
+            ? templateFixedValues.developerId
+            : null;
+        if (developerId !== null) {
+          const [dev] = await db
+            .select({ id: developersTable.id })
+            .from(developersTable)
+            .where(
+              and(
+                eq(developersTable.id, developerId),
+                eq(developersTable.firmId, firmId)
+              )
+            )
+            .limit(1);
+          if (!dev) {
+            templateFixedValues.developerId = null;
+            validationWarnings.push("Saved developer no longer exists, cleared.");
+          }
+        }
+
+        const solMapping = (templateFixedValues.solMapping ?? {}) as Record<string, number | null>;
+        const cleanSolMapping: Record<string, number | null> = {};
+        let solCleared = false;
+        for (const [k, v] of Object.entries(solMapping)) {
+          if (typeof v === "number") {
+            const [u] = await db
+              .select({ id: usersTable.id })
+              .from(usersTable)
+              .where(eq(usersTable.id, v))
+              .limit(1);
+            if (u) {
+              cleanSolMapping[k] = v;
+            } else {
+              solCleared = true;
+              cleanSolMapping[k] = null;
+            }
+          } else {
+            cleanSolMapping[k] = v;
+          }
+        }
+        if (solCleared) {
+          templateFixedValues.solMapping = cleanSolMapping;
+          validationWarnings.push("Some solicitor mappings no longer exist, cleared.");
+        }
+
+        if (validationWarnings.length > 0) {
+          mappingSourceWarning = validationWarnings.join(" ");
+        }
+      }
     }
 
-    const fixedValues = (optionsJson.fixedValues as Record<string, unknown>) ?? {
-      projectId: null,
-      developerId: null,
-      caseType: "developer_sales",
-      borrowerModeSuggested: null,
-      solMapping: {},
+    if (templateColumns && templateColumns.length > 0) {
+      columns = templateColumns;
+    } else {
+      const optionsColumns = (optionsJson.columns as ExcelColumnMapping[]) ?? null;
+      if (optionsColumns && Array.isArray(optionsColumns) && optionsColumns.length > 0) {
+        columns = optionsColumns;
+      } else {
+        const firstRow = (await db
+          .select({ rawRowJson: legacyCaseImportRowsTable.rawRowJson })
+          .from(legacyCaseImportRowsTable)
+          .where(
+            and(
+              eq(legacyCaseImportRowsTable.batchId, batchId),
+              eq(legacyCaseImportRowsTable.firmId, firmId)
+            )
+          )
+          .orderBy(legacyCaseImportRowsTable.sourceRowNo)
+          .limit(1))[0];
+
+        const headerKeys = firstRow?.rawRowJson
+          ? Object.keys(firstRow.rawRowJson as Record<string, unknown>)
+          : [];
+        const autoMapped = autoMapHeaders(headerKeys, M_LEGASI_PRESET_MAPPING);
+        columns = autoMapped.columns;
+      }
+    }
+
+    const optionsFixedValues = (optionsJson.fixedValues as Record<string, unknown> | undefined) ?? {};
+    const fixedValues = {
+      projectId: templateFixedValues.projectId ?? optionsFixedValues.projectId ?? null,
+      developerId: templateFixedValues.developerId ?? optionsFixedValues.developerId ?? null,
+      caseType: (templateFixedValues.caseType ?? optionsFixedValues.caseType ?? "developer_sales") as
+        | "developer_sales"
+        | "subsale"
+        | "perfection",
+      preserveRef:
+        typeof (templateFixedValues.preserveRef ?? optionsFixedValues.preserveRef) === "boolean"
+          ? ((templateFixedValues.preserveRef ?? optionsFixedValues.preserveRef) as boolean)
+          : true,
+      solMapping: (templateFixedValues.solMapping ??
+        optionsFixedValues.solMapping ??
+        {}) as Record<string, number | null>,
     };
 
-    res.json({
+    const response: {
+      batch: number;
+      savedMappingTemplateId: number | null;
+      mappingSource: "saved_template" | "auto_detected";
+      mappingSourceWarning?: string;
+      columns: ExcelColumnMapping[];
+      fixedValues: typeof fixedValues;
+      headerFingerprint: string | null;
+      sourceSheetName: string | null;
+      catalog: typeof LEGACY_FIELD_CATALOG;
+    } = {
       batch: batch.id,
-      savedMappingTemplateId: batch.mappingTemplateId ?? null,
-      fixedValues,
+      savedMappingTemplateId: savedMappingTemplateId ?? batch.mappingTemplateId ?? null,
+      mappingSource,
       columns,
+      fixedValues,
       headerFingerprint: batch.headerFingerprint,
       sourceSheetName: batch.sourceSheetName,
       catalog: LEGACY_FIELD_CATALOG,
-    });
+    };
+    if (mappingSourceWarning) {
+      response.mappingSourceWarning = mappingSourceWarning;
+    }
+
+    res.json(response);
   })
 );
 
@@ -389,6 +625,7 @@ const PatchMappingBody = z.object({
     caseType: z
       .enum(["developer_sales", "subsale", "perfection"])
       .optional(),
+    preserveRef: z.boolean().optional(),
     solMapping: z.record(z.string(), z.number().nullable()),
   }),
   mappingTemplateId: z.number().nullish().optional(),
@@ -558,54 +795,31 @@ routerInternal.post(
         parsed.data.reviewOverrides as ImportReviewOverrides
       ),
     };
-    const result = await runImport(db as any, batchId, firmId, actor, importOpts);
+    await runImport(db as any, batchId, firmId, actor, importOpts);
 
-    const [currentBatch] = await db
-      .select({ status: legacyCaseImportBatchesTable.status })
-      .from(legacyCaseImportBatchesTable)
-      .where(
-        and(
-          eq(legacyCaseImportBatchesTable.id, batchId),
-          eq(legacyCaseImportBatchesTable.firmId, firmId)
-        )
-      )
-      .limit(1);
+    const statusResult = await refreshLegacyImportBatchStatus(db as any, batchId, firmId);
 
-    const summaryImported = result.summary.created;
-    const summaryFailed = result.summary.failed;
-    const summarySkipped = result.summary.duplicatesSkipped;
-    const summaryRequested = result.summary.requested;
-
-    if (currentBatch && currentBatch.status !== "failed") {
-      await writeAuditLog(
-        {
-          firmId,
-          actorId: actor,
-          actorType: req.userType ?? "firm_user",
-          action: "cases.legacy_import.completed",
-          entityType: "legacy_case_import_batch",
-          entityId: batchId,
-          detail: `batchId=${batchId} imported=${summaryImported} requested=${summaryRequested}`,
-          ipAddress: req.ip,
-          userAgent: req.headers["user-agent"],
-        },
-        { db: db as any }
-      );
-
-      if (summaryImported + summaryFailed + summarySkipped >= (batch.totalRows ?? 0)) {
-        await db
-          .update(legacyCaseImportBatchesTable)
-          .set({ completedAt: new Date() })
-          .where(
-            and(
-              eq(legacyCaseImportBatchesTable.id, batchId),
-              eq(legacyCaseImportBatchesTable.firmId, firmId)
-            )
-          );
+    if (statusResult.status !== "importing" && statusResult.summary.imported > 0) {
+      try {
+        await writeAuditLog(
+          {
+            firmId,
+            actorId: actor,
+            actorType: req.userType ?? "firm_user",
+            action: "cases.legacy_import.completed",
+            entityType: "legacy_case_import_batch",
+            entityId: batchId,
+            detail: `batchId=${batchId} imported=${statusResult.summary.imported} total=${statusResult.summary.total} failed=${statusResult.summary.failed}`,
+            ipAddress: req.ip ?? null,
+            userAgent: req.headers["user-agent"] ?? null,
+          },
+          { db: db as any }
+        );
+      } catch {
       }
     }
 
-    res.json(result);
+    res.json(statusResult);
   })
 );
 

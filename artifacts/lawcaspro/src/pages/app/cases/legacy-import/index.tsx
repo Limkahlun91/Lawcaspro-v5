@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect, useMemo, useCallback } from "react";
-import { Link, useLocation } from "wouter";
+import { useState, useRef, useMemo, useCallback } from "react";
+import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Upload,
@@ -13,7 +13,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Search,
-  Filter,
   Loader2,
 } from "lucide-react";
 
@@ -48,160 +47,218 @@ import {
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
 import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
+import { getListProjectsQueryKey, getListDevelopersQueryKey } from "@workspace/api-client-react";
+import type {
+  UploadResponse,
+  MappingResponse,
+  PreviewRow,
+  BatchStatusResponse,
+  DryRunResponse,
+  ImportResponse,
+  RecentImport,
+  ExcelColumnMapping,
+  FixedValues,
+  PreviewRowsResponse,
+  FieldCatalogEntry,
+  FieldMappingGroup,
+  ReviewOverride,
+} from "@workspace/db";
+import {
+  mapLegacyRowStatus,
+  CASE_TYPE_LABELS,
+  type CaseTypeApiValue,
+  type UiRowStatus,
+} from "@workspace/db";
 
 type WizardStep = 1 | 2 | 3 | 4;
 
-type UploadResponse = {
-  batchId: string;
-  fileName: string;
-  suggestedSheet: string;
-  totalRows: number;
-  detectedFormat: string;
-  savedMappingAvailable: boolean;
-  columns: string[];
-  autoMappings: Record<string, string>;
-};
-
-type MappingRow = {
-  fieldKey: string;
-  fieldLabel: string;
+type LocalMappingRow = {
+  target: string;
+  label: string;
+  group: FieldMappingGroup;
   required: boolean;
-  group: "core" | "dates" | "address" | "loan" | "other";
-  mappedColumn: string | null;
-  autoMapped: boolean;
-  needsReview: boolean;
+  arrayIndex?: number;
+  dataType: FieldCatalogEntry["dataType"];
+  mappedExcelHeader: string | null;
 };
 
-type PreviewRow = {
-  rowIndex: number;
-  ourRef: string;
-  purchaser: string;
-  property: string;
-  status: "ready" | "warning" | "review" | "duplicate";
-  issues: string[];
-  duplicateCaseId?: number;
-  rawData: Record<string, unknown>;
+const GROUPS_ORDER: FieldMappingGroup[] = [
+  "Core Case",
+  "Purchaser",
+  "Borrower",
+  "Property",
+  "Financing",
+  "Existing Dates / Milestones",
+  "Other",
+];
+
+const DEFAULT_EXPANDED_GROUPS: FieldMappingGroup[] = [
+  "Core Case",
+  "Purchaser",
+  "Borrower",
+  "Property",
+  "Financing",
+];
+
+const OPTIONAL_GROUP_HINT: Record<FieldMappingGroup, string> = {
+  "Core Case": "",
+  Purchaser: "",
+  Borrower: "",
+  Property: "",
+  Financing: "",
+  "Existing Dates / Milestones": "Dates and milestones",
+  Other: "Additional optional fields",
 };
 
-type ImportResult = {
-  batchId: string;
-  created: number;
-  skippedDuplicates: number;
-  needReview: number;
-  failed: number;
-  total: number;
-  status: "processing" | "completed" | "failed";
-};
-
-type RecentImport = {
-  batchId: string;
-  fileName: string;
-  importedAt: string;
-  importedBy: string;
-  created: number;
-  failed: number;
-  status: string;
-};
-
-const CORE_FIELDS = [
-  { key: "ourRef", label: "Our Ref", required: true },
-  { key: "purchaser1Ic", label: "Purchaser 1 IC", required: true },
-  { key: "purchaser2Ic", label: "Purchaser 2 IC", required: false },
-  { key: "purchaser3Ic", label: "Purchaser 3 IC", required: false },
-  { key: "purchaser4Ic", label: "Purchaser 4 IC", required: false },
-  { key: "parcelNo", label: "Parcel No", required: true },
-  { key: "property", label: "Property", required: true },
-  { key: "purchasePrice", label: "Purchase Price", required: true },
-  { key: "borrower1Ic", label: "Borrower 1 IC", required: false },
-  { key: "borrower2Ic", label: "Borrower 2 IC", required: false },
-  { key: "borrower3Ic", label: "Borrower 3 IC", required: false },
-  { key: "borrower4Ic", label: "Borrower 4 IC", required: false },
-  { key: "endFinancier", label: "End Financier", required: false },
-];
-
-const OPTIONAL_DATE_FIELDS = [
-  { key: "spaDate", label: "SPA Date" },
-  { key: "loanOfferDate", label: "Loan Offer Date" },
-  { key: "loanAcceptanceDate", label: "Loan Acceptance Date" },
-  { key: "caveatLodgedDate", label: "Caveat Lodged Date" },
-  { key: "completionDate", label: "Completion / MOT Date" },
-];
-
-const OPTIONAL_ADDRESS_FIELDS = [
-  { key: "purchaserAddress", label: "Purchaser Address" },
-  { key: "borrowerAddress", label: "Borrower Address" },
-  { key: "developerAddress", label: "Developer Address" },
-];
-
-const OPTIONAL_LOAN_FIELDS = [
-  { key: "loanAmount", label: "Loan Amount" },
-  { key: "loanMargin", label: "Loan Margin %" },
-  { key: "loanTenure", label: "Loan Tenure" },
-  { key: "interestRate", label: "Interest Rate" },
-];
-
-const OPTIONAL_OTHER_FIELDS = [
-  { key: "projectName", label: "Project Name" },
-  { key: "developerName", label: "Developer Name" },
-  { key: "caseType", label: "Case Type" },
-  { key: "lawyerAssigned", label: "Lawyer Assigned" },
-  { key: "clerkAssigned", label: "Clerk Assigned" },
-];
-
-const CASE_TYPES = [
-  "Strata Sale (Individual Title)",
-  "Strata Sale (Master Title)",
-  "Subsale",
-  "Commercial Sale",
-  "Refinance",
-  "Transfer of Equity",
-];
-
-const SYSTEM_DATE_TARGETS = [
-  "SPA Date",
-  "Loan Offer Date",
-  "Loan Acceptance Date",
-  "Caveat Lodged Date",
-  "Completion / MOT Date",
-  "Legacy Snapshot Only",
-  "Ignore",
-];
-
+const CHUNK_SIZE = 20;
 const PAGE_SIZE = 50;
 
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+function keyForCatalog(c: FieldCatalogEntry): string {
+  return c.arrayIndex !== undefined ? `${c.target}#${c.arrayIndex}` : c.target;
+}
+
+function isNameField(c: FieldCatalogEntry): boolean {
+  const t = c.target.toLowerCase();
+  return (
+    (t.includes("purchaser") || t.includes("borrower")) &&
+    (t.includes("name") || t.endsWith(".name"))
+  );
+}
+
+function isIcField(c: FieldCatalogEntry): boolean {
+  const t = c.target.toLowerCase();
+  return (
+    (t.includes("purchaser") || t.includes("borrower")) &&
+    (t.includes("ic") || t.includes("nric") || t.endsWith(".ic") || t.endsWith(".nric"))
+  );
+}
+
+function buildInitialMappings(
+  catalog: FieldCatalogEntry[],
+  columns: ExcelColumnMapping[]
+): LocalMappingRow[] {
+  const byKey = new Map<string, ExcelColumnMapping>();
+  for (const col of columns) {
+    const k = col.arrayIndex !== undefined ? `${col.target}#${col.arrayIndex}` : col.target;
+    byKey.set(k, col);
+  }
+
+  return catalog.map((c) => {
+    const k = keyForCatalog(c);
+    const m = byKey.get(k);
+    return {
+      target: c.target,
+      label: c.label,
+      group: c.group,
+      required: !c.optional,
+      arrayIndex: c.arrayIndex,
+      dataType: c.dataType,
+      mappedExcelHeader: m?.excelHeader ?? null,
+    };
+  });
+}
+
+function mappingRowsToColumns(rows: LocalMappingRow[]): ExcelColumnMapping[] {
+  const out: ExcelColumnMapping[] = [];
+  for (const r of rows) {
+    if (r.mappedExcelHeader && r.mappedExcelHeader !== "__ignore__" && r.mappedExcelHeader !== "__snapshot__") {
+      const c: ExcelColumnMapping = {
+        excelHeader: r.mappedExcelHeader,
+        target: r.target,
+      };
+      if (r.arrayIndex !== undefined) c.arrayIndex = r.arrayIndex;
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+function sortCatalogForCoreSection(arr: FieldCatalogEntry[]): FieldCatalogEntry[] {
+  const names = arr.filter(isNameField);
+  const ics = arr.filter(isIcField);
+  const rest = arr.filter((x) => !isNameField(x) && !isIcField(x));
+  return [...names, ...ics, ...rest];
+}
+
 export default function LegacyCaseImportPage() {
-  const [, setLocation] = useLocation();
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [step, setStep] = useState<WizardStep>(1);
   const [isDragOver, setIsDragOver] = useState(false);
   const [uploadData, setUploadData] = useState<UploadResponse | null>(null);
-  const [caseType, setCaseType] = useState<string>("");
-  const [refPreserveMode, setRefPreserveMode] = useState<"preserve" | "override">("preserve");
-  const [mappings, setMappings] = useState<MappingRow[]>([]);
+  const [mappingResponse, setMappingResponse] = useState<MappingResponse | null>(null);
+  const [mappings, setMappings] = useState<LocalMappingRow[]>([]);
   const [optionalExpanded, setOptionalExpanded] = useState(false);
   const [saveMappingChecked, setSaveMappingChecked] = useState(false);
+
+  const [caseType, setCaseType] = useState<CaseTypeApiValue | "">("");
+  const [projectId, setProjectId] = useState<number | "">("");
+  const [developerId, setDeveloperId] = useState<number | "">("");
+  const [preserveRef, setPreserveRef] = useState(true);
+
   const [previewRows, setPreviewRows] = useState<PreviewRow[]>([]);
-  const [previewTab, setPreviewTab] = useState<"all" | "ready" | "warning" | "review" | "duplicate">("all");
+  const [previewTab, setPreviewTab] = useState<"all" | UiRowStatus>("all");
   const [previewSearch, setPreviewSearch] = useState("");
   const [previewPage, setPreviewPage] = useState(1);
-  const [selectedRow, setSelectedRow] = useState<PreviewRow | null>(null);
-  const [showProgressDialog, setShowProgressDialog] = useState(false);
-  const [importProgress, setImportProgress] = useState<ImportResult | null>(null);
-  const [importResult, setImportResult] = useState<ImportResult | null>(null);
-  const [progressPollInterval, setProgressPollInterval] = useState<number | null>(null);
+  const [previewTotal, setPreviewTotal] = useState(0);
+  const [selectedRowId, setSelectedRowId] = useState<string | number | null>(null);
+  const [reviewOverrides, setReviewOverrides] = useState<Record<string, ReviewOverride>>({});
 
-  const recentImportsQuery = useQuery<RecentImport[]>({
+  const [showProgressDialog, setShowProgressDialog] = useState(false);
+  const [completedRows, setCompletedRows] = useState(0);
+  const [selectedRowsForImport, setSelectedRowsForImport] = useState<(string | number)[]>([]);
+  const [importResult, setImportResult] = useState<BatchStatusResponse | null>(null);
+
+  const selectedRow = useMemo(
+    () => previewRows.find((r) => r.id === selectedRowId) ?? null,
+    [previewRows, selectedRowId]
+  );
+
+  const projectsQuery = useQuery({
+    queryKey: getListProjectsQueryKey({ page: 1, limit: 200 }),
+    queryFn: ({ signal }) =>
+      apiFetchJson("/projects?page=1&limit=200", { signal }) as Promise<{ data?: unknown[] }>,
+    enabled: step >= 2,
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+  const projects: Array<{ id: number; name: string }> = Array.isArray(
+    (projectsQuery.data as any)?.data
+  )
+    ? ((projectsQuery.data as any).data as Array<{ id: number; name: string }>)
+    : [];
+
+  const developersQuery = useQuery({
+    queryKey: getListDevelopersQueryKey({ limit: 100 }),
+    queryFn: ({ signal }) =>
+      apiFetchJson("/developers?limit=100", { signal }) as Promise<{ data?: unknown[] }>,
+    enabled: step >= 2,
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+  const developers: Array<{ id: number; name: string }> = Array.isArray(
+    (developersQuery.data as any)?.data
+  )
+    ? ((developersQuery.data as any).data as Array<{ id: number; name: string }>)
+    : [];
+
+  const recentImportsQuery = useQuery({
     queryKey: ["legacy-imports", "recent"],
     queryFn: async () => {
-      try {
-        const r = await apiFetchJson<RecentImport[]>("/legacy-case-imports/recent");
-        return (r as any)?.data ?? r ?? [];
-      } catch {
-        return [];
-      }
+      const r = await apiFetchJson("/legacy-case-imports/recent");
+      const arr = (r as any)?.data ?? r;
+      if (!Array.isArray(arr)) throw new Error("Unexpected response shape from /legacy-case-imports/recent");
+      return arr as RecentImport[];
     },
     enabled: step === 4,
+    staleTime: 30_000,
+    retry: false,
   });
 
   const uploadMutation = useMutation({
@@ -214,86 +271,90 @@ export default function LegacyCaseImportPage() {
         timeoutMs: 120000,
       });
       const body = await res.json();
-      return (body?.data ?? body) as UploadResponse;
+      const upload = (body?.data ?? body) as UploadResponse;
+      const mapRes = await apiFetchJson(
+        `/legacy-case-imports/${encodeURIComponent(String(upload.batchId))}/mapping`
+      );
+      const mapping = (mapRes as any)?.data ?? (mapRes as any);
+      return { upload, mapping: mapping as MappingResponse };
     },
-    onSuccess: (data) => {
-      setUploadData(data);
-      const rows: MappingRow[] = [
-        ...CORE_FIELDS.map((f) => ({
-          fieldKey: f.key,
-          fieldLabel: f.label,
-          required: f.required,
-          group: "core" as const,
-          mappedColumn: data.autoMappings[f.key] ?? null,
-          autoMapped: !!data.autoMappings[f.key],
-          needsReview: false,
-        })),
-        ...OPTIONAL_DATE_FIELDS.map((f) => ({
-          fieldKey: f.key,
-          fieldLabel: f.label,
-          required: false,
-          group: "dates" as const,
-          mappedColumn: data.autoMappings[f.key] ?? null,
-          autoMapped: !!data.autoMappings[f.key],
-          needsReview: false,
-        })),
-        ...OPTIONAL_ADDRESS_FIELDS.map((f) => ({
-          fieldKey: f.key,
-          fieldLabel: f.label,
-          required: false,
-          group: "address" as const,
-          mappedColumn: data.autoMappings[f.key] ?? null,
-          autoMapped: !!data.autoMappings[f.key],
-          needsReview: false,
-        })),
-        ...OPTIONAL_LOAN_FIELDS.map((f) => ({
-          fieldKey: f.key,
-          fieldLabel: f.label,
-          required: false,
-          group: "loan" as const,
-          mappedColumn: data.autoMappings[f.key] ?? null,
-          autoMapped: !!data.autoMappings[f.key],
-          needsReview: false,
-        })),
-        ...OPTIONAL_OTHER_FIELDS.map((f) => ({
-          fieldKey: f.key,
-          fieldLabel: f.label,
-          required: false,
-          group: "other" as const,
-          mappedColumn: data.autoMappings[f.key] ?? null,
-          autoMapped: !!data.autoMappings[f.key],
-          needsReview: false,
-        })),
-      ];
+    onSuccess: ({ upload, mapping }) => {
+      setUploadData(upload);
+      setMappingResponse(mapping);
+      const rows = buildInitialMappings(mapping.catalog, mapping.columns);
       setMappings(rows);
+      if (mapping.fixedValues) {
+        if (mapping.fixedValues.caseType) setCaseType(mapping.fixedValues.caseType);
+        if (mapping.fixedValues.projectId != null) setProjectId(Number(mapping.fixedValues.projectId));
+        if (mapping.fixedValues.developerId != null) setDeveloperId(Number(mapping.fixedValues.developerId));
+        if (typeof mapping.fixedValues.preserveRef === "boolean")
+          setPreserveRef(mapping.fixedValues.preserveRef);
+      }
     },
     onError: (err) => {
       toastError(toast, err, "Upload failed");
     },
   });
 
-  const previewMutation = useMutation({
+  const patchMappingMutation = useMutation({
     mutationFn: async () => {
-      const payload = {
-        batchId: uploadData!.batchId,
-        caseType,
-        refPreserveMode,
-        mappings: mappings.map((m) => ({
-          fieldKey: m.fieldKey,
-          column: m.mappedColumn,
-        })),
-        saveMapping: saveMappingChecked,
-      };
-      const res = await apiRequest("/legacy-case-imports/preview", {
-        method: "POST",
-        body: payload,
-        timeoutMs: 60000,
-      });
+      if (!uploadData || !mappingResponse) throw new Error("No batch");
+      const columns = mappingRowsToColumns(mappings);
+      const fixed: FixedValues = {};
+      if (caseType) fixed.caseType = caseType;
+      if (projectId !== "") fixed.projectId = Number(projectId) ?? null;
+      if (developerId !== "") fixed.developerId = Number(developerId) ?? null;
+      fixed.preserveRef = preserveRef;
+      if (mappingResponse.fixedValues?.solMapping) fixed.solMapping = mappingResponse.fixedValues.solMapping;
+      const res = await apiRequest(
+        `/legacy-case-imports/${encodeURIComponent(String(uploadData.batchId))}/mapping`,
+        {
+          method: "PATCH",
+          body: { columns, fixedValues: fixed } as unknown as RequestInit["body"],
+          timeoutMs: 60000,
+        }
+      );
       const body = await res.json();
-      return (body?.data ?? body) as { rows: PreviewRow[] };
+      return (body?.data ?? body) as MappingResponse;
     },
-    onSuccess: (data) => {
-      setPreviewRows(data.rows);
+  });
+
+  const saveMappingMutation = useMutation({
+    mutationFn: async (batchId: string | number) => {
+      const res = await apiRequest(
+        `/legacy-case-imports/${encodeURIComponent(String(batchId))}/save-mapping-template`,
+        {
+          method: "POST",
+          body: { name: "M LEGASI Master Data", isDefault: true } as unknown as RequestInit["body"],
+          timeoutMs: 30000,
+        }
+      );
+      return res.json();
+    },
+    onError: (err) => {
+      toastError(toast, err, "Failed to save mapping template");
+    },
+  });
+
+  const dryRunMutation = useMutation({
+    mutationFn: async () => {
+      if (!uploadData) throw new Error("No batch");
+      const res = await apiRequest(
+        `/legacy-case-imports/${encodeURIComponent(String(uploadData.batchId))}/dry-run`,
+        { method: "POST", timeoutMs: 60000 }
+      );
+      const body = await res.json();
+      const dryRun = (body?.data ?? body) as DryRunResponse;
+      const rowsRes = await apiFetchJson(
+        `/legacy-case-imports/${encodeURIComponent(String(uploadData.batchId))}/rows?limit=${PAGE_SIZE}&offset=0`
+      );
+      const rowsPayload = ((rowsRes as any)?.data ?? (rowsRes as any)) as PreviewRowsResponse;
+      return { dryRun, rowsPayload };
+    },
+    onSuccess: ({ rowsPayload }) => {
+      setPreviewRows(rowsPayload.rows ?? []);
+      setPreviewTotal(rowsPayload.total ?? (rowsPayload.rows?.length ?? 0));
+      setPreviewPage(1);
       setStep(3);
     },
     onError: (err) => {
@@ -301,55 +362,96 @@ export default function LegacyCaseImportPage() {
     },
   });
 
-  const startImportMutation = useMutation({
-    mutationFn: async (rowIndices: number[]) => {
-      const payload = {
-        batchId: uploadData!.batchId,
-        rowIndices,
-      };
-      const res = await apiRequest("/legacy-case-imports/start", {
-        method: "POST",
-        body: payload,
-        timeoutMs: 30000,
-      });
-      const body = await res.json();
-      return (body?.data ?? body) as ImportResult;
-    },
-    onSuccess: (initialResult) => {
-      setImportProgress(initialResult);
-      setShowProgressDialog(true);
-      beginProgressPolling(initialResult.batchId);
+  const previewMutation = useMutation({
+    mutationFn: async () => {
+      await patchMappingMutation.mutateAsync();
+      if (saveMappingChecked && uploadData) {
+        try {
+          await saveMappingMutation.mutateAsync(uploadData.batchId);
+        } catch {
+        }
+      }
+      return dryRunMutation.mutateAsync();
     },
     onError: (err) => {
-      toastError(toast, err, "Failed to start import");
+      toastError(toast, err, "Failed to generate preview");
     },
   });
 
-  const beginProgressPolling = useCallback((batchId: string) => {
-    if (progressPollInterval) window.clearInterval(progressPollInterval);
-    const id = window.setInterval(async () => {
+  const importChunkMutation = useMutation({
+    mutationFn: async (args: {
+      batchId: string | number;
+      chunk: (string | number)[];
+      overrides: Record<string, ReviewOverride>;
+    }) => {
+      const res = await apiRequest(
+        `/legacy-case-imports/${encodeURIComponent(String(args.batchId))}/import`,
+        {
+          method: "POST",
+          body: {
+            rowIds: args.chunk,
+            includeWarnings: true,
+            reviewOverrides: args.overrides,
+          } as unknown as RequestInit["body"],
+          timeoutMs: 120000,
+        }
+      );
+      const body = await res.json();
+      return (body?.data ?? body) as ImportResponse;
+    },
+  });
+
+  const reconcileMutation = useMutation({
+    mutationFn: async (batchId: string | number) => {
+      const res = await apiFetchJson(
+        `/legacy-case-imports/${encodeURIComponent(String(batchId))}`
+      );
+      return ((res as any)?.data ?? (res as any)) as BatchStatusResponse;
+    },
+  });
+
+  const startImportSequentially = useCallback(
+    async (rowIds: (string | number)[]) => {
+      if (!uploadData) return;
+      const chunks = chunkArray(rowIds, CHUNK_SIZE);
+      setSelectedRowsForImport(rowIds);
+      setCompletedRows(0);
+      setShowProgressDialog(true);
+      let failed = false;
+      for (const chunk of chunks) {
+        const filteredOverrides: Record<string, ReviewOverride> = {};
+        for (const id of chunk) {
+          const k = String(id);
+          if (reviewOverrides[k]) filteredOverrides[k] = reviewOverrides[k];
+        }
+        try {
+          await importChunkMutation.mutateAsync({
+            batchId: uploadData.batchId,
+            chunk,
+            overrides: filteredOverrides,
+          });
+        } catch {
+          failed = true;
+          break;
+        } finally {
+          setCompletedRows((n) => n + chunk.length);
+        }
+      }
       try {
-        const r = await apiFetchJson<ImportResult>(`/legacy-case-imports/${batchId}`);
-        const data = (r as any)?.data ?? r;
-        setImportProgress(data);
-        if (data.status === "completed" || data.status === "failed") {
-          window.clearInterval(id);
-          setProgressPollInterval(null);
-          setImportResult(data);
-          setShowProgressDialog(false);
+        const final = await reconcileMutation.mutateAsync(uploadData.batchId);
+        setImportResult(final);
+        setShowProgressDialog(false);
+        if (final.status === "completed" || final.status === "partial_failed" || final.status === "failed") {
           setStep(4);
         }
-      } catch {
+      } catch (err) {
+        toastError(toast, err, "Failed to reconcile import status");
+        setShowProgressDialog(false);
+        if (!failed) setStep(4);
       }
-    }, 1200);
-    setProgressPollInterval(id);
-  }, [progressPollInterval]);
-
-  useEffect(() => {
-    return () => {
-      if (progressPollInterval) window.clearInterval(progressPollInterval);
-    };
-  }, [progressPollInterval]);
+    },
+    [uploadData, reviewOverrides, importChunkMutation, reconcileMutation, toast]
+  );
 
   const handleFile = (file: File) => {
     uploadMutation.mutate(file);
@@ -363,20 +465,31 @@ export default function LegacyCaseImportPage() {
   };
 
   const previewCounts = useMemo(() => {
-    const counts = { ready: 0, warning: 0, review: 0, duplicate: 0 };
-    for (const r of previewRows) counts[r.status]++;
+    const counts: Record<UiRowStatus, number> = {
+      ready: 0,
+      warning: 0,
+      review: 0,
+      duplicate: 0,
+      invalid: 0,
+      imported: 0,
+      failed: 0,
+      pending: 0,
+    };
+    for (const r of previewRows) counts[mapLegacyRowStatus(r.rowStatus)]++;
     return counts;
   }, [previewRows]);
 
   const filteredRows = useMemo(() => {
     let rows = previewRows;
-    if (previewTab !== "all") rows = rows.filter((r) => r.status === previewTab);
+    if (previewTab !== "all") rows = rows.filter((r) => mapLegacyRowStatus(r.rowStatus) === previewTab);
     if (previewSearch.trim()) {
       const q = previewSearch.trim().toLowerCase();
-      rows = rows.filter((r) =>
-        r.ourRef.toLowerCase().includes(q) ||
-        r.purchaser.toLowerCase().includes(q) ||
-        r.property.toLowerCase().includes(q)
+      rows = rows.filter(
+        (r) =>
+          String(r.sourceReference ?? "").toLowerCase().includes(q) ||
+          String(r.purchaserSummary ?? "").toLowerCase().includes(q) ||
+          String(r.borrowerSummary ?? "").toLowerCase().includes(q) ||
+          String(r.propertySummary ?? "").toLowerCase().includes(q)
       );
     }
     return rows;
@@ -392,42 +505,86 @@ export default function LegacyCaseImportPage() {
   const importableCount = previewCounts.ready + previewCounts.warning;
 
   const handleStartImport = () => {
-    const indices = previewRows
-      .filter((r) => r.status === "ready" || r.status === "warning")
-      .map((r) => r.rowIndex);
-    startImportMutation.mutate(indices);
+    const ids = previewRows
+      .filter((r) => {
+        const s = mapLegacyRowStatus(r.rowStatus);
+        return s === "ready" || s === "warning";
+      })
+      .map((r) => r.id);
+    if (ids.length === 0) return;
+    void startImportSequentially(ids);
   };
 
   const handleSkipRow = () => {
     if (!selectedRow) return;
-    setPreviewRows((prev) =>
-      prev.map((r) =>
-        r.rowIndex === selectedRow.rowIndex ? { ...r, status: "review" as const } : r
-      )
-    );
-    setSelectedRow(null);
+    setReviewOverrides((prev) => ({
+      ...prev,
+      [String(selectedRow.id)]: { duplicateAction: "skip" },
+    }));
+    setSelectedRowId(null);
   };
 
   const handleImportAnyway = () => {
     if (!selectedRow) return;
-    setPreviewRows((prev) =>
-      prev.map((r) =>
-        r.rowIndex === selectedRow.rowIndex ? { ...r, status: "ready" as const, issues: [] } : r
-      )
-    );
-    setSelectedRow(null);
+    setReviewOverrides((prev) => ({
+      ...prev,
+      [String(selectedRow.id)]: { duplicateAction: "import_anyway" },
+    }));
+    setSelectedRowId(null);
   };
+
+  const updateMappingRow = (key: string, excelHeader: string | null) => {
+    setMappings((prev) =>
+      prev.map((m) => {
+        const k = m.arrayIndex !== undefined ? `${m.target}#${m.arrayIndex}` : m.target;
+        return k === key ? { ...m, mappedExcelHeader: excelHeader } : m;
+      })
+    );
+  };
+
+  const groupedMappings = useMemo(() => {
+    const out: Record<FieldMappingGroup, LocalMappingRow[]> = {
+      "Core Case": [],
+      Purchaser: [],
+      Borrower: [],
+      Property: [],
+      Financing: [],
+      "Existing Dates / Milestones": [],
+      Other: [],
+    };
+    for (const m of mappings) {
+      if (!out[m.group]) out[m.group] = [];
+      out[m.group].push(m);
+    }
+    for (const g of Object.keys(out) as FieldMappingGroup[]) {
+      out[g].sort((a, b) => {
+        const aName = a.label.toLowerCase().includes("name") || a.target.toLowerCase().includes(".name");
+        const bName = b.label.toLowerCase().includes("name") || b.target.toLowerCase().includes(".name");
+        if (aName !== bName) return aName ? -1 : 1;
+        const aIc = a.label.toLowerCase().includes("ic") || a.target.toLowerCase().includes(".ic");
+        const bIc = b.label.toLowerCase().includes("ic") || b.target.toLowerCase().includes(".ic");
+        if (aIc !== bIc) return aIc ? -1 : 1;
+        return 0;
+      });
+    }
+    return out;
+  }, [mappings]);
+
+  const possibleHeaders = useMemo(() => {
+    return Array.from(new Set((mappingResponse?.columns ?? []).map((c: ExcelColumnMapping) => c.excelHeader)));
+  }, [mappingResponse]);
 
   const downloadErrorReport = async () => {
     if (!importResult) return;
     try {
-      const blob = await apiFetchBlob(`/legacy-case-imports/${importResult.batchId}/error-report`, {
-        timeoutMs: 60000,
-      });
+      const blob = await apiFetchBlob(
+        `/legacy-case-imports/${encodeURIComponent(String(importResult.batchId))}/error-report`,
+        { timeoutMs: 60000 }
+      );
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `legacy-import-errors-${importResult.batchId}.xlsx`;
+      a.download = `legacy-import-errors-${String(importResult.batchId)}.xlsx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -439,25 +596,39 @@ export default function LegacyCaseImportPage() {
 
   const retryFailedMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest(`/legacy-case-imports/${importResult!.batchId}/retry-failed`, {
-        method: "POST",
-        timeoutMs: 30000,
-      });
+      if (!importResult) throw new Error("No result");
+      const res = await apiRequest(
+        `/legacy-case-imports/${encodeURIComponent(String(importResult.batchId))}/retry-failed`,
+        { method: "POST", timeoutMs: 30000 }
+      );
       const body = await res.json();
-      return (body?.data ?? body) as ImportResult;
+      return ((body?.data ?? body) as any) as BatchStatusResponse;
     },
     onSuccess: (data) => {
       setImportResult(data);
-      toast({ title: "Retry queued", description: "Failed rows have been re-submitted for processing." });
+      toast({
+        title: "Retry queued",
+        description: "Failed rows have been re-submitted for processing.",
+      });
     },
     onError: (err) => {
       toastError(toast, err, "Retry failed");
     },
   });
 
-  const progressPct = importProgress
-    ? Math.round(((importProgress.created + importProgress.skippedDuplicates + importProgress.needReview + importProgress.failed) / importProgress.total) * 100)
-    : 0;
+  const progressPct =
+    selectedRowsForImport.length > 0
+      ? Math.min(100, Math.round((completedRows / selectedRowsForImport.length) * 100))
+      : 0;
+
+  const summary = importResult?.summary;
+  const resultCreated = summary?.imported ?? 0;
+  const resultSkipped = summary?.duplicates ?? 0;
+  const resultReview = summary?.reviewRequired ?? 0;
+  const resultFailed = summary?.failed ?? 0;
+  const resultTotal = summary?.total ?? resultCreated + resultSkipped + resultReview + resultFailed;
+
+  const selectedRowUiStatus = selectedRow ? mapLegacyRowStatus(selectedRow.rowStatus) : null;
 
   return (
     <div className="space-y-6 pb-24 max-w-6xl mx-auto">
@@ -484,7 +655,7 @@ export default function LegacyCaseImportPage() {
           <div key={n} className="flex items-center">
             <div
               className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold border ${
-                step === n
+                step === (n as WizardStep)
                   ? "bg-amber-500 border-amber-500 text-white"
                   : step > n
                   ? "bg-emerald-50 border-emerald-200 text-emerald-700"
@@ -553,37 +724,72 @@ export default function LegacyCaseImportPage() {
               )}
             </div>
 
-            {uploadData && (
-              <div className="mt-6 grid grid-cols-2 md:grid-cols-5 gap-4">
-                <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
-                  <div className="text-xs text-slate-500 mb-1">File</div>
-                  <div className="text-sm font-medium text-slate-900 truncate" title={uploadData.fileName}>
-                    {uploadData.fileName}
+            {uploadData && mappingResponse && (
+              <>
+                <div className="mt-6 grid grid-cols-2 md:grid-cols-5 gap-4">
+                  <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
+                    <div className="text-xs text-slate-500 mb-1">File</div>
+                    <div
+                      className="text-sm font-medium text-slate-900 truncate"
+                      title={uploadData.fileName}
+                    >
+                      {uploadData.fileName}
+                    </div>
+                  </div>
+                  <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
+                    <div className="text-xs text-slate-500 mb-1">Sheet</div>
+                    <div className="text-sm font-medium text-slate-900">
+                      {uploadData.suggestedSheet}
+                    </div>
+                  </div>
+                  <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
+                    <div className="text-xs text-slate-500 mb-1">Total Rows</div>
+                    <div className="text-sm font-medium text-slate-900">
+                      {uploadData.totalRows.toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
+                    <div className="text-xs text-slate-500 mb-1">Format</div>
+                    <div className="text-sm font-medium text-slate-900">
+                      {uploadData.detectedFormat}
+                    </div>
+                  </div>
+                  <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
+                    <div className="text-xs text-slate-500 mb-1">Saved Mapping</div>
+                    <div className="text-sm font-medium">
+                      {uploadData.savedMappingAvailable ? (
+                        <Badge
+                          variant="secondary"
+                          className="bg-emerald-50 text-emerald-700 border-emerald-200"
+                        >
+                          Available
+                        </Badge>
+                      ) : (
+                        <span className="text-slate-500">—</span>
+                      )}
+                    </div>
                   </div>
                 </div>
-                <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
-                  <div className="text-xs text-slate-500 mb-1">Sheet</div>
-                  <div className="text-sm font-medium text-slate-900">{uploadData.suggestedSheet}</div>
-                </div>
-                <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
-                  <div className="text-xs text-slate-500 mb-1">Total Rows</div>
-                  <div className="text-sm font-medium text-slate-900">{uploadData.totalRows.toLocaleString()}</div>
-                </div>
-                <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
-                  <div className="text-xs text-slate-500 mb-1">Format</div>
-                  <div className="text-sm font-medium text-slate-900">{uploadData.detectedFormat}</div>
-                </div>
-                <div className="p-4 rounded-lg bg-slate-50 border border-slate-200">
-                  <div className="text-xs text-slate-500 mb-1">Saved Mapping</div>
-                  <div className="text-sm font-medium">
-                    {uploadData.savedMappingAvailable ? (
-                      <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 border-emerald-200">Available</Badge>
-                    ) : (
-                      <span className="text-slate-500">—</span>
+                {(mappingResponse.mappingSource === "saved_template" ||
+                  mappingResponse.mappingSource === "auto_detected") && (
+                  <div
+                    className={`mt-4 p-3 rounded-md text-sm ${
+                      mappingResponse.mappingSource === "saved_template"
+                        ? "bg-emerald-50 border border-emerald-200 text-emerald-800"
+                        : "bg-sky-50 border border-sky-200 text-sky-800"
+                    }`}
+                  >
+                    {mappingResponse.mappingSource === "saved_template"
+                      ? "Previous mapping applied — review column mapping below."
+                      : "Known format detected — review column mapping below."}
+                    {mappingResponse.mappingSourceWarning && (
+                      <span className="ml-2 text-amber-700">
+                        Note: {mappingResponse.mappingSourceWarning}
+                      </span>
                     )}
                   </div>
-                </div>
-              </div>
+                )}
+              </>
             )}
 
             <div className="mt-8 flex justify-end">
@@ -605,34 +811,91 @@ export default function LegacyCaseImportPage() {
           <Card>
             <CardContent className="p-6">
               <h3 className="text-sm font-semibold text-slate-900 mb-4">Import Settings</h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 <div>
-                  <label className="text-xs font-medium text-slate-600 mb-1.5 block">Case Type (default)</label>
-                  <Select value={caseType} onValueChange={setCaseType}>
+                  <label className="text-xs font-medium text-slate-600 mb-1.5 block">
+                    Case Type
+                  </label>
+                  <Select
+                    value={caseType}
+                    onValueChange={(v) => setCaseType(v as CaseTypeApiValue | "")}
+                  >
                     <SelectTrigger>
                       <SelectValue placeholder="Select case type" />
                     </SelectTrigger>
                     <SelectContent>
-                      {CASE_TYPES.map((t) => (
-                        <SelectItem key={t} value={t}>{t}</SelectItem>
+                      {(Object.keys(CASE_TYPE_LABELS) as CaseTypeApiValue[]).map((k) => (
+                        <SelectItem key={k} value={k}>
+                          {CASE_TYPE_LABELS[k]}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-600 mb-1.5 block">
+                    Project
+                  </label>
+                  <Select
+                    value={projectId === "" ? "" : String(projectId)}
+                    onValueChange={(v) =>
+                      setProjectId(v === "" ? "" : (Number(v) as number | ""))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select project (optional)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">— None —</SelectItem>
+                      {projects.map((p) => (
+                        <SelectItem key={p.id} value={String(p.id)}>
+                          {p.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-600 mb-1.5 block">
+                    Developer
+                  </label>
+                  <Select
+                    value={developerId === "" ? "" : String(developerId)}
+                    onValueChange={(v) =>
+                      setDeveloperId(v === "" ? "" : (Number(v) as number | ""))
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select developer (optional)" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">— None —</SelectItem>
+                      {developers.map((d) => (
+                        <SelectItem key={d.id} value={String(d.id)}>
+                          {d.name}
+                        </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
                 </div>
                 <div className="md:col-span-2">
-                  <label className="text-xs font-medium text-slate-600 mb-1.5 block">Our Reference Handling</label>
+                  <label className="text-xs font-medium text-slate-600 mb-1.5 block">
+                    Our Reference Handling
+                  </label>
                   <div className="flex gap-6 pt-1">
                     <label className="flex items-center gap-2 cursor-pointer">
                       <Checkbox
-                        checked={refPreserveMode === "preserve"}
-                        onCheckedChange={() => setRefPreserveMode("preserve")}
+                        checked={preserveRef}
+                        onCheckedChange={(v) => setPreserveRef(!!v)}
                       />
-                      <span className="text-sm text-slate-700">Preserve Our Ref from file</span>
+                      <span className="text-sm text-slate-700">
+                        Preserve Our Ref from file (default)
+                      </span>
                     </label>
                     <label className="flex items-center gap-2 cursor-pointer">
                       <Checkbox
-                        checked={refPreserveMode === "override"}
-                        onCheckedChange={() => setRefPreserveMode("override")}
+                        checked={!preserveRef}
+                        onCheckedChange={(v) => setPreserveRef(!v)}
                       />
                       <span className="text-sm text-slate-700">Auto-generate new Our Ref</span>
                     </label>
@@ -642,61 +905,73 @@ export default function LegacyCaseImportPage() {
             </CardContent>
           </Card>
 
-          <Card>
-            <CardContent className="p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-sm font-semibold text-slate-900">Core Data</h3>
-                <Badge variant="outline" className="text-xs">
-                  {mappings.filter((m) => m.group === "core" && m.required && m.mappedColumn).length} / {mappings.filter((m) => m.group === "core" && m.required).length} required mapped
-                </Badge>
-              </div>
-              <div className="space-y-1">
-                {mappings.filter((m) => m.group === "core").map((row) => (
-                  <div
-                    key={row.fieldKey}
-                    className="grid grid-cols-12 gap-4 items-center py-2.5 border-b border-slate-100 last:border-0"
-                  >
-                    <div className="col-span-5 flex items-center gap-2">
-                      <span className="text-sm text-slate-900">{row.fieldLabel}</span>
-                      {row.required && <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4">Required</Badge>}
-                    </div>
-                    <div className="col-span-5">
-                      <Select
-                        value={row.mappedColumn ?? ""}
-                        onValueChange={(v) => {
-                          setMappings((prev) =>
-                            prev.map((m) =>
-                              m.fieldKey === row.fieldKey
-                                ? { ...m, mappedColumn: v || null, autoMapped: false, needsReview: false }
-                                : m
-                            )
-                          );
-                        }}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder="Select Excel column" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__ignore__">— Ignore —</SelectItem>
-                          {uploadData?.columns.map((c) => (
-                            <SelectItem key={c} value={c}>{c}</SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                    <div className="col-span-2 flex justify-end">
-                      {row.autoMapped && row.mappedColumn && (
-                        <Badge variant="secondary" className="text-[10px] bg-sky-50 text-sky-700 border-sky-200">Auto</Badge>
-                      )}
-                      {row.needsReview && row.mappedColumn && (
-                        <Badge variant="secondary" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200">Review</Badge>
-                      )}
-                    </div>
+          {GROUPS_ORDER.filter((g) => DEFAULT_EXPANDED_GROUPS.includes(g)).map((group) => {
+            const rows = groupedMappings[group] ?? [];
+            if (rows.length === 0) return null;
+            const requiredCount = rows.filter((r) => r.required).length;
+            const requiredMapped = rows.filter((r) => r.required && r.mappedExcelHeader).length;
+            return (
+              <Card key={group}>
+                <CardContent className="p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-sm font-semibold text-slate-900">{group}</h3>
+                    {group === "Core Case" && requiredCount > 0 && (
+                      <Badge variant="outline" className="text-xs">
+                        {requiredMapped} / {requiredCount} required mapped
+                      </Badge>
+                    )}
                   </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
+                  <div className="space-y-1">
+                    {rows.map((row) => {
+                      const k =
+                        row.arrayIndex !== undefined
+                          ? `${row.target}#${row.arrayIndex}`
+                          : row.target;
+                      return (
+                        <div
+                          key={k}
+                          className="grid grid-cols-12 gap-4 items-center py-2.5 border-b border-slate-100 last:border-0"
+                        >
+                          <div className="col-span-5 flex items-center gap-2">
+                            <span className="text-sm text-slate-900">{row.label}</span>
+                            {row.required && (
+                              <Badge
+                                variant="destructive"
+                                className="text-[10px] px-1.5 py-0 h-4"
+                              >
+                                Required
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="col-span-5">
+                            <Select
+                              value={row.mappedExcelHeader ?? ""}
+                              onValueChange={(v) =>
+                                updateMappingRow(k, v === "" ? null : v)
+                              }
+                            >
+                              <SelectTrigger>
+                                <SelectValue placeholder="Select Excel column" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="__ignore__">— Ignore —</SelectItem>
+                                {possibleHeaders.map((c) => (
+                                  <SelectItem key={c} value={c}>
+                                    {c}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="col-span-2 flex justify-end" />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
 
           <Card>
             <CardContent className="p-6">
@@ -706,7 +981,7 @@ export default function LegacyCaseImportPage() {
                   onClick={() => setOptionalExpanded(true)}
                   className="text-sm text-amber-600 hover:text-amber-700 font-medium"
                 >
-                  View Optional Fields (Dates / Address / Loan / Other)
+                  View Optional Fields (Existing Dates / Other)
                   <ChevronRight className="w-4 h-4 inline ml-0.5" />
                 </button>
               ) : (
@@ -721,85 +996,76 @@ export default function LegacyCaseImportPage() {
                       Collapse
                     </button>
                   </div>
-
-                  {["dates", "address", "loan", "other"].map((group) => {
-                    const groupRows = mappings.filter((m) => m.group === group);
-                    if (groupRows.length === 0) return null;
-                    const groupLabel = group === "dates" ? "Dates" : group === "address" ? "Address" : group === "loan" ? "Loan" : "Other";
-                    return (
-                      <div key={group} className="pt-2">
-                        <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">{groupLabel}</h4>
-                        <div className="space-y-1">
-                          {groupRows.map((row) => (
-                            <div
-                              key={row.fieldKey}
-                              className="grid grid-cols-12 gap-4 items-center py-2 border-b border-slate-100 last:border-0"
-                            >
-                              <div className="col-span-5">
-                                <span className="text-sm text-slate-700">{row.fieldLabel}</span>
-                              </div>
-                              <div className="col-span-5">
-                                {row.group === "dates" ? (
-                                  <Select
-                                    value={row.mappedColumn ?? ""}
-                                    onValueChange={(v) => {
-                                      setMappings((prev) =>
-                                        prev.map((m) =>
-                                          m.fieldKey === row.fieldKey
-                                            ? { ...m, mappedColumn: v || null, autoMapped: false }
-                                            : m
-                                        )
-                                      );
-                                    }}
-                                  >
-                                    <SelectTrigger>
-                                      <SelectValue placeholder="Map to system date" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      <SelectItem value="__ignore__" className="text-slate-400">Ignore</SelectItem>
-                                      <SelectItem value="__snapshot__">Legacy Snapshot Only</SelectItem>
-                                      {SYSTEM_DATE_TARGETS.slice(0, 5).map((d) => (
-                                        <SelectItem key={d} value={`date:${d}`}>{d}</SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                ) : (
-                                  <Select
-                                    value={row.mappedColumn ?? ""}
-                                    onValueChange={(v) => {
-                                      setMappings((prev) =>
-                                        prev.map((m) =>
-                                          m.fieldKey === row.fieldKey
-                                            ? { ...m, mappedColumn: v || null, autoMapped: false }
-                                            : m
-                                        )
-                                      );
-                                    }}
-                                  >
-                                    <SelectTrigger>
-                                      <SelectValue placeholder="Select mapping" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      <SelectItem value="__ignore__" className="text-slate-400">Ignore</SelectItem>
-                                      <SelectItem value="__snapshot__">Legacy Snapshot Only</SelectItem>
-                                      {uploadData?.columns.map((c) => (
-                                        <SelectItem key={c} value={c}>{c}</SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                )}
-                              </div>
-                              <div className="col-span-2 flex justify-end">
-                                {row.autoMapped && row.mappedColumn && (
-                                  <Badge variant="secondary" className="text-[10px] bg-sky-50 text-sky-700 border-sky-200">Auto</Badge>
-                                )}
-                              </div>
-                            </div>
-                          ))}
+                  {GROUPS_ORDER.filter((g) => !DEFAULT_EXPANDED_GROUPS.includes(g)).map(
+                    (group) => {
+                      const rows = groupedMappings[group] ?? [];
+                      if (rows.length === 0) return null;
+                      const hint = OPTIONAL_GROUP_HINT[group];
+                      const possibleHeaders = Array.from(
+                        new Set(
+                          (mappingResponse?.columns ?? []).map((c) => c.excelHeader)
+                        )
+                      );
+                      return (
+                        <div key={group} className="pt-2">
+                          <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">
+                            {group}
+                            {hint && (
+                              <span className="ml-2 normal-case text-slate-400 font-normal">
+                                — {hint}
+                              </span>
+                            )}
+                          </h4>
+                          <div className="space-y-1">
+                            {rows.map((row) => {
+                              const k =
+                                row.arrayIndex !== undefined
+                                  ? `${row.target}#${row.arrayIndex}`
+                                  : row.target;
+                              return (
+                                <div
+                                  key={k}
+                                  className="grid grid-cols-12 gap-4 items-center py-2 border-b border-slate-100 last:border-0"
+                                >
+                                  <div className="col-span-5">
+                                    <span className="text-sm text-slate-700">
+                                      {row.label}
+                                    </span>
+                                  </div>
+                                  <div className="col-span-5">
+                                    <Select
+                                      value={row.mappedExcelHeader ?? ""}
+                                      onValueChange={(v) =>
+                                        updateMappingRow(k, v === "" ? null : v)
+                                      }
+                                    >
+                                      <SelectTrigger>
+                                        <SelectValue placeholder="Select mapping" />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="__ignore__">
+                                          — Ignore —
+                                        </SelectItem>
+                                        <SelectItem value="__snapshot__">
+                                          Legacy Snapshot Only
+                                        </SelectItem>
+                                        {possibleHeaders.map((c) => (
+                                          <SelectItem key={c} value={c}>
+                                            {c}
+                                          </SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+                                  <div className="col-span-2 flex justify-end" />
+                                </div>
+                              );
+                            })}
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
+                      );
+                    }
+                  )}
                 </div>
               )}
             </CardContent>
@@ -818,7 +1084,8 @@ export default function LegacyCaseImportPage() {
                     Save this mapping for future M LEGASI Master Data files
                   </div>
                   <div className="text-xs text-slate-500 mt-0.5">
-                    Next time you upload a file with matching column headers, Lawcaspro will auto-apply this mapping.
+                    Next time you upload a file with matching column headers, Lawcaspro will
+                    auto-apply this mapping.
                   </div>
                 </div>
               </label>
@@ -835,7 +1102,9 @@ export default function LegacyCaseImportPage() {
               onClick={() => previewMutation.mutate()}
               disabled={previewMutation.isPending}
             >
-              {previewMutation.isPending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+              {previewMutation.isPending && (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              )}
               Continue Preview
               <ChevronRight className="w-4 h-4 ml-1" />
             </Button>
@@ -879,37 +1148,71 @@ export default function LegacyCaseImportPage() {
           <Card>
             <CardContent className="p-4">
               <div className="flex flex-col md:flex-row gap-3 md:items-center md:justify-between mb-4">
-                <Tabs value={previewTab} onValueChange={(v) => { setPreviewTab(v as any); setPreviewPage(1); }}>
+                <Tabs
+                  value={previewTab}
+                  onValueChange={(v) => {
+                    setPreviewTab(v as any);
+                    setPreviewPage(1);
+                  }}
+                >
                   <TabsList className="h-auto p-1 bg-slate-100">
-                    <TabsTrigger value="all" className="text-xs px-3 py-1.5 data-[state=active]:bg-white">
+                    <TabsTrigger
+                      value="all"
+                      className="text-xs px-3 py-1.5 data-[state=active]:bg-white"
+                    >
                       All
-                      <span className="ml-1.5 text-slate-400 text-[10px]">{previewRows.length}</span>
+                      <span className="ml-1.5 text-slate-400 text-[10px]">
+                        {previewRows.length}
+                      </span>
                     </TabsTrigger>
-                    <TabsTrigger value="ready" className="text-xs px-3 py-1.5 data-[state=active]:bg-white">
+                    <TabsTrigger
+                      value="ready"
+                      className="text-xs px-3 py-1.5 data-[state=active]:bg-white"
+                    >
                       Ready
-                      <span className="ml-1.5 text-slate-400 text-[10px]">{previewCounts.ready}</span>
+                      <span className="ml-1.5 text-slate-400 text-[10px]">
+                        {previewCounts.ready}
+                      </span>
                     </TabsTrigger>
-                    <TabsTrigger value="warning" className="text-xs px-3 py-1.5 data-[state=active]:bg-white">
+                    <TabsTrigger
+                      value="warning"
+                      className="text-xs px-3 py-1.5 data-[state=active]:bg-white"
+                    >
                       Warnings
-                      <span className="ml-1.5 text-slate-400 text-[10px]">{previewCounts.warning}</span>
+                      <span className="ml-1.5 text-slate-400 text-[10px]">
+                        {previewCounts.warning}
+                      </span>
                     </TabsTrigger>
-                    <TabsTrigger value="review" className="text-xs px-3 py-1.5 data-[state=active]:bg-white">
+                    <TabsTrigger
+                      value="review"
+                      className="text-xs px-3 py-1.5 data-[state=active]:bg-white"
+                    >
                       Review
-                      <span className="ml-1.5 text-slate-400 text-[10px]">{previewCounts.review}</span>
+                      <span className="ml-1.5 text-slate-400 text-[10px]">
+                        {previewCounts.review}
+                      </span>
                     </TabsTrigger>
-                    <TabsTrigger value="duplicate" className="text-xs px-3 py-1.5 data-[state=active]:bg-white">
+                    <TabsTrigger
+                      value="duplicate"
+                      className="text-xs px-3 py-1.5 data-[state=active]:bg-white"
+                    >
                       Duplicates
-                      <span className="ml-1.5 text-slate-400 text-[10px]">{previewCounts.duplicate}</span>
+                      <span className="ml-1.5 text-slate-400 text-[10px]">
+                        {previewCounts.duplicate}
+                      </span>
                     </TabsTrigger>
                   </TabsList>
                 </Tabs>
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                   <Input
-                    placeholder="Search Our Ref / Purchaser / Property…"
-                    className="pl-9 w-full md:w-72"
+                    placeholder="Search Our Ref / Purchaser / Borrower / Property…"
+                    className="pl-9 w-full md:w-80"
                     value={previewSearch}
-                    onChange={(e) => { setPreviewSearch(e.target.value); setPreviewPage(1); }}
+                    onChange={(e) => {
+                      setPreviewSearch(e.target.value);
+                      setPreviewPage(1);
+                    }}
                   />
                 </div>
               </div>
@@ -921,49 +1224,120 @@ export default function LegacyCaseImportPage() {
                       <th className="text-left px-4 py-3 font-medium w-16">Row</th>
                       <th className="text-left px-4 py-3 font-medium w-36">Our Ref</th>
                       <th className="text-left px-4 py-3 font-medium w-56">Purchaser</th>
+                      <th className="text-left px-4 py-3 font-medium w-56">Borrower</th>
                       <th className="text-left px-4 py-3 font-medium">Property</th>
                       <th className="text-left px-4 py-3 font-medium w-28">Result</th>
                       <th className="text-left px-4 py-3 font-medium w-48">Issue</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {pagedRows.map((row) => (
-                      <tr
-                        key={row.rowIndex}
-                        className="border-b border-slate-100 hover:bg-slate-50/60 cursor-pointer transition-colors"
-                        onClick={() => setSelectedRow(row)}
-                      >
-                        <td className="px-4 py-3 text-slate-500 font-mono text-xs">{row.rowIndex + 1}</td>
-                        <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.ourRef || "—"}</td>
-                        <td className="px-4 py-3 text-slate-800 truncate" title={row.purchaser}>
-                          {row.purchaser || "—"}
-                        </td>
-                        <td className="px-4 py-3 text-slate-800 truncate" title={row.property}>
-                          {row.property || "—"}
-                        </td>
-                        <td className="px-4 py-3">
-                          {row.status === "ready" && (
-                            <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 border-emerald-200">Ready</Badge>
-                          )}
-                          {row.status === "warning" && (
-                            <Badge variant="secondary" className="bg-amber-50 text-amber-700 border-amber-200">Warning</Badge>
-                          )}
-                          {row.status === "review" && (
-                            <Badge variant="secondary" className="bg-orange-50 text-orange-700 border-orange-200">Review</Badge>
-                          )}
-                          {row.status === "duplicate" && (
-                            <Badge variant="outline" className="border-slate-300 text-slate-600">Duplicate</Badge>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 text-xs text-slate-500 truncate" title={row.issues.join("; ")}>
-                          {row.issues[0] || "—"}
-                          {row.issues.length > 1 && ` +${row.issues.length - 1}`}
-                        </td>
-                      </tr>
-                    ))}
+                    {pagedRows.map((row) => {
+                      const s = mapLegacyRowStatus(row.rowStatus);
+                      return (
+                        <tr
+                          key={String(row.id)}
+                          className="border-b border-slate-100 hover:bg-slate-50/60 cursor-pointer transition-colors"
+                          onClick={() => setSelectedRowId(row.id)}
+                        >
+                          <td className="px-4 py-3 text-slate-500 font-mono text-xs">
+                            {row.sourceRowNo ?? "—"}
+                          </td>
+                          <td className="px-4 py-3 font-mono text-xs text-slate-900">
+                            {row.sourceReference || "—"}
+                          </td>
+                          <td
+                            className="px-4 py-3 text-slate-800 truncate"
+                            title={row.purchaserSummary ?? undefined}
+                          >
+                            {row.purchaserSummary || "—"}
+                          </td>
+                          <td
+                            className="px-4 py-3 text-slate-800 truncate"
+                            title={row.borrowerSummary ?? undefined}
+                          >
+                            {row.borrowerSummary || "—"}
+                          </td>
+                          <td
+                            className="px-4 py-3 text-slate-800 truncate"
+                            title={row.propertySummary ?? undefined}
+                          >
+                            {row.propertySummary || "—"}
+                          </td>
+                          <td className="px-4 py-3">
+                            {s === "ready" && (
+                              <Badge
+                                variant="secondary"
+                                className="bg-emerald-50 text-emerald-700 border-emerald-200"
+                              >
+                                Ready
+                              </Badge>
+                            )}
+                            {s === "warning" && (
+                              <Badge
+                                variant="secondary"
+                                className="bg-amber-50 text-amber-700 border-amber-200"
+                              >
+                                Warning
+                              </Badge>
+                            )}
+                            {(s === "review" || s === "invalid") && (
+                              <Badge
+                                variant="secondary"
+                                className="bg-orange-50 text-orange-700 border-orange-200"
+                              >
+                                Review
+                              </Badge>
+                            )}
+                            {s === "duplicate" && (
+                              <Badge variant="outline" className="border-slate-300 text-slate-600">
+                                Duplicate
+                              </Badge>
+                            )}
+                            {s === "imported" && (
+                              <Badge
+                                variant="secondary"
+                                className="bg-emerald-50 text-emerald-700 border-emerald-200"
+                              >
+                                Imported
+                              </Badge>
+                            )}
+                            {s === "failed" && (
+                              <Badge
+                                variant="secondary"
+                                className="bg-rose-50 text-rose-700 border-rose-200"
+                              >
+                                Failed
+                              </Badge>
+                            )}
+                            {s === "pending" && (
+                              <Badge variant="outline" className="border-slate-300 text-slate-600">
+                                Pending
+                              </Badge>
+                            )}
+                          </td>
+                          <td
+                            className="px-4 py-3 text-xs text-slate-500 truncate"
+                            title={(row.warnings ?? [])
+                              .concat(row.errors ?? [])
+                              .map((i: { message: string }) => i.message)
+                              .join("; ")}
+                          >
+                            {(() => {
+                              const issues = (row.warnings ?? []).concat(row.errors ?? []);
+                              return (
+                                <>
+                                  {issues[0]?.message || "—"}
+                                  {issues.length > 1 && ` +${issues.length - 1}`}
+                                </>
+                              );
+                            })()}
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {pagedRows.length === 0 && (
                       <tr>
-                        <td colSpan={6} className="px-4 py-16 text-center text-sm text-slate-400">
+                        <td colSpan={7} className="px-4 py-16 text-center text-sm text-slate-400">
                           No rows match current filters
                         </td>
                       </tr>
@@ -974,8 +1348,17 @@ export default function LegacyCaseImportPage() {
 
               <div className="flex items-center justify-between mt-4 pt-2">
                 <div className="text-xs text-slate-500">
-                  Showing {filteredRows.length === 0 ? 0 : (previewPage - 1) * PAGE_SIZE + 1}–
-                  {Math.min(previewPage * PAGE_SIZE, filteredRows.length)} of {filteredRows.length}
+                  Showing{" "}
+                  {filteredRows.length === 0
+                    ? 0
+                    : (previewPage - 1) * PAGE_SIZE + 1}
+                  –{Math.min(previewPage * PAGE_SIZE, filteredRows.length)} of{" "}
+                  {filteredRows.length}
+                  {previewTotal && previewTotal !== filteredRows.length && (
+                    <span className="ml-2 text-slate-400">
+                      (batch total: {previewTotal})
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <Button
@@ -1013,9 +1396,11 @@ export default function LegacyCaseImportPage() {
                   <Button
                     className="bg-amber-500 hover:bg-amber-600 text-white"
                     onClick={handleStartImport}
-                    disabled={importableCount === 0 || startImportMutation.isPending}
+                    disabled={importableCount === 0 || showProgressDialog}
                   >
-                    {startImportMutation.isPending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                    {showProgressDialog && (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    )}
                     Import {importableCount} {importableCount === 1 ? "Case" : "Cases"}
                   </Button>
                 </div>
@@ -1036,28 +1421,28 @@ export default function LegacyCaseImportPage() {
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                 <span className="text-xs font-medium text-emerald-700">Created</span>
               </div>
-              <div className="text-2xl font-bold text-emerald-800">{importResult.created}</div>
+              <div className="text-2xl font-bold text-emerald-800">{resultCreated}</div>
             </div>
             <div className="p-4 rounded-lg border bg-slate-50 border-slate-200">
               <div className="flex items-center gap-2 mb-1">
                 <XCircle className="w-4 h-4 text-slate-500" />
                 <span className="text-xs font-medium text-slate-600">Skipped (Duplicates)</span>
               </div>
-              <div className="text-2xl font-bold text-slate-800">{importResult.skippedDuplicates}</div>
+              <div className="text-2xl font-bold text-slate-800">{resultSkipped}</div>
             </div>
             <div className="p-4 rounded-lg border bg-orange-50/60 border-orange-100">
               <div className="flex items-center gap-2 mb-1">
                 <AlertCircle className="w-4 h-4 text-orange-600" />
                 <span className="text-xs font-medium text-orange-700">Need Review</span>
               </div>
-              <div className="text-2xl font-bold text-orange-800">{importResult.needReview}</div>
+              <div className="text-2xl font-bold text-orange-800">{resultReview}</div>
             </div>
             <div className="p-4 rounded-lg border bg-rose-50/60 border-rose-100">
               <div className="flex items-center gap-2 mb-1">
                 <AlertTriangle className="w-4 h-4 text-rose-600" />
                 <span className="text-xs font-medium text-rose-700">Failed</span>
               </div>
-              <div className="text-2xl font-bold text-rose-800">{importResult.failed}</div>
+              <div className="text-2xl font-bold text-rose-800">{resultFailed}</div>
             </div>
           </div>
 
@@ -1065,17 +1450,24 @@ export default function LegacyCaseImportPage() {
             <CardContent className="p-6">
               <h3 className="text-sm font-semibold text-slate-900 mb-4">Import Complete</h3>
               <p className="text-sm text-slate-600 mb-6">
-                {importResult.created > 0
-                  ? `${importResult.created.toLocaleString()} new case${importResult.created === 1 ? "" : "s"} created successfully. `
+                {resultCreated > 0
+                  ? `${resultCreated.toLocaleString()} new case${
+                      resultCreated === 1 ? "" : "s"
+                    } created successfully. `
                   : ""}
-                {importResult.skippedDuplicates > 0
-                  ? `${importResult.skippedDuplicates} duplicate${importResult.skippedDuplicates === 1 ? "" : "s"} skipped. `
+                {resultSkipped > 0
+                  ? `${resultSkipped} duplicate${resultSkipped === 1 ? "" : "s"} skipped. `
                   : ""}
-                {importResult.needReview > 0
-                  ? `${importResult.needReview} row${importResult.needReview === 1 ? "" : "s"} need manual review. `
+                {resultReview > 0
+                  ? `${resultReview} row${resultReview === 1 ? "" : "s"} need manual review. `
                   : ""}
-                {importResult.failed > 0
-                  ? `${importResult.failed} row${importResult.failed === 1 ? "" : "s"} failed — download the error report below and retry.`
+                {resultFailed > 0
+                  ? `${resultFailed} row${
+                      resultFailed === 1 ? "" : "s"
+                    } failed — download the error report below and retry.`
+                  : ""}
+                {resultCreated === 0 && resultSkipped === 0 && resultReview === 0 && resultFailed === 0
+                  ? `${resultTotal.toLocaleString()} total rows processed.`
                   : ""}
               </p>
               <div className="flex flex-wrap gap-2">
@@ -1085,19 +1477,21 @@ export default function LegacyCaseImportPage() {
                     <ChevronRight className="w-4 h-4 ml-1" />
                   </Button>
                 </Link>
-                {importResult.failed > 0 && (
+                {resultFailed > 0 && (
                   <Button variant="outline" onClick={downloadErrorReport}>
                     <Download className="w-4 h-4 mr-2" />
                     Download Error Rows
                   </Button>
                 )}
-                {importResult.failed > 0 && (
+                {resultFailed > 0 && (
                   <Button
                     variant="secondary"
                     onClick={() => retryFailedMutation.mutate()}
                     disabled={retryFailedMutation.isPending}
                   >
-                    {retryFailedMutation.isPending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                    {retryFailedMutation.isPending && (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    )}
                     <Plus className="w-4 h-4 mr-2" />
                     Retry Failed Rows
                   </Button>
@@ -1110,6 +1504,11 @@ export default function LegacyCaseImportPage() {
             <CardContent className="p-6">
               <h3 className="text-sm font-semibold text-slate-900 mb-4">Recent Imports</h3>
               <div className="overflow-x-auto">
+                {recentImportsQuery.isError && (
+                  <div className="mb-3 p-3 rounded-md bg-rose-50 border border-rose-200 text-xs text-rose-800">
+                    Failed to load recent imports.
+                  </div>
+                )}
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="text-xs text-slate-500 border-b border-slate-200">
@@ -1124,19 +1523,30 @@ export default function LegacyCaseImportPage() {
                   <tbody>
                     {(recentImportsQuery.data ?? []).map((imp) => (
                       <tr
-                        key={imp.batchId}
+                        key={String(imp.batchId)}
                         className="border-b border-slate-100 hover:bg-slate-50/60 cursor-pointer"
                       >
-                        <td className="py-3 px-2 text-slate-900 truncate max-w-[240px]" title={imp.fileName}>
+                        <td
+                          className="py-3 px-2 text-slate-900 truncate max-w-[240px]"
+                          title={imp.fileName}
+                        >
                           <div className="flex items-center gap-2">
                             <FileSpreadsheet className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                             <span className="truncate">{imp.fileName}</span>
                           </div>
                         </td>
-                        <td className="py-3 px-2 text-slate-600 text-xs">{imp.importedAt || "—"}</td>
-                        <td className="py-3 px-2 text-slate-600 text-xs">{imp.importedBy || "—"}</td>
-                        <td className="py-3 px-2 text-right font-medium text-emerald-700">{imp.created}</td>
-                        <td className="py-3 px-2 text-right font-medium text-rose-700">{imp.failed || 0}</td>
+                        <td className="py-3 px-2 text-slate-600 text-xs">
+                          {imp.importedAt || "—"}
+                        </td>
+                        <td className="py-3 px-2 text-slate-600 text-xs">
+                          {imp.importedBy || "—"}
+                        </td>
+                        <td className="py-3 px-2 text-right font-medium text-emerald-700">
+                          {imp.created}
+                        </td>
+                        <td className="py-3 px-2 text-right font-medium text-rose-700">
+                          {imp.failed || 0}
+                        </td>
                         <td className="py-3 px-2">
                           <Badge
                             variant="secondary"
@@ -1153,13 +1563,30 @@ export default function LegacyCaseImportPage() {
                         </td>
                       </tr>
                     ))}
-                    {(recentImportsQuery.data ?? []).length === 0 && (
-                      <tr>
-                        <td colSpan={6} className="py-8 text-center text-xs text-slate-400">
-                          No recent imports
-                        </td>
-                      </tr>
-                    )}
+                    {(recentImportsQuery.data ?? []).length === 0 &&
+                      !recentImportsQuery.isError &&
+                      !recentImportsQuery.isFetching && (
+                        <tr>
+                          <td
+                            colSpan={6}
+                            className="py-8 text-center text-xs text-slate-400"
+                          >
+                            No recent imports
+                          </td>
+                        </tr>
+                      )}
+                    {recentImportsQuery.isFetching &&
+                      (recentImportsQuery.data ?? []).length === 0 && (
+                        <tr>
+                          <td
+                            colSpan={6}
+                            className="py-8 text-center text-xs text-slate-400"
+                          >
+                            <Loader2 className="w-4 h-4 inline animate-spin mr-2" />
+                            Loading recent imports…
+                          </td>
+                        </tr>
+                      )}
                   </tbody>
                 </table>
               </div>
@@ -1168,68 +1595,120 @@ export default function LegacyCaseImportPage() {
         </div>
       )}
 
-      <Dialog open={!!selectedRow} onOpenChange={(o) => !o && setSelectedRow(null)}>
+      <Dialog open={!!selectedRow} onOpenChange={(o) => !o && setSelectedRowId(null)}>
         <DialogContent className="max-w-3xl">
-          {selectedRow && (
+          {selectedRow && selectedRowUiStatus && (
             <>
               <DialogHeader>
                 <DialogTitle className="flex items-center gap-2">
-                  Row {selectedRow.rowIndex + 1} · {selectedRow.ourRef || "No Ref"}
-                  {selectedRow.status === "ready" && <Badge variant="secondary" className="bg-emerald-50 text-emerald-700 border-emerald-200">Ready</Badge>}
-                  {selectedRow.status === "warning" && <Badge variant="secondary" className="bg-amber-50 text-amber-700 border-amber-200">Warning</Badge>}
-                  {selectedRow.status === "review" && <Badge variant="secondary" className="bg-orange-50 text-orange-700 border-orange-200">Needs Review</Badge>}
-                  {selectedRow.status === "duplicate" && <Badge variant="outline" className="border-slate-300 text-slate-600">Duplicate</Badge>}
+                  Row {selectedRow.sourceRowNo ?? "?"} ·{" "}
+                  {selectedRow.sourceReference || "No Ref"}
+                  {selectedRowUiStatus === "ready" && (
+                    <Badge
+                      variant="secondary"
+                      className="bg-emerald-50 text-emerald-700 border-emerald-200"
+                    >
+                      Ready
+                    </Badge>
+                  )}
+                  {selectedRowUiStatus === "warning" && (
+                    <Badge
+                      variant="secondary"
+                      className="bg-amber-50 text-amber-700 border-amber-200"
+                    >
+                      Warning
+                    </Badge>
+                  )}
+                  {selectedRowUiStatus === "review" && (
+                    <Badge
+                      variant="secondary"
+                      className="bg-orange-50 text-orange-700 border-orange-200"
+                    >
+                      Needs Review
+                    </Badge>
+                  )}
+                  {selectedRowUiStatus === "duplicate" && (
+                    <Badge variant="outline" className="border-slate-300 text-slate-600">
+                      Duplicate
+                    </Badge>
+                  )}
                 </DialogTitle>
-                <DialogDescription>
-                  Review row details and decide next action
-                </DialogDescription>
+                <DialogDescription>Review row details and decide next action</DialogDescription>
               </DialogHeader>
 
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
                   <div className="text-xs text-slate-500 mb-1">Our Ref</div>
-                  <div className="font-mono text-slate-900">{selectedRow.ourRef || "—"}</div>
+                  <div className="font-mono text-slate-900">
+                    {selectedRow.sourceReference || "—"}
+                  </div>
                 </div>
                 <div>
                   <div className="text-xs text-slate-500 mb-1">Purchaser</div>
-                  <div className="text-slate-900">{selectedRow.purchaser || "—"}</div>
+                  <div className="text-slate-900">{selectedRow.purchaserSummary || "—"}</div>
                 </div>
-                <div className="col-span-2">
-                  <div className="text-xs text-slate-500 mb-1">Property</div>
-                  <div className="text-slate-900">{selectedRow.property || "—"}</div>
+                <div>
+                  <div className="text-xs text-slate-500 mb-1">Borrower</div>
+                  <div className="text-slate-900">{selectedRow.borrowerSummary || "—"}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-slate-500 mb-1">Property Summary</div>
+                  <div className="text-slate-900">{selectedRow.propertySummary || "—"}</div>
                 </div>
               </div>
 
-              {selectedRow.issues.length > 0 && (
+              {((selectedRow.warnings?.length ?? 0) + (selectedRow.errors?.length ?? 0)) > 0 && (
                 <div className="p-3 rounded-md bg-amber-50 border border-amber-200">
                   <div className="text-xs font-semibold text-amber-800 mb-2 flex items-center gap-1.5">
                     <AlertTriangle className="w-3.5 h-3.5" />
                     Issues
                   </div>
                   <ul className="text-xs text-amber-900 space-y-1">
-                    {selectedRow.issues.map((i, idx) => (
-                      <li key={idx}>· {i}</li>
-                    ))}
+                    {(selectedRow.warnings ?? [])
+                      .concat(selectedRow.errors ?? [])
+                      .map((i: { message: string }, idx: number) => (
+                        <li key={idx}>· {i.message}</li>
+                      ))}
                   </ul>
                 </div>
               )}
 
               {selectedRow.duplicateCaseId && (
                 <div className="p-4 rounded-md border border-slate-200 bg-slate-50">
-                  <div className="text-xs font-semibold text-slate-700 mb-3">Possible Duplicate — Excel vs Existing Case</div>
+                  <div className="text-xs font-semibold text-slate-700 mb-3">
+                    Possible Duplicate — Excel vs Existing Case
+                  </div>
                   <div className="grid grid-cols-2 gap-4 text-xs">
                     <div>
                       <div className="text-slate-500 mb-1">Excel Row</div>
                       <div className="p-3 rounded border border-slate-200 bg-white space-y-1">
-                        <div><span className="text-slate-500">Our Ref:</span> <span className="font-mono">{selectedRow.ourRef || "—"}</span></div>
-                        <div><span className="text-slate-500">Purchaser:</span> {selectedRow.purchaser || "—"}</div>
+                        <div>
+                          <span className="text-slate-500">Our Ref:</span>{" "}
+                          <span className="font-mono">
+                            {selectedRow.sourceReference || "—"}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-slate-500">Purchaser:</span>{" "}
+                          {selectedRow.purchaserSummary || "—"}
+                        </div>
                       </div>
                     </div>
                     <div>
-                      <div className="text-slate-500 mb-1">Lawcaspro Case #{selectedRow.duplicateCaseId}</div>
+                      <div className="text-slate-500 mb-1">
+                        Lawcaspro Case #{selectedRow.duplicateCaseId}
+                      </div>
                       <div className="p-3 rounded border border-slate-200 bg-white space-y-1">
-                        <div><span className="text-slate-500">Our Ref:</span> <span className="font-mono">—</span></div>
-                        <div><span className="text-slate-500">Purchaser:</span> —</div>
+                        <div>
+                          <span className="text-slate-500">Case ID:</span>{" "}
+                          <span className="font-mono">{selectedRow.duplicateCaseId}</span>
+                        </div>
+                        {selectedRow.duplicateType && (
+                          <div>
+                            <span className="text-slate-500">Match type:</span>{" "}
+                            {selectedRow.duplicateType}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1242,13 +1721,16 @@ export default function LegacyCaseImportPage() {
                   Skip
                 </Button>
                 {selectedRow.duplicateCaseId && (
-                  <Link href={`/app/cases/${selectedRow.duplicateCaseId}`}>
-                    <Button variant="secondary">
-                      Open Existing Case
-                    </Button>
+                  <Link
+                    href={`/app/cases/${encodeURIComponent(String(selectedRow.duplicateCaseId))}`}
+                  >
+                    <Button variant="secondary">Open Existing Case</Button>
                   </Link>
                 )}
-                <Button className="bg-amber-500 hover:bg-amber-600 text-white" onClick={handleImportAnyway}>
+                <Button
+                  className="bg-amber-500 hover:bg-amber-600 text-white"
+                  onClick={handleImportAnyway}
+                >
                   Import Anyway
                 </Button>
               </DialogFooter>
@@ -1265,37 +1747,37 @@ export default function LegacyCaseImportPage() {
               Please keep this tab open while we import your data.
             </DialogDescription>
           </DialogHeader>
-          {importProgress && (
-            <div className="space-y-4">
-              <div>
-                <div className="flex justify-between text-xs text-slate-600 mb-2">
-                  <span>
-                    {importProgress.created + importProgress.skippedDuplicates + importProgress.needReview + importProgress.failed} / {importProgress.total} processed
-                  </span>
-                  <span>{progressPct}%</span>
-                </div>
-                <Progress value={progressPct} />
+          <div className="space-y-4">
+            <div>
+              <div className="flex justify-between text-xs text-slate-600 mb-2">
+                <span>
+                  {completedRows} / {selectedRowsForImport.length} processed
+                </span>
+                <span>{progressPct}%</span>
               </div>
-              <div className="grid grid-cols-4 gap-2 text-center text-xs">
-                <div className="p-2 rounded bg-emerald-50 text-emerald-700">
-                  <div className="font-bold text-base">{importProgress.created}</div>
-                  Created
+              <Progress value={progressPct} />
+            </div>
+            <div className="grid grid-cols-4 gap-2 text-center text-xs">
+              <div className="p-2 rounded bg-slate-50 text-slate-700">
+                <div className="font-bold text-base">{completedRows}</div>
+                Sent
+              </div>
+              <div className="p-2 rounded bg-slate-50 text-slate-700">
+                <div className="font-bold text-base">
+                  {Math.max(0, selectedRowsForImport.length - completedRows)}
                 </div>
-                <div className="p-2 rounded bg-slate-50 text-slate-700">
-                  <div className="font-bold text-base">{importProgress.skippedDuplicates}</div>
-                  Skipped
-                </div>
-                <div className="p-2 rounded bg-orange-50 text-orange-700">
-                  <div className="font-bold text-base">{importProgress.needReview}</div>
-                  Review
-                </div>
-                <div className="p-2 rounded bg-rose-50 text-rose-700">
-                  <div className="font-bold text-base">{importProgress.failed}</div>
-                  Failed
-                </div>
+                Remaining
+              </div>
+              <div className="p-2 rounded bg-emerald-50 text-emerald-700">
+                <div className="font-bold text-base">{resultCreated}</div>
+                Created
+              </div>
+              <div className="p-2 rounded bg-rose-50 text-rose-700">
+                <div className="font-bold text-base">{resultFailed}</div>
+                Failed
               </div>
             </div>
-          )}
+          </div>
         </DialogContent>
       </Dialog>
     </div>

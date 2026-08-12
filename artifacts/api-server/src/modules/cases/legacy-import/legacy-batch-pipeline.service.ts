@@ -1,4 +1,4 @@
-import { and, eq, isNotNull, or } from "drizzle-orm";
+import { and, eq, isNotNull, or, inArray } from "drizzle-orm";
 import {
   db,
   legacyCaseImportBatchesTable,
@@ -135,6 +135,128 @@ export type RunImportSummary = {
 };
 
 export type RetryOptions = ImportOptions;
+
+export type BatchStatusSummary = {
+  total: number;
+  imported: number;
+  failed: number;
+  duplicates: number;
+  reviewRequired: number;
+  remaining: number;
+};
+
+export type RefreshBatchStatusResult = {
+  batchId: number;
+  status: "importing" | "partial_failed" | "failed" | "completed";
+  summary: BatchStatusSummary;
+};
+
+export async function writeLegacyImportAuditInTx(
+  tx: DbConnLike,
+  params: {
+    firmId: number;
+    actorId: number;
+    actorType: string;
+    action: string;
+    entityType: string;
+    entityId: number;
+    detail: string;
+  },
+): Promise<void> {
+  await tx.insert(auditLogsTable).values({
+    firmId: params.firmId,
+    actorId: params.actorId,
+    actorType: params.actorType,
+    action: params.action,
+    entityType: params.entityType,
+    entityId: params.entityId,
+    detail: params.detail,
+    ipAddress: null,
+    userAgent: null,
+  });
+}
+
+export async function refreshLegacyImportBatchStatus(
+  dbConn: DbConnLike,
+  batchId: number,
+  firmId: number,
+): Promise<RefreshBatchStatusResult> {
+  const statusRows = await dbConn
+    .select({
+      rowStatus: legacyCaseImportRowsTable.rowStatus,
+      count: dbConn.$count(legacyCaseImportRowsTable.id),
+    })
+    .from(legacyCaseImportRowsTable)
+    .where(
+      and(
+        eq(legacyCaseImportRowsTable.batchId, batchId),
+        eq(legacyCaseImportRowsTable.firmId, firmId),
+      ),
+    )
+    .groupBy(legacyCaseImportRowsTable.rowStatus);
+
+  const counts: Record<string, number> = {};
+  for (const sr of statusRows) {
+    counts[String(sr.rowStatus)] = Number(sr.count);
+  }
+
+  const total = statusRows.reduce((acc, sr) => acc + Number(sr.count), 0);
+  const imported = counts["imported"] ?? 0;
+  const failed = counts["failed"] ?? 0;
+  const duplicates = counts["HARD_DUPLICATE"] ?? 0;
+  const reviewRequired = counts["REVIEW_REQUIRED"] ?? 0;
+
+  const readyCount = counts["READY"] ?? 0;
+  const warningCount = counts["WARNING"] ?? 0;
+  const reviewCountForRemaining = counts["REVIEW_REQUIRED"] ?? 0;
+  const remaining = readyCount + warningCount + reviewCountForRemaining > 0
+    ? readyCount + warningCount + reviewCountForRemaining
+    : 0;
+
+  let status: RefreshBatchStatusResult["status"];
+  if (remaining > 0) {
+    status = "importing";
+  } else if (failed > 0 && imported > 0) {
+    status = "partial_failed";
+  } else if (failed > 0) {
+    status = "failed";
+  } else {
+    status = "completed";
+  }
+
+  const updatePayload: Partial<typeof legacyCaseImportBatchesTable.$inferInsert> = {
+    status,
+    importedRows: imported,
+    failedRows: failed,
+    updatedAt: new Date(),
+  };
+  if (status !== "importing") {
+    updatePayload.completedAt = new Date();
+  }
+
+  await dbConn
+    .update(legacyCaseImportBatchesTable)
+    .set(updatePayload)
+    .where(
+      and(
+        eq(legacyCaseImportBatchesTable.id, batchId),
+        eq(legacyCaseImportBatchesTable.firmId, firmId),
+      ),
+    );
+
+  return {
+    batchId,
+    status,
+    summary: {
+      total,
+      imported,
+      failed,
+      duplicates,
+      reviewRequired,
+      remaining,
+    },
+  };
+}
 
 export async function validateFixedValues(
   r: DbConnLike,
@@ -705,7 +827,7 @@ export async function runDryRun(
   };
 }
 
-async function writeAudit(
+async function writeAuditBestEffort(
   r: DbConnLike,
   params: {
     firmId: number;
@@ -741,7 +863,7 @@ export async function runImport(
   firmId: number,
   actorUserId: number,
   opts: ImportOptions = {},
-): Promise<RunImportSummary> {
+): Promise<RefreshBatchStatusResult> {
   const rowIds = opts.rowIds ?? null;
   const includeWarnings = opts.includeWarnings ?? false;
   const reviewOverrides = opts.reviewOverrides ?? {};
@@ -791,138 +913,139 @@ export async function runImport(
     }
   }
 
-  const requested = eligibleRows.length;
-  let created = 0;
-  let alreadyImported = 0;
-  let failed = 0;
+  for (const row of eligibleRows) {
+    const rowId = row.id;
 
-  const CHUNK_SIZE = 4;
-
-  for (let i = 0; i < eligibleRows.length; i += CHUNK_SIZE) {
-    const chunk = eligibleRows.slice(i, i + CHUNK_SIZE);
-    for (const row of chunk) {
-      const rowId = row.id;
-
-      const preCheck = await dbConn
-        .select()
-        .from(legacyCaseImportRowsTable)
-        .where(
-          and(
-            eq(legacyCaseImportRowsTable.firmId, firmId),
-            or(
-              eq(legacyCaseImportRowsTable.idempotencyKey, row.idempotencyKey),
-              and(
-                eq(legacyCaseImportRowsTable.batchId, row.batchId),
-                eq(legacyCaseImportRowsTable.sourceRowNo, row.sourceRowNo),
-                isNotNull(legacyCaseImportRowsTable.createdCaseId),
-              ),
+    const preCheck = await dbConn
+      .select()
+      .from(legacyCaseImportRowsTable)
+      .where(
+        and(
+          eq(legacyCaseImportRowsTable.firmId, firmId),
+          or(
+            eq(legacyCaseImportRowsTable.idempotencyKey, row.idempotencyKey),
+            and(
+              eq(legacyCaseImportRowsTable.batchId, row.batchId),
+              eq(legacyCaseImportRowsTable.sourceRowNo, row.sourceRowNo),
+              isNotNull(legacyCaseImportRowsTable.createdCaseId),
             ),
           ),
-        )
-        .limit(1);
+        ),
+      )
+      .limit(1);
 
-      if (preCheck.length > 0 && preCheck[0].createdCaseId !== null) {
-        alreadyImported++;
-        continue;
-      }
+    if (preCheck.length > 0 && preCheck[0].createdCaseId !== null) {
+      continue;
+    }
 
-      const mappedPayload = row.mappedPayloadJson as Record<string, unknown> | null;
-      if (!mappedPayload || typeof mappedPayload !== "object") {
-        failed++;
-        await dbConn
-          .update(legacyCaseImportRowsTable)
-          .set({
-            rowStatus: "failed",
-            errorCode: "NO_MAPPED_PAYLOAD",
-            errorMessage: "Mapped payload missing. Run dry-run first.",
-          })
-          .where(eq(legacyCaseImportRowsTable.id, rowId));
-        continue;
-      }
+    const mappedPayload = row.mappedPayloadJson as Record<string, unknown> | null;
+    if (!mappedPayload || typeof mappedPayload !== "object") {
+      await dbConn
+        .update(legacyCaseImportRowsTable)
+        .set({
+          rowStatus: "failed",
+          errorCode: "NO_MAPPED_PAYLOAD",
+          errorMessage: "Mapped payload missing. Run dry-run first.",
+        })
+        .where(
+          and(
+            eq(legacyCaseImportRowsTable.id, rowId),
+            eq(legacyCaseImportRowsTable.firmId, firmId),
+          ),
+        );
+      await writeAuditBestEffort(dbConn, {
+        firmId,
+        actorId: actorUserId,
+        actorType: "firm_user",
+        action: "cases.legacy_import.row_failed",
+        entityType: "legacy_case_import_row",
+        entityId: rowId,
+        detail: `batchId=${batchId} rowId=${rowId} errorCode=NO_MAPPED_PAYLOAD error=Mapped payload missing. Run dry-run first.`,
+      });
+      continue;
+    }
 
-      const caseData = (mappedPayload.case ?? {}) as Record<string, unknown>;
-      const purchasers = (mappedPayload.purchasers ?? []) as CanonicalPurchaserInput[];
-      const borrowers = (mappedPayload.borrowers ?? []) as CanonicalBorrowerInput[];
-      const propertyData = (mappedPayload.property ?? {}) as Record<string, unknown>;
-      const financingData = (mappedPayload.financing ?? {}) as Record<string, unknown>;
-      const keyDates = (mappedPayload.keyDates ?? {}) as Record<string, string | null>;
+    const caseData = (mappedPayload.case ?? {}) as Record<string, unknown>;
+    const purchasers = (mappedPayload.purchasers ?? []) as CanonicalPurchaserInput[];
+    const borrowers = (mappedPayload.borrowers ?? []) as CanonicalBorrowerInput[];
+    const propertyData = (mappedPayload.property ?? {}) as Record<string, unknown>;
+    const financingData = (mappedPayload.financing ?? {}) as Record<string, unknown>;
+    const keyDates = (mappedPayload.keyDates ?? {}) as Record<string, string | null>;
 
-      const projectId = typeof caseData.projectId === "number" ? caseData.projectId : null;
-      const developerId = typeof caseData.developerId === "number" ? caseData.developerId : null;
+    const projectId = typeof caseData.projectId === "number" ? caseData.projectId : null;
+    const developerId = typeof caseData.developerId === "number" ? caseData.developerId : null;
+    const preserveRef =
+      typeof (mappedPayload.fixedValues as Record<string, unknown> | undefined)?.preserveRef === "boolean"
+        ? ((mappedPayload.fixedValues as Record<string, unknown>).preserveRef as boolean)
+        : true;
 
-      const createInput: CanonicalCaseCreateInput = {
-        caseType: "developer_sales",
-        projectId: projectId ?? null,
-        developerId: developerId ?? null,
-        referenceNo: typeof caseData.referenceNo === "string" ? caseData.referenceNo : null,
-        purchaseMode: "cash",
-        titleType: typeof caseData.titleType === "string" ? caseData.titleType : null,
-        assignedLawyerId: typeof caseData.assignedLawyerId === "number" ? caseData.assignedLawyerId : null,
-        assignedClerkId: typeof caseData.assignedClerkId === "number" ? caseData.assignedClerkId : null,
-        purchasers,
-        borrowerMode: borrowers.length > 0 ? "separate" : "none",
-        loanPartyType: "1st_party",
-        borrowers,
-        parcelNo: typeof caseData.parcelNo === "string" ? caseData.parcelNo : null,
-        propertyAddress: typeof propertyData.propertyAddress === "string" ? propertyData.propertyAddress : null,
-        propertyDetails: propertyData,
-        loanDetails: financingData,
-        spaPrice: typeof caseData.spaPrice === "number" ? caseData.spaPrice : null,
-        apdlPrice: typeof caseData.apdlPrice === "number" ? caseData.apdlPrice : null,
-        developerDiscount: typeof caseData.developerDiscount === "number" ? caseData.developerDiscount : null,
-        bumiputraDiscount: typeof caseData.bumiputraDiscount === "number" ? caseData.bumiputraDiscount : null,
-        mappedKeyDates: {
-          spa_date: keyDates.spa_date ?? null,
-          spa_stamped_date: keyDates.spa_stamped_date ?? null,
-          letter_of_offer_date: keyDates.letter_of_offer_date ?? null,
-          loan_docs_signed_date: keyDates.loan_docs_signed_date ?? null,
-          completion_date: keyDates.completion_date ?? null,
-        },
-        migration: {
-          mode: "legacy_existing_case",
-          sourceBatchId: batchId,
-          sourceRowNo: row.sourceRowNo,
-          preserveReferenceNo: true,
-          approvalMode: "already_approved",
-          suppressNewCaseNotifications: true,
-        },
-      };
+    const createInput: CanonicalCaseCreateInput = {
+      caseType: "developer_sales",
+      projectId: projectId ?? null,
+      developerId: developerId ?? null,
+      referenceNo: typeof caseData.referenceNo === "string" ? caseData.referenceNo : null,
+      purchaseMode: "cash",
+      titleType: typeof caseData.titleType === "string" ? caseData.titleType : null,
+      assignedLawyerId: typeof caseData.assignedLawyerId === "number" ? caseData.assignedLawyerId : null,
+      assignedClerkId: typeof caseData.assignedClerkId === "number" ? caseData.assignedClerkId : null,
+      purchasers,
+      borrowerMode: borrowers.length > 0 ? "separate" : "none",
+      loanPartyType: "1st_party",
+      borrowers,
+      parcelNo: typeof caseData.parcelNo === "string" ? caseData.parcelNo : null,
+      propertyAddress: typeof propertyData.propertyAddress === "string" ? propertyData.propertyAddress : null,
+      propertyDetails: propertyData,
+      loanDetails: financingData,
+      spaPrice: typeof caseData.spaPrice === "number" ? caseData.spaPrice : null,
+      apdlPrice: typeof caseData.apdlPrice === "number" ? caseData.apdlPrice : null,
+      developerDiscount: typeof caseData.developerDiscount === "number" ? caseData.developerDiscount : null,
+      bumiputraDiscount: typeof caseData.bumiputraDiscount === "number" ? caseData.bumiputraDiscount : null,
+      mappedKeyDates: {
+        spa_date: keyDates.spa_date ?? null,
+        spa_stamped_date: keyDates.spa_stamped_date ?? null,
+        letter_of_offer_date: keyDates.letter_of_offer_date ?? null,
+        loan_docs_signed_date: keyDates.loan_docs_signed_date ?? null,
+        completion_date: keyDates.completion_date ?? null,
+      },
+      migration: {
+        mode: "legacy_existing_case",
+        sourceBatchId: batchId,
+        sourceRowNo: row.sourceRowNo,
+        preserveReferenceNo: preserveRef,
+        approvalMode: "already_approved",
+        suppressNewCaseNotifications: true,
+      },
+    };
 
-      let createdCaseId: number | null = null;
-      let importError: { code: string; message: string } | null = null;
+    let importError: { code: string; message: string } | null = null;
 
-      try {
-        const txResult = await db.transaction(async (tx) => {
-          const ctx: CanonicalCaseCreateContext = {
-            db: tx as any,
-            firmId,
-            actorUserId,
-            canAssignAny: true,
-            source: "legacy_excel_import",
-          };
-          return await createCaseCanonical(ctx, createInput);
-        });
-        createdCaseId = txResult.case.id;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        importError = {
-          code: err instanceof Error && (err as any).code ? String((err as any).code) : "IMPORT_ERROR",
-          message: msg.length > 1000 ? msg.slice(0, 997) + "..." : msg,
+    try {
+      await dbConn.transaction(async (tx: any) => {
+        const ctx: CanonicalCaseCreateContext = {
+          db: tx as any,
+          firmId,
+          actorUserId,
+          canAssignAny: true,
+          source: "legacy_excel_import",
         };
-      }
+        const txResult = await createCaseCanonical(ctx, createInput);
+        const createdCaseId = txResult.case.id;
 
-      if (createdCaseId !== null) {
-        created++;
-        await dbConn
+        await tx
           .update(legacyCaseImportRowsTable)
           .set({
             rowStatus: "imported",
             createdCaseId,
             importedAt: new Date(),
           })
-          .where(eq(legacyCaseImportRowsTable.id, rowId));
+          .where(
+            and(
+              eq(legacyCaseImportRowsTable.id, rowId),
+              eq(legacyCaseImportRowsTable.firmId, firmId),
+            ),
+          );
 
-        await writeAudit(dbConn, {
+        await writeLegacyImportAuditInTx(tx, {
           firmId,
           actorId: actorUserId,
           actorType: "firm_user",
@@ -931,32 +1054,44 @@ export async function runImport(
           entityId: createdCaseId,
           detail: `batchId=${batchId} rowId=${rowId} sourceRowNo=${row.sourceRowNo} caseId=${createdCaseId}`,
         });
-      } else if (importError) {
-        failed++;
-        await dbConn
-          .update(legacyCaseImportRowsTable)
-          .set({
-            rowStatus: "failed",
-            errorCode: importError.code,
-            errorMessage: importError.message,
-          })
-          .where(eq(legacyCaseImportRowsTable.id, rowId));
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      importError = {
+        code: err instanceof Error && (err as any).code ? String((err as any).code) : "IMPORT_ERROR",
+        message: msg.length > 1000 ? msg.slice(0, 997) + "..." : msg,
+      };
+    }
 
-        await writeAudit(dbConn, {
-          firmId,
-          actorId: actorUserId,
-          actorType: "firm_user",
-          action: "cases.legacy_import.row_failed",
-          entityType: "legacy_case_import_row",
-          entityId: rowId,
-          detail: `batchId=${batchId} rowId=${rowId} errorCode=${importError.code} error=${importError.message}`,
-        });
-      }
+    if (importError) {
+      await dbConn
+        .update(legacyCaseImportRowsTable)
+        .set({
+          rowStatus: "failed",
+          errorCode: importError.code,
+          errorMessage: importError.message,
+        })
+        .where(
+          and(
+            eq(legacyCaseImportRowsTable.id, rowId),
+            eq(legacyCaseImportRowsTable.firmId, firmId),
+          ),
+        );
+
+      await writeAuditBestEffort(dbConn, {
+        firmId,
+        actorId: actorUserId,
+        actorType: "firm_user",
+        action: "cases.legacy_import.row_failed",
+        entityType: "legacy_case_import_row",
+        entityId: rowId,
+        detail: `batchId=${batchId} rowId=${rowId} errorCode=${importError.code} error=${importError.message}`,
+      });
     }
   }
 
   for (const row of hardDuplicateRows) {
-    await writeAudit(dbConn, {
+    await writeAuditBestEffort(dbConn, {
       firmId,
       actorId: actorUserId,
       actorType: "firm_user",
@@ -967,67 +1102,7 @@ export async function runImport(
     });
   }
 
-  let status: RunImportSummary["status"];
-  if (failed === 0 && requested > 0) {
-    status = "completed";
-  } else if (created > 0 && failed > 0) {
-    status = "partial_failed";
-  } else if (requested === 0) {
-    status = "completed";
-  } else {
-    status = "failed";
-  }
-
-  const duplicatesSkipped = hardDuplicateRows.length;
-
-  const summaryCounts = await dbConn
-    .select({
-      rowStatus: legacyCaseImportRowsTable.rowStatus,
-      count: dbConn.$count(legacyCaseImportRowsTable.id),
-    })
-    .from(legacyCaseImportRowsTable)
-    .where(
-      and(
-        eq(legacyCaseImportRowsTable.batchId, batchId),
-        eq(legacyCaseImportRowsTable.firmId, firmId),
-      ),
-    )
-    .groupBy(legacyCaseImportRowsTable.rowStatus);
-
-  let importedRows = 0;
-  let failedRowsCount = 0;
-  for (const sc of summaryCounts) {
-    if (sc.rowStatus === "imported") importedRows = Number(sc.count);
-    if (sc.rowStatus === "failed") failedRowsCount = Number(sc.count);
-  }
-
-  await dbConn
-    .update(legacyCaseImportBatchesTable)
-    .set({
-      status,
-      importedRows,
-      failedRows: failedRowsCount,
-      completedAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(legacyCaseImportBatchesTable.id, batchId),
-        eq(legacyCaseImportBatchesTable.firmId, firmId),
-      ),
-    );
-
-  return {
-    batchId,
-    status,
-    summary: {
-      requested,
-      created,
-      alreadyImported,
-      duplicatesSkipped,
-      failed,
-    },
-  };
+  return refreshLegacyImportBatchStatus(dbConn, batchId, firmId);
 }
 
 export async function retryFailedRows(
@@ -1036,7 +1111,7 @@ export async function retryFailedRows(
   firmId: number,
   actorUserId: number,
   opts: RetryOptions = {},
-): Promise<RunImportSummary> {
+): Promise<RefreshBatchStatusResult> {
   const failedRows = await dbConn
     .select()
     .from(legacyCaseImportRowsTable)
