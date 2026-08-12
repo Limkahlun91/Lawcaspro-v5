@@ -9,7 +9,7 @@ import { parseExcelWorkbook, computeHeaderFingerprint, normalizeHeader, LEGACY_I
 import { M_LEGASI_PRESET_MAPPING, LEGACY_FIELD_CATALOG, type FieldMappingGroup } from "../modules/cases/legacy-import/legacy-case-field-catalog.js";
 import { autoMapHeaders, applyRowMapping, type ExcelColumnMapping, type MappingTemplateDefinition } from "../modules/cases/legacy-import/mapping-engine.js";
 import { buildIdempotencyKey } from "../modules/cases/legacy-import/legacy-case-duplicate-detector.js";
-import { runDryRun, runImport, retryFailedRows, validateFixedValues, refreshLegacyImportBatchStatus } from "../modules/cases/legacy-import/legacy-batch-pipeline.service.js";
+import { runDryRun, runImport, retryFailedRows, validateFixedValues, refreshLegacyImportBatchStatus, LEGACY_IMPORT_V1_CASE_TYPE } from "../modules/cases/legacy-import/legacy-batch-pipeline.service.js";
 import { writeLegacyErrorReportXlsxBuffer } from "../modules/cases/legacy-import/legacy-error-report.js";
 import crypto from "node:crypto";
 
@@ -358,27 +358,27 @@ routerInternal.get(
 
     const limit = Math.min(oneNum(req.query.limit as any) ?? 100, 500);
     const offset = oneNum(req.query.offset as any) ?? 0;
+    const statusFilter = one(req.query.status as any) ?? null;
+
+    const whereClause: unknown[] = [
+      eq(legacyCaseImportRowsTable.batchId, batchId),
+      eq(legacyCaseImportRowsTable.firmId, firmId),
+    ];
+    if (statusFilter) {
+      whereClause.push(eq(legacyCaseImportRowsTable.rowStatus, statusFilter));
+    }
+    const whereFinal = and(...(whereClause as any));
 
     const [{ count: totalRaw }] = await db
       .select({ count: sql<number>`count(*)` })
       .from(legacyCaseImportRowsTable)
-      .where(
-        and(
-          eq(legacyCaseImportRowsTable.batchId, batchId),
-          eq(legacyCaseImportRowsTable.firmId, firmId)
-        )
-      );
+      .where(whereFinal as any);
     const total = Number(totalRaw ?? 0);
 
     const rows = await db
       .select()
       .from(legacyCaseImportRowsTable)
-      .where(
-        and(
-          eq(legacyCaseImportRowsTable.batchId, batchId),
-          eq(legacyCaseImportRowsTable.firmId, firmId)
-        )
-      )
+      .where(whereFinal as any)
       .orderBy(legacyCaseImportRowsTable.sourceRowNo)
       .limit(limit)
       .offset(offset);
@@ -432,6 +432,21 @@ routerInternal.get(
 
     let templateFixedValues: Record<string, unknown> = {};
     let templateColumns: ExcelColumnMapping[] | null = null;
+    let storedHeaders: string[] | null = null;
+    const firstRow = (await db
+      .select({ rawRowJson: legacyCaseImportRowsTable.rawRowJson })
+      .from(legacyCaseImportRowsTable)
+      .where(
+        and(
+          eq(legacyCaseImportRowsTable.batchId, batchId),
+          eq(legacyCaseImportRowsTable.firmId, firmId)
+        )
+      )
+      .orderBy(legacyCaseImportRowsTable.sourceRowNo)
+      .limit(1))[0];
+    if (firstRow?.rawRowJson && typeof firstRow.rawRowJson === "object") {
+      storedHeaders = Object.keys(firstRow.rawRowJson as Record<string, unknown>);
+    }
 
     if (savedMappingAvailable) {
       const [defaultTemplate] = await db
@@ -546,34 +561,21 @@ routerInternal.get(
       if (optionsColumns && Array.isArray(optionsColumns) && optionsColumns.length > 0) {
         columns = optionsColumns;
       } else {
-        const firstRow = (await db
-          .select({ rawRowJson: legacyCaseImportRowsTable.rawRowJson })
-          .from(legacyCaseImportRowsTable)
-          .where(
-            and(
-              eq(legacyCaseImportRowsTable.batchId, batchId),
-              eq(legacyCaseImportRowsTable.firmId, firmId)
-            )
-          )
-          .orderBy(legacyCaseImportRowsTable.sourceRowNo)
-          .limit(1))[0];
-
-        const headerKeys = firstRow?.rawRowJson
-          ? Object.keys(firstRow.rawRowJson as Record<string, unknown>)
-          : [];
+        const headerKeys = storedHeaders ?? [];
         const autoMapped = autoMapHeaders(headerKeys, M_LEGASI_PRESET_MAPPING);
         columns = autoMapped.columns;
       }
     }
 
+    const sourceHeaders = Array.isArray(storedHeaders) && storedHeaders.length > 0
+      ? storedHeaders
+      : (columns.map((c) => c.excelHeader) as string[]);
+
     const optionsFixedValues = (optionsJson.fixedValues as Record<string, unknown> | undefined) ?? {};
     const fixedValues = {
       projectId: templateFixedValues.projectId ?? optionsFixedValues.projectId ?? null,
       developerId: templateFixedValues.developerId ?? optionsFixedValues.developerId ?? null,
-      caseType: (templateFixedValues.caseType ?? optionsFixedValues.caseType ?? "developer_sales") as
-        | "developer_sales"
-        | "subsale"
-        | "perfection",
+      caseType: LEGACY_IMPORT_V1_CASE_TYPE,
       preserveRef:
         typeof (templateFixedValues.preserveRef ?? optionsFixedValues.preserveRef) === "boolean"
           ? ((templateFixedValues.preserveRef ?? optionsFixedValues.preserveRef) as boolean)
@@ -592,6 +594,7 @@ routerInternal.get(
       fixedValues: typeof fixedValues;
       headerFingerprint: string | null;
       sourceSheetName: string | null;
+      sourceHeaders: string[];
       catalog: typeof LEGACY_FIELD_CATALOG;
     } = {
       batch: batch.id,
@@ -601,6 +604,7 @@ routerInternal.get(
       fixedValues,
       headerFingerprint: batch.headerFingerprint,
       sourceSheetName: batch.sourceSheetName,
+      sourceHeaders,
       catalog: LEGACY_FIELD_CATALOG,
     };
     if (mappingSourceWarning) {
@@ -650,7 +654,12 @@ routerInternal.patch(
 
     const { columns, fixedValues, mappingTemplateId } = parsed.data;
 
-    const validation = await validateFixedValues(db as any, firmId, fixedValues);
+    const normalizedFixedValues: Record<string, unknown> = {
+      ...fixedValues,
+      caseType: LEGACY_IMPORT_V1_CASE_TYPE,
+    };
+
+    const validation = await validateFixedValues(db as any, firmId, normalizedFixedValues);
     if (!validation.ok) {
       const fail = validation as { ok: false; code: string; message: string };
       return res.status(400).json({
@@ -664,7 +673,7 @@ routerInternal.patch(
     const updatedOptions: Record<string, unknown> = {
       ...existingOptions,
       columns,
-      fixedValues,
+      fixedValues: normalizedFixedValues,
     };
 
     const updatePayload: Partial<typeof legacyCaseImportBatchesTable.$inferInsert> = {
@@ -686,6 +695,71 @@ routerInternal.patch(
       .returning();
 
     res.json(updated);
+  })
+);
+
+routerInternal.get(
+  "/:batchId/import-plan",
+  authed(async (req, res) => {
+    const firmId = req.firmId!;
+    const batchId = oneNum(req.params.batchId);
+    if (!batchId) return res.status(400).json({ error: "Invalid batchId" });
+
+    const batch = await getBatchOr404(firmId, batchId);
+    if (!batch) return res.status(404).json({ error: "Batch not found" });
+
+    const allRows = await db
+      .select({
+        id: legacyCaseImportRowsTable.id,
+        rowStatus: legacyCaseImportRowsTable.rowStatus,
+      })
+      .from(legacyCaseImportRowsTable)
+      .where(
+        and(
+          eq(legacyCaseImportRowsTable.batchId, batchId),
+          eq(legacyCaseImportRowsTable.firmId, firmId),
+        ),
+      );
+
+    const counts = {
+      ready: 0,
+      warnings: 0,
+      reviewRequired: 0,
+      duplicates: 0,
+      invalid: 0,
+    };
+    const importableRowIds: number[] = [];
+    const reviewRowIds: number[] = [];
+
+    for (const row of allRows) {
+      switch (row.rowStatus) {
+        case "READY":
+          counts.ready++;
+          importableRowIds.push(row.id);
+          break;
+        case "WARNING":
+          counts.warnings++;
+          importableRowIds.push(row.id);
+          break;
+        case "REVIEW_REQUIRED":
+          counts.reviewRequired++;
+          reviewRowIds.push(row.id);
+          break;
+        case "HARD_DUPLICATE":
+          counts.duplicates++;
+          break;
+        case "INVALID":
+          counts.invalid++;
+          break;
+      }
+    }
+
+    res.json({
+      batchId,
+      counts,
+      importableRowIds,
+      reviewRowIds,
+    });
   })
 );
 

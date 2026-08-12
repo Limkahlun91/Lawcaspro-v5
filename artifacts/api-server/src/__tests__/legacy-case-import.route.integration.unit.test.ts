@@ -329,17 +329,18 @@ describe("legacy-case-import.route.integration.unit tests", () => {
       expect(dateBlankWarningsOnly.every((c) => c.startsWith("WARN_"))).toBe(true);
     });
 
-    it("dryRunValidateRow source: blank date mapping → warnings only, not pushed to errors array", () => {
-      expect(PIPELINE_SRC).toContain("WARN_SPA_DATE_BLANK");
-      expect(PIPELINE_SRC).toContain("parsed.status === \"blank\"");
+    it("dryRunValidateRow source: blank date mapping → NO blank-date warnings pushed (blank = optional per rule, no WARN_*_DATE_BLANK)", () => {
+      expect(PIPELINE_SRC).not.toContain("WARN_SPA_DATE_BLANK");
+      expect(PIPELINE_SRC).not.toContain("WARN_LO_DATE_BLANK");
+      expect(PIPELINE_SRC).not.toContain("WARN_STAMPED_DATE_BLANK");
 
       const dryRunValidateIdx = PIPELINE_SRC.indexOf("export async function dryRunValidateRow");
       expect(dryRunValidateIdx).toBeGreaterThan(-1);
       const runDryRunIdx = PIPELINE_SRC.indexOf("export async function runDryRun");
       const slice = PIPELINE_SRC.slice(dryRunValidateIdx, runDryRunIdx);
 
-      expect(slice).toContain("warnings.push({");
-      const blankErrorPushCount = (slice.match(/if \(parsed\.status === "blank"\)[\s\S]*?errors\.push/g) || []).length;
+      expect(slice).toContain("DATE_FIELD_CODES");
+      const blankErrorPushCount = (slice.match(/WARN_[A-Z_]*DATE_BLANK/g) || []).length;
       expect(blankErrorPushCount).toBe(0);
     });
   });
@@ -505,14 +506,14 @@ describe("legacy-case-import.route.integration.unit tests", () => {
   });
 
   describe("IMPORT-11: import valid row eventually reaches createCaseCanonical with context.source=legacy_excel_import", () => {
-    it("runImport source: contains createCaseCanonical call with source:'legacy_excel_import' in CanonicalCaseCreateContext", () => {
-      expect(PIPELINE_SRC).toContain("createCaseCanonical");
+    it("runImport source: contains createCaseCanonicalInTx call with source:'legacy_excel_import' in CanonicalCaseCreateContext", () => {
+      expect(PIPELINE_SRC).toContain("createCaseCanonicalInTx");
       expect(PIPELINE_SRC).toContain('source: "legacy_excel_import"');
       expect(PIPELINE_SRC).toContain("migration:");
       expect(PIPELINE_SRC).toContain("legacy_existing_case");
     });
 
-    it("migration.mode set to legacy_existing_case when invoking createCaseCanonical", () => {
+    it("migration.mode set to legacy_existing_case when invoking createCaseCanonicalInTx", () => {
       const runImportStart = PIPELINE_SRC.indexOf("export async function runImport");
       expect(runImportStart).toBeGreaterThan(-1);
       const retryStart = PIPELINE_SRC.indexOf("export async function retryFailedRows");
@@ -528,9 +529,9 @@ describe("legacy-case-import.route.integration.unit tests", () => {
   });
 
   describe("IMPORT-12: retry same import returns already_imported with SAME caseIds", () => {
-    it("runImport preCheck loop: createdCaseId !== null → alreadyImported++ and skips creation", () => {
+    it("runImport preCheck loop: createdCaseId !== null → skips row via continue (already imported idempotency)", () => {
       expect(PIPELINE_SRC).toContain("createdCaseId !== null");
-      expect(PIPELINE_SRC).toContain("alreadyImported++");
+      expect(PIPELINE_SRC).toContain("continue;");
 
       const firstRunCaseIds = { 1: 456 };
       const secondRunCaseIds = { 1: 456 };
@@ -543,7 +544,7 @@ describe("legacy-case-import.route.integration.unit tests", () => {
   });
 
   describe("IMPORT-13: one failed row in middle doesn't rollback previously committed rows", () => {
-    it("runImport body: individual try/catch per row, failure updates rowStatus=failed and failed++, does NOT rollback prior rows", () => {
+    it("runImport body: individual try/catch per row, failure updates rowStatus=failed and imported rowStatus=imported, does NOT rollback prior rows", () => {
       const runImportStart = PIPELINE_SRC.indexOf("export async function runImport");
       const retryStart = PIPELINE_SRC.indexOf("export async function retryFailedRows");
       const slice = PIPELINE_SRC.slice(
@@ -553,10 +554,10 @@ describe("legacy-case-import.route.integration.unit tests", () => {
 
       expect(slice).toContain("try {");
       expect(slice).toContain("} catch (err)");
-      expect(slice).toContain("failed++");
-      expect(slice).toContain("created++");
+      expect(slice).toContain('rowStatus: "failed"');
+      expect(slice).toContain('rowStatus: "imported"');
       expect(slice).toContain("for (");
-      expect(slice).toContain("for (const row of chunk)");
+      expect(slice).toContain("for (const row of eligibleRows)");
 
       const seqA = { id: 101, caseId: 1, ok: true };
       const seqB = { id: 102, caseId: null, ok: false, error: "BAD DATA" };
@@ -572,7 +573,7 @@ describe("legacy-case-import.route.integration.unit tests", () => {
   describe("IMPORT-14: purchaser/clients canonical reuse - importer delegates createCaseCanonical", () => {
     it("pipeline source has NO '.insert(clientsTable)' - purchasers passed in createInput, delegated canonical", () => {
       expect(PIPELINE_SRC).not.toContain(".insert(clientsTable)");
-      expect(PIPELINE_SRC).toContain("createCaseCanonical");
+      expect(PIPELINE_SRC).toContain("createCaseCanonicalInTx");
       expect(PIPELINE_SRC).toContain("purchasers,");
       expect(PIPELINE_SRC).toContain("borrowers,");
     });

@@ -411,7 +411,7 @@ export class CanonicalCaseCreateError extends Error {
   }
 }
 
-export async function createCaseCanonical(
+export async function createCaseCanonicalInTx(
   context: CanonicalCaseCreateContext,
   input: CanonicalCaseCreateInput,
 ): Promise<CanonicalCreateCaseResult> {
@@ -1015,4 +1015,25 @@ export async function createCaseCanonical(
     assignments: responseAssignments,
     duplicate: false,
   };
+}
+
+export async function createCaseCanonical(
+  context: CanonicalCaseCreateContext,
+  input: CanonicalCaseCreateInput,
+): Promise<CanonicalCreateCaseResult> {
+  const r = context.db as any;
+
+  if (!r || typeof r.transaction !== "function") {
+    throw new Error("CANONICAL_CASE_CREATE_TRANSACTION_REQUIRED");
+  }
+
+  return r.transaction(async (tx: any) =>
+    createCaseCanonicalInTx(
+      {
+        ...context,
+        db: tx,
+      },
+      input,
+    ),
+  );
 }

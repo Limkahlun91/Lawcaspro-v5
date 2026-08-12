@@ -25,6 +25,7 @@ import {
 } from "./mapping-engine.js";
 import {
   createCaseCanonical,
+  createCaseCanonicalInTx,
   type CanonicalCaseCreateContext,
   type CanonicalCaseCreateInput,
   type CanonicalPurchaserInput,
@@ -32,6 +33,59 @@ import {
 } from "../create-case-canonical.service.js";
 
 type DbConnLike = any;
+
+export const LEGACY_IMPORT_V1_CASE_TYPE = "developer_sales" as const;
+export type LegacyImportV1CaseType = typeof LEGACY_IMPORT_V1_CASE_TYPE;
+
+export type LegacyFixedValues = {
+  projectId: number | null;
+  developerId: number | null;
+  caseType: LegacyImportV1CaseType;
+  preserveRef: boolean;
+};
+
+export function deriveLegacyPurchaseMode(
+  borrowers: unknown[],
+  financing: Record<string, unknown> | null | undefined,
+): "cash" | "loan" {
+  if (Array.isArray(borrowers) && borrowers.length > 0) return "loan";
+  if (!financing) return "cash";
+  const nonBlank = (v: unknown) =>
+    (typeof v === "string" && v.trim().length > 0) ||
+    (typeof v === "number" && Number.isFinite(v) && v > 0) ||
+    (typeof v === "number" && Number.isFinite(v));
+  if (nonBlank(financing.endFinancierBank ?? financing.end_financier ?? financing.endFinancier)) return "loan";
+  const financingSum = financing.propertyFinancingSum ?? financing.financingAmount ?? financing.loanAmount;
+  if (typeof financingSum === "number" && Number.isFinite(financingSum) && financingSum > 0) return "loan";
+  const loanAmount = financing.loanAmount ?? financing.loan_amount ?? financing.totalLoan;
+  if (typeof loanAmount === "number" && Number.isFinite(loanAmount) && loanAmount > 0) return "loan";
+  if (nonBlank(financing.bankRef)) return "loan";
+  return "cash";
+}
+
+function normalizeIdentityKey(p: { ic?: string | null; tin?: string | null; name: string }): string {
+  if (p.ic && String(p.ic).trim()) return `ic:${String(p.ic).trim().toLowerCase()}`;
+  if (p.tin && String(p.tin).trim()) return `tin:${String(p.tin).trim().toLowerCase()}`;
+  return `name:${String(p.name ?? "").trim().toLowerCase()}`;
+}
+
+export function deriveLegacyLoanPartyType(
+  purchasers: CanonicalPurchaserInput[],
+  borrowers: CanonicalBorrowerInput[],
+): { loanPartyType: "1st_party" | "3rd_party"; borrowerMode: "same_as_purchaser" | "separate" | "none" } {
+  if (!borrowers || borrowers.length === 0) return { loanPartyType: "1st_party", borrowerMode: "none" };
+  if (!purchasers || purchasers.length === 0) return { loanPartyType: "3rd_party", borrowerMode: "separate" };
+  const purchaserKeys = new Set(purchasers.map(normalizeIdentityKey));
+  let matches = 0;
+  for (const b of borrowers) {
+    const k = normalizeIdentityKey(b);
+    if (purchaserKeys.has(k)) matches++;
+  }
+  if (matches === borrowers.length && purchasers.length >= borrowers.length) {
+    return { loanPartyType: "1st_party", borrowerMode: "same_as_purchaser" };
+  }
+  return { loanPartyType: "3rd_party", borrowerMode: "separate" };
+}
 
 export type FixedValuesInput = {
   firmId: number;
@@ -349,9 +403,9 @@ function buildPropertySummary(
 }
 
 const DATE_FIELD_CODES = [
-  { field: "keydate.spa_date", code: "WARN_SPA_DATE_BLANK" },
-  { field: "keydate.letter_of_offer_date", code: "WARN_LO_DATE_BLANK" },
-  { field: "keydate.spa_stamped_date", code: "WARN_STAMPED_DATE_BLANK" },
+  { field: "keydate.spa_date" },
+  { field: "keydate.letter_of_offer_date" },
+  { field: "keydate.spa_stamped_date" },
 ];
 
 export async function dryRunValidateRow(
@@ -456,19 +510,19 @@ export async function dryRunValidateRow(
   }
 
   const keyDates = mapped.keyDates ?? {};
+  const mappedKeypaths = new Set<string>();
+  for (const col of mapping.columns) {
+    if (DATE_FIELD_CODES.some((d) => col.target === d.field)) {
+      mappedKeypaths.add(col.target);
+    }
+  }
   for (const dateSpec of DATE_FIELD_CODES) {
     const key = dateSpec.field.split(".").pop()!;
     const val = keyDates[key];
     if (val === null || val === undefined) {
-      const rawVal = (rawRow as Record<string, unknown>)[key] ?? (rawRow as Record<string, unknown>)[dateSpec.field];
-      const parsed = parseLegacyDate(rawVal);
-      if (parsed.status === "blank") {
-        warnings.push({
-          code: dateSpec.code,
-          field: dateSpec.field,
-          message: `${dateSpec.field} is blank`,
-        });
-      }
+      // Only warn for blanks if the user did NOT explicitly map the column.
+      // Per rule: blank → no error no warning; not_applicable → no error no warning.
+      // We skip any WARN_*_DATE_BLANK generation entirely.
     }
   }
 
@@ -757,6 +811,12 @@ export async function runDryRun(
         purchaserSummary: result.validation.purchaserSummary,
         borrowerSummary: result.validation.borrowerSummary,
         propertySummary: result.validation.propertySummary,
+        fixedValues: {
+          projectId: selectedFixedValues.projectId ?? null,
+          developerId: selectedFixedValues.developerId ?? null,
+          caseType: LEGACY_IMPORT_V1_CASE_TYPE,
+          preserveRef: selectedFixedValues.preserveRef ?? true,
+        },
       };
 
       const validationJson = {
@@ -971,31 +1031,37 @@ export async function runImport(
     const propertyData = (mappedPayload.property ?? {}) as Record<string, unknown>;
     const financingData = (mappedPayload.financing ?? {}) as Record<string, unknown>;
     const keyDates = (mappedPayload.keyDates ?? {}) as Record<string, string | null>;
+    const rawFixedValues = (mappedPayload.fixedValues ?? {}) as Record<string, unknown>;
 
-    const projectId = typeof caseData.projectId === "number" ? caseData.projectId : null;
-    const developerId = typeof caseData.developerId === "number" ? caseData.developerId : null;
-    const preserveRef =
-      typeof (mappedPayload.fixedValues as Record<string, unknown> | undefined)?.preserveRef === "boolean"
-        ? ((mappedPayload.fixedValues as Record<string, unknown>).preserveRef as boolean)
-        : true;
+    const rowMappedProjectId = typeof caseData.projectId === "number" ? caseData.projectId : null;
+    const rowMappedDeveloperId = typeof caseData.developerId === "number" ? caseData.developerId : null;
+    const fixedProjectId = typeof rawFixedValues.projectId === "number" ? rawFixedValues.projectId : null;
+    const fixedDeveloperId = typeof rawFixedValues.developerId === "number" ? rawFixedValues.developerId : null;
+    const effectiveProjectId = rowMappedProjectId ?? fixedProjectId;
+    const effectiveDeveloperId = rowMappedDeveloperId ?? fixedDeveloperId;
+    const preserveRef = typeof rawFixedValues.preserveRef === "boolean" ? rawFixedValues.preserveRef : true;
+    const purchaseMode = deriveLegacyPurchaseMode(borrowers, financingData);
+    const loanPartyInfo = purchaseMode === "loan"
+      ? deriveLegacyLoanPartyType(purchasers, borrowers)
+      : { loanPartyType: "1st_party" as const, borrowerMode: "none" as const };
 
     const createInput: CanonicalCaseCreateInput = {
-      caseType: "developer_sales",
-      projectId: projectId ?? null,
-      developerId: developerId ?? null,
+      caseType: LEGACY_IMPORT_V1_CASE_TYPE,
+      projectId: effectiveProjectId,
+      developerId: effectiveDeveloperId,
       referenceNo: typeof caseData.referenceNo === "string" ? caseData.referenceNo : null,
-      purchaseMode: "cash",
+      purchaseMode,
       titleType: typeof caseData.titleType === "string" ? caseData.titleType : null,
       assignedLawyerId: typeof caseData.assignedLawyerId === "number" ? caseData.assignedLawyerId : null,
       assignedClerkId: typeof caseData.assignedClerkId === "number" ? caseData.assignedClerkId : null,
       purchasers,
-      borrowerMode: borrowers.length > 0 ? "separate" : "none",
-      loanPartyType: "1st_party",
+      borrowerMode: loanPartyInfo.borrowerMode,
+      loanPartyType: loanPartyInfo.loanPartyType,
       borrowers,
       parcelNo: typeof caseData.parcelNo === "string" ? caseData.parcelNo : null,
       propertyAddress: typeof propertyData.propertyAddress === "string" ? propertyData.propertyAddress : null,
       propertyDetails: propertyData,
-      loanDetails: financingData,
+      loanDetails: Object.keys(financingData).length > 0 ? financingData : null,
       spaPrice: typeof caseData.spaPrice === "number" ? caseData.spaPrice : null,
       apdlPrice: typeof caseData.apdlPrice === "number" ? caseData.apdlPrice : null,
       developerDiscount: typeof caseData.developerDiscount === "number" ? caseData.developerDiscount : null,
@@ -1028,7 +1094,7 @@ export async function runImport(
           canAssignAny: true,
           source: "legacy_excel_import",
         };
-        const txResult = await createCaseCanonical(ctx, createInput);
+        const txResult = await createCaseCanonicalInTx(ctx, createInput);
         const createdCaseId = txResult.case.id;
 
         await tx

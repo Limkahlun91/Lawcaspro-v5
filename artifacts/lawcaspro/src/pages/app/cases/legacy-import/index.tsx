@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo, useCallback } from "react";
+import { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import { Link } from "wouter";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
@@ -197,7 +197,7 @@ export default function LegacyCaseImportPage() {
   const [optionalExpanded, setOptionalExpanded] = useState(false);
   const [saveMappingChecked, setSaveMappingChecked] = useState(false);
 
-  const [caseType, setCaseType] = useState<CaseTypeApiValue | "">("");
+  const [caseType, setCaseType] = useState<"developer_sales">("developer_sales");
   const [projectId, setProjectId] = useState<number | "">("");
   const [developerId, setDeveloperId] = useState<number | "">("");
   const [preserveRef, setPreserveRef] = useState(true);
@@ -219,6 +219,23 @@ export default function LegacyCaseImportPage() {
     () => previewRows.find((r) => r.id === selectedRowId) ?? null,
     [previewRows, selectedRowId]
   );
+
+  useEffect(() => {
+    if (step !== 3 || !uploadData) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const payload = await fetchRowsForPage(uploadData.batchId, previewPage, previewTab);
+        if (cancelled) return;
+        setPreviewRows(payload.rows ?? []);
+        setPreviewTotal(payload.total ?? (payload.rows?.length ?? 0));
+      } catch {
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [step, uploadData, previewPage, previewTab, fetchRowsForPage]);
 
   const projectsQuery = useQuery({
     queryKey: getListProjectsQueryKey({ page: 1, limit: 200 }),
@@ -336,6 +353,34 @@ export default function LegacyCaseImportPage() {
     },
   });
 
+  const fetchRowsForPage = useCallback(
+    async (batchId: string | number, page: number, tab: "all" | UiRowStatus) => {
+      const statusParam =
+        tab === "all"
+          ? ""
+          : tab === "ready"
+          ? "status=READY&"
+          : tab === "warning"
+          ? "status=WARNING&"
+          : tab === "review"
+          ? "status=REVIEW_REQUIRED&"
+          : tab === "duplicate"
+          ? "status=HARD_DUPLICATE&"
+          : tab === "invalid"
+          ? "status=INVALID&"
+          : tab === "imported"
+          ? "status=imported&"
+          : tab === "failed"
+          ? "status=failed&"
+          : "";
+      const url = `/legacy-case-imports/${encodeURIComponent(String(batchId))}/rows?${statusParam}limit=${PAGE_SIZE}&offset=${(page - 1) * PAGE_SIZE}`;
+      const rowsRes = await apiFetchJson(url);
+      const rowsPayload = ((rowsRes as any)?.data ?? (rowsRes as any)) as PreviewRowsResponse;
+      return rowsPayload;
+    },
+    []
+  );
+
   const dryRunMutation = useMutation({
     mutationFn: async () => {
       if (!uploadData) throw new Error("No batch");
@@ -345,10 +390,7 @@ export default function LegacyCaseImportPage() {
       );
       const body = await res.json();
       const dryRun = (body?.data ?? body) as DryRunResponse;
-      const rowsRes = await apiFetchJson(
-        `/legacy-case-imports/${encodeURIComponent(String(uploadData.batchId))}/rows?limit=${PAGE_SIZE}&offset=0`
-      );
-      const rowsPayload = ((rowsRes as any)?.data ?? (rowsRes as any)) as PreviewRowsResponse;
+      const rowsPayload = await fetchRowsForPage(uploadData.batchId, 1, previewTab);
       return { dryRun, rowsPayload };
     },
     onSuccess: ({ rowsPayload }) => {
@@ -481,7 +523,6 @@ export default function LegacyCaseImportPage() {
 
   const filteredRows = useMemo(() => {
     let rows = previewRows;
-    if (previewTab !== "all") rows = rows.filter((r) => mapLegacyRowStatus(r.rowStatus) === previewTab);
     if (previewSearch.trim()) {
       const q = previewSearch.trim().toLowerCase();
       rows = rows.filter(
@@ -493,26 +534,50 @@ export default function LegacyCaseImportPage() {
       );
     }
     return rows;
-  }, [previewRows, previewTab, previewSearch]);
+  }, [previewRows, previewSearch]);
 
-  const pagedRows = useMemo(() => {
-    const start = (previewPage - 1) * PAGE_SIZE;
-    return filteredRows.slice(start, start + PAGE_SIZE);
-  }, [filteredRows, previewPage]);
+  const totalPages = Math.max(1, Math.ceil(previewTotal / PAGE_SIZE));
 
-  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
+  const approvedReviewRowIds = new Set(
+    Object.entries(reviewOverrides)
+      .filter(([, o]) => o?.duplicateAction === "import_anyway")
+      .map(([id]) => id)
+  );
 
-  const importableCount = previewCounts.ready + previewCounts.warning;
+  const importableCount =
+    (dryRunMutation.data?.dryRun.summary.ready ?? 0) +
+    (dryRunMutation.data?.dryRun.summary.warnings ?? 0) +
+    approvedReviewRowIds.size;
 
-  const handleStartImport = () => {
-    const ids = previewRows
-      .filter((r) => {
-        const s = mapLegacyRowStatus(r.rowStatus);
-        return s === "ready" || s === "warning";
-      })
-      .map((r) => r.id);
-    if (ids.length === 0) return;
-    void startImportSequentially(ids);
+  const handleStartImport = async () => {
+    if (!uploadData) return;
+    try {
+      const planRaw = await apiFetchJson(
+        `/legacy-case-imports/${encodeURIComponent(String(uploadData.batchId))}/import-plan`
+      );
+      const plan = ((planRaw as any)?.data ?? (planRaw as any)) as {
+        importableRowIds: (string | number)[];
+        reviewRowIds: (string | number)[];
+      };
+      let ids: (string | number)[] = [...plan.importableRowIds];
+      const skipped = new Set(
+        Object.entries(reviewOverrides)
+          .filter(([, o]) => o?.duplicateAction === "skip")
+          .map(([id]) => id)
+      );
+      for (const [idStr, override] of Object.entries(reviewOverrides)) {
+        if (override?.duplicateAction === "import_anyway") {
+          if (!ids.includes(Number(idStr)) && !ids.includes(idStr)) {
+            ids.push(Number(idStr));
+          }
+        }
+      }
+      ids = ids.filter((id) => !skipped.has(String(id)));
+      if (ids.length === 0) return;
+      void startImportSequentially(ids);
+    } catch (err) {
+      toastError(toast, err, "Failed to prepare import plan");
+    }
   };
 
   const handleSkipRow = () => {
@@ -571,7 +636,12 @@ export default function LegacyCaseImportPage() {
   }, [mappings]);
 
   const possibleHeaders = useMemo(() => {
-    return Array.from(new Set((mappingResponse?.columns ?? []).map((c: ExcelColumnMapping) => c.excelHeader)));
+    const fromContract = Array.isArray((mappingResponse as any)?.sourceHeaders)
+      ? ((mappingResponse as any).sourceHeaders as string[])
+      : null;
+    const fromColumns = (mappingResponse?.columns ?? []).map((c: ExcelColumnMapping) => c.excelHeader);
+    const list = fromContract && fromContract.length > 0 ? fromContract : fromColumns;
+    return Array.from(new Set(list));
   }, [mappingResponse]);
 
   const downloadErrorReport = async () => {
@@ -816,25 +886,16 @@ export default function LegacyCaseImportPage() {
                   <label className="text-xs font-medium text-slate-600 mb-1.5 block">
                     Case Type
                   </label>
-                  <Select
-                    value={caseType}
-                    onValueChange={(v) => setCaseType(v as CaseTypeApiValue | "")}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select case type" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(Object.keys(CASE_TYPE_LABELS) as CaseTypeApiValue[]).map((k) => (
-                        <SelectItem key={k} value={k}>
-                          {CASE_TYPE_LABELS[k]}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <div className="px-3 py-2 rounded-md border border-slate-200 bg-slate-50 text-sm font-medium text-slate-900 flex items-center gap-2">
+                    <Badge variant="outline" className="text-xs px-2 py-0.5 bg-emerald-50 text-emerald-700 border-emerald-200">
+                      Developer Sales
+                    </Badge>
+                    <span className="text-xs text-slate-500">Fixed for Legacy Import V1</span>
+                  </div>
                 </div>
                 <div>
                   <label className="text-xs font-medium text-slate-600 mb-1.5 block">
-                    Project
+                    Project <span className="text-rose-600">*</span>
                   </label>
                   <Select
                     value={projectId === "" ? "" : String(projectId)}
@@ -843,7 +904,7 @@ export default function LegacyCaseImportPage() {
                     }
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Select project (optional)" />
+                      <SelectValue placeholder="Select Project *" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="">— None —</SelectItem>
@@ -857,7 +918,7 @@ export default function LegacyCaseImportPage() {
                 </div>
                 <div>
                   <label className="text-xs font-medium text-slate-600 mb-1.5 block">
-                    Developer
+                    Developer <span className="text-rose-600">*</span>
                   </label>
                   <Select
                     value={developerId === "" ? "" : String(developerId)}
@@ -866,7 +927,7 @@ export default function LegacyCaseImportPage() {
                     }
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Select developer (optional)" />
+                      <SelectValue placeholder="Select Developer *" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="">— None —</SelectItem>
@@ -1097,17 +1158,28 @@ export default function LegacyCaseImportPage() {
               <ChevronLeft className="w-4 h-4 mr-1" />
               Back
             </Button>
-            <Button
-              className="bg-amber-500 hover:bg-amber-600 text-white"
-              onClick={() => previewMutation.mutate()}
-              disabled={previewMutation.isPending}
-            >
-              {previewMutation.isPending && (
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+            <div className="flex flex-col md:flex-row items-end gap-2">
+              {(!projectId || !developerId) && (
+                <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-1.5">
+                  Please select Project and Developer.
+                </div>
               )}
-              Continue Preview
-              <ChevronRight className="w-4 h-4 ml-1" />
-            </Button>
+              <Button
+                className="bg-amber-500 hover:bg-amber-600 text-white"
+                onClick={() => previewMutation.mutate()}
+                disabled={
+                  previewMutation.isPending ||
+                  !projectId ||
+                  !developerId
+                }
+              >
+                {previewMutation.isPending && (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                )}
+                Continue Preview
+                <ChevronRight className="w-4 h-4 ml-1" />
+              </Button>
+            </div>
           </div>
         </div>
       )}
@@ -1162,7 +1234,7 @@ export default function LegacyCaseImportPage() {
                     >
                       All
                       <span className="ml-1.5 text-slate-400 text-[10px]">
-                        {previewRows.length}
+                        {previewTotal || previewRows.length}
                       </span>
                     </TabsTrigger>
                     <TabsTrigger
@@ -1206,12 +1278,11 @@ export default function LegacyCaseImportPage() {
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                   <Input
-                    placeholder="Search Our Ref / Purchaser / Borrower / Property…"
+                    placeholder="Search current page only…"
                     className="pl-9 w-full md:w-80"
                     value={previewSearch}
                     onChange={(e) => {
                       setPreviewSearch(e.target.value);
-                      setPreviewPage(1);
                     }}
                   />
                 </div>
@@ -1231,7 +1302,7 @@ export default function LegacyCaseImportPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {pagedRows.map((row) => {
+                    {filteredRows.map((row) => {
                       const s = mapLegacyRowStatus(row.rowStatus);
                       return (
                         <tr
@@ -1335,7 +1406,7 @@ export default function LegacyCaseImportPage() {
                         </tr>
                       );
                     })}
-                    {pagedRows.length === 0 && (
+                    {filteredRows.length === 0 && (
                       <tr>
                         <td colSpan={7} className="px-4 py-16 text-center text-sm text-slate-400">
                           No rows match current filters
@@ -1349,16 +1420,11 @@ export default function LegacyCaseImportPage() {
               <div className="flex items-center justify-between mt-4 pt-2">
                 <div className="text-xs text-slate-500">
                   Showing{" "}
-                  {filteredRows.length === 0
+                  {previewRows.length === 0
                     ? 0
                     : (previewPage - 1) * PAGE_SIZE + 1}
-                  –{Math.min(previewPage * PAGE_SIZE, filteredRows.length)} of{" "}
-                  {filteredRows.length}
-                  {previewTotal && previewTotal !== filteredRows.length && (
-                    <span className="ml-2 text-slate-400">
-                      (batch total: {previewTotal})
-                    </span>
-                  )}
+                  –{Math.min(previewPage * PAGE_SIZE, previewTotal || previewRows.length)} of{" "}
+                  {previewTotal || previewRows.length}
                 </div>
                 <div className="flex items-center gap-2">
                   <Button

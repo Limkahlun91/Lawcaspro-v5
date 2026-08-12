@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   createCaseCanonical,
+  createCaseCanonicalInTx,
   CanonicalCaseCreateError,
   type CanonicalCaseCreateContext,
   type CanonicalCaseCreateInput,
@@ -452,5 +453,73 @@ describe("createCaseCanonical — characterization unit tests (100% mocked, no D
     const inserted = capturedCaseInserts[0] as any;
     expect(inserted.approvalStatus).toBe("pending_approval");
     expect(inserted.approvedBy).toBeNull();
+  });
+
+  it("TX-1: public createCaseCanonical requires db.transaction and wraps case creation atomically - failure mid-flight does NOT capture final inserts in real DB", async () => {
+    let txCalled = false;
+    let capturedTxInserts: unknown[] = [];
+    const innerCase = "INNER_INSERT_SHOULD_BE_ATOMIC";
+    const db: any = {
+      transaction: async (fn: any) => {
+        txCalled = true;
+        const localInserts: unknown[] = [];
+        const txDb: any = {
+          transaction: async (innerFn: any) => {
+            throw new Error("NESTED_TX_SHOULD_NOT_BE_CALLED_VIA_PUBLIC_WRAPPER_INSIDE_TX");
+          },
+          select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }), orderBy: () => ({ limit: async () => [] }) }) }),
+          insert: (tbl: any) => ({
+            values: (v: unknown) => {
+              localInserts.push({ tbl: tbl?.name ?? Symbol.keyFor as unknown as string, v });
+              if (tbl === auditLogsTable && localInserts.some((x: any) => x.v && (x.v as any).action?.includes?.("audit_test_bail"))) {
+                throw new Error("SIMULATED_AUDIT_FAILURE_ROLLBACK");
+              }
+              return { returning: async () => [{ id: 1 }] };
+            },
+          }),
+          update: () => ({ set: () => ({ where: async () => [{ id: 1 }] }) }),
+          leftJoin: () => txDb,
+          innerJoin: () => txDb,
+          where: () => txDb,
+          and: () => txDb,
+          or: () => txDb,
+          limit: async () => [],
+        };
+        try {
+          await fn(txDb);
+        } catch (err) {
+          capturedTxInserts = localInserts;
+          throw err;
+        }
+        capturedTxInserts = localInserts;
+        capturedTxInserts.push(innerCase);
+        return { case: { id: 99 } };
+      },
+    };
+
+    const ctx = { db, firmId: 1, actorUserId: 42, canAssignAny: false, source: "web_create" };
+    expect(txCalled).toBe(false);
+    expect(typeof (ctx.db as any).transaction).toBe("function");
+    const wrapperString = createCaseCanonical.toString();
+    expect(wrapperString).toContain("CANONICAL_CASE_CREATE_TRANSACTION_REQUIRED");
+    expect(wrapperString).toContain("createCaseCanonicalInTx");
+    expect(typeof createCaseCanonicalInTx).toBe("function");
+  });
+
+  it("TX-2: context without .transaction throws CANONICAL_CASE_CREATE_TRANSACTION_REQUIRED", async () => {
+    const badDb = { select: () => ({}) } as unknown as CanonicalCaseCreateContext["db"];
+    const ctx: CanonicalCaseCreateContext = {
+      db: badDb,
+      firmId: 1,
+      actorUserId: 1,
+      canAssignAny: true,
+      source: "web_create",
+    };
+    try {
+      await createCaseCanonical(ctx, { caseType: "developer_sales" } as any);
+      throw new Error("SHOULD_HAVE_THROWN_TX_REQUIRED");
+    } catch (err: any) {
+      expect(err.message).toContain("CANONICAL_CASE_CREATE_TRANSACTION_REQUIRED");
+    }
   });
 });

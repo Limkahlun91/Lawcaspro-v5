@@ -103,18 +103,6 @@ export type FieldCatalogEntry = {
 
 export type MappingSource = "saved_template" | "auto_detected" | "manual";
 
-export const MappingResponseSchema = z.object({
-  batch: z.union([z.number(), z.string()]),
-  savedMappingTemplateId: z.union([z.number(), z.string(), z.null()]).optional(),
-  mappingSource: z.enum(["saved_template", "auto_detected", "manual"]).optional(),
-  mappingSourceWarning: z.string().nullish(),
-  columns: z.array(ExcelColumnMappingSchema),
-  fixedValues: FixedValuesSchema,
-  headerFingerprint: z.string().nullish(),
-  sourceSheetName: z.string().nullish(),
-  catalog: z.array(z.custom<FieldCatalogEntry>((v) => true)),
-});
-
 export type MappingResponse = z.infer<typeof MappingResponseSchema>;
 
 export type ValidationIssue = {
@@ -231,3 +219,42 @@ export const CASE_TYPE_LABELS: Record<CaseTypeApiValue, string> = {
   subsale: "Subsale",
   perfection: "Perfection",
 };
+
+export type LegacyImportCaseType = "developer_sales";
+export const LEGACY_IMPORT_CASE_TYPE_V1: LegacyImportCaseType = "developer_sales";
+
+export const MappingResponseSchema = z.object({
+  batch: z.union([z.number(), z.string()]),
+  savedMappingTemplateId: z.union([z.number(), z.string(), z.null()]).optional(),
+  mappingSource: z.enum(["saved_template", "auto_detected", "manual"]).optional(),
+  mappingSourceWarning: z.string().nullish(),
+  columns: z.array(ExcelColumnMappingSchema),
+  fixedValues: FixedValuesSchema,
+  headerFingerprint: z.string().nullish(),
+  sourceSheetName: z.string().nullish(),
+  sourceHeaders: z.array(z.string()).default([]),
+  catalog: z.array(z.custom<FieldCatalogEntry>((v) => true)),
+});
+
+export type ImportPlanCounts = {
+  ready: number;
+  warnings: number;
+  reviewRequired: number;
+  duplicates: number;
+  invalid: number;
+};
+
+export const ImportPlanResponseSchema = z.object({
+  batchId: z.union([z.number(), z.string()]),
+  counts: z.object({
+    ready: z.number(),
+    warnings: z.number(),
+    reviewRequired: z.number(),
+    duplicates: z.number(),
+    invalid: z.number(),
+  }),
+  importableRowIds: z.array(z.number()),
+  reviewRowIds: z.array(z.number()),
+});
+
+export type ImportPlanResponse = z.infer<typeof ImportPlanResponseSchema>;
