@@ -1,7 +1,7 @@
 import { CaseMilestoneKey, MilestonePresence, getListCasesQueryKey, useListCases, useListProjects, getListProjectsQueryKey, useListUsers, getListUsersQueryKey } from "@workspace/api-client-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Download, Plus, Search, Printer, Pencil as BatchUpdateIcon } from "lucide-react";
+import { Download, Plus, Search, Printer, Pencil as BatchUpdateIcon, FileSpreadsheet } from "lucide-react";
 import { Link, useLocation } from "wouter";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -29,6 +29,7 @@ import {
 import { normalizeAssignedToUserIdParam } from "./case-filter-utils";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { FeatureGuard } from "@/lib/feature-guards";
 
 async function apiFetchCsv(path: string): Promise<Blob> {
   return await apiFetchBlob(path, { timeoutMs: 60000, headers: { accept: "text/csv" } });
@@ -665,6 +666,14 @@ export default function CasesList() {
             <Download className="w-4 h-4 mr-2" />
             Export CSV
           </Button>
+          <FeatureGuard feature="cases.legacy_import">
+            <Link href="/app/cases/import">
+              <Button variant="outline">
+                <FileSpreadsheet className="w-4 h-4 mr-2" />
+                Import Old Cases
+              </Button>
+            </Link>
+          </FeatureGuard>
           <Link href="/app/cases/new">
             <Button className="bg-amber-500 hover:bg-amber-600 text-white">
               <Plus className="w-4 h-4 mr-2" />

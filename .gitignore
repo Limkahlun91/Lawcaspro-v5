@@ -70,3 +70,8 @@ LAWCASEPRO_FEATURE_REGISTRY.md
 artifacts/api-server/test-results*.json
 artifacts/api-server/test-failures*.json
 artifacts/api-server/p0-compare-report.json
+
+# Legacy import temp files and output
+*Legacy*Master*Data*.xls*
+artifacts/api-server/tmp-imports/
+artifacts/api-server/test-import-output/

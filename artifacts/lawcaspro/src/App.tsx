@@ -17,6 +17,7 @@ import { getApiOrigin } from "@/lib/api-base";
 import { getStoredAuthToken } from "@/lib/auth-token";
 import { DeveloperGuard } from "@/components/developer-guard";
 import { isEmailControlEnabled, isEmailSettingsEnabled, isWhatsAppInboxEnabled, isHRModuleEnabled, PHASE2_NOTICE, HR_DISABLED_NOTICE } from "@/lib/feature-flags";
+import { FeatureGuard } from "@/lib/feature-guards";
 import { useEffect, type ReactNode } from "react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -54,6 +55,7 @@ import NewCase from "@/pages/app/cases/new";
 import CaseDetail from "@/pages/app/cases/detail";
 import Workbench from "@/pages/app/workbench";
 import CaseIntakeInboxPage from "@/pages/app/cases/intake";
+import LegacyCaseImportPage from "@/pages/app/cases/legacy-import";
 
 import NewUser from "@/pages/app/users/new";
 
@@ -272,6 +274,13 @@ function AppRoutes() {
             <PermissionGuard module="cases" action="create">
               <NewCase />
             </PermissionGuard>
+          )} />
+          <Route path="/app/cases/import" component={() => (
+            <FeatureGuard feature="cases.legacy_import" hideDisabled={false}>
+              <PermissionGuard module="cases" action="create">
+                <LegacyCaseImportPage />
+              </PermissionGuard>
+            </FeatureGuard>
           )} />
           <Route path="/app/cases/intake" component={() => (
             <PermissionGuard module="cases" action="create">
