@@ -67,7 +67,7 @@ export async function approveLeaveIdempotent(
     actorUserId: number;
   },
   opts: { tx?: unknown } = {},
-): Promise<{ leave: LeaveRequestRecord; wasAlreadyApproved: boolean; balanceDeductedNow: boolean; newBalanceDays: number; approved: boolean }> {
+): Promise<{ leave: LeaveRequestRecord; wasAlreadyApproved: boolean; balanceDeductedNow: boolean; newBalanceDays: number; approved: boolean; idempotencyKey: string }> {
   const conn = pickDbConn(opts.tx);
   const now = new Date();
   const key = `${input.firmId}:${input.leaveId}`;
@@ -88,7 +88,7 @@ export async function approveLeaveIdempotent(
     createdAt: now,
     updatedAt: now,
   };
-  return { leave: stub, wasAlreadyApproved, balanceDeductedNow: !wasAlreadyApproved, newBalanceDays: 0, approved: true };
+  return { leave: stub, wasAlreadyApproved, balanceDeductedNow: !wasAlreadyApproved, newBalanceDays: 0, approved: true, idempotencyKey: stub.leaveAuditIdempotencyKey };
 }
 
 export async function rejectLeaveRequest(

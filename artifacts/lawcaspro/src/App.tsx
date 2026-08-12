@@ -102,6 +102,39 @@ import QuotationsList from "@/pages/app/quotations";
 import NewQuotation from "@/pages/app/quotations/new";
 import QuotationDetail from "@/pages/app/quotations/detail";
 
+// Partner / Monitor
+import CaseMonitorPage from "@/pages/app/case-monitor";
+import BankAdaptersPage from "@/pages/app/bank-adapters";
+
+// HR Full pages
+import HrDashboard from "@/pages/app/hr/dashboard";
+import HrEmployees from "@/pages/app/hr/employees";
+import HrAttendance from "@/pages/app/hr/attendance";
+import HrLeave from "@/pages/app/hr/leave";
+import HrClaims from "@/pages/app/hr/claims";
+import HrPayroll from "@/pages/app/hr/payroll";
+import HrRecruitment from "@/pages/app/hr/recruitment";
+import HrPerformance from "@/pages/app/hr/performance";
+import HrTraining from "@/pages/app/hr/training";
+import HrAssets from "@/pages/app/hr/assets";
+import HrDocuments from "@/pages/app/hr/documents";
+import HrOnboarding from "@/pages/app/hr/onboarding";
+import HrOffboarding from "@/pages/app/hr/offboarding";
+import HrDepartments from "@/pages/app/hr/departments";
+import HrPositions from "@/pages/app/hr/positions";
+import HrReports from "@/pages/app/hr/reports";
+import HrSettings from "@/pages/app/hr/settings";
+
+// My Work / Self Service
+import MyDashboard from "@/pages/app/my/dashboard";
+import MyLeave from "@/pages/app/my/leave";
+import MyClaims from "@/pages/app/my/claims";
+import MyPayslips from "@/pages/app/my/payslips";
+import MyProfile from "@/pages/app/my/profile";
+import MyAttendance from "@/pages/app/my/attendance";
+import MyDocuments from "@/pages/app/my/documents";
+import MyRequests from "@/pages/app/my/requests";
+
 // Developer Pages
 import DeveloperDashboardPage from "@/pages/developer/dashboard";
 
@@ -227,7 +260,9 @@ function AppRoutes() {
             </PermissionGuard>
           )} />
 
-          <Route path="/app/workbench" component={() => (
+          <Route path="/app/workbench" component={() => <Redirect to="/app/my-work" />} />
+
+          <Route path="/app/my-work" component={() => (
             <PermissionGuard module="cases" action="read" mode="silent">
               <Workbench />
             </PermissionGuard>
@@ -457,6 +492,45 @@ function AppRoutes() {
               <Hub />
             </PermissionGuard>
           )} />
+
+          {/* My Work /app/my/* pages already handled via /app/* catch-all above via Switch */}
+
+          {/* Partner / Monitor (Partner / Manager only via page-guard) */}
+          <Route path="/app/case-monitor" component={CaseMonitorPage} />
+
+          {/* Bank Adapters */}
+          <Route path="/app/bank-adapters" component={BankAdaptersPage} />
+
+          {/* HR Full Admin (HRRedirectGuard wraps module.hr) */}
+          <Route path="/app/hr/dashboard" component={() => <HRRedirectGuard><PermissionGuard module="hr" action="read" mode="silent"><HrDashboard /></PermissionGuard></HRRedirectGuard>} />
+          <Route path="/app/hr/employees" component={() => <HRRedirectGuard><PermissionGuard module="hr" action="read" mode="silent"><HrEmployees /></PermissionGuard></HRRedirectGuard>} />
+          <Route path="/app/hr/attendance" component={() => <HRRedirectGuard><HrAttendance /></HRRedirectGuard>} />
+          <Route path="/app/hr/leave" component={() => <HRRedirectGuard><HrLeave /></HRRedirectGuard>} />
+          <Route path="/app/hr/claims" component={() => <HRRedirectGuard><HrClaims /></HRRedirectGuard>} />
+          <Route path="/app/hr/payroll" component={() => <HRRedirectGuard><HrPayroll /></HRRedirectGuard>} />
+          <Route path="/app/hr/recruitment" component={() => <HRRedirectGuard><HrRecruitment /></HRRedirectGuard>} />
+          <Route path="/app/hr/performance" component={() => <HRRedirectGuard><HrPerformance /></HRRedirectGuard>} />
+          <Route path="/app/hr/training" component={() => <HRRedirectGuard><HrTraining /></HRRedirectGuard>} />
+          <Route path="/app/hr/assets" component={() => <HRRedirectGuard><HrAssets /></HRRedirectGuard>} />
+          <Route path="/app/hr/documents" component={() => <HRRedirectGuard><HrDocuments /></HRRedirectGuard>} />
+          <Route path="/app/hr/onboarding" component={() => <HRRedirectGuard><HrOnboarding /></HRRedirectGuard>} />
+          <Route path="/app/hr/offboarding" component={() => <HRRedirectGuard><HrOffboarding /></HRRedirectGuard>} />
+          <Route path="/app/hr/departments" component={() => <HRRedirectGuard><HrDepartments /></HRRedirectGuard>} />
+          <Route path="/app/hr/positions" component={() => <HRRedirectGuard><HrPositions /></HRRedirectGuard>} />
+          <Route path="/app/hr/reports" component={() => <HRRedirectGuard><HrReports /></HRRedirectGuard>} />
+          <Route path="/app/hr/settings" component={() => <HRRedirectGuard><HrSettings /></HRRedirectGuard>} />
+          <Route path="/app/hr" component={() => <Redirect to="/app/hr/dashboard" />} />
+
+          {/* Self Service My Work */}
+          <Route path="/app/my/dashboard" component={() => <PermissionGuard module="dashboard" action="read" mode="silent"><MyDashboard /></PermissionGuard>} />
+          <Route path="/app/my/leave" component={MyLeave} />
+          <Route path="/app/my/claims" component={MyClaims} />
+          <Route path="/app/my/payslips" component={MyPayslips} />
+          <Route path="/app/my/profile" component={MyProfile} />
+          <Route path="/app/my/attendance" component={MyAttendance} />
+          <Route path="/app/my/documents" component={MyDocuments} />
+          <Route path="/app/my/requests" component={MyRequests} />
+          <Route path="/app/my" component={() => <Redirect to="/app/my/dashboard" />} />
           
           <Route path="/app/*" component={NotFound} />
         </Switch>
@@ -495,7 +569,7 @@ function Router() {
       <Route path="/developer" component={() => <Redirect to="/developer/dashboard" />} />
       <Route path="/developer/*" component={DeveloperRoutes} />
 
-      <Route path="/app" component={() => <Redirect to="/app/workbench" />} />
+      <Route path="/app" component={() => <Redirect to="/app/my-work" />} />
       <Route path="/app/*" component={AppRoutes} />
       
       <Route component={NotFound} />

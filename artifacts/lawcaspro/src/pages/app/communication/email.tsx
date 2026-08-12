@@ -15,6 +15,7 @@ import { EmailComposeDialog } from "@/components/communication/email-compose-dia
 import { apiFetchJson } from "@/lib/api-client";
 import { sanitizeEmailHtml } from "@/lib/email-html";
 import { toastError } from "@/lib/toast-error";
+import { getApiFailureCodeFromError } from "@/lib/api-failure";
 import { useToast } from "@/hooks/use-toast";
 
 type InboxView =
@@ -938,6 +939,68 @@ export default function EmailControlCenterPage() {
     onError: (e) => toastError(toast, e),
   });
 
+  const replyDraftMut = useMutation({
+    mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/reply-draft`, { method: "POST" }),
+    onSuccess: (_r, messageId) => {
+      toast({ title: "Reply draft created" });
+      qc.invalidateQueries({ queryKey: ["communication", "drafts"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", messageId] });
+      setComposeMode("reply");
+    },
+    onError: (e) => toastError(toast, e, "Create reply draft failed"),
+  });
+
+  const replyAllDraftMut = useMutation({
+    mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/reply-all-draft`, { method: "POST" }),
+    onSuccess: (_r, messageId) => {
+      toast({ title: "Reply All draft created" });
+      qc.invalidateQueries({ queryKey: ["communication", "drafts"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", messageId] });
+      setComposeMode("replyAll");
+    },
+    onError: (e) => toastError(toast, e, "Create reply-all draft failed"),
+  });
+
+  const forwardDraftMut = useMutation({
+    mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/forward-draft`, { method: "POST" }),
+    onSuccess: (_r, messageId) => {
+      toast({ title: "Forward draft created" });
+      qc.invalidateQueries({ queryKey: ["communication", "drafts"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", messageId] });
+      setComposeMode("forward");
+    },
+    onError: (e) => toastError(toast, e, "Create forward draft failed"),
+  });
+
+  const forwardAttachDraftMut = useMutation({
+    mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/forward-with-attachments-draft`, { method: "POST" }),
+    onSuccess: (_r, messageId) => {
+      toast({ title: "Forward with attachments draft created" });
+      qc.invalidateQueries({ queryKey: ["communication", "drafts"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", messageId] });
+      setComposeMode("forward");
+    },
+    onError: (e) => toastError(toast, e, "Create forward+attachments draft failed"),
+  });
+
+  const forwardAsAttachDraftMut = useMutation({
+    mutationFn: (messageId: number) => apiFetchJson(`/communication/messages/${messageId}/forward-as-attachment-draft`, { method: "POST" }),
+    onSuccess: (_r, messageId) => {
+      toast({ title: "Forward as attachment draft created" });
+      qc.invalidateQueries({ queryKey: ["communication", "drafts"] });
+      qc.invalidateQueries({ queryKey: ["communication", "message", messageId] });
+      setComposeMode("forward");
+    },
+    onError: (e: any) => {
+      const code = getApiFailureCodeFromError(e);
+      if (code === "RAW_EMAIL_SOURCE_UNAVAILABLE") {
+        toast({ variant: "destructive", title: "Raw email source unavailable", description: "Cannot attach original .eml — the provider did not store a pristine copy." });
+        return;
+      }
+      toastError(toast, e, "Create forward-as-attachment draft failed");
+    },
+  });
+
   const messages = asArray<MessageRow>(messagesQuery.data);
   const tasksMine = asArray<Task>(tasksMineQuery.data);
   const draftsPending = asArray<Draft>(draftsPendingQuery.data);
@@ -1346,27 +1409,63 @@ export default function EmailControlCenterPage() {
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => setComposeMode("reply")}
-                          disabled={!selectedMessageAccount?.canSend}
+                          onClick={() => replyDraftMut.mutate(selectedMessage.id)}
+                          disabled={!selectedMessageAccount?.canSend || replyDraftMut.isPending}
                         >
                           Reply
                         </Button>
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => setComposeMode("replyAll")}
-                          disabled={!selectedMessageAccount?.canSend}
+                          onClick={() => replyAllDraftMut.mutate(selectedMessage.id)}
+                          disabled={!selectedMessageAccount?.canSend || replyAllDraftMut.isPending}
+                          title={`Reply to: ${[selectedMessage.fromAddress ?? "", ...(selectedMessage.toAddresses ?? []), ...(selectedMessage.ccAddresses ?? [])].filter(Boolean).join(", ")}`}
                         >
                           Reply All
                         </Button>
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => setComposeMode("forward")}
-                          disabled={!selectedMessageAccount?.canSend}
+                          onClick={() => forwardDraftMut.mutate(selectedMessage.id)}
+                          disabled={!selectedMessageAccount?.canSend || forwardDraftMut.isPending}
                         >
                           Forward
                         </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => forwardAttachDraftMut.mutate(selectedMessage.id)}
+                          disabled={!selectedMessageAccount?.canSend || forwardAttachDraftMut.isPending}
+                          title="Include original attachments"
+                        >
+                          Forward w/ Attach
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => forwardAsAttachDraftMut.mutate(selectedMessage.id)}
+                          disabled={!selectedMessageAccount?.canSend || forwardAsAttachDraftMut.isPending}
+                          title="Attach original message as .eml file"
+                        >
+                          Fwd as Attachment
+                        </Button>
+                        <div className="h-8 w-px bg-slate-200 self-center" />
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setTaskDialogOpen(true)}
+                          disabled={createTaskMutation.isPending}
+                        >
+                          Create Task
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={() => setAssigneesDialogOpen(true)}>
+                          Assign Staff
+                        </Button>
+                        {!selectedMessage.linkedCaseId ? (
+                          <Button variant="outline" size="sm" onClick={() => document.getElementById("link-case-focus")?.focus?.()}>
+                            Link Case
+                          </Button>
+                        ) : null}
                         <Button
                           variant="outline"
                           size="sm"
@@ -1383,14 +1482,31 @@ export default function EmailControlCenterPage() {
                         >
                           {selectedMessage.internalStatus === "archived" ? "Unarchive" : "Archive"}
                         </Button>
-                        <Button variant="outline" size="sm" onClick={() => setAssigneesDialogOpen(true)}>
-                          Edit Assigned Users
-                        </Button>
                         {selectedMessage.linkedCaseId ? (
                           <Button variant="outline" size="sm" onClick={() => unlinkMessageCaseMutation.mutate(selectedMessage.id)} disabled={unlinkMessageCaseMutation.isPending}>
                             Unlink Case
                           </Button>
                         ) : null}
+                      </div>
+
+                      <div className="mt-3 space-y-2">
+                        <div className="text-xs font-medium text-slate-500">Reply All Recipients</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {(() => {
+                            const all = [
+                              selectedMessage.fromAddress ? { label: "From", addr: selectedMessage.fromAddress, name: selectedMessage.fromName } : null,
+                              ...(selectedMessage.toAddresses ?? []).map((a, i) => ({ label: "To", addr: a, name: null as string | null, _i: `t${i}` })),
+                              ...(selectedMessage.ccAddresses ?? []).map((a, i) => ({ label: "CC", addr: a, name: null as string | null, _i: `c${i}` })),
+                            ].filter(Boolean) as Array<{ label: string; addr: string; name: string | null }>;
+                            if (all.length === 0) return <div className="text-xs text-slate-400">No recipients</div>;
+                            return all.map((r, i) => (
+                              <Badge key={`${r.addr}-${i}`} variant="secondary" className="text-[11px] font-normal gap-1 px-2 py-0.5">
+                                <span className="text-slate-400 font-mono">{r.label}</span>
+                                <span className="text-slate-700">{r.name || r.addr}</span>
+                              </Badge>
+                            ));
+                          })()}
+                        </div>
                       </div>
                       {!selectedMessageAccount?.canSend && selectedMessageSendDisabledReason ? (
                         <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">

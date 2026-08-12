@@ -60,6 +60,8 @@ export function DangerActionDialog({
   targetLabelHint,
   onExecute,
   isExecuting,
+  disableExecute,
+  executionNotice,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -76,6 +78,8 @@ export function DangerActionDialog({
   targetLabelHint?: string | null;
   onExecute: (payload: { reason: string; typed_confirmation: string | null; confirm_firm: string | null; confirm_target: string | null; approval_request_id: string | null; step_up_challenge_id: string | null; step_up_phrase: string | null; emergency_flag: boolean }) => Promise<unknown>;
   isExecuting?: boolean;
+  disableExecute?: boolean;
+  executionNotice?: React.ReactNode;
 }) {
   const { toast } = useToast();
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
@@ -243,6 +247,12 @@ export function DangerActionDialog({
                 </ul>
               </div>
             ) : null}
+
+            {executionNotice ? (
+              <div className="rounded border border-amber-200 bg-amber-50 p-3">
+                {executionNotice}
+              </div>
+            ) : null}
           </div>
         ) : step === 2 ? (
           <div className="space-y-3">
@@ -339,8 +349,8 @@ export function DangerActionDialog({
           ) : step === 3 ? (
             <>
               <Button variant="outline" onClick={() => setStep(2)}>Back</Button>
-              <Button disabled={!canContinueConfirm || !!isExecuting || (governance?.approvalRequired && !approvalRequestId.trim())} onClick={execute}>
-                {isExecuting ? "Executing..." : (governance?.approvalRequired ? "Execute (with Approval)" : "Final Execute")}
+              <Button disabled={!canContinueConfirm || !!isExecuting || !!disableExecute || (governance?.approvalRequired && !approvalRequestId.trim())} onClick={execute}>
+                {isExecuting ? "Executing..." : disableExecute ? "Execute Disabled" : (governance?.approvalRequired ? "Execute (with Approval)" : "Final Execute")}
               </Button>
             </>
           ) : (

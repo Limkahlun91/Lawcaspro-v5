@@ -65,3 +65,8 @@ Thumbs.db
 
 # Generated inventories (never versioned)
 LAWCASEPRO_FEATURE_REGISTRY.md
+
+# Test artifacts (never versioned)
+artifacts/api-server/test-results*.json
+artifacts/api-server/test-failures*.json
+artifacts/api-server/p0-compare-report.json

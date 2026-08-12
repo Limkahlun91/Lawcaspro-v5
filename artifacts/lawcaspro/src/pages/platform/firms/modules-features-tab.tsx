@@ -16,7 +16,16 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 type OverrideMode = "plan" | "enabled" | "disabled";
-type SourceKind = "plan" | "founder_override" | "temporary_override" | "emergency_disable";
+type SourceKind =
+  | "plan"
+  | "founder_override"
+  | "temporary_override"
+  | "emergency_disable"
+  | "feature_default"
+  | "plan_entitlement"
+  | "firm_override_permanent"
+  | "firm_override_temporary"
+  | "denial";
 
 type FeatureDefLike = {
   key: string;
@@ -87,11 +96,18 @@ function sourceBadge(source: SourceKind, emergency?: boolean) {
   }
   switch (source) {
     case "plan":
+    case "plan_entitlement":
       return <Badge variant="secondary" className="text-xs">Plan</Badge>;
+    case "feature_default":
+      return <Badge variant="outline" className="text-xs border-slate-400 text-slate-600 bg-slate-50">Default</Badge>;
     case "founder_override":
+    case "firm_override_permanent":
       return <Badge variant="outline" className="text-xs border-sky-500 text-sky-700 bg-sky-50">Founder Override</Badge>;
     case "temporary_override":
-      return <Badge variant="outline" className="text-xs border-amber-500 text-amber-700 bg-amber-50">Temporary</Badge>;
+    case "firm_override_temporary":
+      return <Badge variant="outline" className="text-xs border-amber-500 text-amber-700 bg-amber-50">Temporary Override</Badge>;
+    case "denial":
+      return <Badge variant="outline" className="text-xs border-rose-500 text-rose-700 bg-rose-50">Denied</Badge>;
     default:
       return <Badge variant="outline" className="text-xs">{source}</Badge>;
   }
@@ -191,7 +207,13 @@ export function FirmModulesFeaturesTab({ firmId, firmName }: { firmId: number; f
     }
     const ent = entitlements.data?.items[key];
     if (showOverridesOnly) {
-      if (!ent || (ent.source !== "founder_override" && ent.source !== "temporary_override" && ent.source !== "emergency_disable")) return false;
+      if (!ent || (
+        ent.source !== "founder_override" &&
+        ent.source !== "temporary_override" &&
+        ent.source !== "emergency_disable" &&
+        ent.source !== "firm_override_permanent" &&
+        ent.source !== "firm_override_temporary"
+      )) return false;
     }
     if (onlyDisabled) {
       if (!ent || ent.enabled) return false;
@@ -305,9 +327,9 @@ export function FirmModulesFeaturesTab({ firmId, firmName }: { firmId: number; f
     const expanded = getExpandState(key);
     const hasChildren = children.length > 0;
     const overrideMode: OverrideMode =
-      ent?.source === "founder_override"
+      (ent?.source === "founder_override" || ent?.source === "firm_override_permanent")
         ? ent.enabled ? "enabled" : "disabled"
-        : ent?.source === "temporary_override"
+        : (ent?.source === "temporary_override" || ent?.source === "firm_override_temporary")
           ? ent.enabled ? "enabled" : "disabled"
           : "plan";
 
@@ -564,7 +586,9 @@ export function FirmModulesFeaturesTab({ firmId, firmName }: { firmId: number; f
                         <OverrideModeSelect
                           value={
                             (entitlements.data?.items[f.key]?.source === "founder_override" ||
-                              entitlements.data?.items[f.key]?.source === "temporary_override")
+                              entitlements.data?.items[f.key]?.source === "firm_override_permanent" ||
+                              entitlements.data?.items[f.key]?.source === "temporary_override" ||
+                              entitlements.data?.items[f.key]?.source === "firm_override_temporary")
                               ? (entitlements.data?.items[f.key]?.enabled ? "enabled" : "disabled")
                               : "plan"
                           }

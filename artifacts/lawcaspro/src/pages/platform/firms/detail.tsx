@@ -18,12 +18,15 @@ import { useAuth } from "@/lib/auth-context";
 import { FirmMaintenanceTab } from "@/pages/platform/firms/maintenance-tab";
 import { FirmSnapshotsTab } from "@/pages/platform/firms/snapshots-tab";
 import { FirmActionHistoryTab } from "@/pages/platform/firms/history-tab";
+import { FirmModulesFeaturesTab } from "@/pages/platform/firms/modules-features-tab";
 import { Textarea } from "@/components/ui/textarea";
 import { getSupportSessionId, setSupportSessionId } from "@/lib/support-session";
 import { listItems } from "@/lib/list-items";
 import { PlatformPage, PlatformPageHeader } from "@/components/platform/page";
 import { StatCard } from "@/components/platform/stat-card";
 import { PlatformEmptyState, PlatformLoadingState } from "@/components/platform/states";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { ExternalLink } from "lucide-react";
 
 interface FirmUser {
   id: number;
@@ -284,7 +287,7 @@ export default function FirmDetail() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<"settings" | "users" | "maintenance" | "snapshots" | "history">("settings");
+  const [activeTab, setActiveTab] = useState<"settings" | "users" | "features" | "plan" | "billing" | "planbilling" | "data" | "maintenance" | "snapshots" | "history">("settings");
 
   const { data: firm, isLoading } = useGetFirm(firmId, {
     query: { enabled: !!firmId, queryKey: getGetFirmQueryKey(firmId) }
@@ -295,8 +298,35 @@ export default function FirmDetail() {
 
   const plansQuery = useQuery({
     queryKey: ["subscription-plans"],
-    queryFn: async () => unwrapApiData<{ items: Array<{ id: number; name: string; isActive: boolean }> }>(await apiFetchJson("/subscription-plans")),
+    queryFn: async () => unwrapApiData<{ items: Array<{ id: number; name: string; isActive: boolean; priceMonthlyCents?: number; description?: string }> }>(await apiFetchJson("/subscription-plans")),
     retry: false,
+  });
+
+  const planDetailQuery = useQuery({
+    queryKey: ["firm-plan-detail", firmId],
+    queryFn: async () => {
+      try { return unwrapApiData<{ plan: { name: string; priceMonthlyCents?: number } | null; subscription: { status: string; renewsAt?: string | null } | null; lastInvoice?: { id: number; amountCents?: number; status: string; issuedAt?: string | null } | null }>(await apiFetchJson(`/founder/firms/${firmId}/plan-summary`)); }
+      catch { return { plan: null, subscription: null, lastInvoice: null }; }
+    },
+    enabled: !!firmId,
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  const dataMgmtQuery = useQuery({
+    queryKey: ["firm-data-mgmt", firmId],
+    queryFn: async () => {
+      try { return unwrapApiData<{ executionAvailable: boolean; lastExecutionAt?: string | null; previewNote?: string | null }>(await apiFetchJson(`/founder/firms/${firmId}/data-management/preview`)); }
+      catch { return { executionAvailable: false, lastExecutionAt: null, previewNote: null }; }
+    },
+    enabled: !!firmId,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const executeReset = useMutation({
+    mutationFn: async () => unwrapApiData(await apiFetchJson(`/founder/firms/${firmId}/data-management/execute-reset`, { method: "POST" })),
+    onSuccess: () => { toast({ title: "Reset executed" }); },
+    onError: (e) => toastError(toast, e, "Reset failed"),
   });
 
   const usersQuery = useQuery<FirmUser[]>({
@@ -406,7 +436,7 @@ export default function FirmDetail() {
       <div className="rounded-lg border border-slate-200 bg-slate-50">
         <div className="overflow-x-auto md:overflow-visible">
           <div className="flex gap-1 p-1 min-w-max md:min-w-0 md:flex-wrap">
-            {(["settings", "users", "maintenance", "snapshots", "history"] as const).map((tab) => (
+            {(["settings", "users", "features", "plan", "billing", "planbilling", "data", "maintenance", "snapshots", "history"] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -420,11 +450,21 @@ export default function FirmDetail() {
                   ? "Settings"
                   : tab === "users"
                     ? `Users (${firm.userCount})`
-                    : tab === "maintenance"
-                      ? "Maintenance"
-                      : tab === "snapshots"
-                        ? "Backups / Restore"
-                        : "Action History"}
+                    : tab === "features"
+                      ? "Features"
+                      : tab === "plan"
+                        ? "Plan"
+                        : tab === "billing"
+                          ? "Billing"
+                          : tab === "planbilling"
+                            ? "Plan & Billing"
+                            : tab === "data"
+                              ? "Data Management"
+                              : tab === "maintenance"
+                                ? "Maintenance"
+                                : tab === "snapshots"
+                                  ? "Backups / Restore"
+                                  : "Action History"}
               </button>
             ))}
           </div>
@@ -492,6 +532,250 @@ export default function FirmDetail() {
                 ))}
               </div>
             )}
+          </CardContent>
+        </Card>
+      )}
+
+      {activeTab === "features" && (
+        <FirmModulesFeaturesTab firmId={firmId} firmName={firm.name} />
+      )}
+
+      {activeTab === "plan" && (
+        <Card>
+          <CardHeader><CardTitle>Plan & Subscription</CardTitle></CardHeader>
+          <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <Card><CardContent className="p-4">
+              <div className="text-xs text-slate-500 uppercase">Plan</div>
+              <div className="text-2xl font-semibold mt-1">{planDetailQuery.data?.plan?.name ?? firm.subscriptionPlan ?? "—"}</div>
+              <div className="text-xs text-slate-500 mt-1">
+                {(planDetailQuery.data?.plan?.priceMonthlyCents ?? null) != null
+                  ? `MYR ${((planDetailQuery.data?.plan?.priceMonthlyCents ?? 0) / 100).toFixed(2)}/month`
+                  : "Price information not available"}
+              </div>
+            </CardContent></Card>
+            <Card><CardContent className="p-4">
+              <div className="text-xs text-slate-500 uppercase">Subscription Status</div>
+              <div className="mt-1">
+                <Badge variant={planDetailQuery.data?.subscription?.status === "active" ? "default" : "secondary"}>
+                  {planDetailQuery.data?.subscription?.status ?? "Unknown"}
+                </Badge>
+              </div>
+              <div className="text-xs text-slate-500 mt-2">
+                {planDetailQuery.data?.subscription?.renewsAt ? `Renews: ${new Date(planDetailQuery.data.subscription.renewsAt).toLocaleDateString()}` : "Renewal date unavailable"}
+              </div>
+            </CardContent></Card>
+            <Card><CardContent className="p-4">
+              <div className="text-xs text-slate-500 uppercase">Firm Status</div>
+              <div className="mt-1"><Badge variant={firm.status === "active" ? "default" : "outline"}>{firm.status}</Badge></div>
+              <div className="text-xs text-slate-500 mt-2">Since {new Date(firm.createdAt).toLocaleDateString()}</div>
+            </CardContent></Card>
+          </CardContent>
+        </Card>
+      )}
+
+      {activeTab === "billing" && (
+        <Card>
+          <CardHeader><CardTitle>Billing</CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            <div>
+              <Button variant="outline" className="gap-2" onClick={() => setLocation("/platform/billing")}>
+                <ExternalLink className="w-4 h-4" /> Go to Founder Billing
+              </Button>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500 uppercase mb-2">Last Invoice</div>
+              {planDetailQuery.data?.lastInvoice ? (
+                <Card><CardContent className="p-4 grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+                  <div><div className="text-xs text-slate-500">Invoice ID</div><div className="font-medium">#{planDetailQuery.data.lastInvoice.id}</div></div>
+                  <div><div className="text-xs text-slate-500">Amount</div><div className="font-medium">MYR {((planDetailQuery.data.lastInvoice.amountCents ?? 0) / 100).toFixed(2)}</div></div>
+                  <div><div className="text-xs text-slate-500">Status</div><Badge variant="outline">{planDetailQuery.data.lastInvoice.status}</Badge></div>
+                  <div><div className="text-xs text-slate-500">Issued</div><div>{planDetailQuery.data.lastInvoice.issuedAt ? new Date(planDetailQuery.data.lastInvoice.issuedAt).toLocaleDateString() : "—"}</div></div>
+                </CardContent></Card>
+              ) : (
+                <div className="text-sm text-slate-500">No invoice history available.</div>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {activeTab === "planbilling" && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Plan &amp; Billing</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <Card className="border-slate-200">
+                <CardContent className="p-4 space-y-2">
+                  <div className="text-xs text-slate-500 uppercase tracking-wider">Current Plan</div>
+                  <div className="text-2xl font-semibold text-slate-900">{planDetailQuery.data?.plan?.name ?? firm.subscriptionPlan ?? "—"}</div>
+                  <div className="text-xs text-slate-500">
+                    {(planDetailQuery.data?.plan?.priceMonthlyCents ?? null) != null
+                      ? `MYR ${((planDetailQuery.data?.plan?.priceMonthlyCents ?? 0) / 100).toFixed(2)}/month`
+                      : "Price information not available"}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">Read-only view. Use Settings tab to change the plan.</div>
+                </CardContent>
+              </Card>
+              <Card className="border-slate-200">
+                <CardContent className="p-4 space-y-2">
+                  <div className="text-xs text-slate-500 uppercase tracking-wider">Subscription Status</div>
+                  <div className="mt-1">
+                    <Badge variant={planDetailQuery.data?.subscription?.status === "active" ? "default" : "secondary"}>
+                      {planDetailQuery.data?.subscription?.status ?? "Unknown"}
+                    </Badge>
+                  </div>
+                  <div className="text-xs text-slate-500 mt-1">
+                    {planDetailQuery.data?.subscription?.renewsAt ? `Renews on ${new Date(planDetailQuery.data.subscription.renewsAt).toLocaleDateString()}` : "Renewal date unavailable"}
+                  </div>
+                  <div className="text-[11px] text-slate-400 mt-1">Go to Founder Billing for management.</div>
+                </CardContent>
+              </Card>
+              <Card className="border-slate-200">
+                <CardContent className="p-4 space-y-2">
+                  <div className="text-xs text-slate-500 uppercase tracking-wider">Firm Status</div>
+                  <div className="mt-1"><Badge variant={firm.status === "active" ? "default" : "outline"}>{firm.status}</Badge></div>
+                  <div className="text-xs text-slate-500 mt-1">Customer since {new Date(firm.createdAt).toLocaleDateString()}</div>
+                  <div className="text-[11px] text-slate-400 mt-1">Slug: {firm.slug}</div>
+                </CardContent>
+              </Card>
+            </div>
+
+            <Card className="border-slate-200 bg-slate-50/60">
+              <CardContent className="p-4 space-y-2">
+                <div className="text-sm font-medium text-slate-800 flex items-center justify-between">
+                  <span>Last Invoice Summary</span>
+                  <Button variant="outline" size="sm" className="h-7 gap-1" onClick={() => setLocation("/platform/billing")}>
+                    <ExternalLink className="w-3.5 h-3.5" /> Founder Billing
+                  </Button>
+                </div>
+                {planDetailQuery.data?.lastInvoice ? (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm pt-1">
+                    <div>
+                      <div className="text-xs text-slate-500">Invoice</div>
+                      <div className="font-medium">#{planDetailQuery.data.lastInvoice.id}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500">Amount</div>
+                      <div className="font-medium">MYR {((planDetailQuery.data.lastInvoice.amountCents ?? 0) / 100).toFixed(2)}</div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500">Status</div>
+                      <Badge variant="outline">{planDetailQuery.data.lastInvoice.status}</Badge>
+                    </div>
+                    <div>
+                      <div className="text-xs text-slate-500">Issued</div>
+                      <div>{planDetailQuery.data.lastInvoice.issuedAt ? new Date(planDetailQuery.data.lastInvoice.issuedAt).toLocaleDateString() : "—"}</div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm text-slate-500">No invoice history available yet.</div>
+                )}
+              </CardContent>
+            </Card>
+
+            <div className="text-xs text-slate-400">
+              Note: This is a read-only consolidated view. Plan changes are done via the Settings tab; billing actions are managed on Founder Billing page.
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {activeTab === "data" && (
+        <Card>
+          <CardHeader><CardTitle>Data Management</CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            <Card className="border-slate-200 bg-slate-50/60"><CardContent className="p-4 space-y-2">
+              <div className="text-sm font-medium text-slate-800">Reset execution preview</div>
+              <div className="text-xs text-slate-500">
+                {dataMgmtQuery.data?.previewNote ?? "Preview available. Reset execution is not yet enabled for this firm."}
+              </div>
+              <div className="text-xs text-slate-500 mt-1">
+                Execution available: <span className={`font-medium ${dataMgmtQuery.data?.executionAvailable ? "text-emerald-700" : "text-rose-700"}`}>
+                  {dataMgmtQuery.data?.executionAvailable ? "YES" : "NO"}
+                </span>
+              </div>
+              {dataMgmtQuery.data?.lastExecutionAt && (
+                <div className="text-xs text-slate-500">Last executed: {new Date(dataMgmtQuery.data.lastExecutionAt).toLocaleString()}</div>
+              )}
+            </CardContent></Card>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="inline-block">
+                    <Button
+                      variant="destructive"
+                      disabled={!dataMgmtQuery.data?.executionAvailable || executeReset.isPending}
+                      onClick={() => executeReset.mutate()}
+                    >
+                      {executeReset.isPending ? "Executing..." : "Execute Reset"}
+                    </Button>
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {dataMgmtQuery.data?.executionAvailable
+                    ? "Run the reset procedure now."
+                    : "Reset execution is not yet enabled. Please contact the administrator to enable reset capability."}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+            {!dataMgmtQuery.data?.executionAvailable && (
+              <div className="text-xs text-slate-500">
+                Preview available. Reset execution is not yet enabled.
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+              <Card className="border-slate-200"><CardContent className="p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-medium text-slate-800">Snapshots &amp; Backups</div>
+                  <Button variant="outline" size="sm" className="h-7 gap-1" onClick={() => setActiveTab("snapshots")}>
+                    View
+                  </Button>
+                </div>
+                <div className="text-xs text-slate-500">Create and manage point-in-time snapshots before running destructive resets or maintenance.</div>
+                <div className="grid grid-cols-2 gap-2 text-xs pt-1">
+                  <div>
+                    <div className="text-slate-500">Last snapshot</div>
+                    <div className="font-medium">{lastSnapshotAt ? new Date(lastSnapshotAt).toLocaleDateString() : "—"}</div>
+                  </div>
+                  <div>
+                    <div className="text-slate-500">Last restore</div>
+                    <div className="font-medium">{lastRestoreAt ? new Date(lastRestoreAt).toLocaleDateString() : "—"}</div>
+                  </div>
+                </div>
+                <div className="text-[11px] text-slate-400">Tip: Always create a snapshot before maintenance actions.</div>
+              </CardContent></Card>
+              <Card className="border-slate-200"><CardContent className="p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-medium text-slate-800">Maintenance Actions</div>
+                  <Button variant="outline" size="sm" className="h-7 gap-1" onClick={() => setActiveTab("maintenance")}>
+                    Open
+                  </Button>
+                </div>
+                <div className="text-xs text-slate-500">Access record-level resets, module resets, and safe maintenance tools for this firm.</div>
+                <div className="grid grid-cols-2 gap-2 text-xs pt-1">
+                  <div>
+                    <div className="text-slate-500">Last maintenance</div>
+                    <div className="font-medium">{lastMaintenanceAt ? new Date(lastMaintenanceAt).toLocaleDateString() : "—"}</div>
+                  </div>
+                  <div>
+                    <div className="text-slate-500">Last rollback</div>
+                    <div className="font-medium">{lastRollbackAt ? new Date(lastRollbackAt).toLocaleDateString() : "—"}</div>
+                  </div>
+                </div>
+                <div className="text-[11px] text-slate-400">Warning: Maintenance actions are audited and may require typed confirmation.</div>
+              </CardContent></Card>
+            </div>
+
+            <Card className="border-slate-200 bg-slate-50/40"><CardContent className="p-4 space-y-1">
+              <div className="text-sm font-medium text-slate-800">Data Lifecycle Overview (placeholder)</div>
+              <div className="text-xs text-slate-500">
+                Full data lifecycle controls (retention policies, archival exports, GDPR/PDPB subject access requests, and scheduled purges) will be exposed here in a future release.
+              </div>
+              <div className="text-[11px] text-slate-400 pt-1">For now, use the Snapshots, Maintenance, and Action History tabs for data operations.</div>
+            </CardContent></Card>
           </CardContent>
         </Card>
       )}

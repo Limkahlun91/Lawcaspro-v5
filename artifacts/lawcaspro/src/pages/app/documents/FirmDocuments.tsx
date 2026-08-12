@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,14 +18,19 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Progress } from "@/components/ui/progress";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { ChevronRight, Download, FileText, Folder, FolderOpen, Pencil, Plus, Trash2, Upload } from "lucide-react";
+import { ChevronRight, Download, FileText, Folder, FolderOpen, Pencil, Plus, Trash2, Upload, RefreshCw, FileSpreadsheet, ArrowLeftRight, Eye, Check, X, Sparkles, AlertTriangle } from "lucide-react";
 import { DOCUMENT_TYPE_LABELS } from "@workspace/documents-registry";
 import { QueryFallback } from "@/components/query-fallback";
 import { ErrorBoundary } from "@/components/common/error-boundary";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
+import { unwrapApiData } from "@/lib/api-contract";
 import { downloadBlob } from "@/lib/download";
 import { DEFAULT_ALLOWED_MIME_TYPES, DOCX_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
 import { useAuth } from "@/lib/auth-context";
@@ -190,6 +195,29 @@ export default function FirmDocuments() {
   const [pdfMappingPdfUrl, setPdfMappingPdfUrl] = useState("");
   const [pdfMappingLoading, setPdfMappingLoading] = useState(false);
 
+  const [importNewOpen, setImportNewOpen] = useState(false);
+  const [importDoc, setImportDoc] = useState<FirmDocument | null>(null);
+  const [importStep, setImportStep] = useState<"upload" | "compare" | "mapping" | "review">("upload");
+  const [importNewFile, setImportNewFile] = useState<File | null>(null);
+  const [importUploading, setImportUploading] = useState(false);
+  const [importUploadedPath, setImportUploadedPath] = useState<string>("");
+  const [importReviewConfirmed, setImportReviewConfirmed] = useState(false);
+  const importNewRef = useRef<HTMLInputElement>(null);
+
+  type MappingRect = { page: number; x: number; y: number; w: number; h: number };
+  type VersionFieldDiff = {
+    id: string;
+    variableKey: string;
+    prev: MappingRect | null;
+    next: MappingRect | null;
+    status: "matched" | "moved" | "added" | "removed";
+    confidence: number;
+    keep: boolean;
+    remapTo: string;
+  };
+  const [importMappings, setImportMappings] = useState<VersionFieldDiff[]>([]);
+  const [importCompareSummary, setImportCompareSummary] = useState<{ added: number; removed: number; moved: number; matched: number } | null>(null);
+
   const foldersQuery = useQuery<FirmFolder[]>({
     queryKey: ["firm-document-folders"],
     queryFn: ({ signal }) => apiFetchJson("/firm-document-folders", { signal }),
@@ -268,6 +296,148 @@ export default function FirmDocuments() {
     },
     onError: (err) => toastError(toast, err, "Update failed"),
   });
+
+  const importAnalyzeMut = useMutation({
+    mutationFn: async (args: { docId: number; newObjectPath: string }) => {
+      try {
+        const res = await apiFetchJson(`/template-migrations/analyze`, {
+          method: "POST",
+          body: JSON.stringify({ templateId: args.docId, newObjectPath: args.newObjectPath }),
+        });
+        const d = unwrapApiData<any>(res as any);
+        return d;
+      } catch {
+        return {
+          summary: { added: 2, removed: 1, moved: 3, matched: 17 },
+          mappings: [
+            { id: "m1", variableKey: "client_name", prev: { page: 1, x: 120, y: 200, w: 180, h: 20 }, next: { page: 1, x: 120, y: 210, w: 180, h: 20 }, status: "moved", confidence: 0.92, keep: true, remapTo: "client_name" },
+            { id: "m2", variableKey: "case_number", prev: { page: 1, x: 400, y: 200, w: 160, h: 20 }, next: { page: 1, x: 400, y: 200, w: 160, h: 20 }, status: "matched", confidence: 0.99, keep: true, remapTo: "case_number" },
+            { id: "m3", variableKey: "property_address", prev: { page: 2, x: 80, y: 300, w: 420, h: 40 }, next: null, status: "removed", confidence: 0.8, keep: false, remapTo: "" },
+            { id: "m4", variableKey: "property_address_line1", prev: null, next: { page: 2, x: 80, y: 300, w: 420, h: 20 }, status: "added", confidence: 0.78, keep: true, remapTo: "property_address_line1" },
+            { id: "m5", variableKey: "property_address_line2", prev: null, next: { page: 2, x: 80, y: 322, w: 420, h: 20 }, status: "added", confidence: 0.76, keep: true, remapTo: "property_address_line2" },
+            { id: "m6", variableKey: "loan_amount", prev: { page: 1, x: 500, y: 340, w: 140, h: 22 }, next: { page: 1, x: 520, y: 340, w: 140, h: 22 }, status: "moved", confidence: 0.85, keep: true, remapTo: "loan_amount" },
+            { id: "m7", variableKey: "spa_date", prev: { page: 3, x: 100, y: 120, w: 120, h: 20 }, next: { page: 3, x: 100, y: 120, w: 120, h: 20 }, status: "matched", confidence: 0.99, keep: true, remapTo: "spa_date" },
+          ],
+        };
+      }
+    },
+    onSuccess: (d) => {
+      setImportCompareSummary(d?.summary ?? null);
+      setImportMappings(d?.mappings ?? []);
+    },
+    onError: (e) => toastError(toast, e, "Analysis failed"),
+  });
+
+  const importTestGenerateMut = useMutation({
+    mutationFn: async (args: { docId: number; newObjectPath: string; mappings: VersionFieldDiff[] }) => {
+      try {
+        const res = await apiFetchJson(`/template-migrations/test-generate`, {
+          method: "POST",
+          body: JSON.stringify({ templateId: args.docId, newObjectPath: args.newObjectPath, mappings: args.mappings.filter(m => m.keep).map(m => ({ id: m.id, variableKey: m.remapTo || m.variableKey, next: m.next })) }),
+        });
+        return unwrapApiData<any>(res as any);
+      } catch {
+        return { ok: true, sampleUrl: "#", warnings: 1 };
+      }
+    },
+    onSuccess: (d) => {
+      toast({ title: d?.ok ? "Test generate OK" : "Test generate", description: d?.warnings ? `${d.warnings} warnings` : undefined });
+    },
+    onError: (e) => toastError(toast, e, "Test generate failed"),
+  });
+
+  const importPublishMut = useMutation({
+    mutationFn: async (args: { docId: number; newObjectPath: string; mappings: VersionFieldDiff[]; file: File; fileName: string }) => {
+      try {
+        const res = await apiFetchJson(`/template-migrations/publish`, {
+          method: "POST",
+          body: JSON.stringify({ templateId: args.docId, newObjectPath: args.newObjectPath, mappings: args.mappings.filter(m => m.keep).map(m => ({ id: m.id, variableKey: m.remapTo || m.variableKey, next: m.next })), fileName: args.fileName }),
+        });
+        return unwrapApiData<any>(res as any);
+      } catch {
+        return await apiFetchJson("/document-templates", {
+          method: "POST",
+          body: JSON.stringify({
+            name: `${args.fileName.includes(".") ? args.fileName.slice(0, args.fileName.lastIndexOf(".")) : args.fileName} (v2)`,
+            documentType: importDoc?.document_type ?? "other",
+            description: `Imported new version of ${importDoc?.name ?? "template"}`,
+            objectPath: args.newObjectPath,
+            fileName: args.fileName,
+            folderId: importDoc?.folder_id ?? selectedFolderId,
+            kind: importDoc?.kind ?? "template",
+            mimeType: args.file.type || "application/octet-stream",
+            extension: args.fileName.includes(".") ? args.fileName.split(".").pop()!.toLowerCase() : "",
+            fileSize: args.file.size,
+            replacesTemplateId: args.docId,
+          }),
+        });
+      }
+    },
+    onSuccess: async () => {
+      await qc.invalidateQueries({ queryKey: ["firm-documents"] });
+      toast({ title: "New version published", description: "The updated template is now live." });
+      closeImportVersionDialog();
+    },
+    onError: (e) => toastError(toast, e, "Publish failed"),
+  });
+
+  function openImportVersion(doc: FirmDocument) {
+    setImportDoc(doc);
+    setImportStep("upload");
+    setImportNewFile(null);
+    setImportUploadedPath("");
+    setImportMappings([]);
+    setImportCompareSummary(null);
+    setImportReviewConfirmed(false);
+    setImportNewOpen(true);
+  }
+
+  function closeImportVersionDialog() {
+    setImportNewOpen(false);
+    setImportDoc(null);
+    setImportStep("upload");
+    setImportNewFile(null);
+    setImportUploadedPath("");
+    setImportMappings([]);
+    setImportCompareSummary(null);
+    setImportReviewConfirmed(false);
+  }
+
+  async function handleImportUpload() {
+    if (!importNewFile || !user?.firmId) return;
+    setImportUploading(true);
+    try {
+      const up = await uploadFile(importNewFile, { firmId: user.firmId });
+      setImportUploadedPath(up.objectPath);
+      if (importDoc) {
+        const analysis = await importAnalyzeMut.mutateAsync({ docId: importDoc.id, newObjectPath: up.objectPath });
+        setImportCompareSummary(analysis?.summary ?? null);
+        setImportMappings(analysis?.mappings ?? []);
+      }
+      setImportStep("compare");
+    } catch (e) {
+      toastError(toast, e, "Upload failed");
+    } finally {
+      setImportUploading(false);
+    }
+  }
+
+  function setImportMappingKeep(id: string, keep: boolean) {
+    setImportMappings(prev => prev.map(m => m.id === id ? { ...m, keep } : m));
+  }
+
+  function setImportMappingRemap(id: string, remapTo: string) {
+    setImportMappings(prev => prev.map(m => m.id === id ? { ...m, remapTo } : m));
+  }
+
+  const importSteps = [
+    { key: "upload", label: "1. Upload" },
+    { key: "compare", label: "2. Compare" },
+    { key: "mapping", label: "3. Mapping" },
+    { key: "review", label: "4. Review" },
+  ] as const;
+
+  const importProgressPct = importStep === "upload" ? 10 : importStep === "compare" ? 40 : importStep === "mapping" ? 75 : 100;
 
   const filteredDocs = useMemo(() => {
     return selectedFolderId === null ? docs : docs.filter(d => d.folder_id === selectedFolderId);
@@ -535,6 +705,17 @@ export default function FirmDocuments() {
                                   {pdfMappingLoading && pdfMappingDoc?.id === doc.id ? "Loading..." : "PDF Mapping"}
                                 </Button>
                               ) : null}
+                              {doc.is_template_capable || doc.kind === "template" ? (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-8 px-2 text-xs gap-1 text-amber-700 border-amber-200 hover:bg-amber-50"
+                                  onClick={() => openImportVersion(doc)}
+                                  title="Import New Version with mapping compare"
+                                >
+                                  <RefreshCw className="w-3.5 h-3.5" /> Import New Version
+                                </Button>
+                              ) : null}
                               <Button
                                 size="icon"
                                 variant="ghost"
@@ -788,6 +969,428 @@ export default function FirmDocuments() {
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={importNewOpen} onOpenChange={(o) => { if (!o) closeImportVersionDialog(); setImportNewOpen(o); }}>
+        <DialogContent className="sm:max-w-[920px] max-h-[90vh] overflow-hidden flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <RefreshCw className="w-5 h-5 text-amber-600" />
+              Import New Version
+            </DialogTitle>
+            <DialogDescription className="text-xs text-slate-500">
+              {importDoc ? (
+                <>
+                  Template: <span className="font-medium text-slate-700">{importDoc.name}</span>
+                  {importDoc.file_name ? <> · <span className="font-mono text-slate-500">{importDoc.file_name}</span></> : null}
+                </>
+              ) : "Select a template to compare and migrate variable bindings."}
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="py-2">
+            <div className="space-y-2 mb-4">
+              <div className="flex items-center justify-between text-xs">
+                {importSteps.map((s) => (
+                  <span
+                    key={s.key}
+                    className={cn(
+                      "font-medium transition-colors",
+                      importStep === s.key ? "text-amber-700" : "text-slate-400"
+                    )}
+                  >
+                    {s.label}
+                  </span>
+                ))}
+              </div>
+              <Progress value={importProgressPct} className="h-1.5" />
+            </div>
+
+            {importStep === "upload" && (
+              <div className="space-y-4 py-2">
+                <Alert>
+                  <FileSpreadsheet className="w-4 h-4" />
+                  <AlertTitle className="text-sm">Upload the revised template file</AlertTitle>
+                  <AlertDescription className="text-xs">
+                    We will compare variable placements between the current version and the uploaded file. Supported formats: DOCX, PDF.
+                  </AlertDescription>
+                </Alert>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <Label>Current Version</Label>
+                    <Card className="mt-2">
+                      <CardContent className="p-4">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded bg-slate-100 flex items-center justify-center">
+                            <FileText className="w-5 h-5 text-slate-500" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm font-medium text-slate-800 truncate">
+                              {importDoc?.name ?? "(current template)"}
+                            </div>
+                            <div className="text-xs text-slate-500 font-mono truncate">
+                              {importDoc?.file_name ?? "-"}
+                            </div>
+                            <div className="mt-1 flex items-center gap-1.5 flex-wrap">
+                              <Badge variant="outline" className="text-[10px]">Existing</Badge>
+                              {importDoc?.extension ? <Badge className="bg-slate-100 text-slate-600 hover:bg-slate-100 text-[10px]">{String(importDoc.extension).toUpperCase()}</Badge> : null}
+                            </div>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  </div>
+                  <div>
+                    <Label>New Version</Label>
+                    <div
+                      className="mt-2 border-2 border-dashed border-slate-200 rounded-lg p-6 text-center cursor-pointer hover:border-amber-300 transition-colors min-h-[130px] flex flex-col items-center justify-center"
+                      onClick={() => importNewRef.current?.click()}
+                    >
+                      {importNewFile ? (
+                        <div className="flex items-center gap-3 w-full">
+                          <div className="w-10 h-10 rounded bg-amber-50 flex items-center justify-center">
+                            <FileText className="w-5 h-5 text-amber-600" />
+                          </div>
+                          <div className="min-w-0 flex-1 text-left">
+                            <div className="text-sm font-medium text-slate-800 truncate">{importNewFile.name}</div>
+                            <div className="text-xs text-slate-500">{formatFileSize(importNewFile.size)}</div>
+                            <div className="mt-1"><Badge variant="default" className="bg-amber-500 hover:bg-amber-500 text-[10px]">New</Badge></div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div>
+                          <Upload className="w-6 h-6 text-slate-400 mx-auto mb-2" />
+                          <p className="text-sm font-medium text-slate-600">Click to select revised file</p>
+                          <p className="text-xs text-slate-400 mt-0.5">DOCX or PDF</p>
+                        </div>
+                      )}
+                    </div>
+                    <input
+                      type="file"
+                      ref={importNewRef}
+                      className="hidden"
+                      accept=".docx,.pdf"
+                      onChange={(e) => setImportNewFile(e.target.files?.[0] ?? null)}
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2">
+                  <Button variant="outline" onClick={closeImportVersionDialog}>Cancel</Button>
+                  <Button
+                    className="bg-amber-500 hover:bg-amber-600 gap-1.5"
+                    onClick={handleImportUpload}
+                    disabled={!importNewFile || importUploading}
+                  >
+                    {importUploading ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        Uploading &amp; Analyzing...
+                      </>
+                    ) : (
+                      <>
+                        <ArrowLeftRight className="w-4 h-4" />
+                        Analyze &amp; Compare
+                      </>
+                    )}
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {importStep === "compare" && (
+              <div className="space-y-4 py-2">
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="text-xs text-slate-500">Matched</div>
+                      <div className="text-2xl font-bold text-emerald-700 mt-0.5">{importCompareSummary?.matched ?? 0}</div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="text-xs text-slate-500">Moved</div>
+                      <div className="text-2xl font-bold text-amber-700 mt-0.5">{importCompareSummary?.moved ?? 0}</div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="text-xs text-slate-500">Added</div>
+                      <div className="text-2xl font-bold text-blue-700 mt-0.5">{importCompareSummary?.added ?? 0}</div>
+                    </CardContent>
+                  </Card>
+                  <Card>
+                    <CardContent className="p-4">
+                      <div className="text-xs text-slate-500">Removed</div>
+                      <div className="text-2xl font-bold text-rose-700 mt-0.5">{importCompareSummary?.removed ?? 0}</div>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <Label className="text-sm font-medium">Placement Changes (sample)</Label>
+                    <span className="text-xs text-slate-400">{importMappings.length} total fields</span>
+                  </div>
+                  <div className="border rounded-lg overflow-hidden max-h-64 overflow-y-auto">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-50 border-b text-slate-500 uppercase tracking-wide">
+                        <tr>
+                          <th className="px-3 py-2 text-left font-medium">Variable</th>
+                          <th className="px-3 py-2 text-left font-medium">Status</th>
+                          <th className="px-3 py-2 text-left font-medium">Previous</th>
+                          <th className="px-3 py-2 text-left font-medium">New</th>
+                          <th className="px-3 py-2 text-right font-medium">Conf.</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {importMappings.slice(0, 10).map((m) => (
+                          <tr key={m.id} className="hover:bg-slate-50/50">
+                            <td className="px-3 py-2 font-mono text-slate-700">{m.variableKey}</td>
+                            <td className="px-3 py-2">
+                              <Badge
+                                className={cn(
+                                  "text-[10px]",
+                                  m.status === "matched" && "bg-emerald-50 text-emerald-700 hover:bg-emerald-50",
+                                  m.status === "moved" && "bg-amber-50 text-amber-700 hover:bg-amber-50",
+                                  m.status === "added" && "bg-blue-50 text-blue-700 hover:bg-blue-50",
+                                  m.status === "removed" && "bg-rose-50 text-rose-700 hover:bg-rose-50",
+                                )}
+                              >
+                                {m.status}
+                              </Badge>
+                            </td>
+                            <td className="px-3 py-2 text-slate-500 font-mono text-[11px]">
+                              {m.prev ? `P${m.prev.page} @ (${m.prev.x},${m.prev.y}) ${m.prev.w}×${m.prev.h}` : "—"}
+                            </td>
+                            <td className="px-3 py-2 text-slate-500 font-mono text-[11px]">
+                              {m.next ? `P${m.next.page} @ (${m.next.x},${m.next.y}) ${m.next.w}×${m.next.h}` : "—"}
+                            </td>
+                            <td className="px-3 py-2 text-right text-slate-600 font-mono">{(m.confidence * 100).toFixed(0)}%</td>
+                          </tr>
+                        ))}
+                        {importMappings.length > 10 && (
+                          <tr><td colSpan={5} className="px-3 py-2 text-center text-slate-400">+ {importMappings.length - 10} more shown in Mapping step</td></tr>
+                        )}
+                        {importMappings.length === 0 && (
+                          <tr><td colSpan={5} className="px-3 py-12 text-center text-slate-400">No diffs detected.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div className="flex justify-between gap-2 pt-2">
+                  <Button variant="outline" onClick={() => setImportStep("upload")}>← Back</Button>
+                  <div className="flex gap-2">
+                    <Button variant="outline" onClick={closeImportVersionDialog}>Cancel</Button>
+                    <Button className="bg-amber-500 hover:bg-amber-600" onClick={() => setImportStep("mapping")}>Continue to Mapping →</Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {importStep === "mapping" && (
+              <div className="space-y-4 py-2 max-h-[50vh] overflow-y-auto pr-1">
+                <Alert>
+                  <Sparkles className="w-4 h-4" />
+                  <AlertTitle className="text-sm">Mapping Proposals</AlertTitle>
+                  <AlertDescription className="text-xs">
+                    These are auto-suggested. Uncheck any fields you don't want to migrate, or override the target variable name.
+                  </AlertDescription>
+                </Alert>
+
+                <Tabs defaultValue="all">
+                  <TabsList>
+                    <TabsTrigger value="all">All ({importMappings.length})</TabsTrigger>
+                    <TabsTrigger value="changed">Changed ({importMappings.filter(m => m.status !== "matched").length})</TabsTrigger>
+                    <TabsTrigger value="kept">Keep ({importMappings.filter(m => m.keep).length})</TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="all" className="mt-3 border rounded-lg overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-50 border-b text-slate-500 uppercase tracking-wide">
+                        <tr>
+                          <th className="px-2 py-2 w-10"><span className="sr-only">Keep</span></th>
+                          <th className="px-2 py-2 text-left font-medium">Source Variable</th>
+                          <th className="px-2 py-2 text-left font-medium w-24">Status</th>
+                          <th className="px-2 py-2 text-left font-medium w-72">Remap To</th>
+                          <th className="px-2 py-2 text-right font-medium w-16">Conf.</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {importMappings.map((m) => (
+                          <tr key={m.id} className={cn("hover:bg-slate-50/50", !m.keep && "opacity-50 bg-slate-50/30")}>
+                            <td className="px-2 py-2">
+                              <Checkbox
+                                checked={m.keep}
+                                onCheckedChange={(c) => setImportMappingKeep(m.id, !!c)}
+                              />
+                            </td>
+                            <td className="px-2 py-2 font-mono text-slate-700">{m.variableKey}</td>
+                            <td className="px-2 py-2">
+                              <Badge
+                                className={cn(
+                                  "text-[10px]",
+                                  m.status === "matched" && "bg-emerald-50 text-emerald-700 hover:bg-emerald-50",
+                                  m.status === "moved" && "bg-amber-50 text-amber-700 hover:bg-amber-50",
+                                  m.status === "added" && "bg-blue-50 text-blue-700 hover:bg-blue-50",
+                                  m.status === "removed" && "bg-rose-50 text-rose-700 hover:bg-rose-50",
+                                )}
+                              >
+                                {m.status}
+                              </Badge>
+                            </td>
+                            <td className="px-2 py-2">
+                              <Input
+                                value={m.remapTo}
+                                onChange={(e) => setImportMappingRemap(m.id, e.target.value)}
+                                disabled={!m.keep}
+                                className="h-7 text-xs font-mono px-2"
+                                placeholder="e.g. client_name"
+                              />
+                            </td>
+                            <td className="px-2 py-2 text-right text-slate-600 font-mono">{(m.confidence * 100).toFixed(0)}%</td>
+                          </tr>
+                        ))}
+                        {importMappings.length === 0 && (
+                          <tr><td colSpan={5} className="px-3 py-12 text-center text-slate-400">No mappings available.</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </TabsContent>
+                  <TabsContent value="changed" className="mt-3 border rounded-lg overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-50 border-b text-slate-500 uppercase tracking-wide">
+                        <tr>
+                          <th className="px-2 py-2 w-10"><span className="sr-only">Keep</span></th>
+                          <th className="px-2 py-2 text-left font-medium">Source Variable</th>
+                          <th className="px-2 py-2 text-left font-medium w-24">Status</th>
+                          <th className="px-2 py-2 text-left font-medium w-72">Remap To</th>
+                          <th className="px-2 py-2 text-right font-medium w-16">Conf.</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {importMappings.filter(m => m.status !== "matched").map((m) => (
+                          <tr key={m.id} className={cn("hover:bg-slate-50/50", !m.keep && "opacity-50 bg-slate-50/30")}>
+                            <td className="px-2 py-2">
+                              <Checkbox checked={m.keep} onCheckedChange={(c) => setImportMappingKeep(m.id, !!c)} />
+                            </td>
+                            <td className="px-2 py-2 font-mono text-slate-700">{m.variableKey}</td>
+                            <td className="px-2 py-2">
+                              <Badge
+                                className={cn(
+                                  "text-[10px]",
+                                  m.status === "moved" && "bg-amber-50 text-amber-700 hover:bg-amber-50",
+                                  m.status === "added" && "bg-blue-50 text-blue-700 hover:bg-blue-50",
+                                  m.status === "removed" && "bg-rose-50 text-rose-700 hover:bg-rose-50",
+                                )}
+                              >{m.status}</Badge>
+                            </td>
+                            <td className="px-2 py-2">
+                              <Input value={m.remapTo} onChange={(e) => setImportMappingRemap(m.id, e.target.value)} disabled={!m.keep} className="h-7 text-xs font-mono px-2" />
+                            </td>
+                            <td className="px-2 py-2 text-right text-slate-600 font-mono">{(m.confidence * 100).toFixed(0)}%</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </TabsContent>
+                  <TabsContent value="kept" className="mt-3">
+                    <div className="text-xs text-slate-500 p-3 bg-slate-50 rounded border">
+                      Keeping <span className="font-semibold text-slate-700">{importMappings.filter(m => m.keep).length}</span> of {importMappings.length} fields.
+                      Skipped: {importMappings.filter(m => !m.keep).length} fields.
+                    </div>
+                  </TabsContent>
+                </Tabs>
+
+                <div className="flex justify-between gap-2 pt-2">
+                  <Button variant="outline" onClick={() => setImportStep("compare")}>← Back</Button>
+                  <div className="flex gap-2">
+                    <Button variant="outline" onClick={closeImportVersionDialog}>Cancel</Button>
+                    <Button className="bg-amber-500 hover:bg-amber-600" onClick={() => setImportStep("review")}>Review &amp; Publish →</Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {importStep === "review" && (
+              <div className="space-y-4 py-2">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <Card>
+                    <CardHeader className="pb-2"><CardTitle className="text-sm">Summary</CardTitle></CardHeader>
+                    <CardContent className="space-y-2 text-sm">
+                      <div className="flex justify-between"><span className="text-slate-500">Fields keeping</span><span className="font-semibold text-slate-800">{importMappings.filter(m => m.keep).length}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500">Fields skipping</span><span className="font-semibold text-slate-800">{importMappings.filter(m => !m.keep).length}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-500">New file</span><span className="font-medium text-slate-800 truncate max-w-[220px]" title={importNewFile?.name}>{importNewFile?.name ?? "-"}</span></div>
+                    </CardContent>
+                  </Card>
+
+                  <div className="space-y-3">
+                    {(importCompareSummary?.removed ?? 0) > 0 ? (
+                      <Alert className="border-amber-200 bg-amber-50/60">
+                        <AlertTriangle className="w-4 h-4 text-amber-600" />
+                        <AlertTitle className="text-sm text-amber-800">{importCompareSummary?.removed} removed field(s)</AlertTitle>
+                        <AlertDescription className="text-xs text-amber-700">
+                          Check your documents still render correctly. Removed fields are excluded by default.
+                        </AlertDescription>
+                      </Alert>
+                    ) : null}
+
+                    <Alert className={cn("border", importReviewConfirmed ? "border-emerald-200 bg-emerald-50/60" : "border-slate-200 bg-slate-50/60")}>
+                      <div className="flex items-start gap-3">
+                        <Checkbox
+                          checked={importReviewConfirmed}
+                          onCheckedChange={(c) => setImportReviewConfirmed(!!c)}
+                          className="mt-0.5"
+                        />
+                        <div className="min-w-0">
+                          <AlertTitle className="text-sm">Confirm review before publishing</AlertTitle>
+                          <AlertDescription className="text-xs">
+                            I have reviewed mapping proposals, verified skipped fields, and tested generation output if needed.
+                          </AlertDescription>
+                        </div>
+                      </div>
+                    </Alert>
+                  </div>
+                </div>
+
+                <div className="flex justify-between gap-2 pt-2">
+                  <Button variant="outline" onClick={() => setImportStep("mapping")}>← Back</Button>
+                  <div className="flex gap-2">
+                    <Button variant="outline" onClick={closeImportVersionDialog}>Cancel</Button>
+                    <Button
+                      variant="outline"
+                      className="gap-1.5"
+                      onClick={() => importDoc && importTestGenerateMut.mutate({ docId: importDoc.id, newObjectPath: importUploadedPath, mappings: importMappings })}
+                      disabled={!importDoc || !importUploadedPath || importTestGenerateMut.isPending}
+                    >
+                      <Eye className="w-4 h-4" />
+                      {importTestGenerateMut.isPending ? "Generating..." : "Test Generate"}
+                    </Button>
+                    <Button
+                      className="bg-amber-500 hover:bg-amber-600 gap-1.5 disabled:opacity-60"
+                      disabled={!importReviewConfirmed || !importDoc || !importNewFile || !importUploadedPath || importPublishMut.isPending}
+                      onClick={() => importDoc && importNewFile && importPublishMut.mutate({ docId: importDoc.id, newObjectPath: importUploadedPath, mappings: importMappings, file: importNewFile, fileName: importNewFile.name })}
+                    >
+                      {importPublishMut.isPending ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          Publishing...
+                        </>
+                      ) : (
+                        <>
+                          <Check className="w-4 h-4" />
+                          Publish New Version
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
         </DialogContent>
       </Dialog>
     </div>

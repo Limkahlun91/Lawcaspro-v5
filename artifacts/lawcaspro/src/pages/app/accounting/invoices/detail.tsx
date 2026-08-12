@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Download, CheckCircle, XCircle, Plus, AlertCircle, FileText, RefreshCw, Send } from "lucide-react";
+import { ArrowLeft, Download, CheckCircle, XCircle, Plus, AlertCircle, FileText, RefreshCw, Send, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +12,7 @@ import { useToast } from "@/hooks/use-toast";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
+import { getApiFailureCodeFromError } from "@/lib/api-failure";
 import { useReAuth } from "@/components/re-auth-dialog";
 import { BillToBlock } from "@/components/accounting/BillToBlock";
 import { DocumentPrintStyles } from "@/components/accounting/DocumentPrintStyles";
@@ -152,6 +153,7 @@ export default function InvoiceDetail() {
   const { wrapWithReAuth } = useReAuth();
   const [showReceipt, setShowReceipt] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [integrationNotConfigured, setIntegrationNotConfigured] = useState(false);
   const pdfRef = useRef<HTMLDivElement>(null);
   const [receiptForm, setReceiptForm] = useState({
     amount: "", paymentMethod: "bank_transfer", receivedDate: new Date().toISOString().slice(0, 10), referenceNo: "",
@@ -221,10 +223,18 @@ export default function InvoiceDetail() {
   });
 
   const einvSubmitMut = useMutation({
-    mutationFn: () => apiFetchJson(`/invoices/${id}/einvoice/submit`, { method: "POST" }),
+    mutationFn: async () => {
+      const idempotencyKey = crypto.randomUUID();
+      return apiFetchJson(`/invoices/${id}/einvoice/submit`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idempotencyKey }),
+      });
+    },
     onSuccess: (r: any) => {
       qc.invalidateQueries({ queryKey: ["einvoice-status", id] });
       qc.invalidateQueries({ queryKey: ["invoice", id] });
+      setIntegrationNotConfigured(false);
       if (r?.skippedDueToDuplicateSourceLink) {
         toast({ title: "Submit skipped (double invoice guard)", description: r?.errorMessage ?? "Source already linked to VALID submission." });
       } else if (r?.status === "VALID" || r?.status === "SUBMITTED") {
@@ -234,8 +244,14 @@ export default function InvoiceDetail() {
       }
     },
     onError: (e: any) => {
+      const code = getApiFailureCodeFromError(e);
+      if (code === "EINVOICE_INTEGRATION_NOT_CONFIGURED") {
+        setIntegrationNotConfigured(true);
+        toast({ variant: "destructive", title: "Integration Not Configured", description: "Setup required before submitting to MyInvois portal." });
+        return;
+      }
       const detail = e?.responseJson ?? (typeof e?.message === "string" ? e.message : undefined);
-      if (detail === "EINVOICE_SANDBOX_DISABLED") toast({ variant: "destructive", title: "Sandbox disabled", description: "Set EINVOICE_SANDBOX=1 on server to enable test-mode submit. Production submit is NOT allowed." });
+      if (detail === "EINVOICE_SANDBOX_DISABLED" || code === "EINVOICE_SANDBOX_DISABLED") toast({ variant: "destructive", title: "Sandbox disabled", description: "Set EINVOICE_SANDBOX=1 on server to enable test-mode submit. Production submit is NOT allowed." });
       else toastError(toast, e, "Submit failed");
     },
   });
@@ -423,6 +439,18 @@ export default function InvoiceDetail() {
         </Card>
       </div>
 
+      {integrationNotConfigured && (
+        <Card className="print:hidden pdf-hide border-amber-200 bg-amber-50">
+          <CardContent className="pt-4 pb-4 flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <div className="font-semibold text-amber-800">Integration Not Configured — Setup Required</div>
+              <div className="text-sm text-amber-700 mt-0.5">e-Invoice (MyInvois) portal credentials have not been configured for this firm. Configure them in Firm Settings before submitting.</div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* e-Invoice Status card */}
       <Card className="print:hidden pdf-hide border-indigo-100 bg-indigo-50/40">
         <CardHeader className="flex flex-row items-start justify-between gap-4 pb-2">
@@ -523,7 +551,8 @@ export default function InvoiceDetail() {
               size="sm"
               className="gap-1.5 text-xs h-8 bg-indigo-600 hover:bg-indigo-700 text-white"
               onClick={() => einvSubmitMut.mutate()}
-              disabled={einvPrepareMut.isPending || einvSubmitMut.isPending || einvRetryMut.isPending}
+              disabled={integrationNotConfigured || einvPrepareMut.isPending || einvSubmitMut.isPending || einvRetryMut.isPending}
+              title={integrationNotConfigured ? "Integration not configured — setup required" : undefined}
             >
               <Send className="w-3.5 h-3.5" />
               {einvSubmitMut.isPending ? "Submitting…" : "Submit (Sandbox)"}

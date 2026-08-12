@@ -474,11 +474,31 @@ export function CasePrintModal({ open, onOpenChange, caseId, initialPrintKey }: 
               <div className="text-sm text-slate-500">Loading documents...</div>
             </div>
           ) : metaQuery.error ? (
-            <div className="flex flex-col items-center justify-center py-12 gap-2">
-              <AlertCircle className="w-8 h-8 text-red-500" />
-              <div className="text-sm text-slate-700">Failed to load print documents.</div>
-              <div className="text-xs text-slate-500 max-w-lg text-center">{metaQuery.error ? String(metaQuery.error) : null}</div>
-            </div>
+            (() => {
+              const errCode = metaQuery.error ? getApiFailureCodeFromError(metaQuery.error) ?? "" : "";
+              const isFeatureDisabled = errCode === "FEATURE_DISABLED";
+              return (
+                <div className="flex flex-col items-center justify-center py-12 gap-2 w-full">
+                  <AlertCircle className={`w-8 h-8 ${isFeatureDisabled ? "text-rose-500" : "text-red-500"}`} />
+                  {isFeatureDisabled && (
+                    <Badge variant="destructive" className="text-xs gap-1 px-3 py-1 border border-rose-300 bg-rose-50 text-rose-700">
+                      <AlertCircle className="w-3 h-3" />
+                      FEATURE_DISABLED — Print feature is turned off
+                    </Badge>
+                  )}
+                  <div className="text-sm text-slate-700 font-medium">
+                    {isFeatureDisabled ? "Print feature is currently disabled for your workspace." : "Failed to load print documents."}
+                  </div>
+                  {isFeatureDisabled ? (
+                    <div className="text-xs text-slate-500 max-w-lg text-center">
+                      Contact your firm Partner or Lawcaspro administrator to enable document print/download.
+                    </div>
+                  ) : (
+                    <div className="text-xs text-slate-500 max-w-lg text-center">{metaQuery.error ? String(metaQuery.error) : null}</div>
+                  )}
+                </div>
+              );
+            })()
           ) : (
             <>
               <section>

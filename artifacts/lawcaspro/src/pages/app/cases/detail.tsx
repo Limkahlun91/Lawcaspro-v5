@@ -34,6 +34,7 @@ import { QueryFallback } from "@/components/query-fallback";
 import { CasePrintModal } from "@/components/CasePrintModal";
 import { toastError } from "@/lib/toast-error";
 import { apiFetchBlob, apiFetchJson, apiRequest } from "@/lib/api-client";
+import { unwrapApiData } from "@/lib/api-contract";
 import { DateOnlyInput, formatYmdToDmy, normalizeDateOnlyFromApi } from "@/components/date-only-input";
 import { downloadBlob } from "@/lib/download";
 import { getApiFailureCodeFromError } from "@/lib/api-failure";
@@ -314,34 +315,68 @@ function CaseLedgerTab({ caseId }: { caseId: number }) {
                     <th className="py-3 px-3 font-medium">
                       <button className="hover:text-slate-900" onClick={() => toggleEntrySort("date")}>Date</button>
                     </th>
-                    <th className="py-3 px-3 font-medium">Category</th>
                     <th className="py-3 px-3 font-medium">
                       <button className="hover:text-slate-900" onClick={() => toggleEntrySort("type")}>Type</button>
                     </th>
                     <th className="py-3 px-3 font-medium">Description</th>
-                    <th className="py-3 px-3 font-medium text-right">
-                      <button className="hover:text-slate-900" onClick={() => toggleEntrySort("amount")}>Amount</button>
-                    </th>
+                    <th className="py-3 px-3 font-medium text-right">Debit</th>
+                    <th className="py-3 px-3 font-medium text-right">Credit</th>
+                    <th className="py-3 px-3 font-medium">Source Reference</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {displayEntries.map((e) => (
-                    <tr key={e.id} className="border-b border-slate-100">
-                      <td className="py-2 px-3 whitespace-nowrap">{e.transactionDate}</td>
-                      <td className="py-2 px-3">{e.entryCategory}</td>
-                      <td className="py-2 px-3 font-mono text-xs">{e.entryType}</td>
-                      <td className="py-2 px-3">
-                        {e.sourceType === "payment_voucher" && typeof e.sourceId === "number" ? (
-                          <Link href={`/app/accounting?tab=payment-vouchers&printVoucherId=${e.sourceId}`} className="text-amber-700 hover:underline">
-                            {e.description}
+                  {displayEntries.map((e) => {
+                    const isDebitSide = e.entryType === "invoice_billed" || e.entryType === "disbursement_paid" || e.entryType === "trust_paid";
+                    const amountVal = Number(e.amount ?? 0);
+                    const absVal = Math.abs(amountVal);
+                    const debit = isDebitSide ? absVal : 0;
+                    const credit = isDebitSide ? 0 : absVal;
+                    const kindLabel = (e.sourceType ?? e.entryType) as string;
+                    let sourceRef: React.ReactNode = <span className="text-slate-400 text-xs">—</span>;
+                    if (typeof e.sourceId === "number" && e.sourceId > 0) {
+                      if (e.sourceType === "payment_voucher") {
+                        sourceRef = (
+                          <Link href={`/app/accounting?tab=payment-vouchers&printVoucherId=${e.sourceId}`} className="text-sky-700 hover:underline font-mono text-xs">
+                            PV #{e.sourceId}
                           </Link>
-                        ) : (
-                          e.description
-                        )}
-                      </td>
-                      <td className="py-2 px-3 text-right font-mono text-xs">{fmtMoney(e.amount)}</td>
-                    </tr>
-                  ))}
+                        );
+                      } else if (e.sourceType === "invoice") {
+                        sourceRef = (
+                          <Link href={`/app/accounting/invoices/${e.sourceId}`} className="text-sky-700 hover:underline font-mono text-xs">
+                            INV #{e.sourceId}
+                          </Link>
+                        );
+                      } else if (e.sourceType === "receipt") {
+                        sourceRef = (
+                          <Link href={`/app/accounting/receipts/${e.sourceId}`} className="text-sky-700 hover:underline font-mono text-xs">
+                            RCP #{e.sourceId}
+                          </Link>
+                        );
+                      } else if (e.sourceType === "quotation") {
+                        sourceRef = (
+                          <Link href={`/app/quotations/${e.sourceId}`} className="text-sky-700 hover:underline font-mono text-xs">
+                            QTN #{e.sourceId}
+                          </Link>
+                        );
+                      } else {
+                        sourceRef = <span className="font-mono text-xs text-slate-500">{kindLabel}#{e.sourceId}</span>;
+                      }
+                    }
+                    return (
+                      <tr key={e.id} className="border-b border-slate-100">
+                        <td className="py-2 px-3 whitespace-nowrap">{e.transactionDate}</td>
+                        <td className="py-2 px-3 font-mono text-xs capitalize text-slate-700">{e.entryType.replace(/_/g, " ")}</td>
+                        <td className="py-2 px-3">{e.description}</td>
+                        <td className="py-2 px-3 text-right font-mono text-xs">
+                          {debit > 0 ? fmtMoney(debit) : <span className="text-slate-300">—</span>}
+                        </td>
+                        <td className="py-2 px-3 text-right font-mono text-xs">
+                          {credit > 0 ? fmtMoney(credit) : <span className="text-slate-300">—</span>}
+                        </td>
+                        <td className="py-2 px-3">{sourceRef}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -473,6 +508,237 @@ function ReferenceHistoryPanel({ caseId }: { caseId: number }) {
         </ol>
       </CardContent>
     </Card>
+  );
+}
+
+type SupDocCategory = "stamped_spa" | "stamped_lo" | "lo" | "bank" | "project_master" | "other";
+const SUP_DOC_CATEGORIES: { key: SupDocCategory; label: string }[] = [
+  { key: "stamped_spa", label: "Stamped SPA" },
+  { key: "stamped_lo", label: "Stamped LO" },
+  { key: "lo", label: "LO" },
+  { key: "bank", label: "Bank" },
+  { key: "project_master", label: "Project Master" },
+  { key: "other", label: "Other" },
+];
+type SupDocRow = {
+  id: number;
+  category: SupDocCategory | string;
+  fileName: string;
+  versionLabel: string | number | null;
+  uploadedBy: string | null;
+  uploadedAt: string | null;
+  status: string;
+  projectId?: number | null;
+  downloadUrl?: string | null;
+};
+function SupportingDocumentsPanel({ caseId, projectId }: { caseId: number; projectId: number | null }) {
+  const [activeCat, setActiveCat] = useState<SupDocCategory | "all">("all");
+  const q = useQuery({
+    queryKey: ["case-supporting-documents", caseId],
+    queryFn: async () => {
+      try {
+        return unwrapApiData(await apiFetchJson(`/cases/${String(caseId)}/print-documents`));
+      } catch {
+        return { ok: true, sections: { caseSupporting: { items: [] }, projectSupporting: { items: [] } } } as any;
+      }
+    },
+    staleTime: 30_000,
+    retry: false,
+    enabled: !!caseId,
+  });
+  const rows: SupDocRow[] = useMemo(() => {
+    const out: SupDocRow[] = [];
+    const caseItems = (q.data as any)?.sections?.caseSupporting?.items ?? [];
+    const projectItems = (q.data as any)?.sections?.projectSupporting?.items ?? [];
+    const dtToCat = (dt: string): SupDocCategory => {
+      const s = String(dt ?? "").toLowerCase();
+      if (s.includes("stamped") && s.includes("spa")) return "stamped_spa";
+      if (s.includes("stamped") && s.includes("lo")) return "stamped_lo";
+      if (s === "lo" || s.includes("letter_of_offer") || s.includes("letter offer")) return "lo";
+      if (s === "bank" || s.includes("bank")) return "bank";
+      if (s === "project_master" || s.includes("project")) return "project_master";
+      return "other";
+    };
+    for (const it of caseItems) {
+      out.push({
+        id: Number(it.supportingDocId ?? it.id ?? 0),
+        category: dtToCat(it.documentType ?? "other"),
+        fileName: String(it.documentName ?? it.originalFilename ?? `doc-${String(it.id)}`),
+        versionLabel: (it.versionLabel ?? it.versionNo) as any,
+        uploadedBy: typeof it.uploadedBy === "number" ? `User #${it.uploadedBy}` : null,
+        uploadedAt: it.uploadDate ?? null,
+        status: String(it.status ?? "unknown"),
+        projectId: it.projectId ?? null,
+      });
+    }
+    for (const it of projectItems) {
+      out.push({
+        id: Number(it.supportingDocId ?? it.id ?? 0),
+        category: "project_master",
+        fileName: String(it.documentName ?? it.originalFilename ?? `project-doc-${String(it.id)}`),
+        versionLabel: (it.versionLabel ?? it.versionNo) as any,
+        uploadedBy: typeof it.uploadedBy === "number" ? `User #${it.uploadedBy}` : null,
+        uploadedAt: it.uploadDate ?? null,
+        status: String(it.status ?? "unknown"),
+        projectId: it.projectId ?? null,
+      });
+    }
+    return out;
+  }, [q.data]);
+  const filtered = activeCat === "all" ? rows : rows.filter((r) => r.category === activeCat);
+  const counts = useMemo(() => {
+    const o: Record<string, number> = { all: rows.length };
+    for (const c of SUP_DOC_CATEGORIES) o[c.key] = 0;
+    for (const r of rows) {
+      const k = (r.category as SupDocCategory);
+      if (k in o) o[k] += 1;
+      else o.other = (o.other ?? 0) + 1;
+    }
+    return o;
+  }, [rows]);
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Supporting Documents</CardTitle>
+          <div className="flex gap-2 flex-wrap">
+            <Button size="sm" variant={activeCat === "all" ? "default" : "outline"} onClick={() => setActiveCat("all")}>
+              All ({counts.all ?? 0})
+            </Button>
+            {SUP_DOC_CATEGORIES.map((c) => (
+              <Button key={c.key} size="sm" variant={activeCat === c.key ? "default" : "outline"} onClick={() => setActiveCat(c.key)}>
+                {c.label} ({counts[c.key] ?? 0})
+              </Button>
+            ))}
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto rounded-md border border-slate-200 bg-white">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 border-b border-slate-200 text-left text-slate-600">
+                <tr>
+                  <th className="py-3 px-3 font-medium">File Name</th>
+                  <th className="py-3 px-3 font-medium text-right">Version</th>
+                  <th className="py-3 px-3 font-medium">Uploaded By</th>
+                  <th className="py-3 px-3 font-medium">Uploaded Date</th>
+                  <th className="py-3 px-3 font-medium">Status</th>
+                  <th className="py-3 px-3 font-medium">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.length === 0 ? (
+                  <tr><td colSpan={6} className="py-10 text-center text-sm text-slate-500">No documents in this category.</td></tr>
+                ) : filtered.map((r) => {
+                  const isProject = r.category === "project_master" && (r.projectId ?? projectId);
+                  const pid = r.projectId ?? projectId;
+                  return (
+                    <tr key={String(r.id) + r.category} className="border-b border-slate-100">
+                      <td className="py-2 px-3 font-medium">
+                        {isProject ? (
+                          <>
+                            <a className="text-sky-700 hover:underline" href={`/app/projects/${String(pid)}`}>{r.fileName}</a>
+                            <Badge variant="outline" className="ml-2 text-[10px]">Project Master · Ref</Badge>
+                          </>
+                        ) : r.fileName}
+                      </td>
+                      <td className="py-2 px-3 text-right font-mono text-xs">{r.versionLabel ? `v${String(r.versionLabel)}` : <span className="text-slate-400">—</span>}</td>
+                      <td className="py-2 px-3 text-xs">{r.uploadedBy ?? "—"}</td>
+                      <td className="py-2 px-3 text-xs text-slate-500">{r.uploadedAt ? new Date(String(r.uploadedAt)).toLocaleDateString() : "—"}</td>
+                      <td className="py-2 px-3"><Badge variant="outline">{r.status}</Badge></td>
+                      <td className="py-2 px-3 flex gap-2">
+                        {isProject ? (
+                          <Button size="sm" variant="outline" onClick={() => (window.location.href = `/app/projects/${String(pid)}`)}>Open Project</Button>
+                        ) : (
+                          <Button size="sm" variant="outline">Download</Button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+type HimsTrackerRow = {
+  developer: string | null;
+  project: string | null;
+  phase: string | null;
+  unit: string | null;
+  lot: string | null;
+  title: string | null;
+  lastChecked: string | null;
+  status: string | null;
+  dataMatch: string | boolean | null;
+};
+function HimsTrackerPanel({ caseId }: { caseId: number }) {
+  const q = useQuery({
+    queryKey: ["hims-espa-tracker", caseId],
+    queryFn: async () => {
+      try {
+        return unwrapApiData<{ items: HimsTrackerRow[] }>(await apiFetchJson(`/cases/${String(caseId)}/hims/tracker`));
+      } catch {
+        return { items: [] as HimsTrackerRow[] };
+      }
+    },
+    staleTime: 30_000,
+    retry: false,
+    enabled: !!caseId,
+  });
+  const items = q.data?.items ?? [];
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader className="flex flex-row items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-base">HIMS / eSPA Tracker</CardTitle>
+            <div className="text-xs text-slate-500 mt-1">Tracker data view only — edits managed via workflow steps above.</div>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto rounded-md border border-slate-200 bg-white">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 border-b border-slate-200 text-left text-slate-600">
+                <tr>
+                  <th className="py-3 px-3 font-medium">Developer</th>
+                  <th className="py-3 px-3 font-medium">Project</th>
+                  <th className="py-3 px-3 font-medium">Phase</th>
+                  <th className="py-3 px-3 font-medium">Unit</th>
+                  <th className="py-3 px-3 font-medium">Lot</th>
+                  <th className="py-3 px-3 font-medium">Title</th>
+                  <th className="py-3 px-3 font-medium">Last Checked</th>
+                  <th className="py-3 px-3 font-medium">Status</th>
+                  <th className="py-3 px-3 font-medium">Data Match</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.length === 0 ? (
+                  <tr><td colSpan={9} className="py-10 text-center text-sm text-slate-500">No HIMS tracker records linked yet.</td></tr>
+                ) : items.map((r: HimsTrackerRow, i: number) => (
+                  <tr key={i} className="border-b border-slate-100">
+                    <td className="py-2 px-3">{r.developer ?? "—"}</td>
+                    <td className="py-2 px-3">{r.project ?? "—"}</td>
+                    <td className="py-2 px-3">{r.phase ?? "—"}</td>
+                    <td className="py-2 px-3">{r.unit ?? "—"}</td>
+                    <td className="py-2 px-3 font-mono text-xs">{r.lot ?? "—"}</td>
+                    <td className="py-2 px-3">{r.title ?? "—"}</td>
+                    <td className="py-2 px-3 text-xs text-slate-500">{r.lastChecked ? new Date(String(r.lastChecked)).toLocaleString() : "—"}</td>
+                    <td className="py-2 px-3">{r.status ? <Badge variant="outline">{String(r.status)}</Badge> : "—"}</td>
+                    <td className="py-2 px-3">
+                      {r.dataMatch === true ? <Badge variant="default" className="bg-emerald-600">MATCH</Badge> : r.dataMatch === false ? <Badge variant="destructive">MISMATCH</Badge> : <span className="text-slate-400 text-xs">—</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
@@ -793,6 +1059,8 @@ export default function CaseDetail() {
       "client-interaction",
       "reference-history",
       "operations",
+      "supporting-documents",
+      "hims-tracker",
       ...(SHOW_COMPLIANCE_TAB ? (["compliance"] as const) : []),
     ]);
     const next = allowed.has(tabFromUrlRaw) ? tabFromUrlRaw : "overview";
@@ -2644,6 +2912,14 @@ export default function CaseDetail() {
             <Activity className="h-4 w-4" />
             <span>Operations</span>
           </TabsTrigger>
+          <TabsTrigger value="supporting-documents" className="gap-2">
+            <Upload className="h-4 w-4" />
+            <span>Supporting Docs</span>
+          </TabsTrigger>
+          <TabsTrigger value="hims-tracker" className="gap-2">
+            <Building2 className="h-4 w-4" />
+            <span>HIMS / eSPA Tracker</span>
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
@@ -4146,6 +4422,14 @@ export default function CaseDetail() {
               </CardContent>
             </Card>
           </div>
+        </TabsContent>
+
+        <TabsContent value="supporting-documents" className="space-y-4">
+          <SupportingDocumentsPanel caseId={caseId} projectId={Number(caseInfo?.projectId ?? 0) || null} />
+        </TabsContent>
+
+        <TabsContent value="hims-tracker" className="space-y-4">
+          <HimsTrackerPanel caseId={caseId} />
         </TabsContent>
       </Tabs>
     </div>

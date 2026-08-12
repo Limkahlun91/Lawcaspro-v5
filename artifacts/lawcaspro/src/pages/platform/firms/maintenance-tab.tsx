@@ -36,6 +36,7 @@ type PreviewResponse = {
   required_confirmation: string | null;
   governance?: GovernanceDecision;
   step_up?: StepUpInfo | null;
+  executionAvailable?: boolean;
 };
 
 function ActionCard({
@@ -77,6 +78,7 @@ export function FirmMaintenanceTab({ firmId, firmName }: { firmId: number; firmN
   const [requireFirmName, setRequireFirmName] = useState(false);
   const [requireTarget, setRequireTarget] = useState(false);
   const [targetHint, setTargetHint] = useState<string | null>(null);
+  const [disableExecute, setDisableExecute] = useState(false);
 
   const openPreview = async (title: string, action_code: ActionCode, target?: { entity_type: string; entity_id: string; label?: string }) => {
     setDialogTitle(title);
@@ -88,6 +90,7 @@ export function FirmMaintenanceTab({ firmId, firmName }: { firmId: number; firmN
     setRequireFirmName(false);
     setRequireTarget(false);
     setTargetHint(null);
+    setDisableExecute(false);
     setDialogOpen(true);
     try {
       const res = await apiFetchJson(`/platform/firms/${firmId}/maintenance/preview`, {
@@ -100,6 +103,9 @@ export function FirmMaintenanceTab({ firmId, firmName }: { firmId: number; firmN
       setRequiredText(data.required_confirmation ?? null);
       setGovernance(data.governance ?? null);
       setStepUp(data.step_up ?? null);
+      if (data.executionAvailable === false) {
+        setDisableExecute(true);
+      }
       const risk = data.preview.risk_level;
       if (risk === "critical") setRequireFirmName(true);
       if (data.preview.target?.label) {
@@ -328,6 +334,13 @@ export function FirmMaintenanceTab({ firmId, firmName }: { firmId: number; firmN
         targetLabelHint={targetHint}
         isExecuting={executeMutation.isPending}
         onExecute={(payload) => executeMutation.mutateAsync(payload)}
+        disableExecute={disableExecute}
+        executionNotice={disableExecute ? (
+          <>
+            <div className="text-sm font-medium text-amber-900">Preview available. Reset execution is not yet enabled.</div>
+            <div className="text-xs text-amber-800 mt-1">Execution capability for this maintenance action is currently disabled on the backend. You may review the preview only.</div>
+          </>
+        ) : undefined}
       />
     </div>
   );

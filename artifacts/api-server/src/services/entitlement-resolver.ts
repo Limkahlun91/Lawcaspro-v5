@@ -177,7 +177,17 @@ export interface SubscriptionPolicyDecision {
 
 const isDefined = (v: unknown): boolean => v !== undefined && v !== null;
 
-const coerceBoolean = (v: unknown): boolean | undefined => {
+function unwrapValueEnvelope(v: unknown): unknown {
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const o = v as Record<string, unknown>;
+    if ("v" in o) return o.v;
+    if ("value" in o) return o.value;
+  }
+  return v;
+}
+
+const coerceBoolean = (raw: unknown): boolean | undefined => {
+  const v = unwrapValueEnvelope(raw);
   if (v === null || v === undefined) return undefined;
   if (typeof v === "boolean") return v;
   if (typeof v === "number") return v !== 0;
@@ -189,7 +199,8 @@ const coerceBoolean = (v: unknown): boolean | undefined => {
   return undefined;
 };
 
-const coerceNumber = (v: unknown): number | undefined => {
+const coerceNumber = (raw: unknown): number | undefined => {
+  const v = unwrapValueEnvelope(raw);
   if (v === null || v === undefined) return undefined;
   if (typeof v === "number" && Number.isFinite(v)) return v;
   if (typeof v === "string") {
@@ -723,10 +734,10 @@ function resolveOne(ctx: ResolveOneCtx): EntitlementResult {
 
   // --- Layer 4: plan entitlement ---
   const planRow = ctx.planByFeature.get(key);
-  let effectiveValue: unknown = feature.defaultValue;
+  let effectiveValue: unknown = unwrapValueEnvelope(feature.defaultValue);
   let source: EntitlementResult["source"] = "feature_default";
   if (planRow) {
-    effectiveValue = planRow.valueJson;
+    effectiveValue = unwrapValueEnvelope(planRow.valueJson);
     source = "plan_entitlement";
   }
 
