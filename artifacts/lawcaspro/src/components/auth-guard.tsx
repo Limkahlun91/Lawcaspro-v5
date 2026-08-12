@@ -54,7 +54,15 @@ export function AuthGuard({ children, requireRole }: { children: ReactNode, requ
   }
 
   if (!user || (requireRole && user.userType !== requireRole) || shouldRedirectDeveloperAwayFromApp) {
-    return null;
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
+        <div className="w-full max-w-md bg-white border border-slate-200 rounded-lg p-6 text-center">
+          <div className="w-10 h-10 mx-auto mb-3 rounded-full border-4 border-amber-500 border-t-transparent animate-spin"></div>
+          <div className="text-sm font-medium text-slate-700">Checking access…</div>
+          <div className="text-xs text-slate-500 mt-1">Redirecting to appropriate workspace</div>
+        </div>
+      </div>
+    );
   }
 
   return <>{children}</>;

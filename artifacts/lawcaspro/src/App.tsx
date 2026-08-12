@@ -3,9 +3,9 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { setAuthTokenGetter, setBaseUrl } from "@workspace/api-client-react";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { AppErrorBoundary } from "@/components/app-error-boundary";
+import { AppRuntimeErrorBoundary } from "@/components/app-runtime-error-boundary";
 import { getHttpStatus, isAbortError, isRequestTimeoutError } from "@/lib/error-message";
-import { AuthProvider } from "@/lib/auth-context";
+import { AuthProvider, useAuth } from "@/lib/auth-context";
 import { ReAuthProvider } from "@/components/re-auth-dialog";
 import { AuthGuard } from "@/components/auth-guard";
 import { PermissionGuard } from "@/components/permission-guard";
@@ -18,6 +18,7 @@ import { getStoredAuthToken } from "@/lib/auth-token";
 import { DeveloperGuard } from "@/components/developer-guard";
 import { isEmailControlEnabled, isEmailSettingsEnabled, isWhatsAppInboxEnabled, isHRModuleEnabled, PHASE2_NOTICE, HR_DISABLED_NOTICE } from "@/lib/feature-flags";
 import { FeatureGuard } from "@/lib/feature-guards";
+import { Card, CardContent } from "@/components/ui/card";
 import { useEffect, type ReactNode } from "react";
 import { useToast } from "@/hooks/use-toast";
 
@@ -181,7 +182,17 @@ export function ModuleRedirectGuard({
     setLocation(fallback, { replace: true });
   }, [enabled, notice, fallback, setLocation, toast]);
   if (enabled) return <>{children}</>;
-  return null;
+  return (
+    <div className="min-h-[60vh] flex items-center justify-center bg-slate-50 p-6">
+      <Card className="w-full max-w-md">
+        <CardContent className="pt-6 pb-5 text-center">
+          <div className="w-10 h-10 mx-auto mb-3 rounded-full border-4 border-amber-500 border-t-transparent animate-spin"></div>
+          <div className="text-sm font-medium text-slate-700">Redirecting…</div>
+          <div className="text-xs text-slate-500 mt-1">{notice}</div>
+        </CardContent>
+      </Card>
+    </div>
+  );
 }
 
 function Phase2RedirectGuard({
@@ -335,9 +346,21 @@ function AppRoutes() {
             </PermissionGuard>
           )} />
           
-          <Route path="/app/clients/new" component={NewClient} />
-          <Route path="/app/clients/:id" component={ClientDetail} />
-          <Route path="/app/clients" component={ClientsList} />
+          <Route path="/app/clients/new" component={() => (
+            <PermissionGuard module="contacts" action="read">
+              <NewClient />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/clients/:id" component={() => (
+            <PermissionGuard module="contacts" action="read">
+              <ClientDetail />
+            </PermissionGuard>
+          )} />
+          <Route path="/app/clients" component={() => (
+            <PermissionGuard module="contacts" action="read">
+              <ClientsList />
+            </PermissionGuard>
+          )} />
           
           <Route path="/app/users/new" component={() => (
             <PermissionGuard module="users" action="create">
@@ -434,9 +457,11 @@ function AppRoutes() {
             </PermissionGuard>
           )} />
           <Route path="/app/file-custody" component={() => (
-            <PermissionGuard module="file_custody" action="view">
-              <FileCustodyPage />
-            </PermissionGuard>
+            <FeatureGuard feature="storage.file_custody" hideDisabled={false}>
+              <PermissionGuard module="file_custody" action="view">
+                <FileCustodyPage />
+              </PermissionGuard>
+            </FeatureGuard>
           )} />
           <Route path="/app/reports/bills-delivered-book" component={() => (
             <PermissionGuard module="reports" action="read">
@@ -565,6 +590,64 @@ function DeveloperRoutes() {
   );
 }
 
+function AppRootLanding() {
+  const { user, isLoading, authStatus } = useAuth();
+  const [, setLocation] = useLocation();
+  useEffect(() => {
+    if (isLoading) return;
+    if (authStatus !== "authenticated" || !user) {
+      setLocation("/auth/login", { replace: true });
+      return;
+    }
+    if (user.userType === "founder") {
+      setLocation("/platform/dashboard", { replace: true });
+      return;
+    }
+    if (user.userType === "firm_user") {
+      const roleName = String((user as any)?.roleName ?? "").toLowerCase();
+      const isManagement = roleName.includes("partner") || roleName.includes("manager");
+      if (isManagement) {
+        setLocation("/app/dashboard", { replace: true });
+      } else {
+        setLocation("/app/my-work", { replace: true });
+      }
+      return;
+    }
+    setLocation("/auth/login", { replace: true });
+  }, [user, isLoading, authStatus, setLocation]);
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="w-10 h-10 rounded-full border-4 border-amber-500 border-t-transparent animate-spin"></div>
+      </div>
+    );
+  }
+  if (authStatus !== "authenticated" || !user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
+        <Card className="w-full max-w-md">
+          <CardContent className="pt-6 pb-5 text-center">
+            <div className="w-10 h-10 mx-auto mb-3 rounded-full border-4 border-amber-500 border-t-transparent animate-spin"></div>
+            <div className="text-sm font-medium text-slate-700">Session expired</div>
+            <div className="text-xs text-slate-500 mt-1">Redirecting to login…</div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
+      <Card className="w-full max-w-md">
+        <CardContent className="pt-6 pb-5 text-center">
+          <div className="w-10 h-10 mx-auto mb-3 rounded-full border-4 border-amber-500 border-t-transparent animate-spin"></div>
+          <div className="text-sm font-medium text-slate-700">Loading workspace…</div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function Router() {
   return (
     <Switch>
@@ -578,7 +661,7 @@ function Router() {
       <Route path="/developer" component={() => <Redirect to="/developer/dashboard" />} />
       <Route path="/developer/*" component={DeveloperRoutes} />
 
-      <Route path="/app" component={() => <Redirect to="/app/my-work" />} />
+      <Route path="/app" component={AppRootLanding} />
       <Route path="/app/*" component={AppRoutes} />
       
       <Route component={NotFound} />
@@ -588,20 +671,20 @@ function Router() {
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider>
-        <ReAuthProvider>
-          <TooltipProvider>
-            <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
-              <AppErrorBoundary>
+    <AppRuntimeErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <AuthProvider>
+          <ReAuthProvider>
+            <TooltipProvider>
+              <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
                 <Router />
-              </AppErrorBoundary>
-            </WouterRouter>
-            <Toaster />
-          </TooltipProvider>
-        </ReAuthProvider>
-      </AuthProvider>
-    </QueryClientProvider>
+                <Toaster />
+              </WouterRouter>
+            </TooltipProvider>
+          </ReAuthProvider>
+        </AuthProvider>
+      </QueryClientProvider>
+    </AppRuntimeErrorBoundary>
   );
 }
 

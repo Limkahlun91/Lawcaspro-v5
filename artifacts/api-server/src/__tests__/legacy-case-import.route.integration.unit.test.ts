@@ -590,7 +590,7 @@ describe("legacy-case-import.route.integration.unit tests", () => {
       const { validateFixedValues } = await import(
         "../modules/cases/legacy-import/legacy-batch-pipeline.service.js"
       );
-      const result = await validateFixedValues(db, 1, { projectId: 7 });
+      const result = await validateFixedValues(db, 1, { projectId: 7, developerId: 42 });
       expect(mockSelect).toHaveBeenCalledTimes(1);
       expect(result.ok).toBe(false);
       if (!result.ok) {

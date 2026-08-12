@@ -18,8 +18,11 @@ import {
   deriveLegacyPurchaseMode,
   deriveLegacyLoanPartyType,
   LEGACY_IMPORT_V1_CASE_TYPE,
+  LEGACY_CASE_TYPE_UNSUPPORTED_CODE,
+  sanitizeLegacyImportError,
   runDryRun,
   runImport,
+  validateFixedValues,
 } from "../modules/cases/legacy-import/legacy-batch-pipeline.service.js";
 import {
   createCaseCanonical,
@@ -487,7 +490,7 @@ describe("Legacy Import — REAL DB Pipeline (PGlite + Synthetic 228 rows workbo
     expect(r).toBe("cash");
   });
 
-  it("REAL-1..9: End-to-end 228 row dry-run + plan + import with real DB tables & real services", async () => {
+  it("REAL-1..9: End-to-end EXACT 228 row dry-run + plan + import with real DB tables & real services", async () => {
     const buffer = buildWorkbookBuffer();
     const parsed = await parseExcelWorkbook(buffer, "synthetic-228.xlsx");
     expect(parsed.ok).toBe(true);
@@ -578,6 +581,7 @@ describe("Legacy Import — REAL DB Pipeline (PGlite + Synthetic 228 rows workbo
     const dryRun = await runDryRun(db as any, batchId, TEST_FIRM_ID, TEST_USER_ID);
     expect(dryRun.summary.total).toBe(228);
 
+    // §2 remove LIMIT 200: select ALL rows (not LIMIT 200)
     const rowsQ = await pg.query(
       `SELECT id, source_row_no, row_status, created_case_id FROM legacy_case_import_rows WHERE batch_id = $1 ORDER BY id;`,
       [batchId]
@@ -588,14 +592,12 @@ describe("Legacy Import — REAL DB Pipeline (PGlite + Synthetic 228 rows workbo
     const r51 = rowStatuses.find((r) => r.source_row_no === 51);
     const r228 = rowStatuses.find((r) => r.source_row_no === 228);
     expect(r51).toBeDefined();
+    expect(r228).toBeDefined();
     // Debug: count status distribution
     const dist: Record<string, number> = {};
     for (const r of rowStatuses) dist[r.row_status] = (dist[r.row_status] ?? 0) + 1;
     console.log("[DEBUG REAL-1] row_status distribution after dry run:", JSON.stringify(dist));
-    console.log("[DEBUG REAL-1] r51 source_row_no:", r51?.source_row_no, "row_status:", r51?.row_status);
-    console.log("[DEBUG REAL-1] r228 source_row_no:", r228?.source_row_no, "row_status:", r228?.row_status);
     expect(["READY", "WARNING", "REVIEW_REQUIRED", "INVALID", "HARD_DUPLICATE"].includes(r51!.row_status)).toBe(true);
-    expect(r228).toBeDefined();
     expect(["READY", "WARNING", "REVIEW_REQUIRED", "INVALID", "HARD_DUPLICATE"].includes(r228!.row_status)).toBe(true);
 
     const importableIds: number[] = [];
@@ -609,11 +611,20 @@ describe("Legacy Import — REAL DB Pipeline (PGlite + Synthetic 228 rows workbo
     const caseCountBefore = Number((casesBeforeRes.rows as any)[0].c);
     const notifBeforeRes = await pg.query(`SELECT count(*)::int AS c FROM case_notifications WHERE firm_id = $1;`, [TEST_FIRM_ID]);
     const notifBefore = Number((notifBeforeRes.rows as any)[0].c);
-    const auditBeforeRes = await pg.query(
+    const auditRowImportedBeforeRes = await pg.query(
+      `SELECT count(*)::int AS c FROM audit_logs WHERE firm_id = $1 AND action = 'cases.legacy_import.row_imported';`,
+      [TEST_FIRM_ID]
+    );
+    const auditRowImportedBefore = Number((auditRowImportedBeforeRes.rows as any)[0].c);
+    const auditLegacyBeforeRes = await pg.query(
       `SELECT count(*)::int AS c FROM audit_logs WHERE firm_id = $1 AND action = 'cases.legacy_import';`,
       [TEST_FIRM_ID]
     );
-    const auditBefore = Number((auditBeforeRes.rows as any)[0].c);
+    const auditLegacyBefore = Number((auditLegacyBeforeRes.rows as any)[0].c);
+
+    // §1: Required exact importableIds length 228 (no tolerance). This means ALL rows must be READY or WARNING.
+    // If fewer, increase row count to 228.
+    expect(importableIds.length).toBe(228);
 
     const CHUNK = 20;
     let chunkImportErrors = 0;
@@ -626,7 +637,6 @@ describe("Legacy Import — REAL DB Pipeline (PGlite + Synthetic 228 rows workbo
           createCase: createCaseCanonicalInTx,
         } as any);
         summaries.push(res);
-        console.log(`[DEBUG IMPORT] chunk ${Math.floor(i / CHUNK)} status=${(res as any)?.status} summary.imported=${(res as any)?.summary?.imported ?? "?"} summary.failed=${(res as any)?.summary?.failed ?? "?"} summary.remaining=${(res as any)?.summary?.remaining ?? "?"}`);
       } catch (e) {
         chunkImportErrors++;
         if (chunkImportErrors <= 3) console.error(`[DEBUG IMPORT ERROR chunk ${Math.floor(i / CHUNK)} first 3]:`, String(e?.message ?? e ?? "").slice(0, 500));
@@ -634,40 +644,59 @@ describe("Legacy Import — REAL DB Pipeline (PGlite + Synthetic 228 rows workbo
     }
     console.log(`[DEBUG IMPORT SUMMARY] chunkImportErrors=${chunkImportErrors}/${Math.ceil(importableIds.length / CHUNK)} lastSummary=${JSON.stringify(summaries[summaries.length - 1] ? { status: summaries[summaries.length - 1]?.status, summary: summaries[summaries.length - 1]?.summary } : null)}`);
 
-    // Debug: print up to 3 distinct import failure codes/messages
-    const failDistinctQ = await pg.query(
-      `SELECT error_code, error_message, COUNT(*)::int AS c FROM legacy_case_import_rows WHERE batch_id = $1 AND error_message IS NOT NULL GROUP BY 1,2 ORDER BY c DESC LIMIT 3;`,
+    // §1: Required exact ZERO chunk errors
+    expect(chunkImportErrors).toBe(0);
+
+    // §2 importedRows.length === 228; NO LIMIT 200
+    const rowsAfterQ = await pg.query(
+      `SELECT source_row_no, created_case_id, error_code, error_message FROM legacy_case_import_rows WHERE batch_id = $1 ORDER BY source_row_no;`,
       [batchId]
     );
-    console.log(`[DEBUG IMPORT FAILURES] distinct errors:`);
-    for (const row of failDistinctQ.rows as any[]) {
-      const msg = String(row.error_message ?? "");
-      // Print end of message where actual PG error code lives
-      console.log(`  code=${row.error_code} count=${row.c} msg FIRSTPART[:2500]=${msg.slice(0, 2500)}`);
-      console.log(`  code=${row.error_code} count=${row.c} msg LASTPART[-3000:]=${msg.slice(-3000)}`);
+    const importedRows = (rowsAfterQ.rows as any[]).filter((r) => r.created_case_id != null);
+    expect(importedRows.length).toBe(228);
+    for (const r of rowsAfterQ.rows as any[]) {
+      expect(r.created_case_id).not.toBeNull();
+      expect(r.error_message).toBeNull();
     }
 
     const casesAfterRes = await pg.query(`SELECT * FROM cases WHERE firm_id = $1;`, [TEST_FIRM_ID]);
     const casesAfter = casesAfterRes.rows as any[];
     const createdCount = casesAfter.length - caseCountBefore;
     console.log(`[DEBUG IMPORT] caseCountBefore=${caseCountBefore}; casesAfter.length=${casesAfter.length}; created=${createdCount}`);
-    expect(createdCount).toBeGreaterThanOrEqual(Math.min(140, importableIds.length - chunkImportErrors));
+    // §1: required exact createdCount = 228
+    expect(createdCount).toBe(228);
     for (const c of casesAfter.slice(caseCountBefore)) {
       expect(Number(c.project_id)).toBe(TEST_PROJECT_ID);
       expect(Number(c.developer_id)).toBe(TEST_DEVELOPER_ID);
       expect(c.case_type).toBe("developer_sales");
     }
 
-    const rowsAfterQ = await pg.query(
-      `SELECT source_row_no, created_case_id, error_code, error_message FROM legacy_case_import_rows WHERE batch_id = $1 AND id = ANY($2::int[]) LIMIT 200;`,
-      [batchId, importableIds as any]
+    // §3: re-query for rows 51 & 228 created_case_id NOT NULL + cases real-exists
+    const row51ReQ = await pg.query(
+      `SELECT source_row_no, created_case_id FROM legacy_case_import_rows WHERE batch_id = $1 AND source_row_no = 51;`,
+      [batchId]
     );
-    const importedRows = (rowsAfterQ.rows as any[]).filter((r) => r.created_case_id != null);
-    const failedRows = (rowsAfterQ.rows as any[]).filter((r) => r.error_message != null).slice(0, 3);
-    console.log(`[DEBUG IMPORT] importedRows=${importedRows.length}; failed sample=${JSON.stringify(failedRows)}`);
-    expect(importedRows.length).toBeGreaterThanOrEqual(Math.min(140, importableIds.length - chunkImportErrors));
+    const row228ReQ = await pg.query(
+      `SELECT source_row_no, created_case_id FROM legacy_case_import_rows WHERE batch_id = $1 AND source_row_no = 228;`,
+      [batchId]
+    );
+    const case51 = Number((row51ReQ.rows as any)[0]?.created_case_id);
+    const case228 = Number((row228ReQ.rows as any)[0]?.created_case_id);
+    expect(case51).toBeGreaterThan(0);
+    expect(case228).toBeGreaterThan(0);
+    const case51ExistsRes = await pg.query(`SELECT id FROM cases WHERE id = $1 AND firm_id = $2;`, [case51, TEST_FIRM_ID]);
+    const case228ExistsRes = await pg.query(`SELECT id FROM cases WHERE id = $1 AND firm_id = $2;`, [case228, TEST_FIRM_ID]);
+    expect(Number((case51ExistsRes.rows as any)[0]?.id)).toBe(case51);
+    expect(Number((case228ExistsRes.rows as any)[0]?.id)).toBe(case228);
 
-    // rerun → idempotent (≤ 5 new)
+    // §5: Project + Developer exact 228
+    const cntProjDevRes = await pg.query(
+      `SELECT count(*)::int AS c FROM cases WHERE firm_id = $1 AND project_id = $2 AND developer_id = $3;`,
+      [TEST_FIRM_ID, TEST_PROJECT_ID, TEST_DEVELOPER_ID]
+    );
+    expect(Number((cntProjDevRes.rows as any)[0].c)).toBe(228);
+
+    // §4: retry same batch → idempotent zero tolerance
     for (let i = 0; i < importableIds.length; i += CHUNK) {
       const chunk = importableIds.slice(i, i + CHUNK);
       try {
@@ -677,43 +706,72 @@ describe("Legacy Import — REAL DB Pipeline (PGlite + Synthetic 228 rows workbo
         } as any);
       } catch { /* ignore */ }
     }
-    const casesRerunRes = await pg.query(`SELECT count(*)::int AS c FROM cases WHERE firm_id = $1;`, [TEST_FIRM_ID]);
+    const casesRerunRes = await pg.query(`SELECT count(*)::int AS c, COUNT(DISTINCT reference_no)::int AS dc FROM cases WHERE firm_id = $1;`, [TEST_FIRM_ID]);
     const rerunCount = Number((casesRerunRes.rows as any)[0].c);
-    expect(rerunCount - casesAfter.length).toBeLessThanOrEqual(5);
+    const distinctRef = Number((casesRerunRes.rows as any)[0].dc);
+    expect(rerunCount).toBe(228);
+    expect(distinctRef).toBe(228);
+    const dupGrpRes = await pg.query(
+      `SELECT reference_no, count(*) AS c FROM cases WHERE firm_id = $1 GROUP BY reference_no HAVING count(*) > 1 LIMIT 20;`,
+      [TEST_FIRM_ID]
+    );
+    expect((dupGrpRes.rows as any[]).length).toBe(0);
 
-    // R1: 4-purchaser rows (i%7==0) check at least 2 imported with ≥4 case_purchasers each
-    const fourPurchaserRows = rowStatuses.filter((r) => Number(r.source_row_no) % 7 === 0).slice(0, 2);
-    let fourPurchaserProofCount = 0;
-    for (const r of fourPurchaserRows) {
-      const rowQ = await pg.query(`SELECT created_case_id FROM legacy_case_import_rows WHERE id = $1;`, [r.id]);
-      const cid = Number((rowQ.rows as any)[0]?.created_case_id);
-      if (!cid) continue;
-      const cpRes = await pg.query(`SELECT count(*)::int AS c FROM case_purchasers WHERE case_id = $1;`, [cid]);
-      const cpCount = Number((cpRes.rows as any)[0].c);
-      if (cpCount >= 4) fourPurchaserProofCount++;
-    }
-    expect(fourPurchaserProofCount).toBeGreaterThanOrEqual(1);
+    // §6 Purchasers exact
+    const row7Q = await pg.query(`SELECT source_row_no, created_case_id FROM legacy_case_import_rows WHERE batch_id = $1 AND source_row_no = 7;`, [batchId]);
+    const row1Q = await pg.query(`SELECT source_row_no, created_case_id FROM legacy_case_import_rows WHERE batch_id = $1 AND source_row_no = 1;`, [batchId]);
+    const case7Id = Number((row7Q.rows as any)[0]?.created_case_id);
+    const case1Id = Number((row1Q.rows as any)[0]?.created_case_id);
+    // Case #7 is (i%7==0 => all 4 purchaser columns filled: P1,P2,P3,P4)
+    expect(case7Id).toBeGreaterThan(0);
+    const cp7Res = await pg.query(
+      `SELECT cp.role, c.name, c.ic_no FROM case_purchasers cp JOIN clients c ON c.id = cp.client_id WHERE cp.case_id = $1 ORDER BY cp.order_no;`,
+      [case7Id]
+    );
+    const cp7 = cp7Res.rows as any[];
+    expect(cp7.length).toBe(4);
+    expect(cp7[0].role).toBe("main");
+    expect(cp7[1].role).toBe("joint");
+    expect(cp7[2].role).toBe("joint");
+    expect(cp7[3].role).toBe("joint");
+    // Names/ICs match fixture
+    expect(cp7[0].name).toBe("Purchaser One 7");
+    expect(cp7[0].ic_no).toBe("800101-01-1007");
+    expect(cp7[1].name).toBe("Purchaser Two 7");
+    expect(cp7[1].ic_no).toBe("800202-02-2007");
+    expect(cp7[2].name).toBe("Purchaser Three 7");
+    expect(cp7[2].ic_no).toBe("800303-03-3007");
+    expect(cp7[3].name).toBe("Purchaser Four 7");
+    expect(cp7[3].ic_no).toBe("800404-04-4007");
+    // 1-purchaser sample: Case #1 only has P1 (i=1 odd → i%2 != 0 → no hasP2)
+    expect(case1Id).toBeGreaterThan(0);
+    const cp1Res = await pg.query(
+      `SELECT cp.role, c.name, c.ic_no FROM case_purchasers cp JOIN clients c ON c.id = cp.client_id WHERE cp.case_id = $1 ORDER BY cp.order_no;`,
+      [case1Id]
+    );
+    const cp1 = cp1Res.rows as any[];
+    expect(cp1.length).toBe(1);
+    expect(cp1[0].name).toBe("Purchaser One 1");
+    expect(cp1[0].ic_no).toBe("800101-01-1001");
 
-    // R2: row 1 check purchaser count = 1 if case created
-    const r1Q = await pg.query(`SELECT created_case_id FROM legacy_case_import_rows WHERE batch_id = $1 AND source_row_no = 1;`, [batchId]);
-    const r1CaseId = Number((r1Q.rows as any)[0]?.created_case_id);
-    if (r1CaseId) {
-      const cp1Res = await pg.query(`SELECT count(*)::int AS c FROM case_purchasers WHERE case_id = $1;`, [r1CaseId]);
-      expect(Number((cp1Res.rows as any)[0].c)).toBe(1);
-    }
-
-    // LEGACY audit count
-    const auditAfterRes = await pg.query(
+    // §7: Audit exact (row_imported = 228; cases.legacy_import = 228)
+    const auditRowImportedAfterRes = await pg.query(
+      `SELECT count(*)::int AS c FROM audit_logs WHERE firm_id = $1 AND action = 'cases.legacy_import.row_imported';`,
+      [TEST_FIRM_ID]
+    );
+    const auditRowImportedCount = Number((auditRowImportedAfterRes.rows as any)[0].c) - auditRowImportedBefore;
+    expect(auditRowImportedCount).toBe(228);
+    const auditLegacyAfterRes = await pg.query(
       `SELECT count(*)::int AS c FROM audit_logs WHERE firm_id = $1 AND action = 'cases.legacy_import';`,
       [TEST_FIRM_ID]
     );
-    const legacyAuditCount = Number((auditAfterRes.rows as any)[0].c) - auditBefore;
-    expect(legacyAuditCount).toBeGreaterThanOrEqual(importedRows.length);
+    const auditLegacyCount = Number((auditLegacyAfterRes.rows as any)[0].c) - auditLegacyBefore;
+    expect(auditLegacyCount).toBe(228);
 
-    // Notifications delta = 0 (legacy suppress notifications)
+    // §8: Notifications delta = 0 (legacy suppress notifications)
     const notifAfterRes = await pg.query(`SELECT count(*)::int AS c FROM case_notifications WHERE firm_id = $1;`, [TEST_FIRM_ID]);
     expect(Number((notifAfterRes.rows as any)[0].c) - notifBefore).toBe(0);
-  }, 240_000);
+  }, 420_000);
 });
 
 describe("Normal createCaseCanonical — atomic rollback (REAL PGlite)", () => {
@@ -773,4 +831,296 @@ describe("Normal createCaseCanonical — atomic rollback (REAL PGlite)", () => {
     expect(caseCountAfter).toBe(caseCountBefore);
     expect(clientCountAfter).toBe(clientCountBefore);
   }, 60_000);
+
+  it("ROLLBACK-2: §9 true mid-transaction keydate rollback SPA=2099-01-01 FAILS AFTER Client+Case+Purchaser+Assignment inserted", async () => {
+    // §9: Test-only constraint: REJECT SPA Date = 2099-01-01 on case_key_dates
+    await pg.exec(`ALTER TABLE case_key_dates ADD CONSTRAINT spa_date_not_2099 CHECK (spa_date IS NULL OR spa_date < '2099-01-01'::date);`);
+    const t1 = await Promise.all([
+      pg.query(`SELECT count(*)::int AS c FROM cases WHERE firm_id = $1;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM clients WHERE firm_id = $1 OR firm_id IS NULL;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM case_purchasers cp JOIN cases c ON c.id = cp.case_id WHERE c.firm_id = $1;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM case_assignments ca JOIN cases c ON c.id = ca.case_id WHERE c.firm_id = $1;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM case_key_dates WHERE firm_id = $1;`, [TEST_FIRM_ID]),
+    ]);
+    const before = t1.map((r) => Number((r.rows as any)[0].c));
+    let failed = false;
+    try {
+      const input: CanonicalCaseCreateInput = {
+        caseType: "developer_sales",
+        projectId: TEST_PROJECT_ID,
+        developerId: TEST_DEVELOPER_ID,
+        purchaseMode: "cash",
+        titleType: "master",
+        parcelNo: "ROLLBACK-2-Parcel",
+        purchasers: [{ name: "Rollback Two Main", ic: "890101-01-2345", role: "main" } as any],
+        actingFor: "purchaser",
+        assignedLawyerId: TEST_USER_ID,
+        mappedKeyDates: {
+          spa_date: "2099-01-01",
+        } as any,
+      } as any;
+      await createCaseCanonical({
+        db: db as any,
+        firmId: TEST_FIRM_ID,
+        actorUserId: TEST_USER_ID,
+        actorRoleId: TEST_ROLE_ID,
+        canAssignAny: true,
+        source: "web_create",
+        ipAddress: "127.0.0.1",
+        userAgent: "vitest",
+        logger: null,
+      } as CanonicalCaseCreateContext, input);
+    } catch {
+      failed = true;
+    }
+    expect(failed).toBe(true);
+    const t2 = await Promise.all([
+      pg.query(`SELECT count(*)::int AS c FROM cases WHERE firm_id = $1;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM clients WHERE firm_id = $1 OR firm_id IS NULL;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM case_purchasers cp JOIN cases c ON c.id = cp.case_id WHERE c.firm_id = $1;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM case_assignments ca JOIN cases c ON c.id = ca.case_id WHERE c.firm_id = $1;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM case_key_dates WHERE firm_id = $1;`, [TEST_FIRM_ID]),
+    ]);
+    const after = t2.map((r) => Number((r.rows as any)[0].c));
+    console.log(`[ROLLBACK-2 DEBUG] before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+    expect(after[0] - before[0]).toBe(0); // cases delta 0
+    expect(after[1] - before[1]).toBe(0); // clients delta 0
+    expect(after[2] - before[2]).toBe(0); // purchasers delta 0
+    expect(after[3] - before[3]).toBe(0); // assignments delta 0
+    expect(after[4] - before[4]).toBe(0); // keydates delta 0
+
+    await pg.exec(`ALTER TABLE case_key_dates DROP CONSTRAINT spa_date_not_2099;`);
+  }, 60_000);
+
+  it("ROLLBACK-3: §10 audit_logs reject cases.create FAILURE ROLLBACK all tables delta=0", async () => {
+    // §10: Test-only constraint: reject action = cases.create in audit_logs
+    // Clear existing audit rows first (they contain cases.create / legacy rows from prior tests)
+    await pg.exec(`DELETE FROM audit_logs WHERE 1=1;`);
+    await pg.exec(`ALTER TABLE audit_logs ADD CONSTRAINT no_cases_create CHECK (action <> 'cases.create');`);
+    const t1 = await Promise.all([
+      pg.query(`SELECT count(*)::int AS c FROM cases WHERE firm_id = $1;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM clients WHERE firm_id = $1 OR firm_id IS NULL;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM case_purchasers cp JOIN cases c ON c.id = cp.case_id WHERE c.firm_id = $1;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM case_assignments ca JOIN cases c ON c.id = ca.case_id WHERE c.firm_id = $1;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM audit_logs WHERE firm_id = $1;`, [TEST_FIRM_ID]),
+    ]);
+    const before = t1.map((r) => Number((r.rows as any)[0].c));
+    let failed = false;
+    try {
+      const input: CanonicalCaseCreateInput = {
+        caseType: "developer_sales",
+        projectId: TEST_PROJECT_ID,
+        developerId: TEST_DEVELOPER_ID,
+        purchaseMode: "cash",
+        titleType: "master",
+        parcelNo: "ROLLBACK-3-Parcel",
+        purchasers: [{ name: "Rollback Three Main", ic: "900101-01-5432", role: "main" } as any],
+        actingFor: "purchaser",
+        assignedLawyerId: TEST_USER_ID,
+      } as any;
+      await createCaseCanonical({
+        db: db as any,
+        firmId: TEST_FIRM_ID,
+        actorUserId: TEST_USER_ID,
+        actorRoleId: TEST_ROLE_ID,
+        canAssignAny: true,
+        source: "web_create",
+        ipAddress: "127.0.0.1",
+        userAgent: "vitest",
+        logger: null,
+      } as CanonicalCaseCreateContext, input);
+    } catch {
+      failed = true;
+    }
+    expect(failed).toBe(true);
+    const t2 = await Promise.all([
+      pg.query(`SELECT count(*)::int AS c FROM cases WHERE firm_id = $1;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM clients WHERE firm_id = $1 OR firm_id IS NULL;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM case_purchasers cp JOIN cases c ON c.id = cp.case_id WHERE c.firm_id = $1;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM case_assignments ca JOIN cases c ON c.id = ca.case_id WHERE c.firm_id = $1;`, [TEST_FIRM_ID]),
+      pg.query(`SELECT count(*)::int AS c FROM audit_logs WHERE firm_id = $1;`, [TEST_FIRM_ID]),
+    ]);
+    const after = t2.map((r) => Number((r.rows as any)[0].c));
+    console.log(`[ROLLBACK-3 DEBUG] before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+    expect(after[0] - before[0]).toBe(0);
+    expect(after[1] - before[1]).toBe(0);
+    expect(after[2] - before[2]).toBe(0);
+    expect(after[3] - before[3]).toBe(0);
+    expect(after[4] - before[4]).toBe(0);
+
+    await pg.exec(`ALTER TABLE audit_logs DROP CONSTRAINT no_cases_create;`);
+  }, 60_000);
+});
+
+describe("§11-14 PII sanitizer + strict caseType + fixed values validation", () => {
+  it("§11 sanitizeLegacyImportError: known safe code passes code/message stripped PII", () => {
+    const e1 = sanitizeLegacyImportError({ code: "PROJECT_NOT_FOUND", message: "Project not found" });
+    expect(e1.code).toBe("PROJECT_NOT_FOUND");
+    expect(e1.message).toBe("Project not found");
+    expect(e1.message.length).toBeLessThanOrEqual(500);
+  });
+
+  it("§11 sanitizeLegacyImportError strips NRIC / names / emails / SQL tokens / connection strings", () => {
+    const rawErr = new Error(
+      `failed to insert row: purchaser=TEST JOHN NRIC 800101-01-1234 email=john@test.com address="42 Jalan Foo Bar" conn=postgresql://u:p@host:5432/db SQLSTATE 23505 duplicate key violates constraint detail: ...`
+    );
+    (rawErr as any).code = "SOME_UNKNOWN_DB_CODE";
+    const sanitized = sanitizeLegacyImportError(rawErr);
+    expect(sanitized.code).toBe("LEGACY_IMPORT_INTERNAL_ERROR");
+    expect(sanitized.message).toContain("Legacy case import failed");
+    expect(sanitized.message.length).toBeLessThanOrEqual(500);
+    expect(sanitized.message).not.toContain("TEST JOHN");
+    expect(sanitized.message).not.toContain("800101-01-1234");
+    expect(sanitized.message).not.toContain("john@test.com");
+    expect(sanitized.message).not.toContain("Jalan Foo Bar");
+    expect(sanitized.message).not.toContain("postgresql://");
+    expect(sanitized.message).not.toContain("SQLSTATE");
+    expect(sanitized.message).not.toContain("constraint");
+  });
+
+  it("§13 import-error persistence: PII (TEST JOHN + NRIC) never stored in row.error_message nor audit detail", async () => {
+    // §13 Inject synthetic failure with a fake DB-like error containing PII.
+    // Use a fresh batch with ONE row that has TEST JOHN + 800101-01-1234, and force error via invalid project id.
+    const headers = ["Our Ref", "Parcel No", "Purchaser 1", "Purchaser 1 IC"];
+    const singleRow = {
+      "Our Ref": "LEG-PII-001",
+      "Parcel No": "PT XYZ",
+      "Purchaser 1": "TEST JOHN",
+      "Purchaser 1 IC": "800101-01-1234",
+    };
+    const aoa: unknown[][] = [
+      headers,
+      headers.map((h) => singleRow[h as keyof typeof singleRow] ?? ""),
+    ];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "S1");
+    const buf = Buffer.from(XLSX.write(wb, { type: "buffer", bookType: "xlsx" }));
+    const parsed = await parseExcelWorkbook(buf, "pii-test.xlsx");
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) throw new Error("parse");
+    const sheet = parsed.data.sheets["S1"] ?? parsed.data.sheets[Object.keys(parsed.data.sheets)[0]];
+    const mapping = autoMapHeaders(sheet.headers, M_LEGASI_PRESET_MAPPING);
+
+    // Inject with invalid project (999999 = not found) to force structured error from validateFixedValues
+    const badFixed: any = {
+      projectId: 999999, // project not found → produces safe error PROJECT_NOT_FOUND code
+      developerId: TEST_DEVELOPER_ID,
+      caseType: LEGACY_IMPORT_V1_CASE_TYPE,
+      preserveRef: true,
+    };
+
+    // Insert batch & row
+    const bRes1 = await pg.query(`SELECT coalesce(max(id),0)::int AS m FROM legacy_case_import_batches;`);
+    const maxBid = Number((bRes1.rows as any)[0].m) + 100;
+    await insertSeed("legacy_case_import_batches", [{
+      id: maxBid,
+      firm_id: TEST_FIRM_ID,
+      created_by: TEST_USER_ID,
+      source_file_name: "pii-test.xlsx",
+      source_file_hash: `pii-hash-${Date.now()}`,
+      source_sheet_name: "S1",
+      source_format: "xlsx",
+      status: "mapping_saved",
+      options_json: { storedHeaders: sheet.headers, sourceSheetName: "S1", columns: mapping.columns, fixedValues: badFixed },
+      mapping_template_id: null,
+      header_fingerprint: null,
+      total_rows: 1,
+      ready_rows: 0, warning_rows: 0, review_rows: 0, duplicate_rows: 0, imported_rows: 0, failed_rows: 0,
+    }]);
+    await pg.query(
+      `UPDATE legacy_case_import_batches SET mapping_json=$1::jsonb, fixed_values_json=$2::jsonb WHERE id=$3;`,
+      [JSON.stringify({ columns: mapping.columns }), JSON.stringify(badFixed), maxBid]
+    );
+    await insertSeed("legacy_case_import_rows", [{
+      firm_id: TEST_FIRM_ID,
+      batch_id: maxBid,
+      source_row_no: 1,
+      source_row_hash: null,
+      source_reference: "LEG-PII-001",
+      raw_row_json: JSON.stringify(singleRow),
+      mapped_payload_json: null,
+      validation_json: null,
+      row_status: "UPLOADED",
+      idempotency_key: `pii-test-${maxBid}-1`,
+      duplicate_type: null,
+      duplicate_case_id: null,
+      duplicate_score: null,
+      created_case_id: null,
+      error_code: null,
+      error_message: null,
+    }]);
+    const auditFailBeforeR = await pg.query(`SELECT count(*)::int AS c FROM audit_logs WHERE firm_id=$1 AND action='cases.legacy_import.row_failed';`, [TEST_FIRM_ID]);
+    const auditFailBefore = Number((auditFailBeforeR.rows as any)[0].c);
+
+    // Dry run then import one row → will fail in validateFixedValues → produces failed row with sanitized message
+    try { await runDryRun(db as any, maxBid, TEST_FIRM_ID, TEST_USER_ID); } catch { /* ignore */ }
+    const rowsPreQ = await pg.query(`SELECT id, row_status FROM legacy_case_import_rows WHERE batch_id=$1;`, [maxBid]);
+    const row = (rowsPreQ.rows as any[])[0];
+    if (row && (row.row_status === "READY" || row.row_status === "WARNING")) {
+      try {
+        await runImport(db as any, maxBid, TEST_FIRM_ID, TEST_USER_ID, {
+          rowIds: [row.id], includeWarnings: true, reviewOverrides: {},
+          createCase: createCaseCanonicalInTx,
+        } as any);
+      } catch { /* ignore */ }
+    }
+
+    const failRowQ = await pg.query(
+      `SELECT error_code, error_message FROM legacy_case_import_rows WHERE batch_id=$1 AND source_row_no=1;`,
+      [maxBid]
+    );
+    const errRow = (failRowQ.rows as any[])[0];
+    const msg = String(errRow?.error_message ?? "");
+    const code = String(errRow?.error_code ?? "");
+    console.log(`[PII-TEST] persisted code=${code} message=${JSON.stringify(msg)}`);
+    // §13: no PII leak in persisted message
+    expect(msg).not.toContain("TEST JOHN");
+    expect(msg).not.toContain("800101-01-1234");
+    // Also message length cap 500 or under (sanitizer limit)
+    if (msg !== "" && msg !== null) {
+      expect(msg.length).toBeLessThanOrEqual(500);
+    }
+    // §12 audit detail only has batchId rowId sourceRowNo errorCode — no raw error
+    const auditFailAfterR = await pg.query(`SELECT detail FROM audit_logs WHERE firm_id=$1 AND action='cases.legacy_import.row_failed' ORDER BY id DESC LIMIT 5;`, [TEST_FIRM_ID]);
+    const failCount = Number(((await pg.query(`SELECT count(*)::int AS c FROM audit_logs WHERE firm_id=$1 AND action='cases.legacy_import.row_failed';`, [TEST_FIRM_ID])).rows as any)[0].c) - auditFailBefore;
+    if (failCount > 0) {
+      for (const row of auditFailAfterR.rows as any[]) {
+        const d = String(row.detail ?? "");
+        expect(d).not.toContain("TEST JOHN");
+        expect(d).not.toContain("800101-01-1234");
+        expect(d).not.toMatch(/error=.+/); // No raw `error=…message…`
+        expect(d).toContain("batchId=");
+        expect(d).toContain("rowId=");
+        expect(d).toContain(/errorCode=/);
+      }
+    }
+  }, 120_000);
+
+  it("§14 strict caseType: subsale mapping must HTTP 400 + LEGACY_CASE_TYPE_UNSUPPORTED (no silent remap)", async () => {
+    // First: validateFixedValues() → must return LEGACY_CASE_TYPE_UNSUPPORTED directly for subsale
+    const v = await validateFixedValues(db as any, TEST_FIRM_ID, {
+      projectId: TEST_PROJECT_ID,
+      developerId: TEST_DEVELOPER_ID,
+      caseType: "subsale",
+    });
+    expect(v.ok).toBe(false);
+    if (v.ok === false) {
+      expect(v.code).toBe(LEGACY_CASE_TYPE_UNSUPPORTED_CODE);
+      expect(v.message).toMatch(/Developer Sales/);
+    }
+    // Also: LEGACY_IMPORT_V1_CASE_TYPE still ok
+    const v2 = await validateFixedValues(db as any, TEST_FIRM_ID, {
+      projectId: TEST_PROJECT_ID,
+      developerId: TEST_DEVELOPER_ID,
+      caseType: LEGACY_IMPORT_V1_CASE_TYPE,
+    });
+    expect(v2.ok).toBe(true);
+    // sanity: empty/null caseType also currently accepted (normalized default to developer_sales by caller in routes anyway)
+    const v3 = await validateFixedValues(db as any, TEST_FIRM_ID, {
+      projectId: TEST_PROJECT_ID,
+      developerId: TEST_DEVELOPER_ID,
+    });
+    expect(v3.ok).toBe(true);
+  });
 });

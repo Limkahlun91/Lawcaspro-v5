@@ -197,7 +197,7 @@ export default function LegacyCaseImportPage() {
   const [optionalExpanded, setOptionalExpanded] = useState(false);
   const [saveMappingChecked, setSaveMappingChecked] = useState(false);
 
-  const [caseType, setCaseType] = useState<"developer_sales">("developer_sales");
+  const [caseType, setCaseType] = useState<"developer_sales" | "subsale" | "perfection">("developer_sales");
   const [projectId, setProjectId] = useState<number | "">("");
   const [developerId, setDeveloperId] = useState<number | "">("");
   const [preserveRef, setPreserveRef] = useState(true);
@@ -218,6 +218,34 @@ export default function LegacyCaseImportPage() {
   const selectedRow = useMemo(
     () => previewRows.find((r) => r.id === selectedRowId) ?? null,
     [previewRows, selectedRowId]
+  );
+
+  const fetchRowsForPage = useCallback(
+    async (batchId: string | number, page: number, tab: "all" | UiRowStatus) => {
+      const statusParam =
+        tab === "all"
+          ? ""
+          : tab === "ready"
+          ? "status=READY&"
+          : tab === "warning"
+          ? "status=WARNING&"
+          : tab === "review"
+          ? "status=REVIEW_REQUIRED&"
+          : tab === "duplicate"
+          ? "status=HARD_DUPLICATE&"
+          : tab === "invalid"
+          ? "status=INVALID&"
+          : tab === "imported"
+          ? "status=imported&"
+          : tab === "failed"
+          ? "status=failed&"
+          : "";
+      const url = `/legacy-case-imports/${encodeURIComponent(String(batchId))}/rows?${statusParam}limit=${PAGE_SIZE}&offset=${(page - 1) * PAGE_SIZE}`;
+      const rowsRes = await apiFetchJson(url);
+      const rowsPayload = ((rowsRes as any)?.data ?? (rowsRes as any)) as PreviewRowsResponse;
+      return rowsPayload;
+    },
+    []
   );
 
   useEffect(() => {
@@ -355,34 +383,6 @@ export default function LegacyCaseImportPage() {
       toastError(toast, err, "Failed to save mapping template");
     },
   });
-
-  const fetchRowsForPage = useCallback(
-    async (batchId: string | number, page: number, tab: "all" | UiRowStatus) => {
-      const statusParam =
-        tab === "all"
-          ? ""
-          : tab === "ready"
-          ? "status=READY&"
-          : tab === "warning"
-          ? "status=WARNING&"
-          : tab === "review"
-          ? "status=REVIEW_REQUIRED&"
-          : tab === "duplicate"
-          ? "status=HARD_DUPLICATE&"
-          : tab === "invalid"
-          ? "status=INVALID&"
-          : tab === "imported"
-          ? "status=imported&"
-          : tab === "failed"
-          ? "status=failed&"
-          : "";
-      const url = `/legacy-case-imports/${encodeURIComponent(String(batchId))}/rows?${statusParam}limit=${PAGE_SIZE}&offset=${(page - 1) * PAGE_SIZE}`;
-      const rowsRes = await apiFetchJson(url);
-      const rowsPayload = ((rowsRes as any)?.data ?? (rowsRes as any)) as PreviewRowsResponse;
-      return rowsPayload;
-    },
-    []
-  );
 
   const dryRunMutation = useMutation({
     mutationFn: async () => {
@@ -929,7 +929,7 @@ export default function LegacyCaseImportPage() {
                     }
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Select Project *" />
+                      <SelectValue placeholder="Select Project" />
                     </SelectTrigger>
                     <SelectContent>
                       {projects.map((p) => (
@@ -951,7 +951,7 @@ export default function LegacyCaseImportPage() {
                     }
                   >
                     <SelectTrigger>
-                      <SelectValue placeholder="Select Developer *" />
+                      <SelectValue placeholder="Select Developer" />
                     </SelectTrigger>
                     <SelectContent>
                       {developers.map((d) => (
@@ -1215,28 +1215,28 @@ export default function LegacyCaseImportPage() {
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
                 <span className="text-xs font-medium text-emerald-700">Ready</span>
               </div>
-              <div className="text-2xl font-bold text-emerald-800">{batchSummaryCounts.ready || previewCounts.ready}</div>
+              <div className="text-2xl font-bold text-emerald-800">{batchSummaryCounts.ready}</div>
             </div>
             <div className="p-4 rounded-lg border bg-amber-50/60 border-amber-100">
               <div className="flex items-center gap-2 mb-1">
                 <AlertTriangle className="w-4 h-4 text-amber-600" />
                 <span className="text-xs font-medium text-amber-700">Warnings</span>
               </div>
-              <div className="text-2xl font-bold text-amber-800">{batchSummaryCounts.warning || previewCounts.warning}</div>
+              <div className="text-2xl font-bold text-amber-800">{batchSummaryCounts.warning}</div>
             </div>
             <div className="p-4 rounded-lg border bg-orange-50/60 border-orange-100">
               <div className="flex items-center gap-2 mb-1">
                 <AlertCircle className="w-4 h-4 text-orange-600" />
                 <span className="text-xs font-medium text-orange-700">Needs Review</span>
               </div>
-              <div className="text-2xl font-bold text-orange-800">{batchSummaryCounts.review || previewCounts.review}</div>
+              <div className="text-2xl font-bold text-orange-800">{batchSummaryCounts.review}</div>
             </div>
             <div className="p-4 rounded-lg border bg-slate-50 border-slate-200">
               <div className="flex items-center gap-2 mb-1">
                 <XCircle className="w-4 h-4 text-slate-500" />
                 <span className="text-xs font-medium text-slate-600">Duplicates</span>
               </div>
-              <div className="text-2xl font-bold text-slate-800">{batchSummaryCounts.duplicate || previewCounts.duplicate}</div>
+              <div className="text-2xl font-bold text-slate-800">{batchSummaryCounts.duplicate}</div>
             </div>
           </div>
 
@@ -1266,7 +1266,7 @@ export default function LegacyCaseImportPage() {
                     >
                       Ready
                       <span className="ml-1.5 text-slate-400 text-[10px]">
-                        {batchSummaryCounts.ready || previewCounts.ready}
+                        {batchSummaryCounts.ready}
                       </span>
                     </TabsTrigger>
                     <TabsTrigger
@@ -1275,7 +1275,7 @@ export default function LegacyCaseImportPage() {
                     >
                       Warnings
                       <span className="ml-1.5 text-slate-400 text-[10px]">
-                        {batchSummaryCounts.warning || previewCounts.warning}
+                        {batchSummaryCounts.warning}
                       </span>
                     </TabsTrigger>
                     <TabsTrigger
@@ -1284,7 +1284,7 @@ export default function LegacyCaseImportPage() {
                     >
                       Review
                       <span className="ml-1.5 text-slate-400 text-[10px]">
-                        {batchSummaryCounts.review || previewCounts.review}
+                        {batchSummaryCounts.review}
                       </span>
                     </TabsTrigger>
                     <TabsTrigger
@@ -1293,7 +1293,7 @@ export default function LegacyCaseImportPage() {
                     >
                       Duplicates
                       <span className="ml-1.5 text-slate-400 text-[10px]">
-                        {batchSummaryCounts.duplicate || previewCounts.duplicate}
+                        {batchSummaryCounts.duplicate}
                       </span>
                     </TabsTrigger>
                   </TabsList>

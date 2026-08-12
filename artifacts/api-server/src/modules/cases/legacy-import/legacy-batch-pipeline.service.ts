@@ -37,6 +37,92 @@ type DbConnLike = any;
 export const LEGACY_IMPORT_V1_CASE_TYPE = "developer_sales" as const;
 export type LegacyImportV1CaseType = typeof LEGACY_IMPORT_V1_CASE_TYPE;
 
+export const LEGACY_IMPORT_INTERNAL_ERROR_CODE = "LEGACY_IMPORT_INTERNAL_ERROR";
+export const LEGACY_CASE_TYPE_UNSUPPORTED_CODE = "LEGACY_CASE_TYPE_UNSUPPORTED";
+
+const SAFE_LEGACY_CODES = new Set<string>([
+  "NO_MAPPED_PAYLOAD",
+  "PROJECT_NOT_FOUND",
+  "PROJECT_CROSS_FIRM",
+  "DEVELOPER_NOT_FOUND",
+  "DEVELOPER_CROSS_FIRM",
+  "PROJECT_REQUIRED",
+  "DEVELOPER_REQUIRED",
+  "TITLE_TYPE_REQUIRED",
+  LEGACY_CASE_TYPE_UNSUPPORTED_CODE,
+  "DUPLICATE",
+  "LEGACY_IMPORT_VALIDATION_FAILED",
+  "REFERENCE_NO_REQUIRED",
+]);
+
+export type SanitizedLegacyError = { code: string; message: string };
+
+const NRIC_LIKE_RE = /\b\d{6}[- ]?\d{2}[- ]?\d{4}\b/g;
+const EMAIL_LIKE_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+const PG_SQL_RE = /\b(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|JOIN|ALTER|DROP|CREATE|CONSTRAINT|UNIQUE|FOREIGN KEY|REFERENCES|VIOLATES|DUPLICATE KEY|RELATION|TABLE|COLUMN|NOT NULL|SQLSTATE|PG_EXCEPTION|CONTEXT:|LINE\s+\d+)\b/i;
+
+export function sanitizeLegacyImportError(rawErr: unknown): SanitizedLegacyError {
+  const extractCode = (): string | null => {
+    if (rawErr && typeof rawErr === "object") {
+      const o = rawErr as Record<string, unknown>;
+      if (typeof o.code === "string") return o.code;
+    }
+    return null;
+  };
+  const extractSafeMessage = (): string | null => {
+    if (rawErr && typeof rawErr === "object") {
+      const o = rawErr as Record<string, unknown>;
+      if (typeof o.message === "string") return o.message;
+    }
+    if (rawErr instanceof Error) return rawErr.message;
+    return null;
+  };
+  const rawCode = extractCode();
+  if (rawCode && SAFE_LEGACY_CODES.has(rawCode)) {
+    const rawMsg = extractSafeMessage();
+    const msg = typeof rawMsg === "string" && rawMsg.trim().length > 0 ? rawMsg : "Legacy case import failed.";
+    return {
+      code: rawCode,
+      message: cap500(stripPii(msg)),
+    };
+  }
+  return {
+    code: LEGACY_IMPORT_INTERNAL_ERROR_CODE,
+    message: cap500(
+      "Legacy case import failed. Please retry or contact support with the batch and row number.",
+    ),
+  };
+}
+
+function cap500(s: string): string {
+  const v = typeof s === "string" ? s : "";
+  return v.length > 500 ? v.slice(0, 497) + "..." : v;
+}
+
+function stripPii(s: string): string {
+  let v = typeof s === "string" ? s : "";
+  v = v.replace(NRIC_LIKE_RE, "[REDACTED_NRIC]");
+  v = v.replace(EMAIL_LIKE_RE, "[REDACTED_EMAIL]");
+  // strip connection-string-like tokens
+  v = v.replace(/\b(postgres(?:ql)?|mongodb|mysql|redis|amqp|jdbc):\/\/[^)"'\s]+/gi, "[REDACTED_CONN]");
+  // strip long raw SQL-like snippets
+  if (PG_SQL_RE.test(v)) {
+    // replace the whole technical tail after "detail:" if present
+    v = v.split(/\s*—\s*DETAIL\s*:|[:：]\s*DETAIL\s*:|SQL state/i)[0] ?? v;
+    v = "[REDACTED_DBERROR]";
+  }
+  // Drop any "stack" style lines (lines with file paths / node_modules / at …)
+  v = v
+    .split(/\r?\n/)
+    .filter((l) => !/^\s*at\s+.*\(|node_modules|\.(ts|js|tsx|jsx):\d+:\d+/i.test(l))
+    .join(" ");
+  // Generic aggressive PII whitelist approach: drop purchaser/borrower name-ish segments by stripping long tokens after "name"/"purchaser"/"borrower"/"address" keywords
+  v = v.replace(/\b(purchaser|borrower|client|customer|owner|tenant)\b(\s*[:=]?\s*)"[^"]*"/gi, (_m, k, sp) => `${k}${sp ?? ""}"[REDACTED_NAME]"`);
+  v = v.replace(/\b(purchaser|borrower|client|customer|owner|tenant)\b(\s*[:=]?\s*)'[^']*'/gi, (_m, k, sp) => `${k}${sp ?? ""}'[REDACTED_NAME]'`);
+  v = v.replace(/\b(address|alamat)\b(\s*[:=]?\s*)"[^"]*"/gi, (_m, k, sp) => `${k}${sp ?? ""}"[REDACTED_ADDRESS]"`);
+  return v.trim().length > 0 ? v : "Legacy case import failed. Please retry or contact support with the batch and row number.";
+}
+
 export type LegacyFixedValues = {
   projectId: number | null;
   developerId: number | null;
@@ -120,6 +206,9 @@ export type FixedValuesResult =
   | {
       ok: false;
       code:
+        | "PROJECT_REQUIRED"
+        | "DEVELOPER_REQUIRED"
+        | typeof LEGACY_CASE_TYPE_UNSUPPORTED_CODE
         | "PROJECT_NOT_FOUND"
         | "DEVELOPER_NOT_FOUND"
         | "PROJECT_CROSS_FIRM"
@@ -333,15 +422,40 @@ export async function refreshLegacyImportBatchStatus(
 export async function validateFixedValues(
   r: DbConnLike,
   firmId: number,
-  fixed: { projectId?: number | null; developerId?: number | null },
+  fixed: { projectId?: number | null; developerId?: number | null; caseType?: unknown },
 ): Promise<FixedValuesResult> {
   const projectId = fixed.projectId ?? null;
   const developerId = fixed.developerId ?? null;
+  const caseTypeRaw = typeof fixed.caseType === "string" ? fixed.caseType.trim().toLowerCase() : null;
+
+  if (caseTypeRaw && caseTypeRaw !== LEGACY_IMPORT_V1_CASE_TYPE) {
+    return {
+      ok: false,
+      code: LEGACY_CASE_TYPE_UNSUPPORTED_CODE,
+      message: "Legacy V1 import only supports Developer Sales (developer_sales).",
+    };
+  }
+
+  if (projectId === null || projectId === undefined) {
+    return {
+      ok: false,
+      code: "PROJECT_REQUIRED",
+      message: "Project is required for Legacy V1 import.",
+    };
+  }
+
+  if (developerId === null || developerId === undefined) {
+    return {
+      ok: false,
+      code: "DEVELOPER_REQUIRED",
+      message: "Developer is required for Legacy V1 import.",
+    };
+  }
 
   let project: typeof projectsTable.$inferSelect | null = null;
   let developer: typeof developersTable.$inferSelect | null = null;
 
-  if (projectId !== null) {
+  {
     const projects = await r
       .select()
       .from(projectsTable)
@@ -364,7 +478,7 @@ export async function validateFixedValues(
     }
   }
 
-  if (developerId !== null) {
+  {
     const devs = await r
       .select()
       .from(developersTable)
@@ -1038,7 +1152,7 @@ export async function runImport(
         action: "cases.legacy_import.row_failed",
         entityType: "legacy_case_import_row",
         entityId: rowId,
-        detail: `batchId=${batchId} rowId=${rowId} errorCode=NO_MAPPED_PAYLOAD error=Mapped payload missing. Run dry-run first.`,
+        detail: `batchId=${batchId} rowId=${rowId} sourceRowNo=${row.sourceRowNo} errorCode=NO_MAPPED_PAYLOAD`,
       });
       continue;
     }
@@ -1140,11 +1254,20 @@ export async function runImport(
         });
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      importError = {
-        code: err instanceof Error && (err as any).code ? String((err as any).code) : "IMPORT_ERROR",
-        message: msg.length > 8000 ? msg.slice(0, 7997) + "..." : msg,
-      };
+      importError = sanitizeLegacyImportError(err);
+      // Also log raw technical details server-side (PII redacted via existing logger).
+      try {
+        const errCode =
+          (err instanceof Error && typeof (err as any).code === "string") ? String((err as any).code) : null;
+        console.warn("[LEGACY IMPORT ROW FAIL]", {
+          batchId,
+          rowId,
+          sourceRowNo: row.sourceRowNo,
+          safeCode: importError.code,
+          reportedCode: errCode,
+          // Never serialize raw row JSON or PII to logs.
+        });
+      } catch { /* ignore */ }
     }
 
     if (importError) {
@@ -1169,7 +1292,7 @@ export async function runImport(
         action: "cases.legacy_import.row_failed",
         entityType: "legacy_case_import_row",
         entityId: rowId,
-        detail: `batchId=${batchId} rowId=${rowId} errorCode=${importError.code} error=${importError.message}`,
+        detail: `batchId=${batchId} rowId=${rowId} sourceRowNo=${row.sourceRowNo} errorCode=${importError.code}`,
       });
     }
   }

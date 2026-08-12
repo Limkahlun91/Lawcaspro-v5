@@ -9,7 +9,7 @@ import { parseExcelWorkbook, computeHeaderFingerprint, normalizeHeader, LEGACY_I
 import { M_LEGASI_PRESET_MAPPING, LEGACY_FIELD_CATALOG, type FieldMappingGroup } from "../modules/cases/legacy-import/legacy-case-field-catalog.js";
 import { autoMapHeaders, applyRowMapping, type ExcelColumnMapping, type MappingTemplateDefinition } from "../modules/cases/legacy-import/mapping-engine.js";
 import { buildIdempotencyKey } from "../modules/cases/legacy-import/legacy-case-duplicate-detector.js";
-import { runDryRun, runImport, retryFailedRows, validateFixedValues, refreshLegacyImportBatchStatus, LEGACY_IMPORT_V1_CASE_TYPE } from "../modules/cases/legacy-import/legacy-batch-pipeline.service.js";
+import { runDryRun, runImport, retryFailedRows, validateFixedValues, refreshLegacyImportBatchStatus, LEGACY_IMPORT_V1_CASE_TYPE, LEGACY_CASE_TYPE_UNSUPPORTED_CODE } from "../modules/cases/legacy-import/legacy-batch-pipeline.service.js";
 import { writeLegacyErrorReportXlsxBuffer } from "../modules/cases/legacy-import/legacy-error-report.js";
 import crypto from "node:crypto";
 
@@ -639,6 +639,21 @@ const PatchMappingBody = z.object({
   mappingTemplateId: z.number().nullish().optional(),
 });
 
+function isLegacyCaseTypeUnsupportedIssue(issues: z.ZodIssue[]): boolean {
+  if (!issues || issues.length === 0) return false;
+  const flat: z.ZodIssue[] = [...issues];
+  while (flat.length > 0) {
+    const it = flat.shift()!;
+    if (it.code === "invalid_literal" && String(it.message) === "LEGACY_CASE_TYPE_UNSUPPORTED") return true;
+    if ("unionErrors" in it && Array.isArray((it as any).unionErrors)) {
+      for (const ue of (it as any).unionErrors) flat.push(...(ue.issues ?? []));
+    }
+    if ("issues" in it && Array.isArray((it as any).issues)) flat.push(...((it as any).issues ?? []));
+    if ("nested" in it && Array.isArray((it as any).nested)) flat.push(...((it as any).nested ?? []));
+  }
+  return false;
+}
+
 routerInternal.patch(
   "/:batchId/mapping",
   authed(async (req, res) => {
@@ -651,6 +666,13 @@ routerInternal.patch(
 
     const parsed = PatchMappingBody.safeParse(req.body);
     if (!parsed.success) {
+      if (isLegacyCaseTypeUnsupportedIssue(parsed.error.issues)) {
+        return res.status(400).json({
+          error: "caseType unsupported in V1 legacy import (only developer_sales allowed)",
+          code: LEGACY_CASE_TYPE_UNSUPPORTED_CODE,
+          message: "Legacy V1 import only supports Developer Sales (developer_sales).",
+        });
+      }
       return res
         .status(400)
         .json({ error: "Invalid body", issues: parsed.error.issues });

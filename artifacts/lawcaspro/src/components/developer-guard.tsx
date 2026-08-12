@@ -14,8 +14,26 @@ export function DeveloperGuard({ children }: { children: ReactNode }) {
     );
   }
 
-  if (!user) return null;
-  if (user.userType !== "firm_user") return null;
+  if (!user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
+        <div className="w-full max-w-md bg-white border border-slate-200 rounded-lg p-6 text-center">
+          <div className="w-10 h-10 mx-auto mb-3 rounded-full border-4 border-amber-500 border-t-transparent animate-spin"></div>
+          <div className="text-sm font-medium text-slate-700">Checking access…</div>
+        </div>
+      </div>
+    );
+  }
+  if (user.userType !== "firm_user") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-6">
+        <div className="w-full max-w-md bg-white border border-slate-200 rounded-lg p-6 text-center">
+          <div className="w-10 h-10 mx-auto mb-3 rounded-full border-4 border-amber-500 border-t-transparent animate-spin"></div>
+          <div className="text-sm font-medium text-slate-700">Redirecting…</div>
+        </div>
+      </div>
+    );
+  }
 
   if (permissionsStatus === "loading") {
     return (
