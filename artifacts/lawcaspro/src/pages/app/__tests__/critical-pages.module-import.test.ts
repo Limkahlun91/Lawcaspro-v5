@@ -7,61 +7,68 @@ beforeAll(() => {
 });
 
 const CRITICAL_PAGES = [
-  "../dashboard",
-  "../cases",
-  "../cases/detail",
-  "../cases/legacy-import",
-  "../workbench",
-  "../accounting",
-  "../accounting/bank-reconciliation",
-  "../accounting/file-listing",
-  "../accounting/bank-accounts",
-  "../hr/dashboard",
-  "../hr/employees",
-  "../hr/attendance",
-  "../hr/leave",
-  "../hr/claims",
-  "../hr/payroll",
-  "../hr/offboarding",
-  "../hr/onboarding",
-  "../communication/email",
-  "../communication/whatsapp",
-  "../file-custody",
-  "../documents",
-  "../documents/automation",
-  "../documents/variables",
-  "../documents/custom-variables",
-  "../communications",
-  "../reports",
-  "../settings",
-  "../quotations",
-  "../quotations/new",
-  "../clients",
-  "../projects",
-  "../developers",
-  "../audit-logs",
-  "../../platform/dashboard",
-  "../../platform/firms",
-  "../../platform/operations",
-  "../../platform/audit-logs",
-  "../../platform/documents",
-  "../../platform/monitoring",
-  "../../platform/variables",
-  "../../platform/custom-variables",
-  "../../auth/login",
-  "../../not-found",
+  { name: "dashboard", load: () => import("../dashboard") },
+  { name: "cases", load: () => import("../cases/index") },
+  { name: "case detail", load: () => import("../cases/detail") },
+  { name: "legacy import", load: () => import("../cases/legacy-import/index") },
+  { name: "my work", load: () => import("../workbench") },
+  { name: "accounting", load: () => import("../accounting/index") },
+  { name: "accounting bank reconciliation", load: () => import("../accounting/bank-reconciliation") },
+  { name: "accounting file listing", load: () => import("../accounting/file-listing") },
+  { name: "accounting bank accounts", load: () => import("../accounting/bank-accounts") },
+  { name: "hr dashboard", load: () => import("../hr/dashboard/index") },
+  { name: "hr employees", load: () => import("../hr/employees/index") },
+  { name: "hr attendance", load: () => import("../hr/attendance/index") },
+  { name: "hr leave", load: () => import("../hr/leave/index") },
+  { name: "hr claims", load: () => import("../hr/claims/index") },
+  { name: "hr payroll", load: () => import("../hr/payroll/index") },
+  { name: "hr offboarding", load: () => import("../hr/offboarding/index") },
+  { name: "hr onboarding", load: () => import("../hr/onboarding/index") },
+  { name: "communication email", load: () => import("../communication/email") },
+  { name: "communication whatsapp", load: () => import("../communication/whatsapp") },
+  { name: "documents", load: () => import("../documents/index") },
+  { name: "documents automation", load: () => import("../documents/automation") },
+  { name: "documents variables", load: () => import("../documents/variables") },
+  { name: "documents custom variables", load: () => import("../documents/custom-variables") },
+  { name: "communications hub", load: () => import("../communications/index") },
+  { name: "reports", load: () => import("../reports/index") },
+  { name: "settings", load: () => import("../settings/index") },
+  { name: "quotations", load: () => import("../quotations/index") },
+  { name: "new quotation", load: () => import("../quotations/new") },
+  { name: "clients", load: () => import("../clients/index") },
+  { name: "projects", load: () => import("../projects/index") },
+  { name: "developers", load: () => import("../developers/index") },
+  { name: "audit logs", load: () => import("../audit-logs/index") },
+  { name: "platform dashboard", load: () => import("../../platform/dashboard") },
+  { name: "platform firms", load: () => import("../../platform/firms") },
+  { name: "platform operations", load: () => import("../../platform/operations") },
+  { name: "platform audit logs", load: () => import("../../platform/audit-logs") },
+  { name: "platform documents", load: () => import("../../platform/documents") },
+  { name: "platform monitoring", load: () => import("../../platform/monitoring") },
+  { name: "platform variables", load: () => import("../../platform/variables") },
+  { name: "platform custom variables", load: () => import("../../platform/custom-variables") },
+  { name: "auth login", load: () => import("../../auth/login") },
+  { name: "not found", load: () => import("../../not-found") },
+] as const;
+
+const HIDDEN_COMPILE_CHECK = [
+  { name: "file custody (hidden module can still compile/import)", load: () => import("../file-custody/index") },
 ] as const;
 
 describe("Critical Pages Module Import Smoke", () => {
-  for (const rel of CRITICAL_PAGES) {
-    it(`resolves module import for ${rel}`, { timeout: 30_000 }, async () => {
-      try {
-        const mod = await import(/* @vite-ignore */ rel);
-        expect(mod).toBeTruthy();
-      } catch (err: any) {
-        const msg = err && err.message ? String(err.message) : String(err);
-        throw new Error(`Failed to import page module: ${rel}. Error: ${msg}`);
-      }
+  for (const page of CRITICAL_PAGES) {
+    it(`resolves ${page.name}`, { timeout: 30_000 }, async () => {
+      const mod = await page.load();
+      expect(mod).toBeTruthy();
+    });
+  }
+});
+
+describe("Hidden module can still compile/import", () => {
+  for (const page of HIDDEN_COMPILE_CHECK) {
+    it(page.name, { timeout: 30_000 }, async () => {
+      const mod = await page.load();
+      expect(mod).toBeTruthy();
     });
   }
 });

@@ -43,6 +43,27 @@ export type SidebarGroupKey =
   | "communication"
   | "administration";
 
+export type SidebarGroupStorage = {
+  version: 1;
+  groups: Record<SidebarGroupKey, boolean>;
+};
+
+export function parseSidebarGroupStorage(raw: string | null): Partial<Record<SidebarGroupKey, boolean>> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") {
+      return {};
+    }
+    if (parsed.groups && typeof parsed.groups === "object") {
+      return parsed.groups as Partial<Record<SidebarGroupKey, boolean>>;
+    }
+    return parsed as Partial<Record<SidebarGroupKey, boolean>>;
+  } catch {
+    return {};
+  }
+}
+
 export type SidebarNavItem = {
   label: string;
   href: string;
@@ -391,11 +412,7 @@ export function SidebarBody({
     try {
       if (typeof window === "undefined" || typeof localStorage === "undefined") return defaultExpanded;
       const raw = localStorage.getItem(storageKey);
-      if (!raw) return defaultExpanded;
-      const parsed = JSON.parse(raw) as any;
-      const groups = parsed && typeof parsed === "object" && parsed.groups && typeof parsed.groups === "object"
-        ? (parsed.groups as Record<string, boolean>)
-        : ({});
+      const groups = parseSidebarGroupStorage(raw);
       return {
         work: typeof groups.work === "boolean" ? groups.work : true,
         cases: typeof groups.cases === "boolean" ? groups.cases : true,
@@ -413,7 +430,11 @@ export function SidebarBody({
   useEffect(() => {
     try {
       if (typeof window === "undefined" || typeof localStorage === "undefined") return;
-      localStorage.setItem(storageKey, JSON.stringify(expandedGroups));
+      const payload: SidebarGroupStorage = {
+        version: 1,
+        groups: expandedGroups,
+      };
+      localStorage.setItem(storageKey, JSON.stringify(payload));
     } catch {
       return;
     }
@@ -531,6 +552,8 @@ export function SidebarBody({
               type="button"
               className="w-full flex items-center justify-between px-3 text-[11px] font-semibold uppercase tracking-wide text-slate-500 hover:text-slate-300"
               onClick={() => toggleGroup(group.key)}
+              aria-expanded={Boolean((expandedGroups[group.key] ?? true) || activeGroupKeys.has(group.key))}
+              aria-controls={`sidebar-group-${group.key}`}
             >
               <span>{group.label}</span>
               {(expandedGroups[group.key] ?? true) || activeGroupKeys.has(group.key) ? (
@@ -540,41 +563,43 @@ export function SidebarBody({
               )}
             </button>
             {(expandedGroups[group.key] ?? true) || activeGroupKeys.has(group.key) ? (
-              group.items.map((item) => {
-                const itemPath = item.href.split("?")[0];
-                const isActive =
-                  (item.href === "/app/documents" ? location === "/app/documents" : false) ||
-                  location === item.href ||
-                  location.startsWith(`${item.href}/`) ||
-                  location.startsWith(`${itemPath}/`) ||
-                  (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
-                return (
-                  <Link key={item.href} href={item.href} onClick={onNavigate}>
-                    <div
-                      onMouseEnter={() => schedulePrefetch(itemPath)}
-                      onMouseLeave={() => cancelPrefetch(itemPath)}
-                      className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
-                        isActive
-                          ? "bg-blue-500/10 text-blue-200"
-                          : "text-slate-300 hover:bg-slate-800 hover:text-slate-100 cursor-pointer"
-                      }`}
-                    >
-                      <item.icon className="w-4 h-4 shrink-0" />
-                      <span className="truncate flex-1">{item.label}</span>
-                      {item.href === "/app/accounting" && accountingUnreadCount > 0 ? (
-                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
-                          {accountingUnreadCount}
-                        </span>
-                      ) : null}
-                      {group.key === "communication" && unreadCount > 0 && item.href.startsWith("/app/communication/") ? (
-                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-blue-500 rounded-full">
-                          {unreadCount}
-                        </span>
-                      ) : null}
-                    </div>
-                  </Link>
-                );
-              })
+              <div id={`sidebar-group-${group.key}`} role="group">
+                {group.items.map((item) => {
+                  const itemPath = item.href.split("?")[0];
+                  const isActive =
+                    (item.href === "/app/documents" ? location === "/app/documents" : false) ||
+                    location === item.href ||
+                    location.startsWith(`${item.href}/`) ||
+                    location.startsWith(`${itemPath}/`) ||
+                    (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
+                  return (
+                    <Link key={item.href} href={item.href} onClick={onNavigate}>
+                      <div
+                        onMouseEnter={() => schedulePrefetch(itemPath)}
+                        onMouseLeave={() => cancelPrefetch(itemPath)}
+                        className={`flex items-center gap-3 px-3 py-2.5 rounded-md text-sm font-medium transition-colors ${
+                          isActive
+                            ? "bg-blue-500/10 text-blue-200"
+                            : "text-slate-300 hover:bg-slate-800 hover:text-slate-100 cursor-pointer"
+                        }`}
+                      >
+                        <item.icon className="w-4 h-4 shrink-0" />
+                        <span className="truncate flex-1">{item.label}</span>
+                        {item.href === "/app/accounting" && accountingUnreadCount > 0 ? (
+                          <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full">
+                            {accountingUnreadCount}
+                          </span>
+                        ) : null}
+                        {group.key === "communication" && unreadCount > 0 && item.href.startsWith("/app/communication/") ? (
+                          <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[10px] font-bold text-white bg-blue-500 rounded-full">
+                            {unreadCount}
+                          </span>
+                        ) : null}
+                      </div>
+                    </Link>
+                  );
+                })}
+              </div>
             ) : null}
           </div>
         ))}

@@ -1,9 +1,10 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppLayout } from "./app-layout";
+import { parseSidebarGroupStorage } from "./sidebar-body";
 
 (globalThis as any).React = React;
 
@@ -83,6 +84,7 @@ beforeEach(() => {
   localStorage.clear();
   apiFetchJsonMock.mockReset();
   apiFetchJsonMock.mockResolvedValue({ count: 0 });
+  setViewportWidth(1024);
 });
 
 function setViewportWidth(width: number) {
@@ -106,6 +108,66 @@ function setViewportWidth(width: number) {
   });
   window.dispatchEvent(new Event("resize"));
 }
+
+function desktopSidebar(container: HTMLElement) {
+  return container.querySelector<HTMLElement>('[class~="hidden"][class*="md:flex"]') as HTMLElement;
+}
+
+function findSidebarGroupButton(
+  sidebar: HTMLElement,
+  name: "Work" | "Cases" | "Documents" | "Accounting" | "HR" | "Communication" | "Administration",
+) {
+  const all = Array.from(sidebar.querySelectorAll<HTMLButtonElement>('button[type="button"]'));
+  const byText = all.filter((b) => {
+    const labelSpan = b.querySelector(":scope > span:first-child");
+    const t = (labelSpan?.textContent ?? b.textContent ?? "").trim();
+    return t === name;
+  });
+  const match = byText.find((b) => typeof b.getAttribute("aria-controls") === "string");
+  return match ?? byText[0];
+}
+
+function sidebarGroupContainer(sidebar: HTMLElement, name: "Documents" | "Work" | "Accounting") {
+  const btn = findSidebarGroupButton(sidebar, name);
+  const controls = btn?.getAttribute("aria-controls");
+  if (!controls) return null;
+  return sidebarGroupContainerById(sidebar, controls);
+}
+
+function sidebarGroupContainerById(sidebar: HTMLElement, id: string) {
+  return sidebar.querySelector<HTMLElement>(`[id="${id}"]`);
+}
+
+function sidebarGroupHasItemText(
+  sidebar: HTMLElement,
+  controls: string,
+  needle: string,
+) {
+  const container = sidebarGroupContainerById(sidebar, controls);
+  if (!container) return false;
+  return Array.from(container.querySelectorAll("a")).some((el) => (el.textContent ?? "").trim().includes(needle));
+}
+
+describe("parseSidebarGroupStorage", () => {
+  it("returns empty for null or empty", () => {
+    expect(parseSidebarGroupStorage(null)).toEqual({});
+    expect(parseSidebarGroupStorage("")).toEqual({});
+  });
+
+  it("restores legacy direct-object shape (backward compat)", () => {
+    const raw = JSON.stringify({ documents: false, accounting: true });
+    expect(parseSidebarGroupStorage(raw)).toEqual({ documents: false, accounting: true });
+  });
+
+  it("restores canonical versioned shape", () => {
+    const raw = JSON.stringify({ version: 1, groups: { documents: false } });
+    expect(parseSidebarGroupStorage(raw)).toEqual({ documents: false });
+  });
+
+  it("falls back to empty on invalid JSON", () => {
+    expect(parseSidebarGroupStorage("not json{{{")).toEqual({});
+  });
+});
 
 describe("AppLayout responsive breakpoints", () => {
   it("360px mobile viewport: root has overflow-x-hidden, mobile dock present, desktop sidebar carries hidden class", async () => {
@@ -160,54 +222,129 @@ describe("AppLayout mobile dock (T1 rename)", () => {
     renderLayout();
     const homeBtns = screen.getAllByLabelText(/^Home/);
     expect(homeBtns.length).toBeGreaterThanOrEqual(1);
-    const dockHomeBtn = homeBtns.find((b) => (b.closest("nav")?.getAttribute("aria-label") === "Mobile primary navigation")) ?? homeBtns[0];
+    const dockHomeBtn =
+      homeBtns.find((b) => b.closest("nav")?.getAttribute("aria-label") === "Mobile primary navigation") ??
+      homeBtns[0];
     expect(dockHomeBtn).toHaveAttribute("aria-current", "page");
   });
 });
 
 describe("AppLayout sidebar groups", () => {
-  it("toggles group items on title click", async () => {
+  it("toggles Work group with aria-expanded attribute and actually hides/shows Dashboard/My Work links", async () => {
     locationValue = "/app/settings";
-    renderLayout();
+    const { container } = renderLayout();
+    const sidebar = desktopSidebar(container);
 
     const dashboards = await screen.findAllByText("Dashboard");
     expect(dashboards.length).toBeGreaterThanOrEqual(1);
-    const mainBtns = screen.getAllByRole("button", { name: "MAIN" });
-    expect(mainBtns.length).toBeGreaterThanOrEqual(1);
-    fireEvent.click(mainBtns[0]);
-    await waitFor(() => expect(screen.queryAllByText("Dashboard").every((d) => d.className.includes("opacity-0") || d.getClientRects().length === 0 || true)).toBe(true));
-    fireEvent.click(mainBtns[0]);
-    expect(screen.getAllByText("Dashboard").length).toBeGreaterThanOrEqual(1);
+
+    const workBtn = findSidebarGroupButton(sidebar, "Work");
+    expect(workBtn).toHaveAttribute("aria-expanded", "true");
+    const workControls = workBtn.getAttribute("aria-controls") as string;
+    expect(sidebarGroupHasItemText(sidebar, workControls, "Dashboard")).toBe(true);
+    expect(sidebarGroupHasItemText(sidebar, workControls, "My Work")).toBe(true);
+
+    fireEvent.click(workBtn);
+    await waitFor(() => expect(workBtn).toHaveAttribute("aria-expanded", "false"));
+
+    expect(sidebarGroupContainerById(sidebar, workControls)).toBeNull();
+    const maybeDashboard = Array.from(sidebar.querySelectorAll("a")).filter(
+      (a) => a.textContent?.trim() === "Dashboard",
+    );
+    expect(maybeDashboard.length).toBe(0);
+
+    fireEvent.click(workBtn);
+    await waitFor(() => expect(workBtn).toHaveAttribute("aria-expanded", "true"));
+
+    expect(sidebarGroupHasItemText(sidebar, workControls, "Dashboard")).toBe(true);
+    expect(sidebarGroupHasItemText(sidebar, workControls, "My Work")).toBe(true);
   });
 
-  it("restores group expanded state from localStorage", async () => {
+  it("stores Documents collapse in canonical versioned shape and restores on remount", async () => {
     const view = renderLayout();
+    const sidebar = desktopSidebar(view.container);
     expect((await screen.findAllByText("Variables")).length).toBeGreaterThan(0);
-    for (const btn of screen.getAllByRole("button", { name: "DOCUMENTS" })) fireEvent.click(btn);
-    await waitFor(() => {
-      const raw = localStorage.getItem("lawcaspro.sidebar.groups:1:1");
-      expect(raw).toBeTruthy();
-      expect(JSON.parse(raw as string).documents).toBe(false);
+
+    const docBtn = findSidebarGroupButton(sidebar, "Documents");
+    await act(async () => {
+      fireEvent.click(docBtn);
     });
+    await waitFor(() => expect(docBtn).toHaveAttribute("aria-expanded", "false"));
+
+    const storageKey = "lawcaspro.sidebar.groups:1:1";
+    let raw: string | null = null;
+    await waitFor(() => {
+      raw = localStorage.getItem(storageKey);
+      expect(raw).toBeTruthy();
+    });
+    const parsed = JSON.parse(raw as string);
+    expect(parsed.version).toBe(1);
+    expect(parsed.groups.documents).toBe(false);
+
     view.unmount();
 
-    renderLayout();
-    for (const btn of screen.getAllByRole("button", { name: "DOCUMENTS" })) fireEvent.click(btn);
-    await waitFor(() => {
-      const raw = localStorage.getItem("lawcaspro.sidebar.groups:1:1");
-      expect(raw).toBeTruthy();
-      expect(JSON.parse(raw as string).documents).toBe(true);
-    });
+    const view2 = renderLayout();
+    const sidebar2 = desktopSidebar(view2.container);
+    const restoredDocBtn = findSidebarGroupButton(sidebar2, "Documents");
+    expect(restoredDocBtn).toHaveAttribute("aria-expanded", "false");
+    const docsContainer = sidebarGroupContainer(sidebar2, "Documents");
+    expect(docsContainer).toBeNull();
   });
 
-  it("keeps active route group expanded", async () => {
+  it("backward compat: legacy (pre-versioned) storage shape still restores collapsed groups", async () => {
     localStorage.setItem(
       "lawcaspro.sidebar.groups:1:1",
-      JSON.stringify({ main: true, documents: false, settings_system: true }),
+      JSON.stringify({ documents: false, accounting: true, bogus: "ignored" }),
+    );
+    locationValue = "/app/dashboard";
+    const { container } = renderLayout();
+    const sidebar = desktopSidebar(container);
+
+    const docBtn = findSidebarGroupButton(sidebar, "Documents");
+    const accBtn = findSidebarGroupButton(sidebar, "Accounting");
+
+    expect(docBtn).toHaveAttribute("aria-expanded", "false");
+    expect(accBtn).toHaveAttribute("aria-expanded", "true");
+
+    expect(sidebarGroupContainer(sidebar, "Documents")).toBeNull();
+    const accControls = accBtn.getAttribute("aria-controls") as string;
+    expect(sidebarGroupHasItemText(sidebar, accControls, "Accounting")).toBe(true);
+  });
+
+  it("invalid JSON in storage falls back to default expanded state", async () => {
+    localStorage.setItem("lawcaspro.sidebar.groups:1:1", "{{{NOT JSON");
+    locationValue = "/app/dashboard";
+    const { container } = renderLayout();
+    const sidebar = desktopSidebar(container);
+
+    const workBtn = findSidebarGroupButton(sidebar, "Work");
+    const docBtn = findSidebarGroupButton(sidebar, "Documents");
+
+    expect(workBtn).toHaveAttribute("aria-expanded", "true");
+    expect(docBtn).toHaveAttribute("aria-expanded", "true");
+    const workControls = workBtn.getAttribute("aria-controls") as string;
+    const docControls = docBtn.getAttribute("aria-controls") as string;
+    expect(sidebarGroupHasItemText(sidebar, workControls, "Dashboard")).toBe(true);
+    expect(sidebarGroupHasItemText(sidebar, docControls, "Doc Automation")).toBe(true);
+  });
+
+  it("keeps active route group expanded even if stored collapsed", async () => {
+    localStorage.setItem(
+      "lawcaspro.sidebar.groups:1:1",
+      JSON.stringify({ version: 1, groups: { documents: false, work: false, administration: true } }),
     );
     locationValue = "/app/documents/variables";
 
-    renderLayout();
+    const { container } = renderLayout();
+    const sidebar = desktopSidebar(container);
     expect((await screen.findAllByText("Variables")).length).toBeGreaterThan(0);
+
+    const docBtn = findSidebarGroupButton(sidebar, "Documents");
+    const workBtn = findSidebarGroupButton(sidebar, "Work");
+
+    expect(docBtn).toHaveAttribute("aria-expanded", "true");
+    expect(workBtn).toHaveAttribute("aria-expanded", "false");
+    const docControls = docBtn.getAttribute("aria-controls") as string;
+    expect(sidebarGroupHasItemText(sidebar, docControls, "Variables")).toBe(true);
   });
 });
