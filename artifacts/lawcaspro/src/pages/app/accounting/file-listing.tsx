@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ArrowLeft } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -113,6 +114,12 @@ function showCell(v: unknown): string {
   if (v === null || v === undefined) return "—";
   const s = String(v).trim();
   return s ? s : "—";
+}
+
+function notProvided(v: unknown): string {
+  if (v === null || v === undefined) return "Not provided";
+  const s = String(v).trim();
+  return s ? s : "Not provided";
 }
 
 function formatClientParties(parties: any): string {
@@ -337,7 +344,42 @@ export default function AccountingFileListing() {
       toast({ title: "Approved" });
       setReviewOpen(false);
     },
-    onError: (err) => toastError(toast, err, "Approve failed"),
+    onError: (err) => {
+      try {
+        const anyErr = err as any;
+        const errBody = anyErr?.body ?? anyErr?.responseBody ?? anyErr?.data ?? anyErr?.error ?? anyErr;
+        const topCode = anyErr?.code ?? errBody?.code;
+        const detailsCode = (errBody?.details && typeof errBody.details === "object") ? (errBody.details as any).code : undefined;
+        const innerDetailsCode = (anyErr?.details && typeof anyErr.details === "object") ? (anyErr.details as any).code : undefined;
+        const codeRaw = topCode ?? detailsCode ?? innerDetailsCode;
+        if (codeRaw === "USER_INITIALS_REQUIRED") {
+          toast({
+            title: "User initials required",
+            description: "Responsible Lawyer / Clerk initials are required before approval. Update them in Settings > Users.",
+            variant: "destructive",
+          });
+          return;
+        }
+        if (codeRaw === "REFERENCE_FORMAT_MISMATCH") {
+          const msg = errBody?.message || anyErr?.message || "Reference number format does not match the active rule.";
+          toast({ title: "Reference format mismatch", description: String(msg), variant: "destructive" });
+          return;
+        }
+        if (codeRaw === "CHANGE_REASON_REQUIRED") {
+          toast({
+            title: "Change Reason required",
+            description: "Please provide a Change Reason when overriding the system-suggested reference number.",
+            variant: "destructive",
+          });
+          return;
+        }
+        if (codeRaw === "DUPLICATE_REFERENCE_NO") {
+          toast({ title: "Duplicate Reference Number", description: "Reference Number already exists in this firm.", variant: "destructive" });
+          return;
+        }
+      } catch { /* fall through to default */ }
+      toastError(toast, err, "Approve failed");
+    },
   });
 
   const rejectMutation = useMutation({
@@ -394,6 +436,15 @@ export default function AccountingFileListing() {
   return (
     <div className="space-y-4">
       <div>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setLocation("/app/accounting?tab=file-listing")}
+          className="mb-2 -ml-2"
+        >
+          <ArrowLeft className="mr-2 h-4 w-4" />
+          Accounting
+        </Button>
         <h1 className="text-3xl font-bold text-slate-900 tracking-tight">File Listing</h1>
         <p className="text-slate-500 mt-1">Open file approvals and amendments</p>
       </div>
@@ -557,16 +608,17 @@ export default function AccountingFileListing() {
         }
       }}>
         <DialogContent
-          className="max-w-[900px] w-[95vw]"
+          className="max-w-[900px] w-[95vw] max-h-[90dvh] p-0 overflow-hidden flex flex-col"
           onInteractOutside={(e) => e.preventDefault()}
           aria-modal="true"
         >
-          <DialogHeader>
+          <DialogHeader className="shrink-0 px-6 pt-6 pb-4 border-b bg-white">
             <DialogTitle>Open File Review</DialogTitle>
             <DialogDescription>Review the case submission and approve or return for amendment.</DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-5">
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-4">
+            <div className="space-y-5">
             <div className="rounded-lg border border-slate-200 bg-slate-50/60">
               <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between">
                 <div className="text-sm font-semibold text-slate-900">Case Summary</div>
@@ -674,7 +726,7 @@ export default function AccountingFileListing() {
                         </div>
                         <div className="rounded-md border border-slate-200 bg-white p-3 md:col-span-2">
                           <div className="text-xs text-slate-500 mb-1">Property</div>
-                          <div className="text-slate-900 break-words">{showCell(c.parcelNo)}</div>
+                          <div className="text-slate-900 break-words">{notProvided(c.parcelNo)}</div>
                         </div>
                         <div className="rounded-md border border-slate-200 bg-white p-3">
                           <div className="text-xs text-slate-500 mb-1">Project</div>
@@ -686,19 +738,19 @@ export default function AccountingFileListing() {
                         </div>
                         <div className="rounded-md border border-slate-200 bg-white p-3">
                           <div className="text-xs text-slate-500 mb-1">Purchase Price</div>
-                          <div className="font-medium text-slate-900">{hasPurchasePrice ? formatRMAmount(purchasePriceRaw) : "—"}</div>
+                          <div className="font-medium text-slate-900">{hasPurchasePrice ? formatRMAmount(purchasePriceRaw) : "Not provided"}</div>
                         </div>
                         <div className="rounded-md border border-slate-200 bg-white p-3">
                           <div className="text-xs text-slate-500 mb-1">Loan Amount</div>
-                          <div className="font-medium text-slate-900">{hasLoanAmount ? formatRMAmount(loanAmountRaw) : "—"}</div>
+                          <div className="font-medium text-slate-900">{hasLoanAmount ? formatRMAmount(loanAmountRaw) : "Not provided"}</div>
                         </div>
                         <div className="rounded-md border border-slate-200 bg-white p-3">
                           <div className="text-xs text-slate-500 mb-1">Responsible Lawyer</div>
-                          <div className="text-slate-900">{showCell(c.responsibleLawyer)}</div>
+                          <div className="text-slate-900">{notProvided(c.responsibleLawyer)}</div>
                         </div>
                         <div className="rounded-md border border-slate-200 bg-white p-3">
                           <div className="text-xs text-slate-500 mb-1">Assigned Clerk</div>
-                          <div className="text-slate-900">{showCell(c.assignedClerk)}</div>
+                          <div className="text-slate-900">{notProvided(c.assignedClerk)}</div>
                         </div>
                         <div className="rounded-md border border-slate-200 bg-white p-3">
                           <div className="text-xs text-slate-500 mb-1">Submission Date</div>
@@ -765,14 +817,14 @@ export default function AccountingFileListing() {
                 ) : null}
                 {!isPendingTab ? <div className="text-xs text-slate-500">Reference Number can only be set while Open File Pending Approval.</div> : null}
               </div>
-              {isPendingTab && reviewProposedReferenceNo.trim() && reviewReferenceNo.trim() && reviewReferenceNo.trim() !== reviewProposedReferenceNo.trim() ? (
+              {isPendingTab && suggestedReference.trim() && reviewReferenceNo.trim() && reviewReferenceNo.trim() !== suggestedReference.trim() ? (
                 <div className="md:col-span-12 space-y-1.5">
-                  <Label>Change Reason (optional)</Label>
+                  <Label>Change Reason <span className="text-red-500">*</span></Label>
                   <Input
                     value={reviewChangeReason}
                     onChange={(e) => setReviewChangeReason(e.target.value)}
                     disabled={!isPendingTab || approveMutation.isPending || rejectMutation.isPending}
-                    placeholder="Optional reason for changing reference number"
+                    placeholder="Required reason for changing reference number from the system-suggested value"
                   />
                 </div>
               ) : null}
@@ -786,8 +838,9 @@ export default function AccountingFileListing() {
                 />
               </div>
             </div>
+            </div>
           </div>
-          <DialogFooter className="gap-2">
+          <DialogFooter className="shrink-0 border-t bg-white px-6 py-4 gap-2">
             <Button variant="secondary" onClick={() => setReviewOpen(false)}>Close</Button>
             <Button
               variant="destructive"
@@ -816,6 +869,10 @@ export default function AccountingFileListing() {
                   toast({ title: "Duplicate Reference Number", description: "Please change the Reference Number before approving.", variant: "destructive" });
                   return;
                 }
+                if (suggestedReference.trim() && reviewReferenceNo.trim() !== suggestedReference.trim() && !reviewChangeReason.trim()) {
+                  toast({ title: "Change Reason required", description: "Please provide a reason for changing the reference number from the system-suggested value.", variant: "destructive" });
+                  return;
+                }
                 approveMutation.mutate({ caseId: reviewCaseId, referenceNo: reviewReferenceNo.trim(), approvalNote: reviewNote, changeReason: reviewChangeReason });
               }}
               disabled={!isPendingTab || !reviewCaseId || approveMutation.isPending}
@@ -830,11 +887,12 @@ export default function AccountingFileListing() {
         setCaseInfoOpen(o);
         if (!o) setCaseInfoCaseId(null);
       }}>
-        <DialogContent className="max-w-[900px] w-[95vw]">
-          <DialogHeader>
+        <DialogContent className="max-w-[900px] w-[95vw] max-h-[90dvh] p-0 overflow-hidden flex flex-col">
+          <DialogHeader className="shrink-0 px-6 pt-6 pb-4 border-b bg-white">
             <DialogTitle>Case Information</DialogTitle>
             <DialogDescription>Read-only case summary for accounting.</DialogDescription>
           </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-4">
           {caseInfoQuery.isError ? (
             <QueryFallback title="Case summary unavailable" error={caseInfoQuery.error} onRetry={() => caseInfoQuery.refetch()} isRetrying={caseInfoQuery.isFetching} />
           ) : caseInfoQuery.isLoading ? (
@@ -869,11 +927,11 @@ export default function AccountingFileListing() {
                     </div>
                     <div className="rounded-md border border-slate-200 p-3">
                       <div className="text-xs text-slate-500">Responsible Lawyer</div>
-                      <div className="font-medium text-slate-900">{showCell(c.responsibleLawyer)}</div>
+                      <div className="font-medium text-slate-900">{notProvided(c.responsibleLawyer)}</div>
                     </div>
                     <div className="rounded-md border border-slate-200 p-3">
                       <div className="text-xs text-slate-500">Assigned Clerk</div>
-                      <div className="font-medium text-slate-900">{showCell(c.assignedClerk)}</div>
+                      <div className="font-medium text-slate-900">{notProvided(c.assignedClerk)}</div>
                     </div>
                   </div>
 
@@ -908,7 +966,8 @@ export default function AccountingFileListing() {
               );
             })()
           )}
-          <DialogFooter className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
+          </div>
+          <DialogFooter className="shrink-0 border-t bg-white px-6 py-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-between">
             <Button variant="outline" onClick={() => setCaseInfoOpen(false)}>Close</Button>
             <div className="flex flex-wrap gap-2 justify-end">
               <Button

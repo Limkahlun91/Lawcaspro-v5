@@ -32,22 +32,27 @@ import { toastError } from "@/lib/toast-error";
 import { QueryFallback } from "@/components/query-fallback";
 import DocumentTemplates from "@/pages/app/settings/DocumentTemplates";
 import FirmSubscriptionFeaturesTab from "@/pages/app/settings/FirmSubscriptionFeaturesTab";
+import UnifiedLogsPage from "@/pages/app/settings/logs";
+import { EmailSettingsPanel } from "@/components/communication/email-settings-panel";
+import { isEmailSettingsEnabled } from "@/lib/feature-flags";
 import { useReAuth } from "@/components/re-auth-dialog";
 import { validateUploadFile } from "@/lib/upload-validation";
 
 const apiFetch = apiFetchJson;
 
-const TABS = ["Firm Info", "Users", "Roles & Permissions", "Security", "Document Templates", "File Reference", "Subscription & Billing"] as const;
-type Tab = typeof TABS[number];
+const TABS = ["Firm Info", "File Reference", "Users", "Roles & Permissions", "Security", "Document Templates", "Subscription & Billing", "Logs"] as const;
+type Tab = typeof TABS[number] | "Email";
 
 const TAB_KEYS: Record<string, Tab> = {
   firm: "Firm Info",
+  fileRef: "File Reference",
   users: "Users",
   roles: "Roles & Permissions",
   security: "Security",
   documents: "Document Templates",
-  fileRef: "File Reference",
   subscription: "Subscription & Billing",
+  logs: "Logs",
+  email: "Email",
 };
 
 const PERMISSION_CATALOG: Array<{ module: string; actions: string[] }> = [
@@ -1422,19 +1427,24 @@ export default function Settings(props?: { defaultTab?: string }) {
   const canUpdateSettings = hasPermission(user, "settings", "update");
   const canReadSettings = hasPermission(user, "settings", "read") || canUpdateSettings;
   const canAccessDocuments = hasPermission(user, "documents", "read") || hasPermission(user, "documents", "create") || hasPermission(user, "documents", "update") || hasPermission(user, "documents", "delete");
+  const canViewAuditLogs = user?.userType === "founder" || hasPermission(user, "audit", "read");
+  const canAccessEmailSettings = isEmailSettingsEnabled() && (hasPermission(user, "communications", "read") || hasPermission(user, "communications", "create") || hasPermission(user, "communications", "update") || hasPermission(user, "communications", "delete"));
 
   const searchString = useSearch();
   const params = new URLSearchParams(searchString);
   const tabFromUrl = params.get("tab");
-  const visibleTabs = ([
+  const visibleTabsBase: Tab[] = [
     "Firm Info",
-    ...(canReadSettings ? (["File Reference"] as const) : []),
-    ...(canManageUsers ? (["Users"] as const) : []),
-    ...(canManageRoles ? (["Roles & Permissions"] as const) : []),
+    ...(canReadSettings ? (["File Reference"] as Tab[]) : []),
+    ...(canManageUsers ? (["Users"] as Tab[]) : []),
+    ...(canManageRoles ? (["Roles & Permissions"] as Tab[]) : []),
     "Security",
     "Document Templates",
     "Subscription & Billing",
-  ] as const) as readonly Tab[];
+    ...(canViewAuditLogs ? (["Logs"] as Tab[]) : []),
+    ...(canAccessEmailSettings ? (["Email" as Tab]) : []),
+  ];
+  const visibleTabs = visibleTabsBase as readonly Tab[];
   const enabledTabs = visibleTabs.filter((t) => (t === "Document Templates" ? canAccessDocuments : true));
   const resolvedTabFromUrl = (tabFromUrl && TAB_KEYS[tabFromUrl]) ? TAB_KEYS[tabFromUrl] : (props?.defaultTab && TAB_KEYS[props.defaultTab] ? TAB_KEYS[props.defaultTab] : null);
   const initialTab = (resolvedTabFromUrl && enabledTabs.includes(resolvedTabFromUrl)) ? resolvedTabFromUrl : "Firm Info";
@@ -2089,6 +2099,20 @@ export default function Settings(props?: { defaultTab?: string }) {
               </DialogFooter>
             </DialogContent>
           </Dialog>
+        </div>
+      )}
+
+      {canViewAuditLogs && activeTab === "Logs" && <UnifiedLogsPage />}
+
+      {canAccessEmailSettings && activeTab === "Email" && (
+        <div className="space-y-6">
+          <div>
+            <h2 className="text-xl font-semibold tracking-tight">Email Settings</h2>
+            <p className="mt-1 text-sm text-slate-500">
+              Mailbox connection, provider setup, folder sync, import status, and sync logs are managed here instead of the daily inbox view.
+            </p>
+          </div>
+          <EmailSettingsPanel />
         </div>
       )}
 

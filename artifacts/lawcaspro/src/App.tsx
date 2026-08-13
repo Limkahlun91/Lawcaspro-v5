@@ -517,18 +517,18 @@ function AppRoutes() {
           )} />
           <Route path="/app/settings/accounting" component={() => (
             <PermissionGuard module="accounting" action="read">
-              <AccountingSettingsPage />
+              <Redirect to="/app/accounting?tab=settings" />
             </PermissionGuard>
           )} />
           <Route path="/app/settings/logs" component={() => (
             <PermissionGuard module="audit" action="read">
-              <UnifiedLogsPage />
+              <Redirect to="/app/settings?tab=logs" />
             </PermissionGuard>
           )} />
           <Route path="/app/settings/email" component={() => (
             <Phase2RedirectGuard enabled={isEmailSettingsEnabled()}>
               <PermissionGuard module="communications" action="read">
-                <EmailSettingsPage />
+                <Redirect to="/app/settings?tab=email" />
               </PermissionGuard>
             </Phase2RedirectGuard>
           )} />

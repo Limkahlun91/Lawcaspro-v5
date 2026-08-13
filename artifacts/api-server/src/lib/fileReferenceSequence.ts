@@ -92,17 +92,23 @@ export function renderFileReferencePattern(patternRaw: string, args: {
   const yyyy = String(now.getFullYear()).padStart(4, "0");
   const yy = yyyy.slice(-2);
   const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const cleanDev = String(args.developerCode ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
+  const cleanProj = String(args.projectCode ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
+  const cleanCaseType = String(args.caseTypeCode ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
+  const cleanInitials = String(args.initials ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
+  const cleanLawyerInitials = String(args.lawyerInitials ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
+  const cleanClerkInitials = String(args.clerkInitials ?? "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5);
   const base = ensureSequencePlaceholder(patternRaw);
   const withVars = base
     .replaceAll("{YYYY}", yyyy)
     .replaceAll("{YY}", yy)
     .replaceAll("{MM}", mm)
-    .replaceAll("{INITIALS}", String(args.initials ?? "NA"))
-    .replaceAll("{DEVELOPER_CODE}", String(args.developerCode ?? "NA"))
-    .replaceAll("{PROJECT_CODE}", String(args.projectCode ?? "NA"))
-    .replaceAll("{CASE_TYPE_CODE}", String(args.caseTypeCode ?? "CASE"))
-    .replaceAll("{LAWYER_INITIALS}", String(args.lawyerInitials ?? "NA"))
-    .replaceAll("{CLERK_INITIALS}", String(args.clerkInitials ?? "NA"));
+    .replaceAll("{INITIALS}", cleanInitials)
+    .replaceAll("{DEVELOPER_CODE}", cleanDev)
+    .replaceAll("{PROJECT_CODE}", cleanProj)
+    .replaceAll("{CASE_TYPE_CODE}", cleanCaseType)
+    .replaceAll("{LAWYER_INITIALS}", cleanLawyerInitials)
+    .replaceAll("{CLERK_INITIALS}", cleanClerkInitials);
 
   return withVars
     .replace(/\{SEQ:(\d+)\}/g, (_m, width: string) => padSequenceNumber(args.seq, Number(width)))

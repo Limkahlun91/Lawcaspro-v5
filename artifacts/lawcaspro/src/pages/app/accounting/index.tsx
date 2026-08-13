@@ -93,13 +93,12 @@ type CaseFilesListResponse = {
   total: number;
 };
 
-const TABS = ["Overview", "Monitor", "File Custody", "File Listing", "Payment Vouchers", "Quotations", "Invoices", "Receipts", "Bank Accounts", "Bank Reconciliation", "Ledger", "Settings"] as const;
+const TABS = ["Overview", "Monitor", "File Listing", "Payment Vouchers", "Quotations", "Invoices", "Receipts", "Bank Accounts", "Bank Reconciliation", "Ledger", "Settings"] as const;
 type Tab = typeof TABS[number];
 
 const TAB_KEYS: Record<string, Tab> = {
   overview: "Overview",
   monitor: "Monitor",
-  "file-custody": "File Custody",
   "file-listing": "File Listing",
   invoices: "Invoices",
   receipts: "Receipts",
@@ -4506,12 +4505,17 @@ export default function Accounting() {
   const [, setLocation] = useLocation();
   const params = new URLSearchParams(searchString);
   const tabFromUrl = params.get("tab");
+  const isLegacyFileCustodyTab = tabFromUrl === "file-custody";
   const initialTab = (tabFromUrl && TAB_KEYS[tabFromUrl]) ? TAB_KEYS[tabFromUrl] : "Overview";
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
 
   useEffect(() => {
-    if (tabFromUrl && TAB_KEYS[tabFromUrl]) setActiveTab(TAB_KEYS[tabFromUrl]);
-  }, [tabFromUrl]);
+    if (isLegacyFileCustodyTab) {
+      setActiveTab("Overview");
+    } else if (tabFromUrl && TAB_KEYS[tabFromUrl]) {
+      setActiveTab(TAB_KEYS[tabFromUrl]);
+    }
+  }, [tabFromUrl, isLegacyFileCustodyTab]);
 
   useEffect(() => {
     if (tabFromUrl === "file-listing") setLocation("/app/accounting/file-listing");
@@ -4520,7 +4524,6 @@ export default function Accounting() {
   const TAB_ICONS: Record<Tab, React.ReactNode> = {
     "Overview": <DollarSign className="w-4 h-4" />,
     "Monitor": <AlertTriangle className="w-4 h-4" />,
-    "File Custody": <FolderKey className="w-4 h-4" />,
     "File Listing": <ListOrdered className="w-4 h-4" />,
     "Invoices": <FileText className="w-4 h-4" />,
     "Receipts": <Receipt className="w-4 h-4" />,
@@ -4565,7 +4568,6 @@ export default function Accounting() {
 
       {activeTab === "Overview" && <OverviewTab />}
       {activeTab === "Monitor" && <MonitorTab />}
-      {activeTab === "File Custody" && <FileCustodyTab />}
       {activeTab === "File Listing" && <FileListingTab />}
       {activeTab === "Invoices" && <InvoicesTab />}
       {activeTab === "Receipts" && <ReceiptsTab />}

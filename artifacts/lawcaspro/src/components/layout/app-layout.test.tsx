@@ -277,7 +277,7 @@ describe("AppLayout sidebar groups", () => {
       raw = localStorage.getItem(storageKey);
       expect(raw).toBeTruthy();
     });
-    const parsed = JSON.parse(raw as string);
+    const parsed = JSON.parse(raw!);
     expect(parsed.version).toBe(1);
     expect(parsed.groups.documents).toBe(false);
 

@@ -47,6 +47,18 @@ import { computeStampingSummary, deriveStampingItemStatus, type StampingItemInpu
 import { checkFirmQuota } from "../lib/quota.js";
 import { resolveSmartFilename } from "../lib/smartFileNaming.js";
 import { computeEffectiveNextNumber, extractRunningNumber, renderFileReferencePattern } from "../lib/fileReferenceSequence.js";
+import {
+  buildSettingsPrecedenceKeys,
+  selectRuleByPrecedence,
+  validateRequiredVariables,
+  validateReferenceFormat,
+  resolveHighestRunningNumberFromRefs,
+  renderRef,
+  renderRuleDefaultFallbackPattern,
+  deriveSanitizedCodeFromName,
+  caseTypeToCode,
+  type MissingUserInitial,
+} from "../lib/resolveCaseReference.js";
 import { computeDashboardStats } from "../services/dashboard-stats.js";
 import { computeMilestonesSummary } from "../services/milestones-summary.js";
 import {
@@ -4517,6 +4529,12 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
     res.status(400).json({ error: "Validation failed", fields: body.error.flatten().fieldErrors });
     return;
   }
+
+  const trimmedReferenceNo = body.data.referenceNo.trim();
+  const changeReason = body.data.changeReason ? body.data.changeReason.trim() : null;
+  const now = new Date();
+
+  // ── Preload canonical case context ─────────────────────────────────────
   const [c] = await r
     .select({
       id: casesTable.id,
@@ -4526,6 +4544,8 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
       titleType: casesTable.titleType,
       proposedReferenceNo: casesTable.proposedReferenceNo,
       createdBy: casesTable.createdBy,
+      projectId: casesTable.projectId,
+      developerId: casesTable.developerId,
     })
     .from(casesTable)
     .where(and(eq(casesTable.id, params.data.caseId), eq(casesTable.firmId, req.firmId!)))
@@ -4538,15 +4558,196 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
     res.status(409).json({ error: "Case is not pending approval" });
     return;
   }
-  const trimmedReferenceNo = body.data.referenceNo.trim();
-  const existingProposedRef = typeof (c as any).proposedReferenceNo === "string" ? String((c as any).proposedReferenceNo).trim() : "";
+
+  const normalizedCaseType = normalizeCaseType(c.caseType);
+
+  let developerCode = "";
+  let projectCode = "";
+  if (c.developerId) {
+    const [dev] = await r
+      .select({ name: developersTable.name })
+      .from(developersTable)
+      .where(and(eq(developersTable.id, c.developerId), eq(developersTable.firmId, req.firmId!)))
+      .limit(1);
+    if (dev?.name) {
+      developerCode = deriveSanitizedCodeFromName(dev.name, { maxLen: 6, mode: "initials" });
+    }
+  }
+  if (c.projectId) {
+    const [proj] = await r
+      .select({ name: projectsTable.name, extraFields: projectsTable.extraFields })
+      .from(projectsTable)
+      .where(and(eq(projectsTable.id, c.projectId), eq(projectsTable.firmId, req.firmId!)))
+      .limit(1);
+    const extra = (proj as any)?.extraFields;
+    const rawRef = extra && typeof extra === "object" ? (extra as any).projectRefCode : null;
+    if (typeof rawRef === "string" && rawRef.trim()) {
+      projectCode = deriveSanitizedCodeFromName(rawRef, { maxLen: 12, mode: "token" });
+    } else if (proj?.name) {
+      projectCode = deriveSanitizedCodeFromName(proj.name, { maxLen: 12, mode: "token" });
+    }
+  }
+  const caseTypeCode = caseTypeToCode(normalizedCaseType);
+
+  const assignments = await r
+    .select({
+      roleInCase: caseAssignmentsTable.roleInCase,
+      userId: caseAssignmentsTable.userId,
+      initials: usersTable.initials,
+      name: usersTable.name,
+      assignedAt: caseAssignmentsTable.assignedAt,
+    })
+    .from(caseAssignmentsTable)
+    .leftJoin(usersTable, eq(caseAssignmentsTable.userId, usersTable.id))
+    .where(and(
+      eq(caseAssignmentsTable.caseId, c.id),
+      sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
+    ))
+    .orderBy(asc(caseAssignmentsTable.assignedAt))
+    .limit(20);
+
+  let lawyerInitials = "";
+  let clerkInitials = "";
+  for (const a of assignments) {
+    const role = String(a.roleInCase ?? "").trim().toLowerCase();
+    const initials = String(a.initials ?? "").trim().toUpperCase();
+    if (!lawyerInitials && role === "lawyer") lawyerInitials = initials;
+    if (!clerkInitials && role === "clerk") clerkInitials = initials;
+  }
+
+  const existingProposedRef = typeof c.proposedReferenceNo === "string" ? c.proposedReferenceNo.trim() : "";
   const effectiveProposedRef = existingProposedRef || trimmedReferenceNo;
+  let serverSuggestedReference = "";
+  let activePattern = "";
+  let activeSettingsKey = "default";
   const isReferenceChanged = effectiveProposedRef !== trimmedReferenceNo;
-  const now = new Date();
-  const changeReason = body.data.changeReason ? body.data.changeReason.trim() : null;
 
   try {
     await r.transaction(async (tx) => {
+      const { keys: precedenceKeys, tierByKey } = buildSettingsPrecedenceKeys({
+        normalizedCaseType,
+        projectId: c.projectId ?? null,
+        developerId: c.developerId ?? null,
+      });
+      const settingsRows = await tx
+        .select({
+          caseType: firmFileRefSettingsTable.caseType,
+          formatPattern: firmFileRefSettingsTable.formatPattern,
+          startingSequence: firmFileRefSettingsTable.startingSequence,
+          currentSequence: firmFileRefSettingsTable.currentSequence,
+        })
+        .from(firmFileRefSettingsTable)
+        .where(and(
+          eq(firmFileRefSettingsTable.firmId, req.firmId!),
+          inArray(firmFileRefSettingsTable.caseType, precedenceKeys),
+        ))
+        .limit(20);
+
+      const resolvedRule = selectRuleByPrecedence({
+        settingRows: settingsRows as any[],
+        precedenceKeys,
+        tierByKey,
+      });
+
+      activeSettingsKey = resolvedRule?.activeSettingsKey ?? "default";
+      activePattern = (
+        resolvedRule?.rule.formatPattern ||
+        renderRuleDefaultFallbackPattern({ normalizedCaseType })
+      ).trim();
+
+      // ── Task 5: Missing initials → 409 ───────────────────────────────────
+      const initialsErr = validateRequiredVariables(activePattern, {
+        lawyerInitials,
+        clerkInitials,
+        assignments: assignments.map((a) => ({
+          roleInCase: String(a.roleInCase ?? ""),
+          userId: a.userId ?? null,
+          name: a.name ?? null,
+          initials: String(a.initials ?? ""),
+        })),
+      });
+      if (initialsErr) {
+        const missing: MissingUserInitial[] = initialsErr.missing.map((m) => ({
+          role: m.role,
+          userId: m.userId || 0,
+          name: m.name || (m.role === "lawyer" ? "Responsible Lawyer" : "Assigned Clerk"),
+        }));
+        throw new ApiError({
+          status: 409,
+          code: "USER_INITIALS_REQUIRED",
+          message: "Responsible Lawyer / Clerk initials are required before approval. Update them in Settings > Users.",
+          details: { code: "USER_INITIALS_REQUIRED", missing },
+        });
+      }
+
+      // ── Server-side resolve suggested reference + sequence ────────────────
+      const approvedRows = await tx
+        .select({
+          referenceNo: casesTable.referenceNo,
+          caseType: casesTable.caseType,
+          projectId: casesTable.projectId,
+          updatedAt: casesTable.updatedAt,
+          createdAt: casesTable.createdAt,
+        })
+        .from(casesTable)
+        .where(and(
+          eq(casesTable.firmId, req.firmId!),
+          sql`${casesTable.deletedAt} IS NULL`,
+          sql`${casesTable.referenceNo} IS NOT NULL`,
+          sql`${casesTable.approvedAt} IS NOT NULL`,
+        ))
+        .limit(500);
+
+      const projectRuleScope = activeSettingsKey.startsWith("project_");
+      const relevantRefs: string[] = [];
+      for (const row of approvedRows) {
+        if (!row.referenceNo) continue;
+        const rowCaseType = normalizeCaseType(row.caseType);
+        const matchesProject = projectRuleScope ? (Number(row.projectId ?? 0) === Number(c.projectId ?? 0)) : rowCaseType === normalizedCaseType;
+        if (matchesProject) relevantRefs.push(String(row.referenceNo));
+      }
+
+      const highestExistingNumber = resolveHighestRunningNumberFromRefs(relevantRefs, activePattern);
+      const sequenceInfo = computeEffectiveNextNumber({
+        startingSequence: resolvedRule?.rule.startingSequence,
+        currentSequence: resolvedRule?.rule.currentSequence,
+        highestExistingNumber,
+      });
+
+      serverSuggestedReference = renderRef({
+        now,
+        pattern: activePattern,
+        seq: sequenceInfo.nextNumber,
+        developerCode,
+        projectCode,
+        caseTypeCode,
+        lawyerInitials,
+        clerkInitials,
+      });
+
+      // ── Task 7: Pattern mismatch → 400 ───────────────────────────────────
+      const matchesPattern = validateReferenceFormat(trimmedReferenceNo, activePattern);
+      if (!matchesPattern) {
+        throw new ApiError({
+          status: 400,
+          code: "REFERENCE_FORMAT_MISMATCH",
+          message: "Final reference does not match the active file reference rule. Use the system-suggested format or update the rule in Settings > File Reference.",
+          details: { code: "REFERENCE_FORMAT_MISMATCH", expectedPattern: activePattern, suggested: serverSuggestedReference },
+        });
+      }
+
+      // ── Task 7: Manual edit differs from suggested → require ChangeReason
+      const differsFromServerSuggested = serverSuggestedReference.trim() && trimmedReferenceNo !== serverSuggestedReference;
+      if (differsFromServerSuggested && !changeReason) {
+        throw new ApiError({
+          status: 400,
+          code: "CHANGE_REASON_REQUIRED",
+          message: "Change Reason is required when the final reference differs from the system-suggested value.",
+          details: { code: "CHANGE_REASON_REQUIRED", suggested: serverSuggestedReference, provided: trimmedReferenceNo },
+        });
+      }
+
+      // ── Duplicate check (TX locked) ───────────────────────────────────────
       const [dup] = await tx
         .select({ id: casesTable.id })
         .from(casesTable)
@@ -4561,15 +4762,19 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
         throw new ApiError({ status: 409, code: "DUPLICATE_REFERENCE_NO", message: "Reference Number already exists in this firm" });
       }
 
+      const refChangedFlag = serverSuggestedReference
+        ? trimmedReferenceNo !== serverSuggestedReference
+        : isReferenceChanged;
+
       const [updated] = await tx
         .update(casesTable)
         .set({
           approvalStatus: "approved",
           referenceNo: trimmedReferenceNo,
           proposedReferenceNo: effectiveProposedRef,
-          referenceNoChangedBy: isReferenceChanged ? (req.userId ?? null) : null,
-          referenceNoChangedAt: isReferenceChanged ? now : null,
-          referenceNoChangeReason: isReferenceChanged ? (changeReason || null) : null,
+          referenceNoChangedBy: refChangedFlag ? (req.userId ?? null) : null,
+          referenceNoChangedAt: refChangedFlag ? now : null,
+          referenceNoChangeReason: refChangedFlag ? (changeReason || null) : null,
           approvedBy: req.userId ?? null,
           approvedAt: now,
           approvalNote: body.data.approvalNote ?? null,
@@ -4587,8 +4792,37 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
     });
   } catch (err: any) {
     if (err instanceof ApiError) {
+      if (err.code === "USER_INITIALS_REQUIRED") {
+        const extra = (err as any).extra ?? {};
+        res.status(409).json({
+          code: "USER_INITIALS_REQUIRED",
+          error: err.message,
+          missing: extra.missing ?? [],
+        });
+        return;
+      }
+      if (err.code === "REFERENCE_FORMAT_MISMATCH") {
+        const extra = (err as any).extra ?? {};
+        res.status(400).json({
+          code: "REFERENCE_FORMAT_MISMATCH",
+          error: err.message,
+          expectedPattern: extra.expectedPattern ?? "",
+          suggested: extra.suggested ?? "",
+        });
+        return;
+      }
+      if (err.code === "CHANGE_REASON_REQUIRED") {
+        const extra = (err as any).extra ?? {};
+        res.status(400).json({
+          code: "CHANGE_REASON_REQUIRED",
+          error: err.message,
+          suggested: extra.suggested ?? "",
+          provided: extra.provided ?? "",
+        });
+        return;
+      }
       if (err.code === "DUPLICATE_REFERENCE_NO") {
-        res.status(409).json({ error: "Reference Number already exists in this firm" });
+        res.status(409).json({ code: "DUPLICATE_REFERENCE_NO", error: err.message });
         return;
       }
       res.status(err.status).json({ error: err.message });
@@ -4596,13 +4830,13 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
     }
     const code = typeof err?.code === "string" ? err.code : "";
     if (code === "23505") {
-      res.status(409).json({ error: "Reference Number already exists in this firm" });
+      res.status(409).json({ code: "DUPLICATE_REFERENCE_NO", error: "Reference Number already exists in this firm" });
       return;
     }
     throw err;
   }
 
-  if (c.caseType === "developer_sales") {
+  if (normalizedCaseType === "developer_sales") {
     const wfExists = await tableExists(r, "public.case_workflow_steps");
     if (wfExists) {
       const existing = await r
@@ -4635,12 +4869,15 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
     action: "cases.approve",
     entityType: "case",
     entityId: params.data.caseId,
-    detail: `referenceNo=${body.data.referenceNo.trim()}`,
+    detail: `referenceNo=${trimmedReferenceNo}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   }, { db: req.rlsDb });
 
-  if (isReferenceChanged) {
+  const refChangedFlag = serverSuggestedReference
+    ? trimmedReferenceNo !== serverSuggestedReference
+    : isReferenceChanged;
+  if (refChangedFlag) {
     await writeAuditLog({
       firmId: req.firmId,
       actorId: req.userId,
@@ -4648,7 +4885,7 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
       action: "cases.reference_no_changed",
       entityType: "case",
       entityId: params.data.caseId,
-      detail: `proposed=${effectiveProposedRef};final=${trimmedReferenceNo}${changeReason ? `;reason=${changeReason}` : ""}`,
+      detail: `suggested=${serverSuggestedReference};final=${trimmedReferenceNo}${changeReason ? `;reason=${changeReason}` : ""}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
     }, { db: req.rlsDb });
@@ -4667,16 +4904,16 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
         message: `Case #${params.data.caseId} approved`,
         meta: { caseId: params.data.caseId, referenceNo: trimmedReferenceNo },
       });
-      if (isReferenceChanged) {
+      if (refChangedFlag) {
         await insertCaseNotifications(r, {
           firmId: req.firmId!,
           caseId: params.data.caseId,
           recipientUserIds: [creatorId],
           actorUserId: req.userId ?? null,
           type: "REFERENCE_NO_CHANGED",
-          title: "Reference number changed after approval",
-          message: `Previous: ${effectiveProposedRef}\nFinal: ${trimmedReferenceNo}`,
-          meta: { caseId: params.data.caseId, previous: effectiveProposedRef, final: trimmedReferenceNo, reason: changeReason },
+          title: "Reference number changed on approval",
+          message: `Suggested: ${serverSuggestedReference || effectiveProposedRef}\nFinal: ${trimmedReferenceNo}`,
+          meta: { caseId: params.data.caseId, previous: serverSuggestedReference || effectiveProposedRef, final: trimmedReferenceNo, reason: changeReason },
         });
       }
     }
@@ -4684,7 +4921,7 @@ router.post("/cases/:caseId/approve", requireAuthHandler, requireFirmUserHandler
     req.log.error({ err, route: "POST /api/cases/:caseId/approve", firmId: req.firmId, userId: req.userId }, "failed to create approval notifications");
   }
 
-  res.json({ ok: true });
+  res.json({ ok: true, suggestedReference: serverSuggestedReference, activeSettingsKey, activePattern });
 }));
 
 router.post("/cases/:caseId/reject", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "update") as RequestHandler, authed(async (req, res) => {
