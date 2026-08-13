@@ -372,12 +372,13 @@ export async function pvMarkTrackingFailedDurable(
   if (trackingUpdateInject && typeof trackingUpdateInject === "object" && trackingUpdateInject !== null) {
     (req as any)[hookSym] = { ...testHooks, _armedTrackingUpdateError: { ...trackingUpdateInject } };
   }
+  const safeError = sanitizePvErrorForTracking(error, stage);
   const res = await withTenantScopedTx(
     req,
     { timeoutMs: PV_CREATE_SMALL_QUERY_TIMEOUT_MS, lockTimeoutMs: PV_CREATE_PRELOCK_TIMEOUT_MS, stage: `tracking_failed:${stage}` },
     async (txR) => {
       try {
-        await updatePvTrackingFailedInTx(txR as TrackingInTxConn, firmId, userId, normalizedClientRequestId, error, stage);
+        await updatePvTrackingFailedInTx(txR as TrackingInTxConn, firmId, userId, normalizedClientRequestId, safeError, stage);
       } catch (dbErr: any) {
         // Structured event exactly matching the helper's legacy path. NEVER silent.
         logger.warn(
@@ -400,6 +401,68 @@ export async function pvMarkTrackingFailedDurable(
     },
   );
   return { ok: res.ok };
+}
+
+function extractPgErrorMeta(err: unknown): { pgCode: string; constraint: string; column: string; tableName: string } {
+  const pgCode = String((err as any)?.code ?? (err as any)?.sqlstate ?? (err as any)?.sqlState ?? "").slice(0, 12);
+  const constraint = String((err as any)?.constraint ?? "").slice(0, 120);
+  const column = String((err as any)?.column ?? "").slice(0, 120);
+  const tableName = String((err as any)?.table ?? "").slice(0, 120);
+  return { pgCode, constraint, column, tableName };
+}
+
+function sanitizePvErrorForTracking(raw: string, stage: string): string {
+  const s = String(raw ?? "");
+  const stripped = s
+    .replace(/\binsert\s+into\s+"[^"]*"(\s*\([^)]*\))?\s*values[\s\S]*$/gi, `[REDACTED_SQL_VALUES]`)
+    .replace(/\bfailed\s+query:[\s\S]*$/gi, `[REDACTED_FAILED_QUERY]`)
+    .replace(/\$\d+/g, "?")
+    .replace(/\bERROR:\s*column\s+"[^"]*"\s+of\s+relation\s+"[^"]*"\s+does\s+not\s+exist/gi, "[REDACTED_COLUMN_MISSING]")
+    .replace(/\bERROR:\s*/gi, "")
+    .slice(0, 200);
+  return `PV_FAIL:stage=${stage || "unknown"}:${stripped || "unknown_error"}`;
+}
+
+function sendPvSafeErrorResponse(
+  res: Response,
+  req: AuthRequest,
+  opts: {
+    normalizedClientRequestId: string | null | undefined;
+    rawErr: unknown;
+    stage: string;
+  },
+): void {
+  const requestId = typeof (res as any).locals?.requestId === "string" ? String((res as any).locals.requestId) : typeof (req as any).id === "string" ? String((req as any).id) : "";
+  const { pgCode, constraint, column, tableName } = extractPgErrorMeta(opts.rawErr);
+  logger.warn(
+    {
+      event: "payment_voucher.create_failed",
+      reqId: requestId,
+      clientRequestId: opts.normalizedClientRequestId ?? null,
+      firmId: req.firmId ?? null,
+      userId: req.userId ?? null,
+      stage: opts.stage,
+      pgCode: pgCode || null,
+      constraint: constraint || null,
+      column: column || null,
+      tableName: tableName || null,
+      durationMs: req.timing?.sections?.totalRequestMs ?? null,
+    },
+    "payment_voucher create failed - SAFE shape returned to client",
+  );
+  const retryable =
+    pgCode === "55P03" ||
+    pgCode === "57014" ||
+    pgCode === "40P01" ||
+    pgCode === "40001";
+  res.status(500).json({
+    ok: false,
+    code: "PAYMENT_VOUCHER_CREATE_FAILED",
+    message: "Payment Voucher could not be created.",
+    requestId,
+    ...(opts.normalizedClientRequestId ? { clientRequestId: opts.normalizedClientRequestId } : {}),
+    ...(retryable ? { retryable: true, retryAfterMs: 2000 } : { retryable: false }),
+  });
 }
 
 function getPvE2eStartAt(req: AuthRequest): number {
@@ -1868,7 +1931,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
         return;
       }
       stopTx();
-      throw bad.error ?? new Error(`financial tx failed: ${bad.code}`);
+      sendPvSafeErrorResponse(res, req, { normalizedClientRequestId, rawErr: bad.error ?? errCode ?? bad.code, stage: `main_tx:${bad.code ?? "unknown"}` });
+      return;
     }
     pv = finTx.value;
     commitMs = finTx.commitMs;
@@ -1914,7 +1978,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       return;
     }
     stopTx();
-    throw err;
+    sendPvSafeErrorResponse(res, req, { normalizedClientRequestId, rawErr: err, stage: "main_transaction_catch" });
+    return;
   } finally {
     stopTx();
     if (abortHandle) { try { clearTimeout(abortHandle); } catch {} }

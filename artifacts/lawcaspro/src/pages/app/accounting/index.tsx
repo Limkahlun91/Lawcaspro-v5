@@ -45,6 +45,7 @@ import {
   restorePendingPaymentVoucherCreateFromSessionStorage,
   savePendingPaymentVoucherCreateSessionState,
   submitPaymentVoucherWithRecovery,
+  toPaymentVoucherUserMessage,
 } from "./payment-voucher-submit";
 
 function fmt(val: unknown) {
@@ -1616,7 +1617,8 @@ export function PaymentVouchersTab() {
         setFailedCreateRequestIds(lastCreateAttemptRef.current.map((x) => x.clientRequestId));
       }
       if (e instanceof Error && e.message === "Please select at least one case") return;
-      toastError(toast, e, "Create failed");
+      const safeMsg = toPaymentVoucherUserMessage(e);
+      toast({ title: safeMsg.title, description: safeMsg.description, variant: "destructive" });
     },
   });
 
@@ -1636,7 +1638,10 @@ export function PaymentVouchersTab() {
         description: rows.length > 1 ? `${rows.length} voucher(s) confirmed` : `Confirmed ${String(rows[0]?.voucherNo ?? "voucher")} successfully`,
       });
     },
-    onError: (e) => toastError(toast, e, "Retry failed"),
+    onError: (e) => {
+      const safeMsg = toPaymentVoucherUserMessage(e);
+      toast({ title: `Retry: ${safeMsg.title}`, description: safeMsg.description, variant: "destructive" });
+    },
   });
 
   const createSubmitUi = derivePaymentVoucherSubmitUiState({

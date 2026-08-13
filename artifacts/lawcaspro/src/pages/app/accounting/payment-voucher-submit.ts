@@ -313,3 +313,90 @@ export function blockRepeatedEnterWhenDisabled(args: {
   }
   return true;
 }
+
+function errorContainsRawPersistence(v: string): boolean {
+  const s = String(v ?? "").toLowerCase();
+  return (
+    s.includes("insert into") ||
+    s.includes("failed query") ||
+    s.includes("payment_vouchers") ||
+    s.includes("duplicate key") ||
+    s.includes("column \"")
+  );
+}
+
+function extractRequestId(err: unknown): string | null {
+  if (!err || typeof err !== "object") return null;
+  const rec = err as Record<string, unknown>;
+  const tryCandidates: unknown[] = [
+    (rec as any).requestId,
+    (rec as any)["request-id"],
+    typeof rec.data === "object" && rec.data ? (rec.data as any).requestId : undefined,
+    typeof rec.data === "object" && rec.data ? (rec.data as any).meta?.request_id : undefined,
+    typeof rec.data === "object" && rec.data && Array.isArray((rec.data as any).clientRequestIds) ? (rec.data as any).clientRequestIds[0] : undefined,
+    (rec as any).clientRequestId,
+  ];
+  for (const cand of tryCandidates) {
+    if (typeof cand === "string" && cand.trim()) return cand.trim().slice(0, 24);
+  }
+  return null;
+}
+
+export function toPaymentVoucherUserMessage(err: unknown): {
+  title: string;
+  description: string;
+} {
+  if (!err) {
+    return { title: "Unable to create Payment Voucher.", description: "Please retry." };
+  }
+  const rawStatus =
+    err && typeof err === "object" && "status" in err ? Number((err as { status?: unknown }).status) : null;
+  const safeStatus = rawStatus && Number.isFinite(rawStatus) ? rawStatus : null;
+  if (
+    err instanceof PaymentVoucherConfirmationUnknownError ||
+    err instanceof PaymentVoucherConfirmationPendingError ||
+    err instanceof PaymentVoucherConfirmationStaleError
+  ) {
+    // "Check Status" path is handled by UI buttons — these are not raw failures.
+    return {
+      title: err instanceof PaymentVoucherConfirmationStaleError ? "Status stale" : "Confirmation pending",
+      description: "Check Status to verify.",
+    };
+  }
+  const reqId = extractRequestId(err);
+  const baseTitle = "Unable to create Payment Voucher.";
+  const baseDesc = reqId ? `Error ID: ${reqId}` : "Please retry or contact support.";
+  // Validation: surface ONLY business-safe messages (never raw SQL or persistence text).
+  if (safeStatus === 400 || safeStatus === 422) {
+    const dataMsg =
+      err && typeof err === "object" && typeof (err as any).message === "string" ? (err as any).message.trim() : "";
+    if (dataMsg && !errorContainsRawPersistence(dataMsg) && dataMsg.length <= 200) {
+      return {
+        title: "Please check your inputs",
+        description: reqId ? `${dataMsg} (Error ID: ${reqId})` : dataMsg,
+      };
+    }
+    return {
+      title: "Please check your inputs",
+      description: baseDesc,
+    };
+  }
+  if (safeStatus === 401 || safeStatus === 403) {
+    return {
+      title: baseTitle,
+      description: reqId ? `You do not have permission. (Error ID: ${reqId})` : "You do not have permission.",
+    };
+  }
+  if (safeStatus === 503) {
+    return {
+      title: baseTitle,
+      description: reqId
+        ? `Service temporarily unavailable. Please retry in a moment. (Error ID: ${reqId})`
+        : "Service temporarily unavailable. Please retry in a moment.",
+    };
+  }
+  return {
+    title: baseTitle,
+    description: baseDesc,
+  };
+}

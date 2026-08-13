@@ -280,10 +280,23 @@ const errorHandler: ErrorMiddlewareLike = (err: unknown, req: ReqLike, res: ResL
   }
 
   const stack = err instanceof Error ? err.stack : undefined;
-  const message = err instanceof Error ? err.message : String(err);
+  const rawMessage = err instanceof Error ? err.message : String(err);
   const requestId = typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : "unknown";
-  console.error("[api.unhandled]", { requestId, method: req.method, path: req.path, message, stack });
-  logger.error({ err, path: req.path, method: req.method, status: 500, requestId }, "Unhandled error");
+  const safeMessage = String(rawMessage ?? "")
+    .replace(/\binsert\s+into\s+"[^"]*"(\s*\([^)]*\))?\s*values[\s\S]*$/gi, "[REDACTED_SQL_VALUES]")
+    .replace(/\bfailed\s+query:[\s\S]*$/gi, "[REDACTED_FAILED_QUERY]")
+    .replace(/\$\d+/g, "?")
+    .slice(0, 300);
+  const safeErrMeta = {
+    name: err instanceof Error ? err.name : typeof err,
+    code: String((err as any)?.code ?? "").slice(0, 32),
+    sqlstate: String((err as any)?.sqlstate ?? (err as any)?.sqlState ?? "").slice(0, 16),
+    constraint: String((err as any)?.constraint ?? "").slice(0, 120),
+    column: String((err as any)?.column ?? "").slice(0, 120),
+    table: String((err as any)?.table ?? "").slice(0, 120),
+  };
+  console.error("[api.unhandled]", { requestId, method: req.method, path: req.path, message: safeMessage, safeErrMeta });
+  logger.error({ safeErrMeta, message: safeMessage, path: req.path, method: req.method, status: 500, requestId }, "Unhandled error");
   sendErrorUnsafe(res, err, { status: 500, code: "INTERNAL_SERVER_ERROR", message: "Internal server error" });
 };
 

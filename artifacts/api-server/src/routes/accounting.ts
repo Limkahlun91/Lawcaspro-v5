@@ -945,6 +945,8 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
   }
 
   const like = `%${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
+  const exactRef = q;
+  const prefixRef = `${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
   const queryStartedAt = Date.now();
   const caseAssignScope = hasFirmwideScope
     ? sql``
@@ -956,6 +958,9 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
       c.status,
       COALESCE(p.name, '') as project_name,
       COALESCE(d.name, '') as developer_name,
+      COALESCE(c.parcel_no, '') as parcel_no,
+      COALESCE(NULLIF(c.property_details->>'propertyAddress', ''), '') as property_address,
+      COALESCE(NULLIF(c.property_details->>'parcelNo', ''), '') as property_parcel_no,
       COALESCE((
         SELECT json_agg(t.name)
         FROM (
@@ -973,7 +978,21 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
         SELECT count(*)
         FROM case_purchasers cp2
         WHERE cp2.case_id = c.id
-      ), 0) AS purchaser_count
+      ), 0) AS purchaser_count,
+      COALESCE((
+        SELECT json_agg(b_name) FILTER (WHERE b_name IS NOT NULL AND b_name <> '')
+        FROM (
+          SELECT trim(elem->>'name') AS b_name
+          FROM jsonb_array_elements(c.borrowers) elem
+          LIMIT 2
+        ) t
+      ), '[]'::json) AS borrower_names,
+      CASE
+        WHEN lower(c.reference_no) = lower(${exactRef}) THEN 0
+        WHEN c.reference_no ILIKE ${prefixRef} THEN 1
+        WHEN c.reference_no ILIKE ${like} THEN 2
+        ELSE 3
+      END AS _rank
     FROM cases c
     LEFT JOIN projects p ON p.id = c.project_id AND p.firm_id = ${firmId}
     LEFT JOIN developers d ON d.id = c.developer_id AND d.firm_id = ${firmId}
@@ -984,6 +1003,9 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
         c.reference_no ILIKE ${like}
         OR COALESCE(p.name, '') ILIKE ${like}
         OR COALESCE(d.name, '') ILIKE ${like}
+        OR COALESCE(c.parcel_no, '') ILIKE ${like}
+        OR COALESCE(NULLIF(c.property_details->>'propertyAddress', ''), '') ILIKE ${like}
+        OR COALESCE(NULLIF(c.property_details->>'parcelNo', ''), '') ILIKE ${like}
         OR EXISTS (
           SELECT 1
           FROM case_purchasers cp3
@@ -993,8 +1015,13 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
           WHERE cp3.case_id = c.id
             AND cl3.name ILIKE ${like}
         )
+        OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(c.borrowers) elem2
+          WHERE trim(elem2->>'name') ILIKE ${like}
+        )
       )
-    ORDER BY c.updated_at DESC
+    ORDER BY _rank ASC, c.updated_at DESC
     LIMIT ${safeLimit}
   `);
   const queryMs = Date.now() - queryStartedAt;
@@ -1005,9 +1032,18 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
     const projectName = String(r.project_name ?? "") || null;
     const developerName = String(r.developer_name ?? "") || null;
     const status = String(r.status ?? "") || null;
+    const parcelNo = String(r.parcel_no ?? "") || null;
+    const propertyAddress = String(r.property_address ?? "") || null;
+    const propertyParcelNo = String(r.property_parcel_no ?? "") || null;
     const purchaserNames =
       Array.isArray((r as any).purchaser_names)
         ? ((r as any).purchaser_names as unknown[])
+          .map((v: unknown) => (typeof v === "string" ? v.trim() : ""))
+          .filter((v: string) => Boolean(v))
+        : [];
+    const borrowerNames =
+      Array.isArray((r as any).borrower_names)
+        ? ((r as any).borrower_names as unknown[])
           .map((v: unknown) => (typeof v === "string" ? v.trim() : ""))
           .filter((v: string) => Boolean(v))
         : [];
@@ -1019,16 +1055,35 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
       const remaining = purchaserCount > firstTwo.length ? purchaserCount - firstTwo.length : 0;
       return remaining > 0 ? `${firstTwo.join(" / ")} +${remaining}` : firstTwo.join(" / ");
     })();
-    const shortLabel = [ref, purchaserLabel, projectName].filter((v) => typeof v === "string" && v.trim().length > 0).join(" • ");
+    const partyLabel = (() => {
+      const parts: string[] = [];
+      if (purchaserLabel) parts.push(purchaserLabel);
+      else if (borrowerNames.length > 0) parts.push(borrowerNames.slice(0, 2).join(" / "));
+      return parts.length > 0 ? parts.join(" • ") : null;
+    })();
+    const propertyLabel = (() => {
+      const parts: string[] = [];
+      if (projectName) parts.push(projectName);
+      if (propertyParcelNo) parts.push(`Parcel ${propertyParcelNo}`);
+      else if (parcelNo) parts.push(`Parcel ${parcelNo}`);
+      if (propertyAddress) parts.push(propertyAddress.slice(0, 80));
+      return parts.length > 0 ? parts.join(" • ") : null;
+    })();
+    const shortLabel = [ref, partyLabel, projectName].filter((v) => typeof v === "string" && v.trim().length > 0).join(" • ");
     return {
       id,
       referenceNo: ref,
       shortLabel,
       purchaserNames,
+      borrowerNames,
       purchaserLabel,
       projectName,
       developerName,
       status,
+      parcelNo,
+      propertyAddress,
+      propertyParcelNo,
+      propertyLabel,
     };
   }).filter((x) => x.id);
 

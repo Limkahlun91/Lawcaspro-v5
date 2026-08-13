@@ -1,15 +1,17 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useLocation, useSearch } from "wouter";
-import { useCreateQuotation, getListQuotationsQueryKey, useListCases, useGetCase, getGetCaseQueryKey, useGetClient, getGetClientQueryKey } from "@workspace/api-client-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useCreateQuotation, getListQuotationsQueryKey, useGetCase, getGetCaseQueryKey, useGetClient, getGetClientQueryKey } from "@workspace/api-client-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { ArrowLeft, Plus, Trash2, Save } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Save, X, ChevronDown, Search } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
+import { apiFetchJson } from "@/lib/api-client";
+import { cn } from "@/lib/utils";
 
 interface LineItem {
   id: string;
@@ -62,6 +64,57 @@ function encodeCategory(base: string, meta: CategoryMeta): string {
   if (meta.remarks && meta.remarks.trim()) parts.push(`r=${encodeURIComponent(meta.remarks.trim())}`);
   return parts.length === 1 ? b : parts.join("|");
 }
+
+type DisbursementCategoryKey = "search" | "stamp_duty" | "registration";
+
+interface DisbursementPreset {
+  id: string;
+  label: string;
+  section: "disbursement";
+  category: DisbursementCategoryKey;
+  defaultTaxCode: string;
+  defaultAmount?: number;
+}
+
+const DISBURSEMENT_PRESETS: DisbursementPreset[] = [
+  // 1. Search and Related (matches SEARCH header category: search)
+  { id: "search-land", label: "1(a) Land Search", section: "disbursement", category: "search", defaultTaxCode: "Z", defaultAmount: 30 },
+  { id: "search-ctc-title", label: "1(b) CTC Title / MOT", section: "disbursement", category: "search", defaultTaxCode: "Z", defaultAmount: 10 },
+  { id: "search-bankruptcy", label: "1(c) Bankruptcy Search (MDI / SSM)", section: "disbursement", category: "search", defaultTaxCode: "Z", defaultAmount: 10 },
+  { id: "search-bankruptcy-sc", label: "1(d) Bankruptcy Search Service Charge", section: "disbursement", category: "search", defaultTaxCode: "Z", defaultAmount: 5 },
+  { id: "search-ccm-winding", label: "1(e) CCM / Company Search (Winding Up)", section: "disbursement", category: "search", defaultTaxCode: "Z", defaultAmount: 30 },
+
+  // 2. Stamp Duty (category: stamp_duty)
+  { id: "sd-spa", label: "2(a) Stamp Duty - SPA / SPA (Sub)", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-loan", label: "2(b) Stamp Duty - Loan Agreement / LACA / FA", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-memo-charge", label: "2(c) Stamp Duty - Memorandum of Charge", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-form-14a", label: "2(d) Stamp Duty - Form 14A (Transfer)", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-form-16a", label: "2(e) Stamp Duty - Form 16A (Annexure)", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-form-16f", label: "2(f) Stamp Duty - Form 16F (Charge)", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-form-16n", label: "2(g) Stamp Duty - Form 16N (Discharge)", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-form-16i", label: "2(h) Stamp Duty - Form 16I", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-deed-assignment", label: "2(i) Stamp Duty - Deed of Assignment (DOA)", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-power-attorney", label: "2(j) Stamp Duty - Power of Attorney (PA)", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-deed-reassignment", label: "2(k) Stamp Duty - Deed of Receipt & Reassignment (DRR)", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-lease", label: "2(l) Stamp Duty - Lease / Sub-Lease / Tenancy", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-caveat", label: "2(m) Stamp Duty - Caveat", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-withdrawal-caveat", label: "2(n) Stamp Duty - Withdrawal of Caveat", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-private-caveat", label: "2(o) Stamp Duty - Private Caveat", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-cancellation-sd", label: "2(p) Stamp Duty - Cancellation / Adjudication", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-refund-sd", label: "2(q) Stamp Duty - Refund / Remission", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-letter-offer", label: "2(r) Stamp Duty - Letter of Offer (LO)", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-lease-extension", label: "2(s) Stamp Duty - Lease Extension / Supplemental", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+  { id: "sd-other", label: "2(t) Others - Refer Attachment I", section: "disbursement", category: "stamp_duty", defaultTaxCode: "Z" },
+
+  // 3. Registration / Entry / Withdrawal (category: registration)
+  { id: "reg-entry-pc", label: "3(a) Entry of Presentation Charge / LHC", section: "disbursement", category: "registration", defaultTaxCode: "Z", defaultAmount: 10 },
+  { id: "reg-withdrawal-pc", label: "3(b) Withdrawal of Presentation Charge / LHC", section: "disbursement", category: "registration", defaultTaxCode: "Z", defaultAmount: 10 },
+  { id: "reg-caveat-entry", label: "3(c) Caveat Entry (Lien / Charge Caveat)", section: "disbursement", category: "registration", defaultTaxCode: "Z", defaultAmount: 130 },
+  { id: "reg-caveat-withdrawal", label: "3(d) Withdrawal of Caveat", section: "disbursement", category: "registration", defaultTaxCode: "Z", defaultAmount: 10 },
+  { id: "reg-private-caveat", label: "3(e) Entry / Withdrawal of Private Caveat", section: "disbursement", category: "registration", defaultTaxCode: "Z", defaultAmount: 130 },
+  { id: "reg-lease", label: "3(f) Entry of Lease / Sub-Lease", section: "disbursement", category: "registration", defaultTaxCode: "Z", defaultAmount: 500 },
+  { id: "reg-mot", label: "3(g) MOT - Form 14A / Form 16F / Form 16I (NLC)", section: "disbursement", category: "registration", defaultTaxCode: "Z", defaultAmount: 100 },
+];
 
 const DEFAULT_DISBURSEMENT_ITEMS: Omit<LineItem, "id" | "itemCategory">[] = [
   { section: "disbursement", category: "search", itemNo: "1", subItemNo: "", description: "SEARCH", taxCode: "T", amountExclTax: 0, taxRate: DEFAULT_TAX_RATE, taxAmount: 0, amountInclTax: 0 },
@@ -124,6 +177,37 @@ function initItems(defaults: Array<Omit<LineItem, "id"> | Omit<LineItem, "id" | 
   }));
 }
 
+interface CaseSearchResultItem {
+  id: number;
+  referenceNo: string;
+  purchaserName?: string | null;
+  project?: string | null;
+  propertyAddress?: string | null;
+  parcelNo?: string | null;
+  propertyParcelNo?: string | null;
+  borrowerNames?: string[] | null;
+  partyLabel?: string | null;
+  propertyLabel?: string | null;
+  developer?: string | null;
+  property?: string | null;
+}
+
+interface CaseSearchResponse {
+  ok?: boolean;
+  data?: CaseSearchResultItem[];
+  items?: CaseSearchResultItem[];
+  total?: number;
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebounced(value), Math.max(0, delayMs));
+    return () => window.clearTimeout(t);
+  }, [value, delayMs]);
+  return debounced;
+}
+
 export default function NewQuotation() {
   const [, setLocation] = useLocation();
   const search = useSearch();
@@ -144,8 +228,89 @@ export default function NewQuotation() {
   const [loanAmount, setLoanAmount] = useState("");
   const [taxRate, setTaxRate] = useState<number>(DEFAULT_TAX_RATE);
 
-  const { data: casesRes } = useListCases({ limit: 100 });
-  const cases = casesRes?.data ?? [];
+  const [caseSearch, setCaseSearch] = useState("");
+  const debouncedCaseSearch = useDebouncedValue(caseSearch, 250).trim();
+  const caseSearchQuery = useQuery<CaseSearchResultItem[]>({
+    queryKey: ["quotation", "case-search", debouncedCaseSearch],
+    enabled: debouncedCaseSearch.length >= 2,
+    queryFn: async ({ signal }) => {
+      const q = encodeURIComponent(debouncedCaseSearch);
+      const raw = await apiFetchJson<CaseSearchResponse>(`/accounting/cases/search?q=${q}&limit=20`, { signal });
+      return Array.isArray(raw?.items) ? raw.items : Array.isArray((raw as any)?.data) ? (raw as any).data : [];
+    },
+  });
+  const caseSearchItems = caseSearchQuery.data ?? [];
+
+  const [selectedCase, setSelectedCase] = useState<CaseSearchResultItem | null>(null);
+  const [caseComboboxOpen, setCaseComboboxOpen] = useState(false);
+
+  useEffect(() => {
+    if (!selectedCase) return;
+    if (String(selectedCase.id) !== selectedCaseId) setSelectedCaseId(String(selectedCase.id));
+    if (selectedCase.referenceNo && selectedCase.referenceNo !== referenceNo) {
+      setReferenceNo(selectedCase.referenceNo);
+    }
+  }, [selectedCase]);
+
+  const [disbursementPresetQuery, setDisbursementPresetQuery] = useState("");
+  const [disbDropdownOpen, setDisbDropdownOpen] = useState(false);
+  const debouncedDisbQ = useDebouncedValue(disbursementPresetQuery, 150).trim().toLowerCase();
+  const filteredDisbursementPresets = useMemo(() => {
+    const all = DISBURSEMENT_PRESETS;
+    if (!debouncedDisbQ) return all;
+    return all.filter(p => {
+      const hay = `${p.label} ${p.category} ${p.defaultTaxCode}`.toLowerCase();
+      return hay.includes(debouncedDisbQ);
+    });
+  }, [debouncedDisbQ]);
+
+  const addDisbursementPresetLine = useCallback((preset: DisbursementPreset) => {
+    const id = generateId();
+    const amount = typeof preset.defaultAmount === "number" ? preset.defaultAmount : 0;
+    const nextTax = calcTax(amount, preset.defaultTaxCode, taxRate);
+    setDisbursementItems(prev => {
+      // Determine itemNo by category (1=search, 2=stamp_duty, 3=registration)
+      const itemNo = preset.category === "search" ? "1" : preset.category === "stamp_duty" ? "2" : "3";
+      // Find the header row index for this category
+      const headerIndex = prev.findIndex(x => x.category === preset.category && x.subItemNo === "" && x.description !== "" && !x.isCustom);
+      const sibs = prev.filter(x => x.category === preset.category);
+      const subs = sibs.filter(x => x.subItemNo !== "");
+      // Letter: a,b,c.. aa,ab.. fallback numeric if too many
+      const idx = subs.length;
+      let sub = String.fromCharCode(97 + idx);
+      if (idx >= 26) {
+        const first = Math.floor(idx / 26) - 1;
+        const second = idx % 26;
+        sub = `${String.fromCharCode(97 + first)}${String.fromCharCode(97 + second)}`;
+      }
+      const newRow: LineItem = {
+        id,
+        section: "disbursement",
+        category: preset.category,
+        itemNo,
+        subItemNo: sub,
+        description: preset.label,
+        taxCode: preset.defaultTaxCode || "Z",
+        itemCategory: "disbursement",
+        amountExclTax: amount,
+        taxRate: nextTax.taxRate,
+        taxAmount: nextTax.taxAmount,
+        amountInclTax: nextTax.amountInclTax,
+        quantity: undefined,
+        unitAmount: undefined,
+        remarks: undefined,
+        isCustom: false,
+      };
+      // Insert after header row if we can find it, else end
+      if (headerIndex >= 0) {
+        // Find last sibling row with same itemNo (after header, before next header)
+        let insertAt = headerIndex + 1;
+        while (insertAt < prev.length && prev[insertAt].category === preset.category) insertAt++;
+        return [...prev.slice(0, insertAt), newRow, ...prev.slice(insertAt)];
+      }
+      return [...prev, newRow];
+    });
+  }, [taxRate]);
 
   const { data: caseDetail } = useGetCase(
     parseInt(selectedCaseId) || 0,
@@ -340,6 +505,10 @@ export default function NewQuotation() {
     window.setTimeout(() => descInputRefs.current[id]?.focus(), 0);
   }, [taxRate]);
 
+  const addCustomDisbursementLine = useCallback(() => {
+    addDisbursementLine("search");
+  }, [addDisbursementLine]);
+
   const addAttachmentItem = () => {
     setAttachmentItems(prev => [...prev, {
       id: generateId(),
@@ -497,24 +666,94 @@ export default function NewQuotation() {
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <div className="md:col-span-3">
-              <Label className="text-xs text-slate-500">Select Case</Label>
-              <select
-                value={selectedCaseId}
-                onChange={e => setSelectedCaseId(e.target.value)}
-                className="w-full h-9 border rounded-md px-3 text-sm bg-white"
-              >
-                <option value="">-- Select a case to auto-fill --</option>
-                {cases.map((c: any) => (
-                  <option key={c.id} value={c.id}>
-                    {c.referenceNo} - {c.projectName} ({c.status})
-                  </option>
-                ))}
-              </select>
+            <div className="md:col-span-2 relative">
+              <Label className="text-xs text-slate-500">Case / Reference No. *</Label>
+              <div className="relative">
+                <div className="relative flex items-stretch">
+                  <div className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400 pointer-events-none">
+                    <Search className="w-4 h-4" />
+                  </div>
+                  <Input
+                    className={cn("h-9 pl-9 pr-9", !!(selectedCase?.referenceNo) ? "bg-slate-50" : "")}
+                    placeholder="Type reference, purchaser, project or property..."
+                    value={selectedCase ? `${selectedCase.referenceNo} ${selectedCase.partyLabel ?? ""}` : caseSearch}
+                    readOnly={!!selectedCase}
+                    onFocus={() => !selectedCase && setCaseComboboxOpen(true)}
+                    onBlur={() => window.setTimeout(() => setCaseComboboxOpen(false), 120)}
+                    onChange={(e) => {
+                      if (selectedCase) return;
+                      setCaseSearch(e.target.value);
+                      setCaseComboboxOpen(true);
+                    }}
+                  />
+                  {selectedCase ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      aria-label="Clear selected case"
+                      className="absolute inset-y-0 right-0 h-9 w-9 rounded-md text-slate-500 hover:text-slate-800"
+                      onClick={() => {
+                        setSelectedCase(null);
+                        setSelectedCaseId("");
+                        setReferenceNo("");
+                        setCaseSearch("");
+                        setCaseComboboxOpen(false);
+                      }}
+                    >
+                      <X className="w-4 h-4" />
+                    </Button>
+                  ) : null}
+                </div>
+                {caseComboboxOpen && !selectedCase && (
+                  <div className="absolute z-40 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-md shadow-lg max-h-80 overflow-auto">
+                    {debouncedCaseSearch.length < 2 ? (
+                      <div className="px-4 py-3 text-xs text-slate-500">Type at least 2 characters to search...</div>
+                    ) : caseSearchQuery.isFetching && caseSearchItems.length === 0 ? (
+                      <div className="px-4 py-3 text-xs text-slate-500">Searching...</div>
+                    ) : caseSearchItems.length === 0 ? (
+                      <div className="px-4 py-3 text-xs text-slate-500">No matching cases.</div>
+                    ) : (
+                      caseSearchItems.map((it) => {
+                        const secondLine = [it.partyLabel, it.project, it.propertyParcelNo || it.parcelNo, it.propertyAddress].filter(Boolean).join(" • ");
+                        return (
+                          <button
+                            type="button"
+                            key={it.id}
+                            className="w-full text-left px-3 py-2 hover:bg-slate-100 border-b border-slate-100 last:border-b-0"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              setSelectedCase(it);
+                              setCaseSearch(it.referenceNo);
+                              setCaseComboboxOpen(false);
+                            }}
+                          >
+                            <div className="text-sm font-semibold text-slate-900">{it.referenceNo}</div>
+                            {secondLine ? <div className="text-xs text-slate-500 mt-0.5 truncate">{secondLine}</div> : null}
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="mt-1 text-[11px] text-slate-400">
+                {selectedCase
+                  ? `Linked to case id ${selectedCase.id}. Reference derived from the selected case. Click X to re-select.`
+                  : "Find a case first — reference, purchaser, project, address, parcel, borrower or developer."}
+              </div>
             </div>
             <div>
-              <Label className="text-xs text-slate-500">Reference No. *</Label>
-              <Input value={referenceNo} onChange={e => setReferenceNo(e.target.value)} placeholder="e.g. NYC/CON" />
+              <Label className="text-xs text-slate-500">
+                Reference (derived from case)
+              </Label>
+              <Input
+                value={referenceNo}
+                readOnly
+                tabIndex={-1}
+                placeholder="Select a case above."
+                className="h-9 bg-slate-50 text-slate-600 cursor-not-allowed"
+              />
             </div>
             <div>
               <Label className="text-xs text-slate-500">Service Tax Rate (%)</Label>
@@ -714,15 +953,71 @@ export default function NewQuotation() {
                 </div>
               ) : null}
               {activeSection === "disbursement" ? (
-                <div className="flex flex-wrap justify-end gap-2 mb-3">
-                  <Button size="sm" variant="outline" onClick={() => addDisbursementLine("search")}>
-                    <Plus className="w-4 h-4 mr-1" /> Add Search Line
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => addDisbursementLine("stamp_duty")}>
-                    <Plus className="w-4 h-4 mr-1" /> Add Stamp Duty Line
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => addDisbursementLine("registration")}>
-                    <Plus className="w-4 h-4 mr-1" /> Add Registration Line
+                <div className="flex flex-wrap justify-end items-center gap-2 mb-3 relative">
+                  <div className="relative">
+                    <Button
+                      id="disbursement-preset-menu-button"
+                      size="sm"
+                      variant="outline"
+                      aria-haspopup="listbox"
+                      aria-expanded={disbDropdownOpen}
+                      onClick={() => setDisbDropdownOpen(v => !v)}
+                      onBlur={() => window.setTimeout(() => setDisbDropdownOpen(false), 150)}
+                    >
+                      <Plus className="w-4 h-4 mr-1" /> Add Disbursement
+                      <ChevronDown className="w-3.5 h-3.5 ml-1.5" />
+                    </Button>
+                    {disbDropdownOpen ? (
+                      <div
+                        role="listbox"
+                        className="absolute z-30 right-0 mt-1 w-[460px] max-w-[90vw] max-h-[380px] overflow-hidden rounded-md border border-slate-200 bg-white shadow-lg flex flex-col"
+                      >
+                        <div className="px-3 py-2 border-b border-slate-100">
+                          <Input
+                            autoFocus
+                            size={1}
+                            value={disbursementPresetQuery}
+                            onChange={(e) => setDisbursementPresetQuery(e.target.value)}
+                            placeholder="Search presets..."
+                            className="h-8 text-xs px-2"
+                          />
+                        </div>
+                        <div className="overflow-y-auto flex-1 py-1">
+                          {filteredDisbursementPresets.length === 0 ? (
+                            <div className="px-3 py-3 text-xs text-slate-500">No presets match.</div>
+                          ) : (
+                            filteredDisbursementPresets.map((p) => (
+                              <button
+                                type="button"
+                                key={p.id}
+                                value={p.id}
+                                className="w-full text-left px-3 py-2 hover:bg-slate-50 flex items-center justify-between gap-3"
+                                onMouseDown={(e) => {
+                                  e.preventDefault();
+                                  addDisbursementPresetLine(p);
+                                  setDisbursementPresetQuery("");
+                                  setDisbDropdownOpen(false);
+                                }}
+                              >
+                                <div className="min-w-0">
+                                  <div className="text-sm text-slate-800 truncate">{p.label}</div>
+                                  <div className="text-[11px] text-slate-400 mt-0.5">
+                                    {p.category.replace("_", " ")} • Tax {p.defaultTaxCode}
+                                    {typeof p.defaultAmount === "number" ? ` • Suggested RM ${p.defaultAmount.toFixed(2)}` : ""}
+                                  </div>
+                                </div>
+                                <span className="text-[10px] uppercase tracking-wide text-slate-400 whitespace-nowrap px-2 py-0.5 border border-slate-200 rounded">
+                                  {p.category === "stamp_duty" ? "STAMP" : p.category === "registration" ? "REG" : "SEARCH"}
+                                </span>
+                              </button>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => { setActiveSection("disbursement"); addCustomDisbursementLine(); }}>
+                    <Plus className="w-4 h-4 mr-1" /> Add Custom Line
                   </Button>
                 </div>
               ) : null}
