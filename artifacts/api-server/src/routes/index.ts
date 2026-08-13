@@ -73,7 +73,7 @@ import templateMigrationsRouter from "./template-migrations.js";
 import bankAdaptersRouter from "./bank-adapters.js";
 import himsRouter from "./hims.js";
 import cronJobsRouter from "./cron-jobs.js";
-import { isHRGlobalEnvEnabled, requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate";
+import { requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate";
 
 type RouterLike = {
   use: (...args: unknown[]) => RouterLike;
@@ -131,27 +131,25 @@ routerInternal.use(complianceReportsRouter);
 routerInternal.use(projectStatusReportRouter);
 routerInternal.use(supportSessionsRouter);
 
-if (isHRGlobalEnvEnabled()) {
-  routerInternal.use(requireHRModuleEnabled);
-  routerInternal.use(hrEmployeesRouter);
-  routerInternal.use(hrDepartmentsRouter);
-  routerInternal.use(hrPositionsRouter);
-  routerInternal.use(hrAttendanceRouter);
-  routerInternal.use(hrLeaveRouter);
-  routerInternal.use(hrClaimsRouter);
-  routerInternal.use(hrPayrollRouter);
-  routerInternal.use(hrRecruitmentRouter);
-  routerInternal.use(hrPerformanceRouter);
-  routerInternal.use(hrTrainingRouter);
-  routerInternal.use(hrAssetsRouter);
-  routerInternal.use(hrOnboardingRouter);
-  routerInternal.use(hrOffboardingRouter);
-  routerInternal.use(hrDocumentsRouter);
-  routerInternal.use(hrSettingsRouter);
-  routerInternal.use(hrReportsRouter);
-  routerInternal.use(hrSelfServiceRouter);
-  routerInternal.use(hrIntegrationEventsRouter);
-}
+routerInternal.use(requireHRModuleEnabled);
+routerInternal.use(hrEmployeesRouter);
+routerInternal.use(hrDepartmentsRouter);
+routerInternal.use(hrPositionsRouter);
+routerInternal.use(hrAttendanceRouter);
+routerInternal.use(hrLeaveRouter);
+routerInternal.use(hrClaimsRouter);
+routerInternal.use(hrPayrollRouter);
+routerInternal.use(hrRecruitmentRouter);
+routerInternal.use(hrPerformanceRouter);
+routerInternal.use(hrTrainingRouter);
+routerInternal.use(hrAssetsRouter);
+routerInternal.use(hrOnboardingRouter);
+routerInternal.use(hrOffboardingRouter);
+routerInternal.use(hrDocumentsRouter);
+routerInternal.use(hrSettingsRouter);
+routerInternal.use(hrReportsRouter);
+routerInternal.use(hrSelfServiceRouter);
+routerInternal.use(hrIntegrationEventsRouter);
 
 routerInternal.use(documentIntelligenceRouter);
 routerInternal.use(templateMigrationsRouter);

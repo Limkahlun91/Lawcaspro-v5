@@ -1,7 +1,7 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
-import { isHRGlobalEnvEnabled, requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate.js";
+import { requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate.js";
 import { createHRError, HR_ERROR_CODES, serializeHRError } from "../modules/shared/errors/hr-error-codes.js";
 import { one } from "../lib/http.js";
 import {
@@ -18,15 +18,6 @@ type RouterInternalLike = {
 
 const expressRouter: ExpressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
-
-if (!isHRGlobalEnvEnabled()) {
-  router.get("*", (_req, res: Response) => {
-    res.status(503).json(serializeHRError(createHRError(HR_ERROR_CODES.HR_MODULE_DISABLED, "HRMS module is not enabled.")));
-  });
-  router.post("*", (_req, res: Response) => {
-    res.status(503).json(serializeHRError(createHRError(HR_ERROR_CODES.HR_MODULE_DISABLED, "HRMS module is not enabled.")));
-  });
-}
 
 const startOffboardingSchema = z.object({
   employeeId: z.number().int().positive(),

@@ -14,13 +14,6 @@ export async function requireHRModuleEnabled(
   next: NextFunction,
 ): Promise<void> {
   const authReq = req as AuthRequest;
-  if (!isHRGlobalEnvEnabled()) {
-    res.status(503).json(serializeHRError(createHRError(
-      HR_ERROR_CODES.HR_MODULE_DISABLED,
-      "HRMS module is not enabled in this environment.",
-    )));
-    return;
-  }
   const firmId = authReq.firmId;
   if (!firmId) {
     res.status(403).json(serializeHRError(createHRError(

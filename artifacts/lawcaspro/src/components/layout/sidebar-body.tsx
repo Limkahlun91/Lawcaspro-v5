@@ -1,7 +1,6 @@
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
-import { isEmailControlEnabled, isEmailSettingsEnabled, isWhatsAppInboxEnabled } from "@/lib/feature-flags";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import {
@@ -28,11 +27,17 @@ import {
   Users,
   Shield,
   FileSpreadsheet,
+  Mail,
+  Calendar,
+  PlaneTakeoff,
+  FileKey,
+  WalletCards,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { apiFetchJson } from "@/lib/api-client";
 import { useToast } from "@/hooks/use-toast";
+import { useFeatureMap } from "@/lib/feature-guards";
 
 export type SidebarGroupKey =
   | "work"
@@ -69,7 +74,7 @@ export type SidebarNavItem = {
   href: string;
   icon: any;
   perm: readonly [string, string];
-  featureCheck?: () => boolean;
+  featureKey?: string;
   roleCheck?: (ctx: SidebarRoleContext) => boolean;
 };
 
@@ -169,17 +174,59 @@ export function navGroupsForUser(): Array<{
       label: "HR",
       items: [
         {
-          label: "Self Service",
-          href: "/app/my/dashboard",
-          icon: UserCog,
+          label: "HR Dashboard",
+          href: "/app/hr/dashboard",
+          icon: BarChart,
           perm: ["hr", "read"],
+          featureKey: "hr.dashboard",
+          roleCheck: isHRFullRole,
         },
         {
           label: "Employees",
-          href: "/app/hr/dashboard",
+          href: "/app/hr/employees",
           icon: Users,
           perm: ["hr", "read"],
+          featureKey: "hr.employees",
           roleCheck: isHRFullRole,
+        },
+        {
+          label: "Attendance",
+          href: "/app/hr/attendance",
+          icon: Calendar,
+          perm: ["hr", "read"],
+          featureKey: "hr.attendance",
+          roleCheck: isHRFullRole,
+        },
+        {
+          label: "Leave",
+          href: "/app/hr/leave",
+          icon: PlaneTakeoff,
+          perm: ["hr", "read"],
+          featureKey: "hr.leave",
+          roleCheck: isHRFullRole,
+        },
+        {
+          label: "Claims",
+          href: "/app/hr/claims",
+          icon: FileKey,
+          perm: ["hr", "read"],
+          featureKey: "hr.claims",
+          roleCheck: isHRFullRole,
+        },
+        {
+          label: "Payroll",
+          href: "/app/hr/payroll",
+          icon: WalletCards,
+          perm: ["hr", "read"],
+          featureKey: "hr.payroll",
+          roleCheck: isHRFullRole,
+        },
+        {
+          label: "My HR",
+          href: "/app/my/dashboard",
+          icon: UserCog,
+          perm: ["hr", "read"],
+          featureKey: "hr.self_service",
         },
       ],
     },
@@ -188,18 +235,11 @@ export function navGroupsForUser(): Array<{
       label: "Communication",
       items: [
         {
-          label: "Email Control",
+          label: "Email",
           href: "/app/communication/email",
-          icon: MessageSquare,
+          icon: Mail,
           perm: ["communications", "read"],
-          featureCheck: isEmailControlEnabled,
-        },
-        {
-          label: "WhatsApp Inbox",
-          href: "/app/communication/whatsapp",
-          icon: MessageSquare,
-          perm: ["communications", "read"],
-          featureCheck: isWhatsAppInboxEnabled,
+          featureKey: "communications.email",
         },
         { label: "Hub", href: "/app/hub", icon: MessageSquare, perm: ["communications", "read"] },
       ],
@@ -234,6 +274,15 @@ export function SidebarBody({
   const [location] = useLocation();
   const qc = useQueryClient();
   const { toast } = useToast();
+
+  const features = useFeatureMap();
+  const ctx: SidebarRoleContext = useMemo(() => {
+    const userType = String((user as any)?.userType ?? "");
+    const roleGroup = String((user as any)?.roleGroup ?? "");
+    const roleLower = String(roleName ?? "").toLowerCase();
+    return { userType, roleGroup, roleLower };
+  }, [user, roleName]);
+
   const accountingUnreadCount = useQuery({
     queryKey: ["user-notifications", "unread-count", "sidebar"],
     queryFn: () => apiFetchJson<{ count: number }>("/user-notifications/unread-count").catch(() => ({ count: 0 })),
@@ -253,7 +302,7 @@ export function SidebarBody({
     enabled:
       !!user &&
       user.userType === "firm_user" &&
-      (isEmailControlEnabled() || isWhatsAppInboxEnabled()) &&
+      !!features["communications.email"]?.enabled &&
       hasPermission(user, "communications", "read"),
   }).data?.count ?? 0;
   const notifSummary = useQuery({
@@ -324,20 +373,13 @@ export function SidebarBody({
 
   const navGroups = navGroupsForUser();
 
-  const ctx: SidebarRoleContext = useMemo(() => {
-    const userType = String((user as any)?.userType ?? "");
-    const roleGroup = String((user as any)?.roleGroup ?? "");
-    const roleLower = String(roleName ?? "").toLowerCase();
-    return { userType, roleGroup, roleLower };
-  }, [user, roleName]);
-
   const visibleNavGroups = navGroups
     .map((g) => ({
       key: g.key,
       label: g.label,
       items: g.items.filter((i) => {
         if (!hasPermission(user, i.perm[0], i.perm[1])) return false;
-        if (typeof i.featureCheck === "function" && !i.featureCheck()) return false;
+        if (i.featureKey && !features[i.featureKey]?.enabled) return false;
         if (typeof i.roleCheck === "function" && !i.roleCheck(ctx)) return false;
         return true;
       }),
