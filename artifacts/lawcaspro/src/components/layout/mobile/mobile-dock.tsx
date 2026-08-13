@@ -114,7 +114,7 @@ export function MobileDockView(props: {
 
   const dockItems = [
     { id: "home" as const, label: "Home", icon: Home, href: "/app/dashboard", badge: 0, badgeVariant: "" },
-    { id: "work" as const, label: "Work", icon: ListTodo, href: "/app/workbench", badge: props.counts.workUnread, badgeVariant: "bg-blue-500" },
+    { id: "work" as const, label: "Work", icon: ListTodo, href: "/app/my-work", badge: props.counts.workUnread, badgeVariant: "bg-blue-500" },
     { id: "monitor" as const, label: "Monitor", icon: MonitorCog, href: "/app/accounting?tab=monitor", badge: canViewMonitor ? props.counts.monitorUniqueCount : 0, badgeVariant: (props.counts.monitorUniqueCount > 0 ? "bg-orange-500" : "bg-amber-500"), requires: "monitor" as const },
     { id: "alerts" as const, label: "Alerts", icon: Bell, href: null, badge: canViewEscalationFeed ? props.counts.notifUnread : 0, badgeVariant: "bg-red-500", requires: "alerts" as const },
     { id: "me" as const, label: "Me", icon: UserCircle2, href: null, badge: 0, badgeVariant: "" },

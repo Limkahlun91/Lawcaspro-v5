@@ -81,7 +81,7 @@ export function MeSheet({
           {meExpand === "nav" ? (
             <>
               <Link className="block" href="/app/dashboard" onClick={() => { onOpenChange(false); onChangeView("home"); }}><div className="rounded-md px-3 py-2 hover:bg-slate-100 flex items-center gap-2"><Home className="w-4 h-4 text-slate-600" /> Dashboard</div></Link>
-              <Link className="block" href="/app/workbench" onClick={() => { onOpenChange(false); onChangeView("work"); }}><div className="rounded-md px-3 py-2 hover:bg-slate-100 flex items-center gap-2"><ListTodo className="w-4 h-4 text-slate-600" /> My Work</div></Link>
+              <Link className="block" href="/app/my-work" onClick={() => { onOpenChange(false); onChangeView("work"); }}><div className="rounded-md px-3 py-2 hover:bg-slate-100 flex items-center gap-2"><ListTodo className="w-4 h-4 text-slate-600" /> My Work</div></Link>
               <Link className="block" href="/app/cases" onClick={() => { onOpenChange(false); onChangeView("work"); }}><div className="rounded-md px-3 py-2 hover:bg-slate-100 flex items-center gap-2"><Briefcase className="w-4 h-4 text-slate-600" /> Cases</div></Link>
               <Link className="block" href="/app/accounting?tab=file-custody" onClick={() => { onOpenChange(false); onChangeView("monitor"); }}><div className="rounded-md px-3 py-2 hover:bg-slate-100 flex items-center gap-2"><Calculator className="w-4 h-4 text-slate-600" /> Accounting &amp; Custody</div></Link>
               <Link className="block" href="/app/reports" onClick={() => { onOpenChange(false); onChangeView("monitor"); }}><div className="rounded-md px-3 py-2 hover:bg-slate-100 flex items-center gap-2"><BarChart className="w-4 h-4 text-slate-600" /> Reports</div></Link>

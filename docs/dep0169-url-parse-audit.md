@@ -1,5 +1,5 @@
-# DEP0169 url.parse() Deprecation Audit (PART 3 §20)
-Last updated: 2026-08-08
+# DEP0169 url.parse() Deprecation Audit (PART 3 §20, retracted PART 2 §1 clean-gate update)
+Last updated: 2026-08-13
 
 ---
 
@@ -21,23 +21,43 @@ All our code that parses URLs uses the WHATWG `new URL(input, base?)` API:
 
 No own-code change required.
 
-## Deprecation source = dependency only
+## Deprecation source classification — RETRACTED EXPRESS_CONFIRMED CLAIM (PART 2 §1)
 
-DEP0169 warning in local stdout comes from transitive dependencies:
+**Previous report stated:**
+> DEP0169_SOURCE = third_party:express@4.22.1  (EXPRESS_CONFIRMED)
 
-| Dependency | Version (lockfile resolved) | Source of `url.parse()` | Action |
+**Evidence review:**
+- Local stdout logs showed DEP0169 line items, but `NODE_OPTIONS=--trace-deprecation` was never captured on a real Vercel Preview Runtime Logs before this gate.
+- Existing references to `express url.parse` inside the codebase were predominantly static comments / audit observations, not a full stack trace with `package/file/line` captured on Preview runtime.
+- Therefore, previous `EXPRESS CONFIRMED` classification was **evidence insufficient**.
+
+**Retracted classification (PART 2 §1):**
+```
+DEP0169_SOURCE       = UNRESOLVED_RUNTIME_SOURCE
+FOLLOW_UP_REQUIRED   = YES
+```
+
+**Current candidates (HYPOTHESIS ONLY, NOT CONFIRMED until §3 stack captured):**
+
+| Hypothesis | Lockfile candidate | Suspected `url.parse()` path | Status |
 |---|---|---|---|
-| `express` 4.x | `express@^4.21.0` | Legacy in `finalhandler` / `send` / `serve-static` transitive when using URL-encoded query string parse with legacy `url.parse` inside internal request handling. | **Do NOT bump express 4 → 5** in this Bulk Sprint (§20: “不要为了消 warning 大规模 dependency bump 破坏系统”). Express 5 is a breaking major. Track for Stabilisation → vNEXT only. |
-| `node-fetch` / `whatwg-url` / `undici` compat? | Checked: `node_modules/node-fetch/src/utils/parse-url.js` | Some versions of `node-fetch@2.x` legacy used url.parse. Current resolved = `node-fetch@2.7.0` (needs spot-check). | Patch-level `pnpm up node-fetch@^2` within semver-compatible range only. |
-| `ws` 8.x | `ws@^8.18.0` | Legacy URL handling path in subdomains. No evidence of deprecation emitter in current 8.x. | No action until release notes mention. |
+| Express 4.x transitive | `express@^4.21.0` lock → `finalhandler` / `send` / `serve-static` legacy URL-encoded query path inside internals | HYPOTHESIS ONLY — NOT CONFIRMED without real Preview `--trace-deprecation` stack |
+| `node-fetch@2.7.0` legacy parse | `node_modules/node-fetch/src/utils/parse-url.js` | HYPOTHESIS ONLY |
+| Vercel Node.js runtime bootstrap | Vercel provided Node 20.x server handler | HYPOTHESIS ONLY |
 
-### Action Plan
-1. Leave Express 4 alone in this Bulk Sprint (§20: no large bump). Accept DEP0169 info-level warning in dev logs.
-2. Dev-only patch: add `NODE_OPTIONS="--no-deprecation"` to `dev` script when running locally to silence during development if/when annoyance — but **not in CI** so we still see new deprecation sources when introduced.
-3. Stabilisation: move express 4 → 5 evaluation as a dedicated, separate card; only then can DEP0169 be fully eliminated from the process tree.
-4. CI: add a `pnpm audit --production` + deprecation warning capture in log archive (not a gate); track count trend.
+### Action Plan (PART 2 §2 — do NOT modify backend / upgrade Express now)
+1. **Do NOT upgrade Express 4 → 5** in this clean gate. (§2 explicit.)
+2. **Do NOT patch node_modules** for this gate. (§2 explicit.)
+3. **Do NOT modify backend business code** only to chase DEP0169 this round. (§2 explicit.)
+4. Capture ONE real Preview stack with `NODE_OPTIONS=--trace-deprecation` only on Preview env (§3), then classify with exact package/file/line:
+   - OWN_SOURCE
+   - DIRECT_DEPENDENCY
+   - TRANSITIVE_DEPENDENCY
+   - VERCEL_RUNTIME
+5. If stack still not captured after §3, keep `UNRESOLVED_RUNTIME_SOURCE` + `FOLLOW_UP_REQUIRED = YES` — no guessing.
 
-### §20 Compliance Statement
+### §20 Compliance Statement (revised PART 2 §1)
 ✅ Own code uses WHATWG `new URL()` API exclusively. 0 calls to legacy `url.parse()`.
-✅ Deps: only express 4.x emit DEP0169. No incompatible upgrade.
-✅ No large-scale dependency bump performed. All carve-outs above documented and non-breaking.
+⚠️ Previous "only express 4.x emit DEP0169" classification → **RETRACTED**. Insufficient `--trace-deprecation` stack evidence from real Vercel Runtime.
+⚠️ DEP0169_SOURCE now = `UNRESOLVED_RUNTIME_SOURCE` / `FOLLOW_UP_REQUIRED = YES` until §3 produces exact stack.
+✅ No large-scale dependency bump performed. No backend code touched for DEP0169 in this gate per §2.

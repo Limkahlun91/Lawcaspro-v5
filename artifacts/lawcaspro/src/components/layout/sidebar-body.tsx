@@ -122,7 +122,7 @@ export function navGroupsForUser(): Array<{
           perm: ["dashboard", "read"],
           roleCheck: isFounderOrManagementOrPartnerOrManager,
         },
-        { label: "My Work", href: "/app/workbench", icon: ListTodo, perm: ["cases", "read"] },
+        { label: "My Work", href: "/app/my-work", icon: ListTodo, perm: ["cases", "read"] },
       ],
     },
     {
