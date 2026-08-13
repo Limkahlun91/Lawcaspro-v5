@@ -9,7 +9,6 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 beforeAll(() => {
-  process.env.DATABASE_URL ??= "postgresql://fake:fake@localhost:5432/fake";
   process.env.NODE_ENV ??= "test";
 });
 

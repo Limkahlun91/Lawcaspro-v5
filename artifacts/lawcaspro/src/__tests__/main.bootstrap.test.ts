@@ -12,7 +12,6 @@
 // postgres-bytea → pg driver evaluation threw "Buffer is not defined" at
 // module load time, causing a 100% blank <div id="root"></div>.
 
-process.env.DATABASE_URL ??= "postgresql://fake:fake@localhost:5432/fake";
 process.env.NODE_ENV ??= "test";
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";

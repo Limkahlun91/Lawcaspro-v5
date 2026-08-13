@@ -78,3 +78,5 @@ artifacts/api-server/test-import-output/
 
 # Temporary diagnostic logs (deployments, build captures, runtime traces)
 artifacts/reports/vercel-*.log
+artifacts/reports/*.json
+reports/

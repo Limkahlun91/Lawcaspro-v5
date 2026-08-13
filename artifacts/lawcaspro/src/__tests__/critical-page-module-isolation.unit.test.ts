@@ -14,7 +14,6 @@
 //    lazy-imported in the source — not accidentally re-imported via a
 //    side static import).
 
-process.env.DATABASE_URL ??= "postgresql://fake:fake@localhost:5432/fake";
 process.env.NODE_ENV ??= "test";
 
 import { describe, it, expect, beforeAll } from "vitest";

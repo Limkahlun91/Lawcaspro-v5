@@ -14,7 +14,6 @@ const APP_TSX = join(REPO_ROOT, "artifacts", "lawcaspro", "src", "App.tsx");
 const SIDEBAR_TSX = join(REPO_ROOT, "artifacts", "lawcaspro", "src", "components", "layout", "sidebar-body.tsx");
 
 beforeAll(() => {
-  process.env.DATABASE_URL ??= "postgresql://fake:fake@localhost:5432/fake";
   process.env.NODE_ENV ??= "test";
 });
 

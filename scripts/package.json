@@ -10,6 +10,7 @@
     "validate:hrms:blockers": "node ./validate-hrms-blocker-register.mjs",
     "validate:migration:sequence": "node ./validate-migration-sequence.mjs",
     "audit:feature-visibility": "tsx ./src/audit-feature-visibility.ts",
+    "assert:browser-bundle-safe": "tsx ./src/assert-browser-bundle-safe.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

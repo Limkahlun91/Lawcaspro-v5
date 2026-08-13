@@ -7,9 +7,6 @@ import { describe, expect, it, vi, beforeEach, beforeAll } from "vitest";
 beforeAll(() => {
   if (typeof process !== "undefined" && process.env) {
     if (!process.env.NODE_ENV) process.env.NODE_ENV = "test";
-    if (!process.env.DATABASE_URL) {
-      process.env.DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/fake";
-    }
   }
   vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 });

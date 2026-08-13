@@ -5,9 +5,7 @@
 // backend assertFirmFeatureEnabled/requireFeature/isFeatureEnabled key —
 // MUST match exactly (e.g. cases.legacy_import cannot be spelled differently across layers).
 
-process.env.DATABASE_URL ??= "postgresql://fake:fake@localhost:5432/fake";
 process.env.NODE_ENV ??= "test";
-process.env.ALLOW_MISSING_DB ??= "1";
 
 import { describe, it, expect, beforeAll } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";

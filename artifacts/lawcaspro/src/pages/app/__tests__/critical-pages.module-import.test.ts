@@ -2,9 +2,6 @@ import { describe, expect, it, beforeAll } from "vitest";
 
 beforeAll(() => {
   if (typeof process !== "undefined" && process.env) {
-    if (!process.env.DATABASE_URL) {
-      process.env.DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/fake";
-    }
     if (!process.env.TEST) process.env.TEST = "1";
   }
 });

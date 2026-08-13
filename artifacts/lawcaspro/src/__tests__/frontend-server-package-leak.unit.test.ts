@@ -12,7 +12,6 @@
 // 4. ZERO TOLERANCE for pg / pg-pool / postgres-* / drizzle-orm root
 //    runtime imports anywhere in frontend src.
 
-process.env.DATABASE_URL ??= "postgresql://fake:fake@localhost:5432/fake";
 process.env.NODE_ENV ??= "test";
 
 import { describe, it, expect, beforeAll } from "vitest";
