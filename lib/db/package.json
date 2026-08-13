@@ -11,6 +11,14 @@
     "./schema": {
       "types": "./dist/schema/index.d.ts",
       "default": "./dist/schema/index.js"
+    },
+    "./legacy-case-import-contract": {
+      "types": "./dist/legacy-case-import.contract.d.ts",
+      "default": "./dist/legacy-case-import.contract.js"
+    },
+    "./feature-registry": {
+      "types": "./dist/feature-registry.d.ts",
+      "default": "./dist/feature-registry.js"
     }
   },
   "scripts": {

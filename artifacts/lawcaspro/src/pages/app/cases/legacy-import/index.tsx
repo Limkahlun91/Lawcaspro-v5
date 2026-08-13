@@ -62,13 +62,13 @@ import type {
   FieldCatalogEntry,
   FieldMappingGroup,
   ReviewOverride,
-} from "@workspace/db";
+  CaseTypeApiValue,
+  UiRowStatus,
+} from "@workspace/db/legacy-case-import-contract";
 import {
   mapLegacyRowStatus,
   CASE_TYPE_LABELS,
-  type CaseTypeApiValue,
-  type UiRowStatus,
-} from "@workspace/db";
+} from "@workspace/db/legacy-case-import-contract";
 
 type WizardStep = 1 | 2 | 3 | 4;
 

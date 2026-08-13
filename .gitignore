@@ -75,3 +75,6 @@ artifacts/api-server/p0-compare-report.json
 *Legacy*Master*Data*.xls*
 artifacts/api-server/tmp-imports/
 artifacts/api-server/test-import-output/
+
+# Temporary diagnostic logs (deployments, build captures, runtime traces)
+artifacts/reports/vercel-*.log

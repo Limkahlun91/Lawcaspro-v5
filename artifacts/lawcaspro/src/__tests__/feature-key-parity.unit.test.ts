@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..", "..", "..", "..");
 
-import { FEATURE_REGISTRY, FEATURE_REGISTRY_MAP } from "@workspace/db";
+import { FEATURE_REGISTRY, FEATURE_REGISTRY_MAP } from "@workspace/db/feature-registry";
 
 function listFiles(dir: string, acc: string[] = []): string[] {
   try {

@@ -19,44 +19,57 @@ import { DeveloperGuard } from "@/components/developer-guard";
 import { isEmailControlEnabled, isEmailSettingsEnabled, isWhatsAppInboxEnabled, isHRModuleEnabled, PHASE2_NOTICE, HR_DISABLED_NOTICE } from "@/lib/feature-flags";
 import { FeatureGuard } from "@/lib/feature-guards";
 import { Card, CardContent } from "@/components/ui/card";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, lazy, Suspense, type ReactNode } from "react";
 import { useToast } from "@/hooks/use-toast";
 
 import Login from "@/pages/auth/login";
 import NotFound from "@/pages/not-found";
 import TrackingTokenPage from "@/pages/public/track/[token]";
 
-// Platform Pages
+function PageLoading() {
+  return (
+    <div className="min-h-[60vh] flex items-center justify-center bg-slate-50 p-6">
+      <Card className="w-full max-w-md">
+        <CardContent className="pt-6 pb-5 text-center">
+          <div className="w-10 h-10 mx-auto mb-3 rounded-full border-4 border-amber-500 border-t-transparent animate-spin"></div>
+          <div className="text-sm font-medium text-slate-700">Loading…</div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// Platform Pages — keep core landing pages static, lazy-load heavy operational pages
 import PlatformDashboard from "@/pages/platform/dashboard";
 import FirmsList from "@/pages/platform/firms";
 import NewFirm from "@/pages/platform/firms/new";
 import FirmDetail from "@/pages/platform/firms/detail";
 import FirmHistoryDetailPage from "@/pages/platform/firms/history-detail";
-import PlatformOperationsOverview from "@/pages/platform/operations";
-import PlatformOperationsLogs from "@/pages/platform/operations/logs";
-import PlatformOperationsIncidents from "@/pages/platform/operations/incidents";
-import PlatformOperationsIncidentDetail from "@/pages/platform/operations/incident-detail";
-import PlatformOperationsRecommendations from "@/pages/platform/operations/recommendations";
-import PlatformOperationsReadiness from "@/pages/platform/operations/readiness";
-import PlatformOperationsPending from "@/pages/platform/operations/pending";
-import PlatformTemplates from "@/pages/platform/operations/templates";
-import PlatformMonitoring from "@/pages/platform/monitoring";
-import PlatformAuditLogs from "@/pages/platform/audit-logs";
-import PlatformDocuments from "@/pages/platform/documents";
-import PlatformMessages from "@/pages/platform/messages";
-import FounderBillingPage from "@/pages/founder/billing";
-import PlatformSubscriptionPlansPage from "@/pages/platform/subscription-plans";
-import PlatformVariablesPage from "@/pages/platform/variables";
-import PlatformCustomVariablesPage from "@/pages/platform/custom-variables";
+const PlatformOperationsOverview = lazy(() => import("@/pages/platform/operations"));
+const PlatformOperationsLogs = lazy(() => import("@/pages/platform/operations/logs"));
+const PlatformOperationsIncidents = lazy(() => import("@/pages/platform/operations/incidents"));
+const PlatformOperationsIncidentDetail = lazy(() => import("@/pages/platform/operations/incident-detail"));
+const PlatformOperationsRecommendations = lazy(() => import("@/pages/platform/operations/recommendations"));
+const PlatformOperationsReadiness = lazy(() => import("@/pages/platform/operations/readiness"));
+const PlatformOperationsPending = lazy(() => import("@/pages/platform/operations/pending"));
+const PlatformTemplates = lazy(() => import("@/pages/platform/operations/templates"));
+const PlatformMonitoring = lazy(() => import("@/pages/platform/monitoring"));
+const PlatformAuditLogs = lazy(() => import("@/pages/platform/audit-logs"));
+const PlatformDocuments = lazy(() => import("@/pages/platform/documents"));
+const PlatformMessages = lazy(() => import("@/pages/platform/messages"));
+const FounderBillingPage = lazy(() => import("@/pages/founder/billing"));
+const PlatformSubscriptionPlansPage = lazy(() => import("@/pages/platform/subscription-plans"));
+const PlatformVariablesPage = lazy(() => import("@/pages/platform/variables"));
+const PlatformCustomVariablesPage = lazy(() => import("@/pages/platform/custom-variables"));
 
-// App Pages
+// App Pages — keep core landing static, lazy-load optional/heavy modules
 import AppDashboard from "@/pages/app/dashboard";
 import CasesList from "@/pages/app/cases";
 import NewCase from "@/pages/app/cases/new";
 import CaseDetail from "@/pages/app/cases/detail";
 import Workbench from "@/pages/app/workbench";
 import CaseIntakeInboxPage from "@/pages/app/cases/intake";
-import LegacyCaseImportPage from "@/pages/app/cases/legacy-import";
+const LegacyCaseImportPage = lazy(() => import("@/pages/app/cases/legacy-import"));
 
 import NewUser from "@/pages/app/users/new";
 
@@ -77,58 +90,58 @@ import AuditLogs from "@/pages/app/audit-logs";
 import UnifiedLogsPage from "@/pages/app/settings/logs";
 import FirmTemplatesSettingsPage from "@/pages/app/settings/templates";
 import ClausesSettingsPage from "@/pages/app/settings/clauses";
-import AccountingSettingsPage from "@/pages/app/settings/accounting";
-import EmailSettingsPage from "@/pages/app/settings/email";
+const AccountingSettingsPage = lazy(() => import("@/pages/app/settings/accounting"));
+const EmailSettingsPage = lazy(() => import("@/pages/app/settings/email"));
 import Settings from "@/pages/app/settings";
-import DocumentsPage from "@/pages/app/documents";
-import DocumentAutomationHub from "@/pages/app/documents/automation";
-import DocumentGenerationLogsPage from "@/pages/app/documents/generation-logs";
-import VariableDictionaryPage from "@/pages/app/documents/variables";
-import CustomVariablesPage from "@/pages/app/documents/custom-variables";
-import Accounting from "@/pages/app/accounting";
-import AccountingFileListing from "@/pages/app/accounting/file-listing";
-import BankReconciliationPage from "@/pages/app/accounting/bank-reconciliation";
-import InvoiceDetail from "@/pages/app/accounting/invoices/detail";
-import ReceiptDetail from "@/pages/app/accounting/receipts/detail";
-import FileCustodyPage from "@/pages/app/file-custody";
-import Reports from "@/pages/app/reports";
-import BillsDeliveredBook from "@/pages/app/reports/bills-delivered-book";
-import MatterAging from "@/pages/app/reports/matter-aging";
-import TrustAccountStatement from "@/pages/app/reports/trust-account-statement";
-import ProjectStatusReport from "@/pages/app/reports/project-status";
-import Hub from "@/pages/app/hub";
-import Communications from "@/pages/app/communications";
-import CommunicationThreadDetail from "@/pages/app/communications/thread-detail";
-import EmailControlCenterPage from "@/pages/app/communication/email";
-import WhatsAppInboxPlaceholderPage from "@/pages/app/communication/whatsapp";
+const DocumentsPage = lazy(() => import("@/pages/app/documents"));
+const DocumentAutomationHub = lazy(() => import("@/pages/app/documents/automation"));
+const DocumentGenerationLogsPage = lazy(() => import("@/pages/app/documents/generation-logs"));
+const VariableDictionaryPage = lazy(() => import("@/pages/app/documents/variables"));
+const CustomVariablesPage = lazy(() => import("@/pages/app/documents/custom-variables"));
+const Accounting = lazy(() => import("@/pages/app/accounting"));
+const AccountingFileListing = lazy(() => import("@/pages/app/accounting/file-listing"));
+const BankReconciliationPage = lazy(() => import("@/pages/app/accounting/bank-reconciliation"));
+const InvoiceDetail = lazy(() => import("@/pages/app/accounting/invoices/detail"));
+const ReceiptDetail = lazy(() => import("@/pages/app/accounting/receipts/detail"));
+const FileCustodyPage = lazy(() => import("@/pages/app/file-custody"));
+const Reports = lazy(() => import("@/pages/app/reports"));
+const BillsDeliveredBook = lazy(() => import("@/pages/app/reports/bills-delivered-book"));
+const MatterAging = lazy(() => import("@/pages/app/reports/matter-aging"));
+const TrustAccountStatement = lazy(() => import("@/pages/app/reports/trust-account-statement"));
+const ProjectStatusReport = lazy(() => import("@/pages/app/reports/project-status"));
+const Hub = lazy(() => import("@/pages/app/hub"));
+const Communications = lazy(() => import("@/pages/app/communications"));
+const CommunicationThreadDetail = lazy(() => import("@/pages/app/communications/thread-detail"));
+const EmailControlCenterPage = lazy(() => import("@/pages/app/communication/email"));
+const WhatsAppInboxPlaceholderPage = lazy(() => import("@/pages/app/communication/whatsapp"));
 import QuotationsList from "@/pages/app/quotations";
 import NewQuotation from "@/pages/app/quotations/new";
 import QuotationDetail from "@/pages/app/quotations/detail";
 
-// Partner / Monitor
-import CaseMonitorPage from "@/pages/app/case-monitor";
-import BankAdaptersPage from "@/pages/app/bank-adapters";
+// Partner / Monitor — lazy-load optional integrations
+const CaseMonitorPage = lazy(() => import("@/pages/app/case-monitor"));
+const BankAdaptersPage = lazy(() => import("@/pages/app/bank-adapters"));
 
-// HR Full pages
-import HrDashboard from "@/pages/app/hr/dashboard";
-import HrEmployees from "@/pages/app/hr/employees";
-import HrAttendance from "@/pages/app/hr/attendance";
-import HrLeave from "@/pages/app/hr/leave";
-import HrClaims from "@/pages/app/hr/claims";
-import HrPayroll from "@/pages/app/hr/payroll";
-import HrRecruitment from "@/pages/app/hr/recruitment";
-import HrPerformance from "@/pages/app/hr/performance";
-import HrTraining from "@/pages/app/hr/training";
-import HrAssets from "@/pages/app/hr/assets";
-import HrDocuments from "@/pages/app/hr/documents";
-import HrOnboarding from "@/pages/app/hr/onboarding";
-import HrOffboarding from "@/pages/app/hr/offboarding";
-import HrDepartments from "@/pages/app/hr/departments";
-import HrPositions from "@/pages/app/hr/positions";
-import HrReports from "@/pages/app/hr/reports";
-import HrSettings from "@/pages/app/hr/settings";
+// HR Full pages — ALL lazy (optional module with guards)
+const HrDashboard = lazy(() => import("@/pages/app/hr/dashboard"));
+const HrEmployees = lazy(() => import("@/pages/app/hr/employees"));
+const HrAttendance = lazy(() => import("@/pages/app/hr/attendance"));
+const HrLeave = lazy(() => import("@/pages/app/hr/leave"));
+const HrClaims = lazy(() => import("@/pages/app/hr/claims"));
+const HrPayroll = lazy(() => import("@/pages/app/hr/payroll"));
+const HrRecruitment = lazy(() => import("@/pages/app/hr/recruitment"));
+const HrPerformance = lazy(() => import("@/pages/app/hr/performance"));
+const HrTraining = lazy(() => import("@/pages/app/hr/training"));
+const HrAssets = lazy(() => import("@/pages/app/hr/assets"));
+const HrDocuments = lazy(() => import("@/pages/app/hr/documents"));
+const HrOnboarding = lazy(() => import("@/pages/app/hr/onboarding"));
+const HrOffboarding = lazy(() => import("@/pages/app/hr/offboarding"));
+const HrDepartments = lazy(() => import("@/pages/app/hr/departments"));
+const HrPositions = lazy(() => import("@/pages/app/hr/positions"));
+const HrReports = lazy(() => import("@/pages/app/hr/reports"));
+const HrSettings = lazy(() => import("@/pages/app/hr/settings"));
 
-// My Work / Self Service
+// My Work / Self Service — keep static (core user landing)
 import MyDashboard from "@/pages/app/my/dashboard";
 import MyLeave from "@/pages/app/my/leave";
 import MyClaims from "@/pages/app/my/claims";
@@ -232,30 +245,32 @@ function PlatformRoutes() {
   return (
     <AuthGuard requireRole="founder">
       <PlatformLayout>
-        <Switch>
-          <Route path="/platform/dashboard" component={PlatformDashboard} />
-          <Route path="/platform/operations/logs" component={PlatformOperationsLogs} />
-          <Route path="/platform/operations/incidents/:id" component={PlatformOperationsIncidentDetail} />
-          <Route path="/platform/operations/incidents" component={PlatformOperationsIncidents} />
-          <Route path="/platform/operations/recommendations" component={PlatformOperationsRecommendations} />
-          <Route path="/platform/operations/readiness" component={PlatformOperationsReadiness} />
-          <Route path="/platform/operations/pending" component={PlatformOperationsPending} />
-          <Route path="/platform/operations/templates" component={PlatformTemplates} />
-          <Route path="/platform/operations" component={PlatformOperationsOverview} />
-          <Route path="/platform/firms/new" component={NewFirm} />
-          <Route path="/platform/firms/:id/history/:kind/:historyId" component={FirmHistoryDetailPage} />
-          <Route path="/platform/firms/:id" component={FirmDetail} />
-          <Route path="/platform/firms" component={FirmsList} />
-          <Route path="/platform/billing" component={FounderBillingPage} />
-          <Route path="/platform/subscription-plans" component={PlatformSubscriptionPlansPage} />
-          <Route path="/platform/documents" component={PlatformDocuments} />
-          <Route path="/platform/variables" component={PlatformVariablesPage} />
-          <Route path="/platform/custom-variables" component={PlatformCustomVariablesPage} />
-          <Route path="/platform/messages" component={PlatformMessages} />
-          <Route path="/platform/monitoring" component={PlatformMonitoring} />
-          <Route path="/platform/audit-logs" component={PlatformAuditLogs} />
-          <Route path="/platform/*" component={NotFound} />
-        </Switch>
+        <Suspense fallback={<PageLoading />}>
+          <Switch>
+            <Route path="/platform/dashboard" component={PlatformDashboard} />
+            <Route path="/platform/operations/logs" component={PlatformOperationsLogs} />
+            <Route path="/platform/operations/incidents/:id" component={PlatformOperationsIncidentDetail} />
+            <Route path="/platform/operations/incidents" component={PlatformOperationsIncidents} />
+            <Route path="/platform/operations/recommendations" component={PlatformOperationsRecommendations} />
+            <Route path="/platform/operations/readiness" component={PlatformOperationsReadiness} />
+            <Route path="/platform/operations/pending" component={PlatformOperationsPending} />
+            <Route path="/platform/operations/templates" component={PlatformTemplates} />
+            <Route path="/platform/operations" component={PlatformOperationsOverview} />
+            <Route path="/platform/firms/new" component={NewFirm} />
+            <Route path="/platform/firms/:id/history/:kind/:historyId" component={FirmHistoryDetailPage} />
+            <Route path="/platform/firms/:id" component={FirmDetail} />
+            <Route path="/platform/firms" component={FirmsList} />
+            <Route path="/platform/billing" component={FounderBillingPage} />
+            <Route path="/platform/subscription-plans" component={PlatformSubscriptionPlansPage} />
+            <Route path="/platform/documents" component={PlatformDocuments} />
+            <Route path="/platform/variables" component={PlatformVariablesPage} />
+            <Route path="/platform/custom-variables" component={PlatformCustomVariablesPage} />
+            <Route path="/platform/messages" component={PlatformMessages} />
+            <Route path="/platform/monitoring" component={PlatformMonitoring} />
+            <Route path="/platform/audit-logs" component={PlatformAuditLogs} />
+            <Route path="/platform/*" component={NotFound} />
+          </Switch>
+        </Suspense>
       </PlatformLayout>
     </AuthGuard>
   );
@@ -266,7 +281,8 @@ function AppRoutes() {
     <AuthGuard requireRole="firm_user">
       <AppLayout>
         <GlobalCaseSearch />
-        <Switch>
+        <Suspense fallback={<PageLoading />}>
+          <Switch>
           <Route path="/app/dashboard" component={() => (
             <PermissionGuard module="dashboard" action="read" mode="silent">
               <AppDashboard />
@@ -567,7 +583,8 @@ function AppRoutes() {
           <Route path="/app/my" component={() => <Redirect to="/app/my/dashboard" />} />
           
           <Route path="/app/*" component={NotFound} />
-        </Switch>
+          </Switch>
+        </Suspense>
       </AppLayout>
     </AuthGuard>
   );
@@ -578,12 +595,14 @@ function DeveloperRoutes() {
     <AuthGuard requireRole="firm_user">
       <DeveloperGuard>
         <DeveloperLayout>
-          <Switch>
-            <Route path="/developer/dashboard" component={DeveloperDashboardPage} />
-            <Route path="/developer/inventory" component={() => <Redirect to="/developer/dashboard" />} />
-            <Route path="/developer" component={() => <Redirect to="/developer/dashboard" />} />
-            <Route path="/developer/*" component={NotFound} />
-          </Switch>
+          <Suspense fallback={<PageLoading />}>
+            <Switch>
+              <Route path="/developer/dashboard" component={DeveloperDashboardPage} />
+              <Route path="/developer/inventory" component={() => <Redirect to="/developer/dashboard" />} />
+              <Route path="/developer" component={() => <Redirect to="/developer/dashboard" />} />
+              <Route path="/developer/*" component={NotFound} />
+            </Switch>
+          </Suspense>
         </DeveloperLayout>
       </DeveloperGuard>
     </AuthGuard>
