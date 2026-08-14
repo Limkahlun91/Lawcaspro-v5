@@ -66,9 +66,39 @@ vi.mock("@/lib/api-client", async () => {
   };
 });
 
+const USER_EFFECTIVE_QUERY_KEY = ["firm", "user", "effective-features"];
+
+function fullAccessEffective() {
+  const fullAccess = (k: string) => ({
+    featureKey: k,
+    firmEnabled: true,
+    userEnabled: true,
+    effectiveEnabled: true,
+    source: "partner_allow" as const,
+    denialCode: null as null,
+    denialReason: null as null,
+    parentKey: null as null,
+  });
+  return new Proxy<Record<string, any>>({}, {
+    get: (_t, p) => {
+      if (typeof p === "symbol") return undefined;
+      if (p === "__esModule" || p === "then") return undefined;
+      return fullAccess(String(p));
+    },
+    has: () => true,
+    ownKeys: () => [],
+  }) as Record<string, ReturnType<typeof fullAccess>>;
+}
+
 function renderLayout() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  qc.setQueryData(USER_EFFECTIVE_QUERY_KEY, {
+    userId: 1,
+    firmId: 1,
+    effective: fullAccessEffective(),
+    explicitOverrides: [],
   });
   return render(
     <QueryClientProvider client={qc}>
@@ -83,8 +113,40 @@ beforeEach(() => {
   locationValue = "/app/dashboard";
   localStorage.clear();
   apiFetchJsonMock.mockReset();
-  apiFetchJsonMock.mockResolvedValue({ count: 0 });
   setViewportWidth(1024);
+  // Default stub — full-access Partner effective-features bundle so sidebar
+  // renders exactly as it did before Part 2 introduced explicit user access.
+  apiFetchJsonMock.mockImplementation(async (...args: any[]) => {
+    const [url] = args as [string, Record<string, unknown>?];
+    if (typeof url === "string" && url.includes("/users/_self/effective-features")) {
+      const fullAccess = (k: string) => ({
+        featureKey: k,
+        firmEnabled: true,
+        userEnabled: true,
+        effectiveEnabled: true,
+        source: "partner_allow" as const,
+        denialCode: null as null,
+        denialReason: null as null,
+        parentKey: null as null,
+      });
+      const effective: Record<string, any> = new Proxy<Record<string, any>>({}, {
+        get: (_t, p) => {
+          if (typeof p === "symbol") return undefined;
+          if (p === "__esModule" || p === "then") return undefined;
+          return fullAccess(String(p));
+        },
+        has: () => true,
+        ownKeys: () => [],
+      });
+      return {
+        userId: 1,
+        firmId: 1,
+        effective,
+        explicitOverrides: [],
+      };
+    }
+    return { count: 0 };
+  });
 });
 
 function setViewportWidth(width: number) {

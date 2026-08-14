@@ -12,6 +12,7 @@ import { syncCaseFinancialTotals } from "../lib/caseFinancialSync.js";
 import { nextInvoiceNo } from "../modules/accounting/firm-sequence-numbers.js";
 import { withDbStatementTimeout, type StatementTimeoutCategory } from "../modules/db/statement-timeout.js";
 import { extractDbErrorInfo } from "../lib/db-error.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;

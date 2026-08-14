@@ -7,6 +7,7 @@ import { syncCaseFinancialTotals } from "../lib/caseFinancialSync.js";
 import { nextReceiptNo } from "../modules/accounting/firm-sequence-numbers.js";
 import { queryOne } from "../lib/http.js";
 import { withDbStatementTimeout, type StatementTimeoutCategory } from "../modules/db/statement-timeout.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 

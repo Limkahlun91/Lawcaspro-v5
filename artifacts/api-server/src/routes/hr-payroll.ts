@@ -4,6 +4,7 @@ import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } fro
 import { requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate.js";
 import { createHRError, HR_ERROR_CODES, serializeHRError } from "../modules/shared/errors/hr-error-codes.js";
 import { one } from "../lib/http.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
 import {
   listPayrollPeriods,
   runPayrollDraft,
@@ -30,7 +31,7 @@ const calculateBodySchema = z.object({
   employeeId: z.number().int().positive(),
 });
 
-router.get("/hr/payroll/periods", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_payroll", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/payroll/periods", requireAuth, requireFirmUser, requireUserFeatureAccess("hr.payroll"), requireHRModuleEnabled, requirePermission("hr_payroll", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const rows = await listPayrollPeriods({ firmId: req.firmId!, actorUserId: req.userId! }, { tx: req.rlsDb });
     res.json({ ok: true, items: rows });
@@ -39,7 +40,7 @@ router.get("/hr/payroll/periods", requireAuth, requireFirmUser, requireHRModuleE
   }
 });
 
-router.post("/hr/payroll/run", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_payroll", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/payroll/run", requireAuth, requireFirmUser, requireUserFeatureAccess("hr.payroll"), requireHRModuleEnabled, requirePermission("hr_payroll", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const parsed = runPayrollBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -60,7 +61,7 @@ router.post("/hr/payroll/run", requireAuth, requireFirmUser, requireHRModuleEnab
   }
 });
 
-router.post("/hr/payroll/calculate", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_payroll", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/payroll/calculate", requireAuth, requireFirmUser, requireUserFeatureAccess("hr.payroll"), requireHRModuleEnabled, requirePermission("hr_payroll", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const parsed = calculateBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) {

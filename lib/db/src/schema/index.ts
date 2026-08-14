@@ -51,3 +51,4 @@ export * from "./einvoice-integrations";
 export * from "./integration-audits";
 
 export * from "./legacy-case-import";
+export * from "./firm-user-feature-access";

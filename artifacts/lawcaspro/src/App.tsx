@@ -17,7 +17,7 @@ import { getApiOrigin } from "@/lib/api-base";
 import { getStoredAuthToken } from "@/lib/auth-token";
 import { DeveloperGuard } from "@/components/developer-guard";
 import { isWhatsAppInboxEnabled, PHASE2_NOTICE, isHRModuleEnabled, HR_DISABLED_NOTICE } from "@/lib/feature-flags";
-import { FeatureGuard } from "@/lib/feature-guards";
+import { FeatureGuard, UserFeatureGuard, UserFeatureNotEnabledPage } from "@/lib/feature-guards";
 import { Card, CardContent } from "@/components/ui/card";
 import { useEffect, lazy, Suspense, type ReactNode } from "react";
 import { useToast } from "@/hooks/use-toast";
@@ -415,63 +415,84 @@ function AppRoutes() {
           )} />
 
           <Route path="/app/quotations/new" component={() => (
-            <PermissionGuard module="accounting" action="write">
-              <NewQuotation />
-            </PermissionGuard>
+            <UserFeatureGuard feature="accounting.quotation" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="accounting.quotation" />}>
+              <PermissionGuard module="accounting" action="write">
+                <NewQuotation />
+              </PermissionGuard>
+            </UserFeatureGuard>
           )} />
           <Route path="/app/quotations/:id" component={() => (
-            <PermissionGuard module="accounting" action="read">
-              <QuotationDetail />
-            </PermissionGuard>
+            <UserFeatureGuard feature="accounting.quotation" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="accounting.quotation" />}>
+              <PermissionGuard module="accounting" action="read">
+                <QuotationDetail />
+              </PermissionGuard>
+            </UserFeatureGuard>
           )} />
           <Route path="/app/quotations" component={() => (
-            <PermissionGuard module="accounting" action="read">
-              <QuotationsList />
-            </PermissionGuard>
+            <UserFeatureGuard feature="accounting.quotation" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="accounting.quotation" />}>
+              <PermissionGuard module="accounting" action="read">
+                <QuotationsList />
+              </PermissionGuard>
+            </UserFeatureGuard>
           )} />
           
           <Route path="/app/settings/documents" component={() => <Redirect to="/app/documents" />} />
-          <Route path="/app/documents/generation-logs" component={() => <Redirect to="/app/settings/logs" />} />
           <Route path="/app/documents/automation" component={() => (
-            <PermissionGuard module="documents" action="read">
-              <DocumentAutomationHub />
-            </PermissionGuard>
+            <UserFeatureGuard feature="documents.hub" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="documents.hub" />}>
+              <PermissionGuard module="documents" action="read">
+                <DocumentAutomationHub />
+              </PermissionGuard>
+            </UserFeatureGuard>
           )} />
           <Route path="/app/documents/variables" component={() => (
-            <PermissionGuard module="documents" action="read">
-              <VariableDictionaryPage />
-            </PermissionGuard>
+            <UserFeatureGuard feature="documents.variables" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="documents.variables" />}>
+              <PermissionGuard module="documents" action="read">
+                <VariableDictionaryPage />
+              </PermissionGuard>
+            </UserFeatureGuard>
           )} />
           <Route path="/app/documents/custom-variables" component={() => <Redirect to="/app/documents/variables#custom" />} />
           <Route path="/app/documents" component={() => (
-            <PermissionGuard module="documents" action="read">
-              <DocumentsPage />
-            </PermissionGuard>
+            <UserFeatureGuard feature="documents.hub" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="documents.hub" />}>
+              <PermissionGuard module="documents" action="read">
+                <DocumentsPage />
+              </PermissionGuard>
+            </UserFeatureGuard>
           )} />
           <Route path="/app/accounting/invoices/:id" component={() => (
-            <PermissionGuard module="accounting" action="read">
-              <InvoiceDetail />
-            </PermissionGuard>
+            <UserFeatureGuard feature="accounting.invoice" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="accounting.invoice" />}>
+              <PermissionGuard module="accounting" action="read">
+                <InvoiceDetail />
+              </PermissionGuard>
+            </UserFeatureGuard>
           )} />
           <Route path="/app/accounting/receipts/:id" component={() => (
-            <PermissionGuard module="accounting" action="read">
-              <ReceiptDetail />
-            </PermissionGuard>
+            <UserFeatureGuard feature="accounting.receipt" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="accounting.receipt" />}>
+              <PermissionGuard module="accounting" action="read">
+                <ReceiptDetail />
+              </PermissionGuard>
+            </UserFeatureGuard>
           )} />
           <Route path="/app/accounting/bank-reconciliation" component={() => (
-            <PermissionGuard module="accounting" action="read">
-              <BankReconciliationPage />
-            </PermissionGuard>
+            <UserFeatureGuard feature="accounting.bank_reconciliation" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="accounting.bank_reconciliation" />}>
+              <PermissionGuard module="accounting" action="read">
+                <BankReconciliationPage />
+              </PermissionGuard>
+            </UserFeatureGuard>
           )} />
           <Route path="/app/accounting/file-listing" component={() => (
-            <PermissionGuard module="accounting" action="read">
-              <AccountingFileListing />
-            </PermissionGuard>
+            <UserFeatureGuard feature="accounting.file_listing" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="accounting.file_listing" />}>
+              <PermissionGuard module="accounting" action="read">
+                <AccountingFileListing />
+              </PermissionGuard>
+            </UserFeatureGuard>
           )} />
           <Route path="/app/accounting" component={() => (
-            <PermissionGuard module="accounting" action="read">
-              <Accounting />
-            </PermissionGuard>
+            <UserFeatureGuard feature="accounting.dashboard" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="accounting.dashboard" />}>
+              <PermissionGuard module="accounting" action="read">
+                <Accounting />
+              </PermissionGuard>
+            </UserFeatureGuard>
           )} />
           <Route path="/app/file-custody" component={() => (
             <FeatureGuard feature="storage.file_custody" hideDisabled={false}>
@@ -552,30 +573,32 @@ function AppRoutes() {
           {/* Bank Adapters */}
           <Route path="/app/bank-adapters" component={BankAdaptersPage} />
 
-          <Route path="/app/hr/dashboard" component={() => <FeatureGuard feature="module.hr" allOf={["hr.dashboard"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrDashboard /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/employees" component={() => <FeatureGuard feature="module.hr" allOf={["hr.employees"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrEmployees /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/attendance" component={() => <FeatureGuard feature="module.hr" allOf={["hr.attendance"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrAttendance /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/leave" component={() => <FeatureGuard feature="module.hr" allOf={["hr.leave"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrLeave /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/claims" component={() => <FeatureGuard feature="module.hr" allOf={["hr.claims"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrClaims /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/payroll" component={() => <FeatureGuard feature="module.hr" allOf={["hr.payroll"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrPayroll /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/recruitment" component={() => <FeatureGuard feature="module.hr" allOf={["hr.recruitment"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrRecruitment /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/performance" component={() => <FeatureGuard feature="module.hr" allOf={["hr.performance"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrPerformance /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/training" component={() => <FeatureGuard feature="module.hr" allOf={["hr.training"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrTraining /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/assets" component={() => <FeatureGuard feature="module.hr" allOf={["hr.assets"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrAssets /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/documents" component={() => <FeatureGuard feature="module.hr" allOf={["hr.documents"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrDocuments /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/onboarding" component={() => <FeatureGuard feature="module.hr" allOf={["hr.onboarding"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrOnboarding /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/offboarding" component={() => <FeatureGuard feature="module.hr" allOf={["hr.offboarding"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrOffboarding /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/departments" component={() => <FeatureGuard feature="module.hr" allOf={["hr.departments"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrDepartments /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/positions" component={() => <FeatureGuard feature="module.hr" allOf={["hr.positions"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrPositions /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/reports" component={() => <FeatureGuard feature="module.hr" allOf={["hr.reports"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrReports /></PermissionGuard></FeatureGuard>} />
-          <Route path="/app/hr/settings" component={() => <FeatureGuard feature="module.hr" allOf={["hr.settings"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrSettings /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/dashboard" component={() => <FeatureGuard feature="module.hr" allOf={["hr.dashboard"]} hideDisabled={false}><UserFeatureGuard feature="hr.dashboard" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.dashboard" />}><PermissionGuard module="hr" action="read"><HrDashboard /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/employees" component={() => <FeatureGuard feature="module.hr" allOf={["hr.employees"]} hideDisabled={false}><UserFeatureGuard feature="hr.employees" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.employees" />}><PermissionGuard module="hr" action="read"><HrEmployees /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/attendance" component={() => <FeatureGuard feature="module.hr" allOf={["hr.attendance"]} hideDisabled={false}><UserFeatureGuard feature="hr.attendance" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.attendance" />}><PermissionGuard module="hr" action="read"><HrAttendance /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/leave" component={() => <FeatureGuard feature="module.hr" allOf={["hr.leave"]} hideDisabled={false}><UserFeatureGuard feature="hr.leave" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.leave" />}><PermissionGuard module="hr" action="read"><HrLeave /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/claims" component={() => <FeatureGuard feature="module.hr" allOf={["hr.claims"]} hideDisabled={false}><UserFeatureGuard feature="hr.claims" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.claims" />}><PermissionGuard module="hr" action="read"><HrClaims /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/payroll" component={() => <FeatureGuard feature="module.hr" allOf={["hr.payroll"]} hideDisabled={false}><UserFeatureGuard feature="hr.payroll" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.payroll" />}><PermissionGuard module="hr" action="read"><HrPayroll /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/recruitment" component={() => <FeatureGuard feature="module.hr" allOf={["hr.recruitment"]} hideDisabled={false}><UserFeatureGuard feature="hr.recruitment" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.recruitment" />}><PermissionGuard module="hr" action="read"><HrRecruitment /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/performance" component={() => <FeatureGuard feature="module.hr" allOf={["hr.performance"]} hideDisabled={false}><UserFeatureGuard feature="hr.performance" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.performance" />}><PermissionGuard module="hr" action="read"><HrPerformance /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/training" component={() => <FeatureGuard feature="module.hr" allOf={["hr.training"]} hideDisabled={false}><UserFeatureGuard feature="hr.training" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.training" />}><PermissionGuard module="hr" action="read"><HrTraining /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/assets" component={() => <FeatureGuard feature="module.hr" allOf={["hr.assets"]} hideDisabled={false}><UserFeatureGuard feature="hr.assets" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.assets" />}><PermissionGuard module="hr" action="read"><HrAssets /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/documents" component={() => <FeatureGuard feature="module.hr" allOf={["hr.documents"]} hideDisabled={false}><UserFeatureGuard feature="hr.documents" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.documents" />}><PermissionGuard module="hr" action="read"><HrDocuments /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/onboarding" component={() => <FeatureGuard feature="module.hr" allOf={["hr.onboarding"]} hideDisabled={false}><UserFeatureGuard feature="hr.onboarding" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.onboarding" />}><PermissionGuard module="hr" action="read"><HrOnboarding /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/offboarding" component={() => <FeatureGuard feature="module.hr" allOf={["hr.offboarding"]} hideDisabled={false}><UserFeatureGuard feature="hr.offboarding" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.offboarding" />}><PermissionGuard module="hr" action="read"><HrOffboarding /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/departments" component={() => <FeatureGuard feature="module.hr" allOf={["hr.departments"]} hideDisabled={false}><UserFeatureGuard feature="hr.departments" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.departments" />}><PermissionGuard module="hr" action="read"><HrDepartments /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/positions" component={() => <FeatureGuard feature="module.hr" allOf={["hr.positions"]} hideDisabled={false}><UserFeatureGuard feature="hr.positions" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.positions" />}><PermissionGuard module="hr" action="read"><HrPositions /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/reports" component={() => <FeatureGuard feature="module.hr" allOf={["hr.reports"]} hideDisabled={false}><UserFeatureGuard feature="hr.reports" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.reports" />}><PermissionGuard module="hr" action="read"><HrReports /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
+          <Route path="/app/hr/settings" component={() => <FeatureGuard feature="module.hr" allOf={["hr.settings"]} hideDisabled={false}><UserFeatureGuard feature="hr.settings" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hr.settings" />}><PermissionGuard module="hr" action="read"><HrSettings /></PermissionGuard></UserFeatureGuard></FeatureGuard>} />
           <Route path="/app/hr" component={() => <Redirect to="/app/hr/dashboard" />} />
 
           <Route path="/app/hims" component={() => (
             <FeatureGuard feature="module.hims" allOf={["hims.tracker"]} hideDisabled={false}>
-              <PermissionGuard module="cases" action="read">
-                <HimsTrackerIndex />
-              </PermissionGuard>
+              <UserFeatureGuard feature="hims.tracker" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="hims.tracker" />}>
+                <PermissionGuard module="cases" action="read">
+                  <HimsTrackerIndex />
+                </PermissionGuard>
+              </UserFeatureGuard>
             </FeatureGuard>
           )} />
 

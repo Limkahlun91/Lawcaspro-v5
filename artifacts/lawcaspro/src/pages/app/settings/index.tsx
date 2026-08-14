@@ -1500,6 +1500,82 @@ export default function Settings(props?: { defaultTab?: string }) {
   const [editRoleId, setEditRoleId] = useState("");
   const [editDeveloperId, setEditDeveloperId] = useState("");
 
+  // Part 2 §7 §22: User Access Profile (cards, not spreadsheet matrix)
+  const [accessProfileLoading, setAccessProfileLoading] = useState(false);
+  const [accessProfile, setAccessProfile] = useState<{
+    modules: Array<{
+      featureKey: string;
+      label: string;
+      state: "full" | "limited" | "off";
+      children: Array<{ featureKey: string; label: string; enabled: boolean }>;
+      allKeys?: Record<string, boolean>;
+    }>;
+    user?: any;
+  } | null>(null);
+  const [featureToggles, setFeatureToggles] = useState<Record<string, boolean>>({});
+  const [resetFeatureKeys, setResetFeatureKeys] = useState<Set<string>>(new Set());
+  const [advancedAccessView, setAdvancedAccessView] = useState(false);
+  const [accessSaving, setAccessSaving] = useState(false);
+
+  const isExactPartnerOrManagerRoleName = (name: string | null | undefined): boolean => {
+    if (!name) return false;
+    const n = String(name).toLowerCase().trim();
+    return (
+      n === "partner" ||
+      n === "managing partner" ||
+      n === "senior partner" ||
+      n === "practice manager" ||
+      n === "firm manager" ||
+      n === "manager" ||
+      n === "director"
+    );
+  };
+
+  useEffect(() => {
+    if (!editUserOpen || !editUser?.id) {
+      setAccessProfile(null);
+      setAccessProfileLoading(false);
+      setFeatureToggles({});
+      setResetFeatureKeys(new Set());
+      return;
+    }
+    const targetRoleName = String(editUser.roleName ?? "");
+    if (isExactPartnerOrManagerRoleName(targetRoleName)) {
+      // §2: Partner bypass per-user checkbox config
+      setAccessProfile({ modules: [] });
+      setFeatureToggles({});
+      return;
+    }
+    let cancelled = false;
+    setAccessProfileLoading(true);
+    (async () => {
+      try {
+        const res = await apiFetchJson<any>(`/users/${encodeURIComponent(editUser.id)}/access-profile`);
+        if (cancelled) return;
+        const data = res?.data ?? res;
+        setAccessProfile(data);
+        const toggles: Record<string, boolean> = {};
+        for (const mod of data?.modules ?? []) {
+          for (const ch of mod.children ?? []) {
+            toggles[ch.featureKey] = !!ch.enabled;
+          }
+        }
+        setFeatureToggles(toggles);
+        setResetFeatureKeys(new Set());
+      } catch (e: any) {
+        if (cancelled) return;
+        toast({ title: "Failed to load access profile", description: e?.error || e?.message || "Please try again.", variant: "destructive" });
+        setAccessProfile({ modules: [] });
+      } finally {
+        if (!cancelled) setAccessProfileLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editUserOpen, editUser?.id]);
+
   const listDevelopersParamsSu = { page: 1 as const, limit: 200 as const };
   const developersQuery = useListDevelopers(listDevelopersParamsSu, {
     query: {
@@ -1818,17 +1894,161 @@ export default function Settings(props?: { defaultTab?: string }) {
                     </div>
                   );
                 })()}
+
+                {/* Part 2 §7 §22: Access section — cards, human labels only */}
+                <div className="pt-2 border-t border-slate-200">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-800">Access</div>
+                      <div className="text-xs text-slate-500 mt-0.5">Toggle what this user can see and use.</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAdvancedAccessView((v) => !v)}
+                      className="text-xs text-slate-500 hover:text-slate-700 underline-offset-2 hover:underline"
+                    >
+                      {advancedAccessView ? "Hide technical keys" : "Show advanced"}
+                    </button>
+                  </div>
+
+                  {isExactPartnerOrManagerRoleName(
+                    (() => {
+                      const rid = editRoleId ? Number(editRoleId) : editUser?.roleId;
+                      if (rid && rolesRes) {
+                        const r = (rolesRes ?? []).find((x: any) => x.id === rid);
+                        if (r?.name) return r.name;
+                      }
+                      return editUser?.roleName;
+                    })()
+                  ) ? (
+                    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      Partner / Manager has full operational access (subject to firm feature switches). No per-user
+                      override needed.
+                    </div>
+                  ) : accessProfileLoading ? (
+                    <div className="py-6 text-center text-sm text-slate-500">Loading access profile…</div>
+                  ) : !accessProfile?.modules?.length ? (
+                    <div className="py-6 text-center text-sm text-slate-500">
+                      No configurable access modules for this user.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[55vh] overflow-y-auto pr-1">
+                      {accessProfile.modules.map((mod) => {
+                        const total = mod.children.length || 1;
+                        const onCount = mod.children.filter((c) => !!featureToggles[c.featureKey]).length;
+                        let state: "full" | "limited" | "off" = "off";
+                        if (mod.state !== "off") {
+                          if (onCount === 0) state = "off";
+                          else if (onCount === total) state = "full";
+                          else state = "limited";
+                        } else {
+                          state = "off";
+                        }
+                        return (
+                          <Card
+                            key={mod.featureKey}
+                            className={cn(
+                              "overflow-hidden",
+                              mod.state === "off" && "opacity-60"
+                            )}
+                          >
+                            <CardHeader className="py-2.5 px-3 bg-slate-50/70 border-b border-slate-200/70 flex flex-row items-center justify-between space-y-0">
+                              <div className="flex items-center gap-2">
+                                <CardTitle className="text-sm font-medium text-slate-800">
+                                  {mod.label}
+                                </CardTitle>
+                                {advancedAccessView && (
+                                  <code className="text-[10px] text-slate-400 font-mono">
+                                    {mod.featureKey}
+                                  </code>
+                                )}
+                              </div>
+                              <span
+                                className={cn(
+                                  "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium",
+                                  state === "full"
+                                    ? "bg-emerald-100 text-emerald-700"
+                                    : state === "limited"
+                                    ? "bg-amber-100 text-amber-700"
+                                    : "bg-slate-100 text-slate-600"
+                                )}
+                              >
+                                {state === "full"
+                                  ? "Full Access"
+                                  : state === "limited"
+                                  ? "Limited Access"
+                                  : "Off"}
+                              </span>
+                            </CardHeader>
+                            <CardContent className="p-2.5 space-y-1">
+                              {mod.children.length === 0 ? (
+                                <div className="text-xs text-slate-500 px-1 py-1">No child features.</div>
+                              ) : (
+                                mod.children.map((ch) => {
+                                  const disabled = mod.state === "off";
+                                  const checked = disabled ? false : !!featureToggles[ch.featureKey];
+                                  return (
+                                    <label
+                                      key={ch.featureKey}
+                                      className={cn(
+                                        "flex items-start gap-2 px-1.5 py-1 rounded hover:bg-slate-50/60 cursor-pointer select-none",
+                                        disabled && "cursor-not-allowed opacity-60"
+                                      )}
+                                    >
+                                      <Checkbox
+                                        className="mt-0.5"
+                                        checked={checked}
+                                        disabled={disabled || accessSaving}
+                                        onCheckedChange={(v) => {
+                                          const next = typeof v === "boolean" ? v : !!v;
+                                          setFeatureToggles((prev) => ({
+                                            ...prev,
+                                            [ch.featureKey]: next,
+                                          }));
+                                          setResetFeatureKeys((prev) => {
+                                            const nx = new Set(prev);
+                                            nx.delete(ch.featureKey);
+                                            return nx;
+                                          });
+                                        }}
+                                      />
+                                      <div className="flex-1 min-w-0">
+                                        <div className="text-xs text-slate-800 leading-5">
+                                          {ch.label}
+                                        </div>
+                                        {advancedAccessView && (
+                                          <div className="text-[10px] text-slate-400 font-mono truncate">
+                                            {ch.featureKey}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </label>
+                                  );
+                                })
+                              )}
+                              {mod.state === "off" && (
+                                <div className="mt-1 text-[11px] text-slate-500 px-1.5">
+                                  Module disabled at firm level. Contact Founder to enable.
+                                </div>
+                              )}
+                            </CardContent>
+                          </Card>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
               <DialogFooter>
                 <Button
                   variant="outline"
                   onClick={() => setEditUserOpen(false)}
-                  disabled={updateUserMutation.isPending}
+                  disabled={updateUserMutation.isPending || accessSaving}
                 >
                   Cancel
                 </Button>
                 <Button
-                  onClick={() => {
+                  onClick={async () => {
                     if (!editUser?.id) return;
                     const name = editName.trim();
                     if (!name) {
@@ -1839,40 +2059,72 @@ export default function Settings(props?: { defaultTab?: string }) {
                       toast({ title: "Initials must be 2–5 characters", variant: "destructive" });
                       return;
                     }
-                    const payload: any = { name };
-                    payload.initials = editInitials.trim() ? editInitials.trim() : null;
-                    if (editRoleId) payload.roleId = Number(editRoleId);
+                    let developerId: number | null = null;
+                    const targetRoleName = (() => {
+                      const rid = editRoleId ? Number(editRoleId) : editUser?.roleId;
+                      if (rid && rolesRes) {
+                        const r = (rolesRes ?? []).find((x: any) => x.id === rid);
+                        if (r?.name) return r.name;
+                      }
+                      return editUser?.roleName;
+                    })();
                     if (editRoleId) {
-                      const roleId = Number(editRoleId);
-                      const roleName = (rolesRes ?? []).find((r: any) => r.id === roleId)?.name;
-                      if (roleName === "Developer_User") {
+                      const rid = Number(editRoleId);
+                      const rname = (rolesRes ?? []).find((r: any) => r.id === rid)?.name;
+                      if (rname === "Developer_User") {
                         const did = Number(editDeveloperId);
                         if (!Number.isInteger(did) || did <= 0) {
                           toast({ title: "Assigned Developer is required", variant: "destructive" });
                           return;
                         }
-                        payload.developerId = did;
-                      } else {
-                        payload.developerId = null;
+                        developerId = did;
                       }
                     }
-                    updateUserMutation.mutate(
-                      { userId: editUser.id, data: payload },
-                      {
-                        onSuccess: () => {
-                          queryClient.invalidateQueries({ queryKey: usersQueryKey });
-                          toast({ title: "User updated" });
-                          setEditUserOpen(false);
-                        },
-                        onError: (e: any) => {
-                          toast({ title: "Failed to update user", description: e?.error || "Please try again.", variant: "destructive" });
-                        },
+
+                    // §23: One Save, one TX — PUT access-profile
+                    setAccessSaving(true);
+                    try {
+                      const body: Record<string, any> = {
+                        name,
+                        initials: editInitials.trim() ? editInitials.trim() : null,
+                        features: { ...featureToggles },
+                      };
+                      if (editRoleId) {
+                        body.roleId = Number(editRoleId);
+                        if (targetRoleName === "Developer_User") body.developerId = developerId;
+                        else body.developerId = null;
                       }
-                    );
+                      if (resetFeatureKeys.size) {
+                        body.resetFeatureKeys = Array.from(resetFeatureKeys);
+                      }
+                      const resp = await apiFetchJson<any>(
+                        `/users/${encodeURIComponent(editUser.id)}/access-profile`,
+                        {
+                          method: "PUT",
+                          body: JSON.stringify(body),
+                          headers: { "Content-Type": "application/json" },
+                        },
+                      );
+                      if (resp?.error && !resp?.ok) {
+                        throw new Error(resp.error);
+                      }
+                      queryClient.invalidateQueries({ queryKey: usersQueryKey });
+                      // Part 2 §9: Sidebar / route guards re-read cache so target user gets immediate update
+                      toast({ title: "User saved" });
+                      setEditUserOpen(false);
+                    } catch (e: any) {
+                      toast({
+                        title: "Failed to save user",
+                        description: e?.error || e?.message || "Please try again.",
+                        variant: "destructive",
+                      });
+                    } finally {
+                      setAccessSaving(false);
+                    }
                   }}
-                  disabled={updateUserMutation.isPending}
+                  disabled={updateUserMutation.isPending || accessSaving || accessProfileLoading}
                 >
-                  Save
+                  {accessSaving ? "Saving…" : "Save User"}
                 </Button>
               </DialogFooter>
             </DialogContent>

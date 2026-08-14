@@ -4,6 +4,7 @@ import { db, quotationItemsTable, quotationsTable, regulatoryRuleSetsTable, regu
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { applyRule } from "./regulatory.js";
 import { logger } from "../lib/logger.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
@@ -200,7 +201,7 @@ async function fetchQuotationsWithAggregates(
   return { results, total };
 }
 
-router.get("/quotations", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/quotations", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.quotation"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const firmId = req.firmId!;
     const caseIdStr = one((req.query as any)?.caseId);
@@ -286,7 +287,7 @@ router.get("/quotations", requireAuth, requireFirmUser, requirePermission("accou
   }
 });
 
-router.get("/quotations/all", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/quotations/all", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.quotation"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const firmId = req.firmId!;
     const caseIdStr = one((req.query as any)?.caseId);
@@ -342,7 +343,7 @@ router.get("/quotations/all", requireAuth, requireFirmUser, requirePermission("a
   }
 });
 
-router.post("/quotations", requireAuth, requireFirmUser, requirePermission("accounting", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/quotations", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.quotation"), requirePermission("accounting", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const firmId = req.firmId!;
     const userId = req.userId!;

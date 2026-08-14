@@ -10,6 +10,246 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetchJson } from "@/lib/api-client";
 
+// Part 2 §9 §10: Per-user effective feature access (Firm entitlement + user explicit row OR role fallback)
+// Unified API so sidebar === route === button visibility share one computation.
+
+export type UserEffectiveFeature = {
+  featureKey: string;
+  firmEnabled: boolean;
+  userEnabled: boolean;
+  effectiveEnabled: boolean;
+  source:
+    | "firm_entitlement_denied"
+    | "partner_allow"
+    | "user_row_true"
+    | "user_row_false"
+    | "role_permission_allow"
+    | "role_permission_denied"
+    | "unknown_feature_deny";
+  denialCode?:
+    | "FIRM_ENTITLEMENT_OFF"
+    | "USER_OVERRIDE_OFF"
+    | "ROLE_DENIED"
+    | "UNKNOWN_FEATURE"
+    | "PARENT_OFF"
+    | null;
+  denialReason?: string | null;
+  parentKey?: string | null;
+};
+
+export type UserEffectiveFeatureBundle = {
+  userId: number | null;
+  firmId: number | null;
+  effective: Record<string, UserEffectiveFeature>;
+  explicitOverrides: Array<{ featureKey: string; isEnabled: boolean }>;
+};
+
+const USER_EFFECTIVE_QUERY_KEY = ["firm", "user", "effective-features"];
+
+export function fetchUserEffectiveFeatures(): Promise<UserEffectiveFeatureBundle> {
+  return apiFetchJson<any>("/users/_self/effective-features").then(
+    (r) => (r?.data ?? r) as UserEffectiveFeatureBundle,
+  );
+}
+
+export function useUserEffectiveFeatures(): {
+  data?: UserEffectiveFeatureBundle;
+  isLoading: boolean;
+  error: unknown;
+  refetch: () => Promise<unknown>;
+} {
+  const res = useQuery<UserEffectiveFeatureBundle>({
+    queryKey: USER_EFFECTIVE_QUERY_KEY,
+    queryFn: fetchUserEffectiveFeatures,
+    staleTime: 45_000,
+    refetchOnWindowFocus: "always",
+    retry: 2,
+  });
+  return {
+    data: res.data,
+    isLoading: res.isLoading,
+    error: res.error,
+    refetch: res.refetch,
+  };
+}
+
+export function useInvalidateUserEffectiveFeatures(): () => Promise<void> {
+  const qc = useQueryClient();
+  return useCallback(async () => {
+    await qc.invalidateQueries({ queryKey: USER_EFFECTIVE_QUERY_KEY });
+  }, [qc]);
+}
+
+// ---------------------------------------------------------------------------
+// useEffectiveUserFeature(featureKey) — single key unified guard
+// §10 sidebar/route identical — one single authority
+// ---------------------------------------------------------------------------
+
+export interface EffectiveUseFeatureResult {
+  isLoading: boolean;
+  enabled: boolean;
+  /** Firm-level entitlement on/off (ignores user override) */
+  firmEnabled: boolean;
+  /** User-level on/off (ignores firm gate) */
+  userEnabled: boolean;
+  denialCode?: string | null;
+  source?: UserEffectiveFeature["source"] | null;
+}
+
+export function useEffectiveUserFeature(
+  featureKey: string | undefined | null,
+): EffectiveUseFeatureResult {
+  const { data, isLoading } = useUserEffectiveFeatures();
+  const firm = useFeature(featureKey);
+  return useMemo<EffectiveUseFeatureResult>(() => {
+    if (!featureKey) return { isLoading: false, enabled: false, firmEnabled: false, userEnabled: false };
+    const eff = data?.effective?.[featureKey];
+    const loadingOrPending = isLoading || !data;
+    if (eff) {
+      return {
+        isLoading: false,
+        enabled: !!eff.effectiveEnabled,
+        firmEnabled: !!eff.firmEnabled,
+        userEnabled: !!eff.userEnabled,
+        denialCode: eff.denialCode ?? null,
+        source: eff.source ?? null,
+      };
+    }
+    if (loadingOrPending && !eff) {
+      return {
+        isLoading: true,
+        enabled: !!firm.enabled,
+        firmEnabled: !!firm.enabled,
+        userEnabled: !!firm.enabled,
+      };
+    }
+    return {
+      isLoading: false,
+      enabled: !!firm.enabled,
+      firmEnabled: !!firm.enabled,
+      userEnabled: !!firm.enabled,
+      denialCode: firm.denialCode ?? null,
+      source: (firm.source as any) ?? null,
+    };
+  }, [featureKey, data, isLoading, firm.enabled, firm.denialCode, firm.source]);
+}
+
+// ---------------------------------------------------------------------------
+// <UserFeatureGuard feature="documents.hub"> — §10 route/sidebar wrapper
+// ---------------------------------------------------------------------------
+
+export interface UserFeatureGuardProps {
+  feature: string;
+  allOf?: readonly string[];
+  anyOf?: readonly string[];
+  children:
+    | ReactNode
+    | ((args: EffectiveUseFeatureResult) => ReactNode);
+  fallback?: ReactNode;
+  hideDisabled?: boolean;
+}
+
+export function UserFeatureGuard(props: UserFeatureGuardProps): ReactNode {
+  const {
+    feature,
+    allOf,
+    anyOf,
+    children,
+    fallback = null,
+    hideDisabled = true,
+  } = props;
+  const primary = useEffectiveUserFeature(feature);
+  const extraAll = (allOf ?? []).map((k) => useEffectiveUserFeature(k));
+  const extraAny = (anyOf ?? []).map((k) => useEffectiveUserFeature(k));
+  const loading =
+    primary.isLoading ||
+    extraAll.some((r) => r.isLoading) ||
+    extraAny.some((r) => r.isLoading);
+  if (loading) return hideDisabled ? null : fallback;
+  const okAll = extraAll.every((r) => r.enabled);
+  const okAny = extraAny.length === 0 || extraAny.some((r) => r.enabled);
+  const ok = primary.enabled && okAll && okAny;
+  if (!ok) return hideDisabled ? null : fallback;
+  if (typeof children === "function") {
+    return children(primary) as ReactNode;
+  }
+  return children;
+}
+
+// ---------------------------------------------------------------------------
+// UserFeatureNotEnabledPage — explicit denial page (matches firm-level one)
+// for when Partner disabled user-only from feature
+// ---------------------------------------------------------------------------
+
+export function UserFeatureNotEnabledPage(props: {
+  featureKey?: string | null;
+  message?: string;
+}): ReactElement {
+  return (
+    <div style={{
+      minHeight: "calc(100vh - 80px)",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 32,
+    }}>
+      <div style={{
+        maxWidth: 520,
+        width: "100%",
+        borderRadius: 12,
+        padding: 32,
+        textAlign: "center",
+        background: "white",
+        border: "1px solid #e5e7eb",
+        boxShadow: "0 4px 12px rgba(0,0,0,0.04)",
+      }}>
+        <div style={{
+          width: 48, height: 48, borderRadius: "50%",
+          background: "#FFF7ED", color: "#C2410C",
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          fontWeight: 600, fontSize: 22, marginBottom: 16,
+        }}>
+          🔒
+        </div>
+        <h2 style={{ fontSize: 20, fontWeight: 600, margin: "0 0 8px 0" }}>
+          This feature is not available to you
+        </h2>
+        <p style={{ color: "#4B5563", margin: "0 0 4px 0", fontSize: 14, lineHeight: 1.6 }}>
+          {props.message ??
+            "Your firm Partner has not granted you access to this feature. Please contact them to request access."}
+        </p>
+        {props.featureKey ? (
+          <p style={{
+            marginTop: 12,
+            color: "#6B7280",
+            fontSize: 12,
+            background: "#F9FAFB",
+            borderRadius: 8,
+            padding: "6px 10px",
+            display: "inline-block",
+          }}>
+            Feature key: <code style={{ fontWeight: 600 }}>{props.featureKey}</code>
+          </p>
+        ) : null}
+        <div style={{ marginTop: 20 }}>
+          <a href="/app/dashboard" style={{
+            display: "inline-block",
+            padding: "10px 16px",
+            borderRadius: 8,
+            background: "#111827",
+            color: "white",
+            textDecoration: "none",
+            fontSize: 14,
+            fontWeight: 500,
+          }}>
+            Return to Dashboard
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export type FeatureDefinitionLike = {
   featureKey: string;
   name: string;
@@ -305,12 +545,35 @@ export function EntitlementsProvider(props: EntitlementsProviderProps): ReactEle
 }
 
 // ---------------------------------------------------------------------------
-// Feature-aware sidebar helper (Part 2 §5 sidebar guard)
+// Feature-aware sidebar helper (Part 2 §5 sidebar guard) — now unifies
+// entitlement + user explicit/role fallback so sidebar === routes.
 // ---------------------------------------------------------------------------
 
 export function useFeatureMap(): Record<string, EntitlementLike> {
   const { data } = useFirmEntitlements();
   return data?.items ?? {};
+}
+
+// ---------------------------------------------------------------------------
+// useEffectiveUserFeaturesMap() — §9 sidebar replacement use of user
+// effective access. Returns Record<featureKey, { enabled, source }>
+// so sidebar item gating doesn't need to know about the backend bundle.
+// ---------------------------------------------------------------------------
+
+export function useEffectiveUserFeaturesMap(): {
+  enabled: (featureKey: string) => boolean;
+  get: (featureKey: string) => UserEffectiveFeature | undefined;
+  loaded: boolean;
+} {
+  const { data, isLoading } = useUserEffectiveFeatures();
+  return useMemo(() => {
+    const eff = data?.effective ?? {};
+    return {
+      enabled: (k) => Boolean(eff[k]?.effectiveEnabled),
+      get: (k) => eff[k],
+      loaded: !isLoading && Boolean(data),
+    };
+  }, [data, isLoading]);
 }
 
 // ---------------------------------------------------------------------------

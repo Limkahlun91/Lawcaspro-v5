@@ -62,6 +62,7 @@ import {
   writePaymentVoucherCreateAuditEvents,
 } from "../modules/accounting/payment-voucher-create-request.js";
 import { withDbStatementTimeout, type StatementTimeoutCategory } from "../modules/db/statement-timeout.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
@@ -917,7 +918,7 @@ async function postLedgerTx(tx: DbTxConn, args: {
 }
 
 // List
-router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/payment-vouchers", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.payment_voucher"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();
   const caseId = one((req.query as any).caseId);
   const status = one((req.query as any).status);
@@ -1026,7 +1027,7 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requirePermission(
 });
 
 // Detail
-router.get("/payment-vouchers/:id(\\d+)", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/payment-vouchers/:id(\\d+)", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.payment_voucher"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid voucher ID" }); return; }
@@ -1100,12 +1101,12 @@ router.get("/payment-vouchers/:id(\\d+)", requireAuth, requireFirmUser, requireP
   });
 });
 
-router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/payment-vouchers/:id", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.payment_voucher"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   res.status(400).json({ error: "Invalid voucher ID" });
 });
 
 // Create
-router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmUserFinancialSession, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmUserFinancialSession, requireUserFeatureAccess("accounting.payment_voucher"), async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();
   (req as { pvCreateStartedAt?: number }).pvCreateStartedAt = startedAt;
   emitPvCreateTiming(req, "request_received");

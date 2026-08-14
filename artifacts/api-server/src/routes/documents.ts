@@ -27824,6 +27824,252 @@ router.delete(
   },
 );
 
+router.get(
+  "/documents/jobs/current",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "read"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const startedAt = Date.now();
+    const r = getRlsDb(req, res);
+    if (!r) return;
+    const requestId =
+      one(req.headers["x-request-id"] as any) ||
+      one(req.headers["x-vercel-id"] as any) ||
+      undefined;
+
+    // Scope:
+    //   currentUserId = req.userId
+    //   status IN ('pending','running')
+    //   stalled detection: lastHeartbeatAt > 10min ago → status='stalled'
+    const STALLED_THRESHOLD_MS = 10 * 60 * 1000;
+
+    const jobs = await queryRows(
+      r,
+      sql`
+        SELECT
+          j.*,
+          CASE
+            WHEN j.status IN ('pending','running')
+             AND COALESCE(EXTRACT(EPOCH FROM (NOW() - COALESCE(j.last_heartbeat_at, j.created_at))) * 1000, 0) > ${STALLED_THRESHOLD_MS}
+            THEN TRUE
+            ELSE FALSE
+          END AS is_stalled,
+          (
+            SELECT COALESCE(json_agg(
+              json_build_object('id', i.id, 'caseId', i.case_id,
+                                 'templateId', i.template_id,
+                                 'platformDocumentId', i.platform_document_id,
+                                 'templateSource', i.template_source,
+                                 'status', i.status,
+                                 'errorCode', i.error_code,
+                                 'errorMessage', i.error_message,
+                                 'phase', i.phase)
+              ORDER BY i.id ASC
+            ), '[]'::json)
+            FROM document_generation_job_items i
+            WHERE i.job_id = j.id AND i.firm_id = j.firm_id
+          ) AS items
+        FROM document_generation_jobs j
+        WHERE j.firm_id = ${req.firmId!}
+          AND j.created_by = ${req.userId!}
+          AND j.status IN ('pending','running')
+        ORDER BY j.created_at DESC
+        LIMIT 2
+      `,
+    );
+
+    if (!jobs.length) {
+      res.json({
+        ok: true,
+        job: null,
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+      return;
+    }
+
+    const [rawJob, secondJob] = jobs;
+    const chosen = rawJob;
+    const isStalled = Boolean((chosen as any).is_stalled);
+    const finalStatus: string =
+      isStalled ? "stalled" : String((chosen as any).status ?? "pending");
+
+    // Heartbeat reaper transition: if caller asks and stalled, we mark status=stalled
+    // atomically once (non-blocking).
+    if (isStalled && String((chosen as any).status ?? "") !== "stalled") {
+      try {
+        await queryRows(
+          r,
+          sql`
+            UPDATE document_generation_jobs
+            SET status = 'stalled',
+                recovered_at = NOW(),
+                error_code = COALESCE(error_code, 'DOCGEN_STALLED'),
+                error_summary = COALESCE(error_summary, 'Generation interrupted. No progress for 10+ minutes.')
+            WHERE id = ${(chosen as any).id} AND firm_id = ${req.firmId!}
+          `,
+        );
+      } catch {
+        // no-op; status column may not accept 'stalled' yet
+      }
+    }
+
+    // If a second pending/running job exists, it's orphaned and we mark
+    // superseded/cancelled silently (rare).
+    if (secondJob) {
+      try {
+        await queryRows(
+          r,
+          sql`
+            UPDATE document_generation_jobs
+            SET status = 'superseded',
+                finished_at = NOW()
+            WHERE id = ${(secondJob as any).id} AND firm_id = ${req.firmId!}
+              AND status IN ('pending','running')
+          `,
+        );
+      } catch {
+        // ignore
+      }
+    }
+
+    res.json({
+      ok: true,
+      job: {
+        id: (chosen as any).id,
+        status: finalStatus,
+        action: (chosen as any).action,
+        jobType: (chosen as any).job_type,
+        totalCount: Number((chosen as any).total_count ?? 0),
+        successCount: Number((chosen as any).success_count ?? 0),
+        failedCount: Number((chosen as any).failed_count ?? 0),
+        pendingCount: Number((chosen as any).pending_count ?? 0),
+        createdAt: (chosen as any).created_at ?? null,
+        startedAt: (chosen as any).started_at ?? null,
+        finishedAt: (chosen as any).finished_at ?? null,
+        lastHeartbeatAt: (chosen as any).last_heartbeat_at ?? null,
+        errorCode: (chosen as any).error_code ?? null,
+        errorSummary: (chosen as any).error_summary ?? null,
+        downloadObjectPath: (chosen as any).download_object_path ?? null,
+        downloadFileName: (chosen as any).download_file_name ?? null,
+        downloadMimeType: (chosen as any).download_mime_type ?? null,
+        stalled: isStalled,
+        caseIds: Array.isArray((chosen as any).case_ids) ? (chosen as any).case_ids : [],
+        templateIds: Array.isArray((chosen as any).template_ids) ? (chosen as any).template_ids : [],
+        platformDocumentIds: Array.isArray((chosen as any).platform_document_ids) ? (chosen as any).platform_document_ids : [],
+        items:
+          Array.isArray((chosen as any).items) ? (chosen as any).items : [],
+      },
+      meta: {
+        request_id: requestId ?? null,
+        timestamp: new Date().toISOString(),
+        duration_ms: Date.now() - startedAt,
+      },
+    });
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Idempotency helper + ownership enforcement for generate-job
+// §20 idempotency key = firmId + userId + cases fp + templates fp + clientRequestId
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/documents/jobs/:jobId/ownership-check",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "read"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const r = getRlsDb(req, res);
+    if (!r) return;
+    const jobId = one((req.params as any).jobId) ?? "";
+    if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+      res.status(400).json({ error: "Invalid jobId" });
+      return;
+    }
+    const rows = await queryRows(
+      r,
+      sql`
+        SELECT id, status, created_by, firm_id FROM document_generation_jobs
+        WHERE id = ${jobId} AND firm_id = ${req.firmId!} LIMIT 1
+      `,
+    );
+    if (!rows[0]) {
+      res.status(404).json({ error: "Job not found" });
+      return;
+    }
+    const j = rows[0] as { created_by: unknown; firm_id: unknown; status: unknown };
+    const owned =
+      Number(j.created_by) === Number(req.userId) ||
+      isExactPartnerOrManagerRoleName(
+        (req as any)._roleCache && (req as any)._roleCache.name,
+      );
+    if (!owned) {
+      res.status(403).json({
+        error: "Not your job",
+        code: "NOT_JOB_OWNER",
+      });
+      return;
+    }
+    res.json({ ok: true, status: j.status });
+  },
+);
+
+function isExactPartnerOrManagerRoleName(roleName: unknown): boolean {
+  const n = typeof roleName === "string" ? roleName.trim().toLowerCase() : "";
+  if (!n) return false;
+  return [
+    "partner",
+    "managing partner",
+    "senior partner",
+    "practice manager",
+    "firm manager",
+    "manager",
+    "director",
+  ].includes(n);
+}
+
+function fingerprintIds(ids: ReadonlyArray<unknown>): string {
+  const nums = ids
+    .map((x) => (typeof x === "number" ? x : Number(x)))
+    .filter((n) => Number.isFinite(n))
+    .slice()
+    .sort((a, b) => a - b);
+  return nums.join(",");
+}
+
+function docJobIdempotencyKey(params: {
+  firmId: number;
+  userId: number;
+  caseIds: ReadonlyArray<unknown>;
+  templateIds: ReadonlyArray<unknown>;
+  platformDocIds: ReadonlyArray<unknown>;
+  clientRequestId?: string | null;
+}): string {
+  const parts = [
+    String(params.firmId),
+    String(params.userId),
+    fingerprintIds(params.caseIds),
+    fingerprintIds(params.templateIds),
+    fingerprintIds(params.platformDocIds),
+    typeof params.clientRequestId === "string" && params.clientRequestId.trim()
+      ? params.clientRequestId.trim()
+      : "",
+  ];
+  let hash = 2166136261;
+  const joined = parts.join("|");
+  for (let i = 0; i < joined.length; i++) {
+    hash ^= joined.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  const hex = (hash >>> 0).toString(16).padStart(8, "0");
+  return `docjob-f${params.firmId}-u${params.userId}-${hex}`;
+}
+
 const exportedRouter = expressRouter as unknown as ExpressRouter;
 export default exportedRouter;
 

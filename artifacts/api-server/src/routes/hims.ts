@@ -7,11 +7,12 @@ import {
   casePurchasersTable,
   clientsTable,
   projectsTable,
+  rolesTable,
   himsStatusChecksTable,
   himsConnectionsTable,
   himsDataComparisonsTable,
 } from "@workspace/db";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, canAccessCase } from "../lib/auth.js";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 import { one, queryOne } from "../lib/http.js";
 import { assertFirmFeatureEnabled } from "../modules/platform/firm-feature-service.js";
 import { publicCredentialStatus, encryptSecret, decryptSecret, isSecretEncryptionConfigured } from "../lib/security/secret-crypto.js";
@@ -25,6 +26,8 @@ import {
   getHimsCaseComparisons,
   compareHimsCase,
 } from "../modules/hims/hims-tracker.service.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
+import { canUserAccessCase, listAccessibleCaseIds } from "../services/case-access.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -55,18 +58,26 @@ const HimsCreateConnectionSchema = z.object({
   mode: z.enum(["tracker_only", "full_write"]).default("tracker_only"),
 });
 
-router.get("/hims/cases", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hims/cases", requireAuth, requireFirmUser, requireUserFeatureAccess("hims.tracker"), requirePermission("cases", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const firmId = req.firmId!;
     const userId = req.userId!;
     const r = req.rlsDb ?? db;
-    const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : undefined;
+    const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : null;
 
     let roleName: string | null = null;
     const roleCache = (req as any)._roleCache as { firmId: number; roleId: number; name: string; permissions?: ReadonlyArray<{ module: string; action: string }> } | undefined;
-    if (roleCache && roleCache.firmId === firmId && roleCache.roleId === roleId) {
+    if (roleCache && roleCache.firmId === firmId && Number(roleCache.roleId) === Number(roleId)) {
       roleName = roleCache.name;
+    }
+    if (!roleName && roleId) {
+      const [rn] = await r
+        .select({ name: rolesTable.name })
+        .from(rolesTable)
+        .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)))
+        .limit(1);
+      if (rn?.name) roleName = String(rn.name);
     }
 
     const connections = await r
@@ -105,23 +116,28 @@ router.get("/hims/cases", requireAuth, requireFirmUser, requirePermission("cases
 
     const caseList: any[] = await baseCaseQb.orderBy(desc(casesTable.updatedAt)).limit(500);
 
-    const caseIds: number[] = [];
+    const caseIdsHint: number[] = [];
     for (const c of caseList) {
-      if (typeof c.caseId === "number" && c.caseId > 0) caseIds.push(c.caseId);
+      if (typeof c.caseId === "number" && c.caseId > 0) caseIdsHint.push(c.caseId);
     }
 
+    // Part 2 §12-14: canonical access computation, matches /cases list exactly.
+    const accessRes = await listAccessibleCaseIds({
+      r: r as any,
+      firmId,
+      userId,
+      roleId,
+      roleName,
+      caseIdsHint,
+      limit: 5000,
+    });
     const accessibleCaseIds: number[] = [];
-    for (const cid of caseIds) {
-      const access = await canAccessCase({
-        r: r as any,
-        firmId,
-        userId,
-        roleId: roleId ?? null,
-        roleName,
-        caseId: cid,
-        purpose: "view_case",
-      });
-      if (access.ok === true) accessibleCaseIds.push(cid);
+    if (accessRes.mode === "all_firm") {
+      for (const cid of caseIdsHint) accessibleCaseIds.push(cid);
+    } else {
+      for (const cid of caseIdsHint) {
+        if (accessRes.caseIds.has(cid)) accessibleCaseIds.push(cid);
+      }
     }
 
     const latestChecks = new Map<number, any>();
@@ -392,8 +408,23 @@ router.patch("/hims/connections/:id", requireAuth, requireFirmUser, requirePermi
 router.get("/hims/cases/:caseId/status", requireAuth, requireFirmUser, requirePermission("module.hims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
+    const firmId = req.firmId!;
     const caseId = parseIntParam(one(req.params?.caseId), "caseId");
-    const status = await getHimsCaseStatus({ firmId: req.firmId!, caseId }, { tx: req.rlsDb });
+    const r = req.rlsDb ?? db;
+    const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : null;
+    let roleName: string | null = null;
+    const roleCache = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+    if (roleCache && roleCache.firmId === firmId && Number(roleCache.roleId) === Number(roleId)) roleName = roleCache.name;
+    if (!roleName && roleId) {
+      const [rn] = await r.select({ name: rolesTable.name }).from(rolesTable).where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId))).limit(1);
+      if (rn?.name) roleName = String(rn.name);
+    }
+    const access = await canUserAccessCase({ r: r as any, firmId, userId: req.userId!, caseId, roleId, roleName });
+    if (!access.ok) {
+      res.status(403).json({ code: "CASE_ACCESS_DENIED", error: access.code ?? "You do not have access to this case." });
+      return;
+    }
+    const status = await getHimsCaseStatus({ firmId, caseId }, { tx: req.rlsDb });
     res.json(status);
   } catch (err: any) {
     if (err?.code === "FEATURE_DISABLED") {
@@ -408,12 +439,27 @@ router.get("/hims/cases/:caseId/status", requireAuth, requireFirmUser, requirePe
 router.post("/hims/cases/:caseId/check", requireAuth, requireFirmUser, requirePermission("module.hims", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
+    const firmId = req.firmId!;
     const caseId = parseIntParam(one(req.params?.caseId), "caseId");
+    const r = req.rlsDb ?? db;
+    const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : null;
+    let roleName: string | null = null;
+    const roleCache = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+    if (roleCache && roleCache.firmId === firmId && Number(roleCache.roleId) === Number(roleId)) roleName = roleCache.name;
+    if (!roleName && roleId) {
+      const [rn] = await r.select({ name: rolesTable.name }).from(rolesTable).where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId))).limit(1);
+      if (rn?.name) roleName = String(rn.name);
+    }
+    const access = await canUserAccessCase({ r: r as any, firmId, userId: req.userId!, caseId, roleId, roleName });
+    if (!access.ok) {
+      res.status(403).json({ code: "CASE_ACCESS_DENIED", error: access.code ?? "You do not have access to this case." });
+      return;
+    }
     const body = req.body as { connectionId?: unknown } ?? {};
     const connectionId = typeof body.connectionId === "number" || typeof body.connectionId === "string" ? parseInt(String(body.connectionId), 10) : null;
     const result = await checkHimsCase(
       {
-        firmId: req.firmId!,
+        firmId,
         actorUserId: req.userId!,
         caseId,
         connectionId: Number.isFinite(connectionId) ? connectionId : null,
@@ -434,8 +480,23 @@ router.post("/hims/cases/:caseId/check", requireAuth, requireFirmUser, requirePe
 router.get("/hims/cases/:caseId/comparisons", requireAuth, requireFirmUser, requirePermission("module.hims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
+    const firmId = req.firmId!;
     const caseId = parseIntParam(one(req.params?.caseId), "caseId");
-    const comparisons = await getHimsCaseComparisons({ firmId: req.firmId!, caseId }, { tx: req.rlsDb });
+    const r = req.rlsDb ?? db;
+    const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : null;
+    let roleName: string | null = null;
+    const roleCache = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+    if (roleCache && roleCache.firmId === firmId && Number(roleCache.roleId) === Number(roleId)) roleName = roleCache.name;
+    if (!roleName && roleId) {
+      const [rn] = await r.select({ name: rolesTable.name }).from(rolesTable).where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId))).limit(1);
+      if (rn?.name) roleName = String(rn.name);
+    }
+    const access = await canUserAccessCase({ r: r as any, firmId, userId: req.userId!, caseId, roleId, roleName });
+    if (!access.ok) {
+      res.status(403).json({ code: "CASE_ACCESS_DENIED", error: access.code ?? "You do not have access to this case." });
+      return;
+    }
+    const comparisons = await getHimsCaseComparisons({ firmId, caseId }, { tx: req.rlsDb });
     res.json(comparisons);
   } catch (err: any) {
     if (err?.code === "FEATURE_DISABLED") {
@@ -450,14 +511,29 @@ router.get("/hims/cases/:caseId/comparisons", requireAuth, requireFirmUser, requ
 router.post("/hims/cases/:caseId/compare", requireAuth, requireFirmUser, requirePermission("module.hims", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
+    const firmId = req.firmId!;
     const caseId = parseIntParam(one(req.params?.caseId), "caseId");
+    const r = req.rlsDb ?? db;
+    const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : null;
+    let roleName: string | null = null;
+    const roleCache = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+    if (roleCache && roleCache.firmId === firmId && Number(roleCache.roleId) === Number(roleId)) roleName = roleCache.name;
+    if (!roleName && roleId) {
+      const [rn] = await r.select({ name: rolesTable.name }).from(rolesTable).where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId))).limit(1);
+      if (rn?.name) roleName = String(rn.name);
+    }
+    const access = await canUserAccessCase({ r: r as any, firmId, userId: req.userId!, caseId, roleId, roleName });
+    if (!access.ok) {
+      res.status(403).json({ code: "CASE_ACCESS_DENIED", error: access.code ?? "You do not have access to this case." });
+      return;
+    }
     const body = req.body as { connectionId?: unknown; fields?: unknown; options?: unknown } ?? {};
     const connectionId = typeof body.connectionId === "number" || typeof body.connectionId === "string" ? parseInt(String(body.connectionId), 10) : null;
     const fields = Array.isArray(body.fields) ? (body.fields as string[]) : null;
     const options = body.options && typeof body.options === "object" ? (body.options as Record<string, unknown>) : {};
     const result = await compareHimsCase(
       {
-        firmId: req.firmId!,
+        firmId,
         actorUserId: req.userId!,
         caseId,
         connectionId: Number.isFinite(connectionId) ? connectionId : null,

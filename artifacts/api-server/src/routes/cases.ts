@@ -38,6 +38,10 @@ import { parseDateOnlyInput } from "../lib/dateOnly.js";
 import { logger } from "../lib/logger.js";
 import { ApiError } from "../lib/api-response.js";
 import { isTransientDbConnectionError } from "../lib/auth-safe-db.js";
+import {
+  canUserAccessCase,
+  listAccessibleCaseIds,
+} from "../services/case-access.js";
 import { ObjectNotFoundError, SupabaseStorageService, getSupabaseStorageConfigError } from "../lib/objectStorage.js";
 import { CASE_ATTACHMENT_ALLOWED_EXTENSIONS, WORKFLOW_DOCUMENT_ALLOWED_KEYS, fileExtLower, workflowDocumentLabel, workflowDocumentLegacyKeys, normalizeWorkflowDocumentKeyFromDb, type WorkflowDocumentMilestoneKey } from "../lib/caseWorkflowDocuments.js";
 import { LOAN_STAMPING_ITEM_KEYS, type LoanStampingItemKey, isLoanStampingItemKeyAllowedForTitleType, normalizeTitleType } from "../lib/loanStamping.js";
@@ -295,20 +299,38 @@ async function enforceCaseAccess(r: DbConn, req: AuthRequest, res: ExpressRespon
     return false;
   }
 
-  const elevated = await canBypassCaseAssignment(r, firmId, req.roleId);
-  if (elevated) return true;
-
-  const [assigned] = await r
-    .select({ id: caseAssignmentsTable.id })
-    .from(caseAssignmentsTable)
-    .where(and(
-      eq(caseAssignmentsTable.caseId, caseId),
-      eq(caseAssignmentsTable.userId, req.userId),
-      inArray(caseAssignmentsTable.roleInCase, ["lawyer", "clerk"]),
-      sql`${caseAssignmentsTable.unassignedAt} IS NULL`,
-    ))
-    .limit(1);
-  if (assigned) return true;
+  // Preload assigned* columns via SQL (cases schema drizzle may not expose them)
+  const preRows = await r.execute(sql`
+    SELECT assigned_lawyer_id AS "assignedLawyerId",
+           assigned_clerk_id  AS "assignedClerkId"
+    FROM cases
+    WHERE id = ${caseId} AND firm_id = ${firmId}
+    LIMIT 1
+  `);
+  const preArr = Array.isArray(preRows)
+    ? (preRows as unknown as { assignedLawyerId?: unknown; assignedClerkId?: unknown }[])
+    : ("rows" in (preRows as any)
+      ? ((preRows as any).rows as { assignedLawyerId?: unknown; assignedClerkId?: unknown }[])
+      : []);
+  const pre = preArr[0];
+  const roleName = await getRoleName(r, firmId, req.roleId);
+  const access = await canUserAccessCase({
+    r: r as any,
+    firmId,
+    userId: req.userId,
+    caseId,
+    roleId: req.roleId ?? null,
+    roleName,
+    purpose: "view_case",
+    preloaded: {
+      assignedLawyerId:
+        typeof pre?.assignedLawyerId === "number" ? pre.assignedLawyerId : null,
+      assignedClerkId:
+        typeof pre?.assignedClerkId === "number" ? pre.assignedClerkId : null,
+      caseFirmId: firmId,
+    },
+  });
+  if (access.ok) return true;
 
   await writeAuditLog({
     firmId,
@@ -317,12 +339,19 @@ async function enforceCaseAccess(r: DbConn, req: AuthRequest, res: ExpressRespon
     action: "auth.forbidden.case_access_denied",
     entityType: "case",
     entityId: caseId,
-    detail: "not_assigned",
+    detail:
+      (access.code ?? "unknown") +
+      (access.reason ? `: ${access.reason}` : "") +
+      (access.via ? ` via=${access.via}` : ""),
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   }, { db: req.rlsDb });
 
-  res.status(403).json({ error: "Forbidden" });
+  res.status(403).json({
+    error: "Forbidden",
+    code: access.code ?? "CASE_ACCESS_DENIED",
+    via: access.via ?? null,
+  });
   return false;
 }
 
@@ -3102,7 +3131,39 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   ];
   const canAssignAny = await hasRolePermission(r, req.firmId!, req.roleId, "cases", "assign_any");
   const canAssignAnyEffective = canAssignAny || (approvalStatus !== "approved" && canReviewApproval);
-  if (!canAssignAnyEffective) {
+
+  // Part 2 §12-14: Unified list access — single authority (management bypass OR explicit list).
+  // Eliminates impossible state: list shows case but /cases/:id returns 403 for same user.
+  const roleName = await getRoleName(r, req.firmId!, req.roleId);
+  const accessible = await listAccessibleCaseIds({
+    r: r as any,
+    firmId: req.firmId!,
+    userId: req.userId!,
+    roleId: req.roleId ?? null,
+    roleName,
+  });
+
+  if (!canAssignAnyEffective && accessible.mode === "explicit_list") {
+    if (accessible.caseIds.size === 0) {
+      // No cases visible yet — force empty result
+      conditions.push(sql`FALSE`);
+    } else {
+      // Build IN clause only for assigned/team cases (matches detail route)
+      const ids = Array.from(accessible.caseIds);
+      if (ids.length <= 5000) {
+        conditions.push(sql`${casesTable.id} = ANY(${sql`${ids}`}::int[])`);
+      } else {
+        conditions.push(sql`EXISTS (
+          SELECT 1
+          FROM ${caseAssignmentsTable}
+          WHERE ${caseAssignmentsTable.caseId} = ${casesTable.id}
+            AND ${caseAssignmentsTable.userId} = ${req.userId}
+            AND ${caseAssignmentsTable.unassignedAt} IS NULL
+        )`);
+      }
+    }
+  } else if (!canAssignAnyEffective) {
+    // mode: all_firm (management) but assign_any isn't effective; use explicit EXISTs
     conditions.push(sql`EXISTS (
       SELECT 1
       FROM ${caseAssignmentsTable}

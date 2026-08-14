@@ -37,7 +37,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { apiFetchJson } from "@/lib/api-client";
 import { useToast } from "@/hooks/use-toast";
-import { useFeatureMap } from "@/lib/feature-guards";
+import { useEffectiveUserFeaturesMap } from "@/lib/feature-guards";
 
 export type SidebarGroupKey =
   | "work"
@@ -151,9 +151,15 @@ export function navGroupsForUser(): Array<{
       key: "documents",
       label: "Documents",
       items: [
-        { label: "Documents", href: "/app/documents", icon: FileText, perm: ["documents", "read"] },
-        { label: "Doc Automation", href: "/app/documents/automation", icon: FileSpreadsheet, perm: ["documents", "read"] },
-        { label: "Variables", href: "/app/documents/variables", icon: FileText, perm: ["documents", "read"] },
+        {
+          label: "Documents",
+          href: "/app/documents",
+          icon: FileText,
+          perm: ["documents", "read"],
+          featureKey: "documents.hub",
+        },
+        { label: "Doc Automation", href: "/app/documents/automation", icon: FileSpreadsheet, perm: ["documents", "read"], featureKey: "documents.hub" },
+        { label: "Variables", href: "/app/documents/variables", icon: FileText, perm: ["documents", "read"], featureKey: "documents.variables" },
       ],
     },
     {
@@ -165,6 +171,7 @@ export function navGroupsForUser(): Array<{
           href: "/app/accounting",
           icon: Calculator,
           perm: ["accounting", "read"],
+          featureKey: "accounting.dashboard",
           roleCheck: isAccountingRole,
         },
         {
@@ -282,7 +289,8 @@ export function SidebarBody({
   const qc = useQueryClient();
   const { toast } = useToast();
 
-  const features = useFeatureMap();
+  const userFeatures = useEffectiveUserFeaturesMap();
+  const features = userFeatures;
   const ctx: SidebarRoleContext = useMemo(() => {
     const userType = String((user as any)?.userType ?? "");
     const roleGroup = String((user as any)?.roleGroup ?? "");
@@ -309,7 +317,7 @@ export function SidebarBody({
     enabled:
       !!user &&
       user.userType === "firm_user" &&
-      !!features["communications.email"]?.enabled &&
+      !!userFeatures.enabled("communications.email") &&
       hasPermission(user, "communications", "read"),
   }).data?.count ?? 0;
   const notifSummary = useQuery({
@@ -386,7 +394,7 @@ export function SidebarBody({
       label: g.label,
       items: g.items.filter((i) => {
         if (!hasPermission(user, i.perm[0], i.perm[1])) return false;
-        if (i.featureKey && !features[i.featureKey]?.enabled) return false;
+        if (i.featureKey && !userFeatures.enabled(i.featureKey)) return false;
         if (typeof i.roleCheck === "function" && !i.roleCheck(ctx)) return false;
         return true;
       }),

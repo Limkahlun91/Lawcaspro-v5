@@ -82,7 +82,7 @@ describe("VIS-2: isEmailControlEnabled static flag does NOT gate Email active ro
 describe("VIS-3: Partner + HR enabled → HR visible + route allowed (structural guard)", () => {
   it("App.tsx HR routes wrapped with FeatureGuard module.hr AND PermissionGuard hr:read", () => {
     // At least one HR dashboard route guard wrapping contains both
-    const win = windowAround(APP_TSX, 'path="/app/hr/dashboard"', 900, 200);
+    const win = windowAround(APP_TSX, 'path="/app/hr/dashboard"', 1200, 2000);
     expect(win.includes('feature="module.hr"')).toBe(true);
     expect(win.includes('allOf={["hr.dashboard"]') || win.includes('allOf={[ "hr.dashboard"') || win.includes("hr.dashboard")).toBe(true);
     expect(win.includes('module="hr"')).toBe(true);
