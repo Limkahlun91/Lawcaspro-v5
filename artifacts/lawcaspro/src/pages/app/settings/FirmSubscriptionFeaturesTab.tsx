@@ -45,21 +45,26 @@ export function FirmSubscriptionFeaturesTab({ firmId }: { firmId: number }) {
   });
 
   const entitlements = useQuery({
-    queryKey: ["firm", "entitlements"],
+    queryKey: ["firm", "user", "effective-features"],
     queryFn: async () => {
-      try {
-        return unwrapApiData<{ items: Record<string, EntitlementLike> }>(
-          await apiFetchJson(`/firm/entitlements/effective?includeAllKeys=true`)
-        );
-      } catch {
-        return unwrapApiData<{ items: Record<string, EntitlementLike> }>(
-          await apiFetchJson(`/founder/firms/${firmId}/entitlements/effective?includeAllKeys=true`)
-        );
+      const raw = unwrapApiData<any>(
+        await apiFetchJson(`/users/_self/effective-features`)
+      );
+      const effective: Record<string, any> = raw?.effective ?? {};
+      const items: Record<string, EntitlementLike> = {};
+      for (const k of Object.keys(effective)) {
+        const v = effective[k] as any;
+        items[k] = {
+          enabled: Boolean(v?.enabled),
+          source: (v?.source as any) ?? "plan",
+          planDefault: Boolean(v?.enabled),
+        };
       }
+      return { items } as { items: Record<string, EntitlementLike> };
     },
-    staleTime: 30 * 1000,
+    staleTime: 60 * 1000,
     enabled: !!firmId,
-    retry: false,
+    retry: 1,
   });
 
   const rows = useMemo(() => {

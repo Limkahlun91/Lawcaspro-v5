@@ -310,7 +310,7 @@ export type FeatureRegistryBundle = {
   jobGuardMap: Record<string, readonly string[]>;
 };
 
-const ENTITLEMENTS_QUERY_KEY = ["firm", "entitlements"];
+const EFFECTIVE_FEATURES_QUERY_KEY = ["firm", "user", "effective-features"];
 const REGISTRY_QUERY_KEY = ["platform", "feature-registry"];
 const INVALIDATION_POLL_INTERVAL_MS = 15_000; // Poll server-epoch every 15s for fast propagation; server invalidation also returns via headers.
 
@@ -325,14 +325,44 @@ export function useFirmEntitlements<TFirmOverride = FirmOverrideLike>(): {
   refetch: () => Promise<unknown>;
 } {
   const res = useQuery<FirmEntitlementsBundle>({
-    queryKey: ENTITLEMENTS_QUERY_KEY,
+    queryKey: EFFECTIVE_FEATURES_QUERY_KEY,
     queryFn: async () => {
-      const r = await apiFetchJson<any>(`/entitlements/founder/firms/_self/effective?includeAllKeys=true`);
-      return (r?.data ?? r) as FirmEntitlementsBundle;
+      const r = await apiFetchJson<any>(`/users/_self/effective-features`);
+      const raw = (r?.data ?? r) as any;
+      // Shape-adapt into FirmEntitlementsBundle.items used downstream.
+      const effective: Record<string, any> = raw?.effective ?? {};
+      const items: Record<string, EntitlementLike> = {};
+      for (const k of Object.keys(effective)) {
+        const v = effective[k] as any;
+        items[k] = {
+          enabled: Boolean(v?.enabled),
+          source: v?.source ?? "feature_default",
+          value: v?.value ?? v?.enabled,
+          valueType: v?.valueType ?? "boolean",
+          denied: v?.denied ?? null,
+          denialReason: v?.denialReason ?? null,
+          usage: v?.usage ?? null,
+        } as EntitlementLike;
+      }
+      const overrides: FirmOverrideLike[] = Array.isArray(raw?.explicitOverrides)
+        ? raw.explicitOverrides.map((o: any, i: number) => ({
+            id: i + 1,
+            featureKey: o.featureKey,
+            overrideMode: o.isEnabled ? "enabled" : "disabled",
+            createdAt: new Date().toISOString(),
+          }))
+        : [];
+      return {
+        firm: raw?.firmId ? { id: raw.firmId, status: "active", subStatus: null, planId: null, isCustomPlan: false, customPriceMonthly: null } : null,
+        plan: null,
+        subscriptionPolicy: null,
+        items,
+        overrides,
+      } as unknown as FirmEntitlementsBundle;
     },
-    staleTime: 30_000,
-    refetchOnWindowFocus: "always",
-    retry: 2,
+    staleTime: 60_000,
+    refetchOnWindowFocus: "stale",
+    retry: 1,
   });
   return { data: res.data, isLoading: res.isLoading, error: res.error, refetch: res.refetch };
 }
@@ -358,7 +388,7 @@ export function useFeatureRegistry(): {
 export function useInvalidateFirmEntitlements(): () => Promise<void> {
   const qc = useQueryClient();
   return useCallback(async () => {
-    await qc.invalidateQueries({ queryKey: ENTITLEMENTS_QUERY_KEY });
+    await qc.invalidateQueries({ queryKey: EFFECTIVE_FEATURES_QUERY_KEY });
   }, [qc]);
 }
 
