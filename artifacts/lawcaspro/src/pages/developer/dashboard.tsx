@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
+import { useLocation } from "wouter";
 import { useMutation, useQuery, useQueryClient, type UseMutationResult, type UseQueryResult } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -95,7 +96,7 @@ type AttentionItem = {
 };
 
 type OverviewResponse = {
-  project: { name: string | null; phase: string | null; developerName: string | null; lastUpdatedAt: string };
+  project: { allProjects: boolean; projectId: number | null; name: string | null; phase: string | null; developerName: string | null; lastUpdatedAt: string | null };
   summary: {
     totalUnits: number;
     spaInProgress: number;
@@ -114,6 +115,8 @@ type OverviewResponse = {
   };
 };
 
+type DeveloperProjectOption = { id: number; name: string; phase: string | null; activeUnitCount: number };
+
 type UnitsResponse = {
   data: UnitListDto[];
   total: number;
@@ -130,6 +133,33 @@ type DevMessage = {
   attachments: unknown;
   createdAt: string;
 };
+
+function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return "No activity yet";
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return "No activity yet";
+  return d.toLocaleString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function one<T>(v: T | T[] | undefined | null): T | undefined {
+  if (Array.isArray(v)) return v[0];
+  return v ?? undefined;
+}
+
+function parseDeveloperProjectIdParam(v: string | string[] | undefined | null): number | "all" {
+  const raw = one(v);
+  if (raw === undefined || raw === null) return "all";
+  if (raw === "all") return "all";
+  const n = Number(raw);
+  if (Number.isFinite(n) && n > 0) return n;
+  return "all";
+}
 
 const LIMIT = 50;
 
@@ -149,19 +179,6 @@ function badgeClassForStatus(s: DevPortalStatus): string {
   }
 }
 
-function formatDateTime(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (!Number.isFinite(d.getTime())) return "—";
-  return d.toLocaleString("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 function formatDateOnly(iso: string | null | undefined): string {
   if (!iso) return "—";
   const ym = normalizeDateOnlyFromApi(iso);
@@ -177,12 +194,35 @@ function purchasersDisplay(list: PurchaserDto[] | undefined, max = 4): string {
 
 export default function DeveloperDashboardPage() {
   const queryClient = useQueryClient();
+  const [location, setLocation] = useLocation();
+  const urlQs = useMemo(() => new URLSearchParams(location.split("?")[1] || ""), [location]);
+  const initialProject = useMemo(() => parseDeveloperProjectIdParam(urlQs.get("projectId")), [urlQs]);
+  const [selectedProjectId, setSelectedProjectId] = useState<number | "all">(initialProject);
+
+  useEffect(() => {
+    const prev = parseDeveloperProjectIdParam(urlQs.get("projectId"));
+    if (prev === selectedProjectId) return;
+    const next = new URLSearchParams(urlQs);
+    if (selectedProjectId === "all") next.delete("projectId");
+    else next.set("projectId", String(selectedProjectId));
+    const nextStr = next.toString();
+    const base = location.split("?")[0];
+    setLocation(nextStr ? `${base}?${nextStr}` : base, { replace: true });
+  }, [selectedProjectId, location, setLocation, urlQs]);
+
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [stage, setStage] = useState<StageFilter>("all");
   const [activeCaseId, setActiveCaseId] = useState<number | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [messageDraft, setMessageDraft] = useState("");
+
+  const projectsQuery = useQuery<DeveloperProjectOption[]>({
+    queryKey: ["developer-portal-projects"],
+    queryFn: ({ signal }) => apiFetchJson("/developer/portal/projects", { signal }) as Promise<DeveloperProjectOption[]>,
+    retry: false,
+    staleTime: 60_000,
+  });
 
   const qs = useMemo(() => {
     const sp = new URLSearchParams();
@@ -191,18 +231,25 @@ export default function DeveloperDashboardPage() {
     if (search.trim()) sp.set("search", search.trim());
     if (stage !== "all") sp.set("stage", stage);
     if (stage === "attention") sp.set("attention", "1");
+    if (selectedProjectId !== "all") sp.set("projectId", String(selectedProjectId));
     return sp.toString();
-  }, [page, search, stage]);
+  }, [page, search, stage, selectedProjectId]);
 
   const overviewQuery = useQuery<OverviewResponse>({
-    queryKey: ["developer-portal-overview"],
-    queryFn: ({ signal }) => apiFetchJson("/developer/portal/overview", { signal }),
+    queryKey: ["developer-portal-overview", selectedProjectId],
+    queryFn: ({ signal }) =>
+      apiFetchJson(
+        selectedProjectId === "all"
+          ? "/developer/portal/overview"
+          : `/developer/portal/overview?projectId=${encodeURIComponent(String(selectedProjectId))}`,
+        { signal },
+      ),
     retry: false,
     staleTime: 30_000,
   });
 
   const invQuery = useQuery<UnitsResponse>({
-    queryKey: ["developer-portal-units", qs],
+    queryKey: ["developer-portal-units", selectedProjectId, qs],
     queryFn: ({ signal }) => apiFetchJson(`/developer/portal/units?${qs}`, { signal }),
     retry: false,
     staleTime: 20_000,
@@ -239,6 +286,15 @@ export default function DeveloperDashboardPage() {
   const setCardFilter = (next: StageFilter) => {
     setStage((prev) => (prev === next ? "all" : next));
     setPage(1);
+  };
+
+  const setProjectAndReset = (id: number | "all") => {
+    setSelectedProjectId(id);
+    setStage("all");
+    setPage(1);
+    setActiveCaseId(null);
+    setSheetOpen(false);
+    setMessageDraft("");
   };
 
   const openUnit = (caseId: number) => {
@@ -293,7 +349,13 @@ export default function DeveloperDashboardPage() {
   return (
     <div className="min-h-screen bg-slate-50/60">
       <div className="px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-        <Header overview={overview} />
+        <Header
+          overview={overview}
+          projects={projectsQuery.data || []}
+          projectsLoading={projectsQuery.isLoading || projectsQuery.isFetching}
+          selectedProjectId={selectedProjectId}
+          onSelectProjectId={setProjectAndReset}
+        />
 
         <SummaryCards summary={overview.summary} activeStage={stage} onPick={setCardFilter} />
 
@@ -464,14 +526,31 @@ export default function DeveloperDashboardPage() {
   );
 }
 
-function Header(props: { overview: OverviewResponse }) {
-  const { project } = props.overview;
+function Header(props: {
+  overview: OverviewResponse;
+  projects: DeveloperProjectOption[];
+  projectsLoading: boolean;
+  selectedProjectId: number | "all";
+  onSelectProjectId: (id: number | "all") => void;
+}) {
+  const { overview, projects, projectsLoading, selectedProjectId, onSelectProjectId } = props;
+  const { project } = overview;
+  const displayTitle = project.allProjects ? "Developer Portfolio" : project.name;
+  const displaySubtitle = project.allProjects ? "All Projects" : project.phase;
+  const effectiveProjectLabel = (nextId: number | "all"): string => {
+    if (nextId === "all") return "All Projects";
+    const p = projects.find((x) => x.id === nextId);
+    if (!p) return "All Projects";
+    const phaseLabel = p.phase && String(p.phase).trim() ? ` · ${p.phase}` : "";
+    const unitLabel = typeof p.activeUnitCount === "number" && p.activeUnitCount >= 0 ? ` (${p.activeUnitCount} units)` : "";
+    return `${p.name}${phaseLabel}${unitLabel}`;
+  };
   return (
     <div className="flex flex-wrap items-end justify-between gap-4">
       <div className="min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <h1 className="text-2xl sm:text-3xl font-semibold text-slate-900 tracking-tight">
-            {project.name ?? "Project Overview"}
+            {displayTitle ?? "Project Overview"}
           </h1>
           <Badge variant="outline" className="text-[11px] bg-white text-slate-600 border-slate-200 px-2 py-0.5 h-6">
             Live from Lawcaspro
@@ -479,9 +558,29 @@ function Header(props: { overview: OverviewResponse }) {
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-slate-500">
           {project.developerName ? <span>{project.developerName}</span> : null}
-          {project.phase ? <span className="inline-flex items-center">· <span className="ml-3">{project.phase}</span></span> : null}
+          {displaySubtitle ? <span className="inline-flex items-center">· <span className="ml-3">{displaySubtitle}</span></span> : null}
           <span className="inline-flex items-center">· <span className="ml-3">Last updated {formatDateTime(project.lastUpdatedAt)}</span></span>
         </div>
+      </div>
+      <div className="w-full sm:w-[280px] max-w-full">
+        <label className="text-[11px] font-medium uppercase tracking-wider text-slate-500">Project</label>
+        <select
+          aria-label="Developer project filter"
+          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-slate-900/30 focus:border-slate-400 disabled:opacity-60"
+          disabled={projectsLoading}
+          value={selectedProjectId === "all" ? "all" : String(selectedProjectId)}
+          onChange={(e) => {
+            const next = e.target.value;
+            onSelectProjectId(next === "all" ? "all" : Number(next));
+          }}
+        >
+          <option value="all">
+            All Projects{typeof overview.summary?.totalUnits === "number" && projectsLoading === false ? ` (${overview.summary.totalUnits} units)` : ""}
+          </option>
+          {(projects || []).map((p) => (
+            <option key={p.id} value={String(p.id)}>{effectiveProjectLabel(p.id)}</option>
+          ))}
+        </select>
       </div>
     </div>
   );

@@ -30,7 +30,6 @@ import {
   deriveLoanStatus,
   formatPurchasePrice,
   getDeveloperPortalUnitLabel,
-  isDeveloperForbiddenApi,
   kdFromJoined,
   mapJoinedCaseToDetailDto,
   mapJoinedCaseToListDto,
@@ -183,15 +182,6 @@ const purchaserNamesSql = sql<string | null>`(
   WHERE ${casePurchasersTable.caseId} = ${casesTable.id}
 )`;
 
-(expressRouter as any).use((req: any, _res: any, next: any) => {
-  const path = (req.originalUrl ?? req.path ?? "").replace(/^[^?]*[/\\]api[/\\]/i, "/api/");
-  if (isDeveloperForbiddenApi(path)) {
-    _res.status(403)?.json?.({ error: "Forbidden" });
-    return;
-  }
-  next();
-});
-
 routerInternal.get("/developer/dashboard", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
@@ -334,63 +324,14 @@ routerInternal.get("/developer/inventory", requireAuth, requireFirmUser, async (
   });
 });
 
-routerInternal.patch("/developer/cases/:caseId/status", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
+routerInternal.patch("/developer/cases/:caseId/status", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
-  const r = rdb(req);
-  const caseId = Number((req.params as any)?.caseId);
-  if (!Number.isFinite(caseId) || caseId <= 0) {
-    res.status(400).json({ error: "Invalid caseId" });
-    return;
-  }
-  const body = req.body as any;
-  const rawStatus = body?.developerStatus;
-  const developerStatus =
-    rawStatus === null
-      ? null
-      : typeof rawStatus === "string"
-          ? (rawStatus.trim() ? rawStatus.trim() : null)
-          : undefined;
-  if (developerStatus === undefined || (typeof developerStatus === "string" && developerStatus.length > 2000)) {
-    res.status(400).json({ error: "Invalid body" });
-    return;
-  }
-
-  const now = new Date();
-  const [updated] = await r
-    .update(casesTable)
-    .set({
-      developerStatus,
-      developerStatusUpdatedAt: now,
-    })
-    .where(and(eq(casesTable.id, caseId), eq(casesTable.firmId, ctx.firmId), eq(casesTable.developerId, ctx.developerId)))
-    .returning({
-      id: casesTable.id,
-      developerStatus: casesTable.developerStatus,
-      developerStatusUpdatedAt: casesTable.developerStatusUpdatedAt,
-    });
-
-  if (!updated) {
-    res.status(404).json({ error: "Not found" });
-    return;
-  }
-
-  await writeAuditLog({
-    firmId: ctx.firmId,
-    actorId: ctx.userId,
-    actorType: "developer_user",
-    action: "developer_portal.case_status.update",
-    entityType: "case",
-    entityId: caseId,
-    detail: JSON.stringify({ developerStatus }),
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
-  }, { db: req.rlsDb as RlsDb | undefined });
-
-  res.json({
-    developerStatus: updated.developerStatus ?? null,
-    developerStatusUpdatedAt: updated.developerStatusUpdatedAt ? toIsoStringSafe(updated.developerStatusUpdatedAt) : null,
+  res.status(410).json({
+    code: "DEVELOPER_STATUS_WRITE_RETIRED",
+    message: "Case status is managed by the law firm workflow.",
   });
+  return;
 });
 
 routerInternal.get("/developer/inventory/export.xlsx", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
@@ -717,44 +658,77 @@ function applyStageFilterPredicate(dto: UnitListDto, stage: DevPortalStageFilter
   }
 }
 
+routerInternal.get("/developer/portal/projects", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
+  const ctx = await requireDeveloperUser(req, res);
+  if (!ctx) return;
+  const r = rdb(req);
+  const rows = await r
+    .select({
+      id: projectsTable.id,
+      name: projectsTable.name,
+      phase: projectsTable.phase,
+      activeUnitCount: sql<number>`COUNT(${casesTable.id})::int`,
+    })
+    .from(projectsTable)
+    .innerJoin(casesTable, and(
+      eq(casesTable.projectId, projectsTable.id),
+      eq(casesTable.firmId, projectsTable.firmId),
+      eq(casesTable.developerId, ctx.developerId),
+      sql`COALESCE(${casesTable.deletedAt}, 'infinity'::timestamptz) > now()`,
+    ))
+    .where(and(eq(projectsTable.firmId, ctx.firmId)))
+    .groupBy(projectsTable.id, projectsTable.name, projectsTable.phase)
+    .orderBy(asc(projectsTable.name), asc(projectsTable.phase));
+  res.setHeader("Cache-Control", "no-store");
+  res.json(rows.map((r) => ({ id: r.id, name: r.name, phase: r.phase ?? null, activeUnitCount: Number(r.activeUnitCount ?? 0) })));
+});
+
 routerInternal.get("/developer/portal/overview", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
   const r = rdb(req);
+  const projectIdRaw = typeof (req.query as any)?.projectId === "string" ? Number((req.query as any).projectId) : null;
+  const projectId = Number.isFinite(projectIdRaw) && projectIdRaw !== null && (projectIdRaw as number) > 0 ? (projectIdRaw as number) : null;
   const conditions: any[] = [
     eq(casesTable.firmId, ctx.firmId),
     eq(casesTable.developerId, ctx.developerId),
   ];
+  if (projectId) conditions.push(eq(casesTable.projectId, projectId));
 
   const allRows = await loadJoinedDeveloperRows(r, conditions, [desc(casesTable.updatedAt)], 5000);
   const ids = allRows.map((x) => x.id);
-  const assignments = await loadCaseAssignments(r, ctx.firmId, ids);
-  enrichAssignments(allRows as any, assignments);
+  const assignments = ids.length ? await loadCaseAssignments(r, ctx.firmId, ids) : {};
+  if (ids.length) enrichAssignments(allRows as any, assignments);
 
   const [dev] = await r.select({ name: developersTable.name }).from(developersTable).where(and(eq(developersTable.id, ctx.developerId), eq(developersTable.firmId, ctx.firmId))).limit(1);
 
   const dtos: UnitListDto[] = allRows.map((r) => mapJoinedCaseToListDto(r as any));
   const summary = summarizeCards(dtos);
   const progress = summarizeProgress(dtos);
-  const attention = collectAttentionItems(dtos, 8);
+  const attentionItems = collectAttentionItems(dtos, 8);
 
   const first = allRows[0];
-  const projectName = first?.projectName ?? first?.["projects.name"] ?? null;
-  const phase = first?.phase ?? first?.["projects.phase"] ?? null;
-  const lastUpdatedAt = dtos.length ? dtos.reduce((a, b) => ((a.lastUpdatedAt ?? "") >= (b.lastUpdatedAt ?? "") ? a : b)).lastUpdatedAt : null;
+  const resolvedProjectName = projectId ? (first?.projectName ?? first?.["projects.name"] ?? null) : null;
+  const resolvedPhase = projectId ? (first?.phase ?? first?.["projects.phase"] ?? null) : null;
+  const resolvedAllProjectsFlag = !projectId;
+  const lastUpdatedAt = dtos.length
+    ? dtos.reduce((a, b) => ((a.lastUpdatedAt ?? "") >= (b.lastUpdatedAt ?? "") ? a : b)).lastUpdatedAt
+    : null;
 
   res.setHeader("Cache-Control", "no-store");
   res.json({
     project: {
-      name: projectName,
-      phase,
+      allProjects: resolvedAllProjectsFlag,
+      projectId: projectId ?? null,
+      name: resolvedProjectName,
+      phase: resolvedPhase,
       developerName: dev?.name ?? null,
-      lastUpdatedAt: lastUpdatedAt ?? new Date().toISOString(),
+      lastUpdatedAt,
     },
     summary,
     attentionSummary: {
-      total: attention.length,
-      items: attention,
+      total: summary.needsAttention,
+      items: attentionItems,
     },
     progress,
   });
@@ -855,7 +829,7 @@ routerInternal.get("/developer/portal/units/:caseId", requireAuth, requireFirmUs
       completedAt: caseWorkflowStepsTable.completedAt,
     })
     .from(caseWorkflowStepsTable)
-    .where(and(eq(caseWorkflowStepsTable.caseId, caseId), eq(caseWorkflowStepsTable.stepKey, caseWorkflowStepsTable.stepKey)))
+    .where(eq(caseWorkflowStepsTable.caseId, caseId))
     .orderBy(caseWorkflowStepsTable.stepOrder, caseWorkflowStepsTable.id)
     .limit(200);
 

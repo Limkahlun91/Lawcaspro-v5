@@ -74,6 +74,8 @@ import bankAdaptersRouter from "./bank-adapters.js";
 import himsRouter from "./hims.js";
 import entitlementsRouter from "./entitlements.js";
 import cronJobsRouter from "./cron-jobs.js";
+import { requireAuth } from "../lib/auth.js";
+import { developerOnlyAllowlistMiddleware } from "../lib/developer-allowlist.js";
 import { requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate";
 
 type RouterLike = {
@@ -86,6 +88,7 @@ const routerInternal = expressRouter as unknown as RouterLike;
 routerInternal.use(healthRouter);
 routerInternal.use(authRouter);
 routerInternal.use(publicRouter);
+routerInternal.use(requireAuth, developerOnlyAllowlistMiddleware);
 routerInternal.use(platformRouter);
 routerInternal.use(usersRouter);
 routerInternal.use(rolesRouter);
