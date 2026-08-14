@@ -34,8 +34,8 @@ describe("DEVPORTAL · FE source audits", () => {
     // overview, units list, unit detail (lazy), messages (lazy)
     const eager = requests.filter((l) => !l.includes("enabled:") && !l.includes("messageDraft"));
     expect(eager.length).toBeGreaterThanOrEqual(2);
-    expect(DP_TSX).toContain('queryKey: ["developer-portal-overview"]');
-    expect(DP_TSX).toContain('queryKey: ["developer-portal-units", qs]');
+    expect(DP_TSX).toContain('queryKey: ["developer-portal-overview", selectedProjectId]');
+    expect(DP_TSX).toContain('queryKey: ["developer-portal-units", selectedProjectId, qs]');
     const detailEnabled = DP_TS_LINES.findIndex((l) => l.includes('enabled: typeof activeCaseId === "number" && activeCaseId > 0 && sheetOpen'));
     expect(detailEnabled).toBeGreaterThan(0);
   });

@@ -347,7 +347,7 @@ export default function DeveloperDashboardPage() {
   const activeListItem = items.find((x) => x.caseId === activeCaseId) ?? null;
 
   return (
-    <div className="min-h-screen bg-slate-50/60">
+    <div data-testid="app-main" className="min-h-screen bg-slate-50/60">
       <div className="px-4 sm:px-6 lg:px-8 py-6 space-y-6">
         <Header
           overview={overview}

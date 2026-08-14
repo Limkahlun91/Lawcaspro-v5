@@ -41,6 +41,9 @@ import {
   buildMotTimeline,
   buildRecentActivity,
   extractLawyerClerk,
+  portalSummaryAggregateSelect,
+  portalProgressAggregateSelect,
+  portalStagePredicateSql,
   type DevPortalStageFilter,
   type UnitListDto,
   type AttentionItem,
@@ -689,36 +692,71 @@ routerInternal.get("/developer/portal/overview", requireAuth, requireFirmUser, a
   const r = rdb(req);
   const projectIdRaw = typeof (req.query as any)?.projectId === "string" ? Number((req.query as any).projectId) : null;
   const projectId = Number.isFinite(projectIdRaw) && projectIdRaw !== null && (projectIdRaw as number) > 0 ? (projectIdRaw as number) : null;
-  const conditions: any[] = [
+  const baseConditions: any[] = [
     eq(casesTable.firmId, ctx.firmId),
     eq(casesTable.developerId, ctx.developerId),
   ];
-  if (projectId) conditions.push(eq(casesTable.projectId, projectId));
-
-  const allRows = await loadJoinedDeveloperRows(r, conditions, [desc(casesTable.updatedAt)], 5000);
-  const ids = allRows.map((x) => x.id);
-  const assignments = ids.length ? await loadCaseAssignments(r, ctx.firmId, ids) : {};
-  if (ids.length) enrichAssignments(allRows as any, assignments);
+  if (projectId) baseConditions.push(eq(casesTable.projectId, projectId));
 
   const [dev] = await r.select({ name: developersTable.name }).from(developersTable).where(and(eq(developersTable.id, ctx.developerId), eq(developersTable.firmId, ctx.firmId))).limit(1);
+  let resolvedProjectName: string | null = null;
+  let resolvedPhase: string | null = null;
+  if (projectId) {
+    const [p] = await r.select({ name: projectsTable.name, phase: projectsTable.phase }).from(projectsTable).where(and(eq(projectsTable.id, projectId), eq(projectsTable.firmId, ctx.firmId), eq(projectsTable.developerId, ctx.developerId))).limit(1);
+    resolvedProjectName = p?.name ?? null;
+    resolvedPhase = p?.phase ?? null;
+  }
 
-  const dtos: UnitListDto[] = allRows.map((r) => mapJoinedCaseToListDto(r as any));
-  const summary = summarizeCards(dtos);
-  const progress = summarizeProgress(dtos);
-  const attentionItems = collectAttentionItems(dtos, 8);
+  const [aggSummary] = await r
+    .select(portalSummaryAggregateSelect())
+    .from(casesTable)
+    .leftJoin(caseKeyDatesTable, sql`${caseKeyDatesTable.caseId} = ${casesTable.id} AND ${caseKeyDatesTable.firmId} = ${casesTable.firmId}`)
+    .where(and(...baseConditions)) as unknown as Array<{
+      total_units: number;
+      spa_in_progress: number;
+      spa_stamped: number;
+      loan_in_progress: number;
+      needs_attention: number;
+      completed_handover: number;
+      last_updated_at: string | null;
+    }>;
+  const [aggProgress] = await r
+    .select(portalProgressAggregateSelect())
+    .from(casesTable)
+    .leftJoin(caseKeyDatesTable, sql`${caseKeyDatesTable.caseId} = ${casesTable.id} AND ${caseKeyDatesTable.firmId} = ${casesTable.firmId}`)
+    .where(and(...baseConditions)) as unknown as Array<{ spa_progressing: number; loan_progressing: number; mot_progressing: number; completed_progressing: number; total: number }>;
 
-  const first = allRows[0];
-  const resolvedProjectName = projectId ? (first?.projectName ?? first?.["projects.name"] ?? null) : null;
-  const resolvedPhase = projectId ? (first?.phase ?? first?.["projects.phase"] ?? null) : null;
-  const resolvedAllProjectsFlag = !projectId;
-  const lastUpdatedAt = dtos.length
-    ? dtos.reduce((a, b) => ((a.lastUpdatedAt ?? "") >= (b.lastUpdatedAt ?? "") ? a : b)).lastUpdatedAt
-    : null;
+  const summary: SummaryCards = {
+    totalUnits: Number(aggSummary?.total_units ?? 0),
+    spaInProgress: Number(aggSummary?.spa_in_progress ?? 0),
+    spaStamped: Number(aggSummary?.spa_stamped ?? 0),
+    loanInProgress: Number(aggSummary?.loan_in_progress ?? 0),
+    needsAttention: Number(aggSummary?.needs_attention ?? 0),
+    completedHandover: Number(aggSummary?.completed_handover ?? 0),
+  };
+  const progress: ProgressStrip = {
+    spa: { progressing: Number(aggProgress?.spa_progressing ?? 0) },
+    loan: { progressing: Number(aggProgress?.loan_progressing ?? 0) },
+    mot: { progressing: Number(aggProgress?.mot_progressing ?? 0) },
+    completed: { progressing: Number(aggProgress?.completed_progressing ?? 0) },
+    total: Number(aggProgress?.total ?? 0),
+  };
+  const lastUpdatedAt = aggSummary?.last_updated_at ?? null;
+
+  const attentionConditions = [...baseConditions];
+  const attentionPred = portalStagePredicateSql("attention");
+  if (attentionPred) attentionConditions.push(attentionPred);
+  const attentionRows = await loadJoinedDeveloperRows(r, attentionConditions, [desc(casesTable.updatedAt)], 8, 0);
+  const attentionIds = attentionRows.map((x) => x.id);
+  const attentionAssignments = attentionIds.length ? await loadCaseAssignments(r, ctx.firmId, attentionIds) : {};
+  if (attentionIds.length) enrichAssignments(attentionRows as any, attentionAssignments);
+  const attentionDtos: UnitListDto[] = attentionRows.map((row) => mapJoinedCaseToListDto(row as any));
+  const attentionItems = collectAttentionItems(attentionDtos, 8);
 
   res.setHeader("Cache-Control", "no-store");
   res.json({
     project: {
-      allProjects: resolvedAllProjectsFlag,
+      allProjects: !projectId,
       projectId: projectId ?? null,
       name: resolvedProjectName,
       phase: resolvedPhase,
@@ -762,32 +800,40 @@ routerInternal.get("/developer/portal/units", requireAuth, requireFirmUser, asyn
     ));
   }
 
-  const [totalRes] = await r.select({ c: count() }).from(casesTable).where(and(...conditions));
+  const filteredConditions = [...conditions];
+  if (q.stage !== "all") {
+    const stagePred = portalStagePredicateSql(q.stage);
+    if (stagePred) filteredConditions.push(stagePred);
+  }
+  if (q.attentionOnly) {
+    const attnPred = portalStagePredicateSql("attention");
+    if (attnPred) filteredConditions.push(attnPred);
+  }
+
+  const [totalRes] = await r.select({ c: count() }).from(casesTable).leftJoin(caseKeyDatesTable, sql`${caseKeyDatesTable.caseId} = ${casesTable.id} AND ${caseKeyDatesTable.firmId} = ${casesTable.firmId}`).where(and(...filteredConditions));
+  const [totalScopeRes] = await r.select({ c: count() }).from(casesTable).where(and(...conditions));
 
   const rows = await loadJoinedDeveloperRows(
     r,
-    conditions,
+    filteredConditions,
     [desc(casesTable.updatedAt)],
-    5000,
-    0,
+    q.limit,
+    offset,
   );
   const ids = rows.map((x) => x.id);
-  const assignments = await loadCaseAssignments(r, ctx.firmId, ids);
-  enrichAssignments(rows as any, assignments);
-  const mappedAll: UnitListDto[] = rows.map((r) => mapJoinedCaseToListDto(r as any));
+  const assignments = ids.length ? await loadCaseAssignments(r, ctx.firmId, ids) : {};
+  if (ids.length) enrichAssignments(rows as any, assignments);
+  const mapped: UnitListDto[] = rows.map((r) => mapJoinedCaseToListDto(r as any));
 
-  let filtered = mappedAll;
+  let filtered = mapped;
   if (q.stage !== "all") filtered = filtered.filter((d) => applyStageFilterPredicate(d, q.stage));
   if (q.attentionOnly) filtered = filtered.filter((d) => !!d.nextAction?.attentionRequired || d.spa.status === "Attention Required" || d.loan.status === "Attention Required");
-  const totalFiltered = filtered.length;
-
-  const paged = filtered.slice(offset, offset + q.limit);
 
   res.setHeader("Cache-Control", "no-store");
   res.json({
-    data: paged,
-    total: Number(totalFiltered),
-    totalMatchingScope: Number(totalRes?.c ?? 0),
+    data: filtered,
+    total: Number(totalRes?.c ?? 0),
+    totalMatchingScope: Number(totalScopeRes?.c ?? 0),
     page: q.page,
     limit: q.limit,
   });
@@ -844,6 +890,7 @@ routerInternal.get("/developer/portal/export.xlsx", requireAuth, requireFirmUser
   if (!ctx) return;
   const r = rdb(req);
   const q = ListInventoryQuery(req.query);
+  const EXPORT_SAFETY_CAP = 5000;
 
   const conditions: any[] = [
     eq(casesTable.firmId, ctx.firmId),
@@ -864,11 +911,36 @@ routerInternal.get("/developer/portal/export.xlsx", requireAuth, requireFirmUser
       )`,
     ));
   }
+  const exportConditions = [...conditions];
+  if (q.stage !== "all") {
+    const stagePred = portalStagePredicateSql(q.stage);
+    if (stagePred) exportConditions.push(stagePred);
+  }
+  if (q.attentionOnly) {
+    const attnPred = portalStagePredicateSql("attention");
+    if (attnPred) exportConditions.push(attnPred);
+  }
 
-  const rows = await loadJoinedDeveloperRows(r, conditions, [desc(casesTable.updatedAt)], 5000, 0);
+  const [countRes] = await r
+    .select({ c: count() })
+    .from(casesTable)
+    .leftJoin(caseKeyDatesTable, sql`${caseKeyDatesTable.caseId} = ${casesTable.id} AND ${caseKeyDatesTable.firmId} = ${casesTable.firmId}`)
+    .where(and(...exportConditions));
+  const matchingCount = Number(countRes?.c ?? 0);
+  if (matchingCount > EXPORT_SAFETY_CAP) {
+    res.status(413).json({
+      code: "EXPORT_TOO_LARGE",
+      message: `Export matches ${matchingCount} rows. Please filter by project or status first to keep export under ${EXPORT_SAFETY_CAP} rows.`,
+      matchingRows: matchingCount,
+      limit: EXPORT_SAFETY_CAP,
+    });
+    return;
+  }
+
+  const rows = await loadJoinedDeveloperRows(r, exportConditions, [desc(casesTable.updatedAt)], EXPORT_SAFETY_CAP, 0);
   const ids = rows.map((x) => x.id);
-  const assignments = await loadCaseAssignments(r, ctx.firmId, ids);
-  enrichAssignments(rows as any, assignments);
+  const assignments = ids.length ? await loadCaseAssignments(r, ctx.firmId, ids) : {};
+  if (ids.length) enrichAssignments(rows as any, assignments);
   let mapped: UnitListDto[] = rows.map((row) => mapJoinedCaseToListDto(row as any));
   if (q.stage !== "all") mapped = mapped.filter((d) => applyStageFilterPredicate(d, q.stage));
   if (q.attentionOnly) mapped = mapped.filter((d) => !!d.nextAction?.attentionRequired || d.spa.status === "Attention Required" || d.loan.status === "Attention Required");

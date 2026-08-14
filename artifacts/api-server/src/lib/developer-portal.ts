@@ -1,6 +1,6 @@
-import type { InferSelectModel } from "drizzle-orm";
+import type { InferSelectModel, SQL } from "drizzle-orm";
 import { caseAssignmentsTable, caseKeyDatesTable, casePurchasersTable, casesTable, caseWorkflowStepsTable, clientsTable, developersTable, projectsTable, usersTable, type RlsDb, db } from "@workspace/db";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 
 export type DevPortalStatus =
   | "Completed"
@@ -327,6 +327,134 @@ export type SummaryCards = {
   needsAttention: number;
   completedHandover: number;
 };
+
+export function portalSummaryAggregateSelect() {
+  const spaStampedCase = sql<boolean>`${caseKeyDatesTable.spaStampedDate} IS NOT NULL`;
+  const spaSignedCase = sql<boolean>`${caseKeyDatesTable.spaSignedDate} IS NOT NULL OR ${caseKeyDatesTable.spaDate} IS NOT NULL OR ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL`;
+  const spaInProgressCase = sql<boolean>`(NOT ${spaStampedCase}) AND (
+    ${caseKeyDatesTable.spaSignedDate} IS NOT NULL
+    OR ${caseKeyDatesTable.spaDate} IS NOT NULL
+    OR ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL
+  )`;
+  const completedCase = sql<boolean>`${caseKeyDatesTable.completionDate} IS NOT NULL`;
+  const loanAny = sql<boolean>`(
+    ${caseKeyDatesTable.actingLetterIssuedDate} IS NOT NULL
+    OR ${caseKeyDatesTable.bankLuReceivedDate} IS NOT NULL
+    OR ${caseKeyDatesTable.adviceToBankDate} IS NOT NULL
+    OR ${caseKeyDatesTable.letterOfOfferDate} IS NOT NULL
+    OR ${caseKeyDatesTable.letterOfOfferStampedDate} IS NOT NULL
+    OR ${caseKeyDatesTable.loanDocsSignedDate} IS NOT NULL
+    OR ${caseKeyDatesTable.loanDocsPendingDate} IS NOT NULL
+    OR ${caseKeyDatesTable.loanAgreementStampedDate} IS NOT NULL
+  )`;
+  const loanInProgressCase = sql<boolean>`${loanAny} AND ${caseKeyDatesTable.bankLuReceivedDate} IS NULL`;
+  const actingLetterOldNoLu = sql<boolean>`${caseKeyDatesTable.actingLetterIssuedDate} IS NOT NULL
+    AND ${caseKeyDatesTable.bankLuReceivedDate} IS NULL
+    AND (extract(epoch from (now() - ${caseKeyDatesTable.actingLetterIssuedDate}))::int / 86400) > 5`;
+  const spaForwardOldNoSigned = sql<boolean>`${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL
+    AND ${caseKeyDatesTable.spaSignedDate} IS NULL
+    AND ${caseKeyDatesTable.spaStampedDate} IS NULL
+    AND (extract(epoch from (now() - ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn}))::int / 86400) > 5`;
+  const needsAttentionCase = sql<boolean>`${spaForwardOldNoSigned} OR ${actingLetterOldNoLu}`;
+  return {
+    totalUnits: sql<number>`COUNT(${casesTable.id})::int`.as("total_units"),
+    spaInProgress: sql<number>`COUNT(*) FILTER (WHERE ${spaInProgressCase})::int`.as("spa_in_progress"),
+    spaStamped: sql<number>`COUNT(*) FILTER (WHERE ${spaStampedCase})::int`.as("spa_stamped"),
+    loanInProgress: sql<number>`COUNT(*) FILTER (WHERE ${loanInProgressCase})::int`.as("loan_in_progress"),
+    needsAttention: sql<number>`COUNT(*) FILTER (WHERE ${needsAttentionCase})::int`.as("needs_attention"),
+    completedHandover: sql<number>`COUNT(*) FILTER (WHERE ${completedCase})::int`.as("completed_handover"),
+    lastUpdatedAt: sql<string | null>`MAX(${casesTable.updatedAt})::text`.as("last_updated_at"),
+  };
+}
+
+export function portalProgressAggregateSelect() {
+  const stage = classifyStageSqlCaseExpr();
+  return {
+    spa: sql<number>`COUNT(*) FILTER (WHERE (${stage}) IN ('spa','spa_stamped'))::int`.as("spa_progressing"),
+    loan: sql<number>`COUNT(*) FILTER (WHERE (${stage}) = 'loan')::int`.as("loan_progressing"),
+    mot: sql<number>`COUNT(*) FILTER (WHERE (${stage}) = 'mot')::int`.as("mot_progressing"),
+    completed: sql<number>`COUNT(*) FILTER (WHERE (${stage}) = 'completed')::int`.as("completed_progressing"),
+    total: sql<number>`COUNT(*)::int`.as("total"),
+  };
+}
+
+function classifyStageSqlCaseExpr(): SQL {
+  return sql`CASE
+    WHEN ${caseKeyDatesTable.completionDate} IS NOT NULL THEN 'completed'
+    WHEN (
+      ${caseKeyDatesTable.motReceivedDate} IS NOT NULL
+      OR ${caseKeyDatesTable.motSignedDate} IS NOT NULL
+      OR ${caseKeyDatesTable.motStampedDate} IS NOT NULL
+      OR ${caseKeyDatesTable.motRegisteredDate} IS NOT NULL
+      OR ${caseKeyDatesTable.dischargeTitleReceivedOn} IS NOT NULL
+      OR ${caseKeyDatesTable.consentToTransferDate} IS NOT NULL
+    ) THEN 'mot'
+    WHEN (
+      ${caseKeyDatesTable.actingLetterIssuedDate} IS NOT NULL
+      OR ${caseKeyDatesTable.bankLuReceivedDate} IS NOT NULL
+      OR ${caseKeyDatesTable.adviceToBankDate} IS NOT NULL
+      OR ${caseKeyDatesTable.letterOfOfferDate} IS NOT NULL
+      OR ${caseKeyDatesTable.letterOfOfferStampedDate} IS NOT NULL
+      OR ${caseKeyDatesTable.loanDocsSignedDate} IS NOT NULL
+      OR ${caseKeyDatesTable.loanDocsPendingDate} IS NOT NULL
+      OR ${caseKeyDatesTable.loanAgreementStampedDate} IS NOT NULL
+    ) THEN 'loan'
+    WHEN ${caseKeyDatesTable.spaStampedDate} IS NOT NULL THEN 'spa_stamped'
+    WHEN ${caseKeyDatesTable.spaSignedDate} IS NOT NULL OR ${caseKeyDatesTable.spaDate} IS NOT NULL OR ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL THEN 'spa'
+    ELSE 'pre_spa'
+  END`;
+}
+
+export function portalStagePredicateSql(stage: DevPortalStageFilter): SQL<unknown> | null {
+  switch (stage) {
+    case "all":
+      return null;
+    case "spa":
+      return sql`(
+        (
+          (
+            ${caseKeyDatesTable.spaSignedDate} IS NOT NULL
+            OR ${caseKeyDatesTable.spaDate} IS NOT NULL
+            OR ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL
+          )
+          AND ${caseKeyDatesTable.spaStampedDate} IS NULL
+        )
+        OR (
+          ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL
+          AND ${caseKeyDatesTable.spaSignedDate} IS NULL
+          AND ${caseKeyDatesTable.spaStampedDate} IS NULL
+          AND (extract(epoch from (now() - ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn}))::int / 86400) > 5
+        )
+      )`;
+    case "spa_stamped":
+      return sql`${caseKeyDatesTable.spaStampedDate} IS NOT NULL`;
+    case "loan":
+      return sql`(
+        ${caseKeyDatesTable.actingLetterIssuedDate} IS NOT NULL
+        OR ${caseKeyDatesTable.bankLuReceivedDate} IS NOT NULL
+        OR ${caseKeyDatesTable.adviceToBankDate} IS NOT NULL
+        OR ${caseKeyDatesTable.letterOfOfferDate} IS NOT NULL
+        OR ${caseKeyDatesTable.letterOfOfferStampedDate} IS NOT NULL
+        OR ${caseKeyDatesTable.loanDocsSignedDate} IS NOT NULL
+        OR ${caseKeyDatesTable.loanDocsPendingDate} IS NOT NULL
+        OR ${caseKeyDatesTable.loanAgreementStampedDate} IS NOT NULL
+      )`;
+    case "attention": {
+      const actingLetterOldNoLu = sql`${caseKeyDatesTable.actingLetterIssuedDate} IS NOT NULL
+        AND ${caseKeyDatesTable.bankLuReceivedDate} IS NULL
+        AND (extract(epoch from (now() - ${caseKeyDatesTable.actingLetterIssuedDate}))::int / 86400) > 5`;
+      const spaForwardOldNoSigned = sql`${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL
+        AND ${caseKeyDatesTable.spaSignedDate} IS NULL
+        AND ${caseKeyDatesTable.spaStampedDate} IS NULL
+        AND (extract(epoch from (now() - ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn}))::int / 86400) > 5`;
+      return sql`(${actingLetterOldNoLu} OR ${spaForwardOldNoSigned})`;
+    }
+    case "completed":
+      return sql`${caseKeyDatesTable.completionDate} IS NOT NULL`;
+    default:
+      return null;
+  }
+}
 
 export type DeveloperPortalCaseJoin = {
   id: number;

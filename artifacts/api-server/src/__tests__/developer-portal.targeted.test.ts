@@ -103,10 +103,12 @@ describe("DEVPORTAL-1 · unit label priority", () => {
 });
 
 describe("DEVPORTAL-2 · SPA completed shows status Completed + date", () => {
-  const r = deriveSpaStatus(kd({ spaStampedDate: "2026-04-09" }));
-  expect(r.status).toBe("Completed" as DevPortalStatus);
-  expect(r.label).toBe("SPA Stamped");
-  expect(r.date).toBe("2026-04-09");
+  it("deriveSpaStatus sets Completed + date + label for stamped", () => {
+    const r = deriveSpaStatus(kd({ spaStampedDate: "2026-04-09" }));
+    expect(r.status).toBe("Completed" as DevPortalStatus);
+    expect(r.label).toBe("SPA Stamped");
+    expect(r.date).toBe("2026-04-09");
+  });
 });
 
 describe("DEVPORTAL-3 · future MOT stage Not Yet Required", () => {
@@ -123,82 +125,94 @@ describe("DEVPORTAL-3 · future MOT stage Not Yet Required", () => {
 });
 
 describe("DEVPORTAL-4 · overdue milestone → Attention Required", () => {
-  const base = kd({ actingLetterIssuedDate: "2026-08-01" });
-  const now = new Date("2026-08-14T00:00:00Z");
-  const loan = deriveLoanStatus(base, "loan");
-  expect(loan.status).toBe("Attention Required" as DevPortalStatus);
-  expect(loan.waitingFor).toMatch(/Bank/);
-  expect(loan.ageDays).toBeGreaterThanOrEqual(13 - 1);
-  const next = deriveNextAction(base, "loan");
-  expect(next?.attentionRequired).toBe(true);
+  it("Acting letter >5d old without Bank LU → Attention Required + true attn flag on nextAction", () => {
+    const base = kd({ actingLetterIssuedDate: "2026-08-01" });
+    const now = new Date("2026-08-14T00:00:00Z");
+    const loan = deriveLoanStatus(base, "loan");
+    expect(loan.status).toBe("Attention Required" as DevPortalStatus);
+    expect(loan.waitingFor).toMatch(/Bank/);
+    expect(loan.ageDays).toBeGreaterThanOrEqual(13 - 1);
+    const next = deriveNextAction(base, "loan");
+    expect(next?.attentionRequired).toBe(true);
+  });
 });
 
 describe("DEVPORTAL-5 · summary card stage filters", () => {
-  const rows: UnitListDto[] = [
-    listOf({ spaStatus: "Completed", spaLabel: "SPA Stamped", loanStatus: "In Progress", completed: false }),
-    listOf({ spaStatus: "Completed", spaLabel: "SPA Stamped", loanStatus: "In Progress", completed: false }),
-    listOf({ spaStatus: "In Progress", spaLabel: "SPA Signing", loanStatus: "Not Yet Required", completed: false }),
-    listOf({ spaStatus: "Attention Required", spaLabel: "SPA Signing", loanStatus: "Not Yet Required", completed: false, attention: true }),
-    listOf({ spaStatus: "Completed", spaLabel: "SPA Stamped", loanStatus: "Completed", completed: true }),
-  ];
-  const s = summarizeCards(rows);
-  expect(s.totalUnits).toBe(5);
-  expect(s.spaStamped).toBe(3);
-  expect(s.spaInProgress).toBe(2);
-  expect(s.loanInProgress).toBe(2);
-  expect(s.needsAttention).toBeGreaterThanOrEqual(1);
-  expect(s.completedHandover).toBe(1);
+  it("counts spaStamped / spaInProgress / loanInProgress / attention / completed correctly", () => {
+    const rows: UnitListDto[] = [
+      listOf({ spaStatus: "Completed", spaLabel: "SPA Stamped", loanStatus: "In Progress", completed: false }),
+      listOf({ spaStatus: "Completed", spaLabel: "SPA Stamped", loanStatus: "In Progress", completed: false }),
+      listOf({ spaStatus: "In Progress", spaLabel: "SPA Signing", loanStatus: "Not Yet Required", completed: false }),
+      listOf({ spaStatus: "Attention Required", spaLabel: "SPA Signing", loanStatus: "Not Yet Required", completed: false, attention: true }),
+      listOf({ spaStatus: "Completed", spaLabel: "SPA Stamped", loanStatus: "Completed", completed: true }),
+    ];
+    const s = summarizeCards(rows);
+    expect(s.totalUnits).toBe(5);
+    expect(s.spaStamped).toBe(3);
+    expect(s.spaInProgress).toBe(2);
+    expect(s.loanInProgress).toBe(2);
+    expect(s.needsAttention).toBeGreaterThanOrEqual(1);
+    expect(s.completedHandover).toBe(1);
+  });
 });
 
 describe("DEVPORTAL-7 · detail DTO carries correct project/case metadata", () => {
-  const row = joinedCase({
-    propertyDetails: { parcelNo: "PT21085", lotNo: "Z-0002" },
-    kd_spaStampedDate: "2026-04-09",
-    kd_actingLetterIssuedDate: "2026-08-09",
+  it("joined row maps → DTO keeps project/phase/reference/purchasers", () => {
+    const row = joinedCase({
+      propertyDetails: { parcelNo: "PT21085", lotNo: "Z-0002" },
+      kd_spaStampedDate: "2026-04-09",
+      kd_actingLetterIssuedDate: "2026-08-09",
+    });
+    const dto = mapJoinedCaseToListDto(row);
+    expect(dto.referenceNo).toBe("CON/001");
+    expect(dto.projectName).toBe("LEGASI");
+    expect(dto.phase).toBe("Phase 1");
+    expect(dto.purchasers.map((p) => p.displayName)).toEqual(["LIMKL", "LIMKL 1"]);
   });
-  const dto = mapJoinedCaseToListDto(row);
-  expect(dto.referenceNo).toBe("CON/001");
-  expect(dto.projectName).toBe("LEGASI");
-  expect(dto.phase).toBe("Phase 1");
-  expect(dto.purchasers.map((p) => p.displayName)).toEqual(["LIMKL", "LIMKL 1"]);
 });
 
 describe("DEVPORTAL-8 · current action derives automatically from workflow", () => {
-  const k = kd({ actingLetterIssuedDate: "2026-08-09", bankLuReceivedDate: null });
-  const a = deriveNextAction(k, "loan");
-  expect(a).not.toBeNull();
-  expect(a!.label.length).toBeGreaterThan(0);
-  expect(["Bank", "Law Firm", "Purchaser"].some((v) => a!.waitingFor.includes(v))).toBe(true);
+  it("acting letter + no Bank LU → nextAction label + wait-for Bank/Lawyer/Purchaser non-empty", () => {
+    const k = kd({ actingLetterIssuedDate: "2026-08-09", bankLuReceivedDate: null });
+    const a = deriveNextAction(k, "loan");
+    expect(a).not.toBeNull();
+    expect(a!.label.length).toBeGreaterThan(0);
+    expect(["Bank", "Law Firm", "Purchaser"].some((v) => a!.waitingFor.includes(v))).toBe(true);
+  });
 });
 
 describe("DEVPORTAL-9 · Developer user cannot see NRIC/TIN fields in DTO", () => {
-  const row = joinedCase({ loanDetails: { nric: "880101-10-5001", tin: "C1234567" }, propertyDetails: { nric: "880101-10-5002" } });
-  const dto = mapJoinedCaseToListDto(row);
-  const serialized = JSON.stringify(dto);
-  expect(serialized).not.toMatch(/880101-10-5001/);
-  expect(serialized).not.toMatch(/880101-10-5002/);
-  expect(serialized).not.toMatch(/"nric"/i);
-  expect(serialized).not.toMatch(/"tin"/i);
+  it("mapJoinedCaseToListDto scrubs sensitive data in loanDetails / propertyDetails", () => {
+    const row = joinedCase({ loanDetails: { nric: "880101-10-5001", tin: "C1234567" }, propertyDetails: { nric: "880101-10-5002" } });
+    const dto = mapJoinedCaseToListDto(row);
+    const serialized = JSON.stringify(dto);
+    expect(serialized).not.toMatch(/880101-10-5001/);
+    expect(serialized).not.toMatch(/880101-10-5002/);
+    expect(serialized).not.toMatch(/"nric"/i);
+    expect(serialized).not.toMatch(/"tin"/i);
+  });
 });
 
 describe("DEVPORTAL-10 · deny list blocks accounting/PV/ledger APIs", () => {
-  const bad = [
-    "/api/accounting",
-    "/api/payment-voucher/any",
-    "/api/invoices/1",
-    "/api/receipts/export",
-    "/api/quotations",
-    "/api/audit/csv",
-    "/api/cases/99/ledger/trust",
-  ];
-  for (const b of bad) expect(isDeveloperForbiddenApi(b)).toBe(true);
-  const good = [
-    "/developer/portal/overview",
-    "/developer/portal/units",
-    "/developer/cases/1/messages",
-    "/api/health",
-  ];
-  for (const g of good) expect(isDeveloperForbiddenApi(g)).toBe(false);
+  it("forbids all bad paths; allows developer portal + health", () => {
+    const bad = [
+      "/api/accounting",
+      "/api/payment-voucher/any",
+      "/api/invoices/1",
+      "/api/receipts/export",
+      "/api/quotations",
+      "/api/audit/csv",
+      "/api/cases/99/ledger/trust",
+    ];
+    for (const b of bad) expect(isDeveloperForbiddenApi(b)).toBe(true);
+    const good = [
+      "/developer/portal/overview",
+      "/developer/portal/units",
+      "/developer/cases/1/messages",
+      "/api/health",
+    ];
+    for (const g of good) expect(isDeveloperForbiddenApi(g)).toBe(false);
+  });
 });
 
 describe("DEVPORTAL-12 · one canonical workflow update reflects in same status", () => {
