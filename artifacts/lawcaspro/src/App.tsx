@@ -103,6 +103,7 @@ const AccountingFileListing = lazy(() => import("@/pages/app/accounting/file-lis
 const BankReconciliationPage = lazy(() => import("@/pages/app/accounting/bank-reconciliation"));
 const InvoiceDetail = lazy(() => import("@/pages/app/accounting/invoices/detail"));
 const ReceiptDetail = lazy(() => import("@/pages/app/accounting/receipts/detail"));
+const PaymentVoucherDetail = lazy(() => import("@/pages/app/accounting/payment-vouchers/detail"));
 const FileCustodyPage = lazy(() => import("@/pages/app/file-custody"));
 const Reports = lazy(() => import("@/pages/app/reports"));
 const BillsDeliveredBook = lazy(() => import("@/pages/app/reports/bills-delivered-book"));
@@ -470,6 +471,13 @@ function AppRoutes() {
             <UserFeatureGuard feature="accounting.receipt" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="accounting.receipt" />}>
               <PermissionGuard module="accounting" action="read">
                 <ReceiptDetail />
+              </PermissionGuard>
+            </UserFeatureGuard>
+          )} />
+          <Route path="/app/accounting/payment-vouchers/:id" component={() => (
+            <UserFeatureGuard feature="accounting.payment_voucher" hideDisabled={false} fallback={<UserFeatureNotEnabledPage featureKey="accounting.payment_voucher" />}>
+              <PermissionGuard module="accounting" action="read">
+                <PaymentVoucherDetail />
               </PermissionGuard>
             </UserFeatureGuard>
           )} />

@@ -2740,7 +2740,7 @@ export function PaymentVouchersTab() {
       <Dialog open={historyOpen} onOpenChange={(open) => { if (!open) setHistoryVoucherId(null); setHistoryOpen(open); }}>
         <DialogContent className="sm:max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
           <DialogHeader>
-            <DialogTitle>Payment Voucher History & Audit Trail</DialogTitle>
+            <DialogTitle>PV Activity</DialogTitle>
             <DialogDescription>
               {historyVoucherId ? `PV #${historyVoucherId} — timeline of all actions` : "Select a voucher to view history."}
             </DialogDescription>

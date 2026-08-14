@@ -7,7 +7,7 @@ import {
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, Minus, X, MoreHorizontal, Share2, AlertTriangle, Loader2, Activity, FolderKey, ChevronRight } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Clock, User, Building2, MapPin, Tag, Receipt, Printer, Upload, Download, Trash2, Plus, Minus, X, MoreHorizontal, Share2, AlertTriangle, Loader2, Activity, FolderKey, ChevronRight, WalletCards } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -965,6 +965,9 @@ export default function CaseDetail() {
   const himsTrackerFeature = useFeature("hims.tracker");
   const canViewHims = hasPermission(user, "cases", "read");
   const himsTabVisible = canViewHims && himsModuleFeature.enabled && himsTrackerFeature.enabled;
+
+  const pvCreateFeature = useFeature("accounting.payment_voucher.create");
+  const canCreatePv = hasPermission(user, "accounting", "read") && pvCreateFeature.enabled;
 
   const {
     data: caseInfo,
@@ -2966,6 +2969,23 @@ export default function CaseDetail() {
             <Receipt className="w-4 h-4 mr-2" />
             Generate Quotation
           </Button>
+          {canCreatePv ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                const p = new URLSearchParams();
+                p.set("tab", "payment-vouchers");
+                p.set("openCreate", "1");
+                p.set("caseId", String((caseInfo as any).id ?? ""));
+                p.set("caseTitle", String((caseInfo as any).referenceNo ?? ""));
+                setLocation(`/app/accounting?${p.toString()}`);
+              }}
+            >
+              <WalletCards className="w-4 h-4 mr-2" />
+              Create PV
+            </Button>
+          ) : null}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="icon" aria-label="More actions">
@@ -2973,6 +2993,18 @@ export default function CaseDetail() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              {canCreatePv ? (
+                <DropdownMenuItem onClick={() => {
+                  const p = new URLSearchParams();
+                  p.set("tab", "payment-vouchers");
+                  p.set("openCreate", "1");
+                  p.set("caseId", String((caseInfo as any).id ?? ""));
+                  p.set("caseTitle", String((caseInfo as any).referenceNo ?? ""));
+                  setLocation(`/app/accounting?${p.toString()}`);
+                }}>
+                  <WalletCards className="w-4 h-4 mr-2" /> Create Payment Voucher
+                </DropdownMenuItem>
+              ) : null}
               <DropdownMenuItem onClick={() => setLocation("/app/documents?tab=firm")}>
                 Configure Templates
               </DropdownMenuItem>

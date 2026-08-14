@@ -11466,37 +11466,12 @@ function startCaseDocumentRunRunner(
 }
 
 async function renderFallbackPdfFromDocx(docxBytes: Buffer): Promise<Buffer> {
-  // #region debug-point D:docx-fallback-render
-  (() => {
-    import("node:fs")
-      .then((fs) => {
-        const p = ".dbg/document-generation-stability.env";
-        let u = "http://127.0.0.1:7777/event";
-        let s = "document-generation-stability";
-        try {
-          const e = fs.readFileSync(p, "utf8");
-          u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-          s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-        } catch {}
-        fetch(u, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId: s,
-            runId: "pre",
-            hypothesisId: "D",
-            location: "documents.ts:renderFallbackPdfFromDocx",
-            msg: "[DEBUG] renderFallbackPdfFromDocx used",
-            ts: Date.now(),
-            data: {
-              docxBytesLength: docxBytes?.length ?? null,
-            },
-          }),
-        }).catch(() => {});
-      })
-      .catch(() => {});
-  })();
-  // #endregion
+  try {
+    logger.warn(
+      { docxBytesLength: docxBytes?.length ?? null },
+      "[documents] renderFallbackPdfFromDocx used",
+    );
+  } catch {}
   const pdfDoc = await PDFDocument.create();
   const page = pdfDoc.addPage([595.28, 841.89]);
   const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
@@ -17592,6 +17567,151 @@ async function processAutomationGenerationJobStep(
     );
   } catch {}
 
+  const existingObjectPath =
+    typeof (item as any).object_path === "string"
+      ? String((item as any).object_path)
+      : null;
+  const hasValidExistingOutput = Boolean(
+    existingObjectPath &&
+      (existingObjectPath.startsWith("/objects/") ||
+        existingObjectPath.startsWith("objects/")),
+  );
+  const jobConfigAny =
+    (job as any)?.config && typeof (job as any).config === "object"
+      ? ((job as any).config as Record<string, unknown>)
+      : {};
+  const forceSkip = Boolean(jobConfigAny.force);
+  if (!forceSkip && hasValidExistingOutput) {
+    try {
+      const setParts: Array<ReturnType<typeof sql>> = [
+        sql`status = 'success'`,
+        sql`error_code = NULL`,
+        sql`error_message = NULL`,
+        sql`finished_at = COALESCE(finished_at, now())`,
+      ];
+      if (caps.items.phase) setParts.push(sql`phase = 'completed'`);
+      if (caps.items.diagnostic) {
+        setParts.push(
+          sql`diagnostic = COALESCE(diagnostic, '{}'::jsonb) || jsonb_build_object(
+                'skippedExisting', true,
+                'skipReason', 'object_path_already_exists',
+                'existingObjectPath', ${existingObjectPath}
+              )`,
+        );
+      }
+      await queryRows(
+        r,
+        sql`
+          UPDATE document_generation_job_items
+          SET ${sql.join(setParts, sql`, `)}
+          WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
+        `,
+      );
+      await updateJobCounts(r, args);
+      try {
+        logger.info(
+          {
+            firmId: args.firmId,
+            jobId: args.jobId,
+            itemId: jobItemId,
+            caseId,
+            templateSource,
+            templateId: templateSource === "master" ? platformDocumentId : templateId,
+            existingObjectPath,
+            skipReason: "object_path_already_exists",
+            elapsedMs: Date.now() - stepStartedAt,
+          },
+          "docgen.run_next.skip_existing_output",
+        );
+      } catch {}
+    } catch {}
+    return;
+  }
+
+  if (!forceSkip) {
+    try {
+      const templateIdWhere =
+        templateSource === "master"
+          ? sql`platform_document_id = ${platformDocumentId}`
+          : sql`document_template_id = ${templateId}`;
+      const existingDocRows = await queryRows(
+        r,
+        sql`
+          SELECT id, object_path, file_name
+          FROM case_documents
+          WHERE firm_id = ${args.firmId}
+            AND case_id = ${caseId}
+            AND ${templateIdWhere}
+            AND object_path IS NOT NULL
+            AND object_path <> ''
+          ORDER BY id DESC
+          LIMIT 1
+        `,
+      );
+      const existingDoc = existingDocRows[0] as any;
+      const existingDocObjectPath =
+        existingDoc && typeof existingDoc.object_path === "string"
+          ? String(existingDoc.object_path)
+          : null;
+      if (
+        existingDocObjectPath &&
+        (existingDocObjectPath.startsWith("/objects/") ||
+          existingDocObjectPath.startsWith("objects/"))
+      ) {
+        const outputFileName =
+          existingDoc && typeof existingDoc.file_name === "string"
+            ? String(existingDoc.file_name)
+            : String((item as any).file_name ?? "generated-document");
+        const setParts2: Array<ReturnType<typeof sql>> = [
+          sql`status = 'success'`,
+          sql`error_code = NULL`,
+          sql`error_message = NULL`,
+          sql`object_path = ${existingDocObjectPath}`,
+          sql`file_name = ${outputFileName}`,
+          sql`case_document_id = ${Number(existingDoc.id)}`,
+          sql`finished_at = COALESCE(finished_at, now())`,
+        ];
+        if (caps.items.phase) setParts2.push(sql`phase = 'completed'`);
+        if (caps.items.diagnostic) {
+          setParts2.push(
+            sql`diagnostic = COALESCE(diagnostic, '{}'::jsonb) || jsonb_build_object(
+                  'skippedExisting', true,
+                  'skipReason', 'case_document_generated_row_exists',
+                  'existingCaseDocumentId', ${Number(existingDoc.id)},
+                  'existingObjectPath', ${existingDocObjectPath}
+                )`,
+          );
+        }
+        await queryRows(
+          r,
+          sql`
+            UPDATE document_generation_job_items
+            SET ${sql.join(setParts2, sql`, `)}
+            WHERE id = ${Number((item as any).id)} AND firm_id = ${args.firmId}
+          `,
+        );
+        await updateJobCounts(r, args);
+        try {
+          logger.info(
+          {
+            firmId: args.firmId,
+            jobId: args.jobId,
+            itemId: jobItemId,
+            caseId,
+            templateSource,
+            templateId: templateSource === "master" ? platformDocumentId : templateId,
+            existingCaseDocumentId: Number(existingDoc.id),
+            existingObjectPath: existingDocObjectPath,
+            skipReason: "case_document_generated_row_exists",
+            elapsedMs: Date.now() - stepStartedAt,
+          },
+          "docgen.run_next.skip_existing_output",
+        );
+      } catch {}
+      }
+    } catch (skipErr) {}
+  }
+
   const deadlineAt =
     typeof opts?.deadlineAt === "number" && Number.isFinite(opts.deadlineAt)
       ? Math.trunc(opts.deadlineAt)
@@ -18516,50 +18636,26 @@ router.post(
         try {
           out = await fn(rlsDb);
         } catch (err) {
-          // #region debug-point A:with-tenant-db-error
-          (() => {
-            import("node:fs")
-              .then((fs) => {
-                const p = ".dbg/document-generation-stability.env";
-                let u = "http://127.0.0.1:7777/event";
-                let s = "document-generation-stability";
-                try {
-                  const e = fs.readFileSync(p, "utf8");
-                  u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-                  s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-                } catch {}
-                const info = extractDbErrorInfo(err);
-                fetch(u, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                    sessionId: s,
-                    runId: "pre",
-                    hypothesisId: "A",
-                    location: "documents.ts:withTenantDb",
-                    msg: "[DEBUG] withTenantDb fn threw",
-                    ts: Date.now(),
-                    traceId: requestId,
-                    data: {
-                      requestId,
-                      firmId,
-                      userId,
-                      sqlstate: info.sqlstate,
-                      table: info.table,
-                      column: info.column,
-                      constraint: info.constraint,
-                      message: info.message,
-                      code:
-                        err instanceof DocumentGenerationError
-                          ? err.code
-                          : undefined,
-                    },
-                  }),
-                }).catch(() => {});
-              })
-              .catch(() => {});
-          })();
-          // #endregion
+          const info = extractDbErrorInfo(err);
+          try {
+            logger.error(
+              {
+                requestId,
+                firmId,
+                userId,
+                sqlstate: info.sqlstate,
+                table: info.table,
+                column: info.column,
+                constraint: info.constraint,
+                message: info.message,
+                code:
+                  err instanceof DocumentGenerationError
+                    ? err.code
+                    : undefined,
+              },
+              "[documents] withTenantDb fn threw",
+            );
+          } catch {}
           throw err;
         }
         ok = true;
@@ -18672,50 +18768,26 @@ router.post(
 
     const useSync = false;
 
-    // #region debug-point A:generate-now-start
-    (() => {
-      import("node:fs")
-        .then((fs) => {
-          const p = ".dbg/document-generation-stability.env";
-          let u = "http://127.0.0.1:7777/event";
-          let s = "document-generation-stability";
-          try {
-            const e = fs.readFileSync(p, "utf8");
-            u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-            s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-          } catch {}
-          fetch(u, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              sessionId: s,
-              runId: "pre",
-              hypothesisId: "A",
-              location: "documents.ts:/documents/automation/generate-now",
-              msg: "[DEBUG] generate-now start",
-              ts: Date.now(),
-              traceId: requestId,
-              data: {
-                requestId,
-                firmId,
-                userId,
-                caseCount: caseIds.length,
-                templateCount: templates.length,
-                itemCount: caseIds.length * templates.length,
-                includeDiagnostics,
-                useSync,
-                limits: {
-                  maxCases: 10,
-                  maxTemplates: 20,
-                  maxItems: 40,
-                },
-              },
-            }),
-          }).catch(() => {});
-        })
-        .catch(() => {});
-    })();
-    // #endregion
+    try {
+      logger.info(
+        {
+          requestId,
+          firmId,
+          userId,
+          caseCount: caseIds.length,
+          templateCount: templates.length,
+          itemCount: caseIds.length * templates.length,
+          includeDiagnostics,
+          useSync,
+          limits: {
+            maxCases: 10,
+            maxTemplates: 20,
+            maxItems: 40,
+          },
+        },
+        "[documents] generate-now start",
+      );
+    } catch {}
 
     const showMasterDocuments = await (async () => {
       return await withTenantDb(async (r) => {
@@ -19033,46 +19105,22 @@ router.post(
             return rows[0] as any;
           } catch (err) {
             const info = extractDbErrorInfo(err);
-            // #region debug-point C:template-meta-query-failed
-            (() => {
-              import("node:fs")
-                .then((fs) => {
-                  const p = ".dbg/document-generation-stability.env";
-                  let u = "http://127.0.0.1:7777/event";
-                  let s = "document-generation-stability";
-                  try {
-                    const e = fs.readFileSync(p, "utf8");
-                    u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-                    s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-                  } catch {}
-                  fetch(u, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      sessionId: s,
-                      runId: "pre",
-                      hypothesisId: "C",
-                      location: "documents.ts:loadTemplateMeta",
-                      msg: "[DEBUG] template metadata query failed",
-                      ts: Date.now(),
-                      traceId: requestId,
-                      data: {
-                        requestId,
-                        firmId,
-                        userId,
-                        template: cacheKey,
-                        sqlstate: info.sqlstate,
-                        table: info.table,
-                        column: info.column,
-                        constraint: info.constraint,
-                        message: info.message,
-                      },
-                    }),
-                  }).catch(() => {});
-                })
-                .catch(() => {});
-            })();
-            // #endregion
+            try {
+              logger.error(
+                {
+                  requestId,
+                  firmId,
+                  userId,
+                  template: cacheKey,
+                  sqlstate: info.sqlstate,
+                  table: info.table,
+                  column: info.column,
+                  constraint: info.constraint,
+                  message: info.message,
+                },
+                "[documents] template metadata query failed",
+              );
+            } catch {}
             throw new DocumentGenerationError(
               422,
               "TEMPLATE_METADATA_QUERY_FAILED",
@@ -19160,44 +19208,20 @@ router.post(
           const cacheKey = `${t.source}:${t.id}`;
 
           try {
-            // #region debug-point B:item-start
-            (() => {
-              import("node:fs")
-                .then((fs) => {
-                  const p = ".dbg/document-generation-stability.env";
-                  let u = "http://127.0.0.1:7777/event";
-                  let s = "document-generation-stability";
-                  try {
-                    const e = fs.readFileSync(p, "utf8");
-                    u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-                    s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-                  } catch {}
-                  fetch(u, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      sessionId: s,
-                      runId: "pre",
-                      hypothesisId: "B",
-                      location: "documents.ts:generate-now:item",
-                      msg: "[DEBUG] item start",
-                      ts: Date.now(),
-                      traceId: requestId,
-                      data: {
-                        requestId,
-                        firmId,
-                        userId,
-                        caseIndex,
-                        caseId,
-                        templateIndex,
-                        template: cacheKey,
-                      },
-                    }),
-                  }).catch(() => {});
-                })
-                .catch(() => {});
-            })();
-            // #endregion
+            try {
+              logger.info(
+                {
+                  requestId,
+                  firmId,
+                  userId,
+                  caseIndex,
+                  caseId,
+                  templateIndex,
+                  template: cacheKey,
+                },
+                "[documents] generate-now item start",
+              );
+            } catch {}
             const out = await withTenantDb(async (r) => {
               const context = await buildCaseContext(r, caseId, firmId, cache);
               if (!context) {
@@ -19393,44 +19417,20 @@ router.post(
             outputs.push(out);
             generatedCount += 1;
             successCount += 1;
-            // #region debug-point B:item-success
-            (() => {
-              import("node:fs")
-                .then((fs) => {
-                  const p = ".dbg/document-generation-stability.env";
-                  let u = "http://127.0.0.1:7777/event";
-                  let s = "document-generation-stability";
-                  try {
-                    const e = fs.readFileSync(p, "utf8");
-                    u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-                    s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-                  } catch {}
-                  fetch(u, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      sessionId: s,
-                      runId: "pre",
-                      hypothesisId: "B",
-                      location: "documents.ts:generate-now:item",
-                      msg: "[DEBUG] item success",
-                      ts: Date.now(),
-                      traceId: requestId,
-                      data: {
-                        requestId,
-                        firmId,
-                        userId,
-                        caseId,
-                        template: cacheKey,
-                        zipPath: out.zipPath,
-                        bytesLength: out.bytes?.length ?? null,
-                      },
-                    }),
-                  }).catch(() => {});
-                })
-                .catch(() => {});
-            })();
-            // #endregion
+            try {
+              logger.info(
+                {
+                  requestId,
+                  firmId,
+                  userId,
+                  caseId,
+                  template: cacheKey,
+                  zipPath: out.zipPath,
+                  bytesLength: out.bytes?.length ?? null,
+                },
+                "[documents] generate-now item success",
+              );
+            } catch {}
           } catch (err) {
             const info = pickDbInfo(err);
             const queryName = pickQueryLabel(err);
@@ -19507,49 +19507,6 @@ router.post(
                 "[documents.generate-now] item failed",
               );
             } catch {}
-            // #region debug-point B:item-failed
-            (() => {
-              import("node:fs")
-                .then((fs) => {
-                  const p = ".dbg/document-generation-stability.env";
-                  let u = "http://127.0.0.1:7777/event";
-                  let s = "document-generation-stability";
-                  try {
-                    const e = fs.readFileSync(p, "utf8");
-                    u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-                    s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-                  } catch {}
-                  fetch(u, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      sessionId: s,
-                      runId: "pre",
-                      hypothesisId: "B",
-                      location: "documents.ts:generate-now:item",
-                      msg: "[DEBUG] item failed",
-                      ts: Date.now(),
-                      traceId: requestId,
-                      data: {
-                        requestId,
-                        firmId,
-                        userId,
-                        caseId,
-                        template: cacheKey,
-                        errorCode,
-                        queryName,
-                        sqlstate: info.sqlstate,
-                        table: info.table,
-                        column: info.column,
-                        constraint: info.constraint,
-                        originalErrorMessage,
-                      },
-                    }),
-                  }).catch(() => {});
-                })
-                .catch(() => {});
-            })();
-            // #endregion
           }
         }
       }
@@ -20220,39 +20177,17 @@ router.post(
       one(req.headers["x-vercel-id"] as any) ||
       undefined;
     const jobId = one((req.params as any).jobId) ?? "";
-    // #region debug-point BE:run-next-start
-    (() => {
-      import("node:fs")
-        .then((fs) => {
-          const p = ".dbg/doc-automation-generate-job.env";
-          let u = "http://127.0.0.1:7777/event";
-          let s = "doc-automation-generate-job";
-          try {
-            const e = fs.readFileSync(p, "utf8");
-            u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-            s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-          } catch {}
-          fetch(u, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              sessionId: s,
-              runId: `be-${Date.now()}`,
-              hypothesisId: "H1",
-              location: "documents.ts:/documents/jobs/:jobId/run-next",
-              msg: "run-next:start",
-              ts: Date.now(),
-              data: {
-                requestId,
-                firmId: req.firmId ?? null,
-                jobId,
-              },
-            }),
-          }).catch(() => {});
-        })
-        .catch(() => {});
-    })();
-    // #endregion
+    try {
+      logger.info(
+        {
+          requestId: requestId ?? null,
+          firmId: req.firmId ?? null,
+          jobId,
+          stage: "run_next_start",
+        },
+        "docgen.run_next.start",
+      );
+    } catch {}
     if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
       res.status(400).json({
         ok: false,
@@ -20747,66 +20682,27 @@ router.post(
         typeof (err as any)?.queryName === "string"
           ? String((err as any).queryName)
           : null;
-      req.log.error(
+      logger.error(
         {
           route: req.originalUrl,
-          requestId,
+          requestId: requestId ?? null,
           jobId,
           firmId: req.firmId ?? null,
+          userId: req.userId ?? null,
+          stage: "run_next_failed",
           queryName,
-          errCode,
-          sqlState: info.sqlstate,
-          table: info.table,
-          column: info.column,
-          constraint: info.constraint,
-          detail: info.detail,
-          hint: info.hint,
-          position: info.position,
+          code: errCode ?? info.sqlstate ?? null,
+          sqlState: info.sqlstate ?? null,
+          table: info.table ?? null,
+          column: info.column ?? null,
+          constraint: info.constraint ?? null,
+          detail: info.detail ?? null,
+          hint: info.hint ?? null,
+          position: info.position ?? null,
           message: errMessage,
         },
         "documents.run-next failed",
       );
-      // #region debug-point BE:run-next-failed
-      (() => {
-        import("node:fs")
-          .then((fs) => {
-            const p = ".dbg/doc-automation-generate-job.env";
-            let u = "http://127.0.0.1:7777/event";
-            let s = "doc-automation-generate-job";
-            try {
-              const e = fs.readFileSync(p, "utf8");
-              u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-              s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-            } catch {}
-            fetch(u, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                sessionId: s,
-                runId: `be-${Date.now()}`,
-                hypothesisId: "H2",
-                location: "documents.ts:/documents/jobs/:jobId/run-next",
-                msg: "run-next:failed",
-                ts: Date.now(),
-                data: {
-                  requestId,
-                  firmId: req.firmId ?? null,
-                  jobId,
-                  sqlstate: info.sqlstate,
-                  table: info.table,
-                  column: info.column,
-                  constraint: info.constraint,
-                  detail: info.detail,
-                  hint: info.hint,
-                  position: info.position,
-                  message: info.message,
-                },
-              }),
-            }).catch(() => {});
-          })
-          .catch(() => {});
-      })();
-      // #endregion
       res.status(500).json({
         ok: false,
         error: {

@@ -41,6 +41,12 @@ type HealthCheckResponseBody = { status: string };
 
 const startedAtIso = new Date().toISOString();
 
+routerInternal.get("/health", (_req: ReqLike, res: ResLike) => {
+  const data: HealthCheckResponseBody = { status: "ok" };
+  res.setHeader("cache-control", "no-store, max-age=0");
+  res.status(200).json(data);
+});
+
 routerInternal.get("/healthz", (_req: ReqLike, res: ResLike) => {
   const data: HealthCheckResponseBody = { status: "ok" };
   res.json(data);

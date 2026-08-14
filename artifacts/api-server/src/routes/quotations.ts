@@ -344,6 +344,7 @@ router.get("/quotations/all", requireAuth, requireFirmUser, requireUserFeatureAc
 });
 
 router.post("/quotations", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.quotation"), requirePermission("accounting", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const requestId = (req.headers["x-request-id"] as string | undefined) ?? `${req.firmId ?? ""}-${req.userId ?? ""}-${Date.now()}`;
   try {
     const firmId = req.firmId!;
     const userId = req.userId!;
@@ -371,6 +372,7 @@ router.post("/quotations", requireAuth, requireFirmUser, requireUserFeatureAcces
     if (!finalClientName) { res.status(400).json({ error: "clientName or clientDetails is required" }); return; }
 
     const result = await db.transaction(async (tx) => {
+      let itemRows: Array<ReturnType<typeof normalizeItem>> = [];
       const [quotation] = await tx.insert(quotationsTable).values({
         ...quotationData,
         clientName: finalClientName,
@@ -381,9 +383,19 @@ router.post("/quotations", requireAuth, requireFirmUser, requireUserFeatureAcces
       }).returning();
 
       if (items && Array.isArray(items) && items.length > 0) {
-        const itemRows = items.map((item: any, idx: number) => normalizeItem(item, quotation.id, idx, taxRateNum));
+        itemRows = items.map((item: any, idx: number) => normalizeItem(item, quotation.id, idx, taxRateNum));
         await tx.insert(quotationItemsTable).values(itemRows);
       }
+
+      try {
+        await writeAuditLog({
+          firmId, actorId: userId, actorType: req.userType,
+          action: "accounting.quotation.create",
+          entityType: "quotation", entityId: quotation.id,
+          detail: `ref=${quotation.referenceNo ?? ""};client=${finalClientName};items=${itemRows.length}`,
+          ipAddress: req.ip, userAgent: req.headers["user-agent"],
+        });
+      } catch (_) { /* audit failure should not break transaction */ }
 
       const allItems = await tx.select().from(quotationItemsTable)
         .where(eq(quotationItemsTable.quotationId, quotation.id))
@@ -399,21 +411,49 @@ router.post("/quotations", requireAuth, requireFirmUser, requireUserFeatureAcces
       };
     });
 
-    try {
-      await writeAuditLog({
-        firmId, actorId: userId, actorType: req.userType,
-        action: "accounting.quotation.create",
-        entityType: "quotation", entityId: result.id,
-        detail: `ref=${result.referenceNo ?? ""};client=${finalClientName};items=${result.items.length}`,
-        ipAddress: req.ip, userAgent: req.headers["user-agent"],
-      });
-    } catch (_) { /* audit failure should not block user response */ }
-
-    res.status(201).json(result);
+    res.status(201).json({ ...result, requestId });
     return;
   } catch (err) {
-    logger.error({ err, path: req.path }, "[quotations]");
-    res.status(500).json({ error: "Internal Server Error" });
+    const pgCode =
+      err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+    const pgTable =
+      err && typeof err === "object" ? (err as { table?: unknown }).table : undefined;
+    const pgColumn =
+      err && typeof err === "object" ? (err as { column?: unknown }).column : undefined;
+    const pgConstraint =
+      err && typeof err === "object"
+        ? (err as { constraint?: unknown }).constraint
+        : undefined;
+    const stage = "header+line_items+audit";
+    logger.error(
+      {
+        err,
+        path: req.path,
+        requestId,
+        stage,
+        pgCode,
+        pgTable: typeof pgTable === "string" ? pgTable : null,
+        pgColumn: typeof pgColumn === "string" ? pgColumn : null,
+        pgConstraint: typeof pgConstraint === "string" ? pgConstraint : null,
+      },
+      "[quotations] POST /quotations failed",
+    );
+    const httpStatus =
+      typeof pgCode === "string" &&
+      /^23/.test(pgCode)
+        ? 400
+        : 500;
+    res.status(httpStatus).json({
+      error:
+        httpStatus === 400
+          ? "Quotation validation failed. Please review required fields and retry."
+          : "Internal Server Error",
+      requestId,
+      sqlstate: typeof pgCode === "string" ? pgCode : null,
+      table: typeof pgTable === "string" ? pgTable : null,
+      column: typeof pgColumn === "string" ? pgColumn : null,
+      constraint: typeof pgConstraint === "string" ? pgConstraint : null,
+    });
     return;
   }
 });

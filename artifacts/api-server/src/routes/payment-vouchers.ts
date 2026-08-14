@@ -19,6 +19,7 @@ import {
   paymentVouchersTable,
   permissionsTable,
   pool,
+  projectsTable,
   quotationItemsTable,
   quotationsTable,
   rolesTable,
@@ -917,6 +918,180 @@ async function postLedgerTx(tx: DbTxConn, args: {
   });
 }
 
+function isExactPartnerOrManagerRoleName(roleName: unknown): boolean {
+  const n = typeof roleName === "string" ? roleName.trim().toLowerCase() : "";
+  if (!n) return false;
+  return [
+    "partner",
+    "managing partner",
+    "senior partner",
+    "practice manager",
+    "firm manager",
+    "manager",
+    "director",
+  ].includes(n);
+}
+
+function isLawyerRoleName(roleName: unknown): boolean {
+  const n = typeof roleName === "string" ? roleName.trim().toLowerCase() : "";
+  if (!n) return false;
+  return n === "lawyer" || n === "paralegal" || n === "associate";
+}
+
+router.get("/payment-vouchers/create-options", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.payment_voucher"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const firmId = req.firmId!;
+  const caseIdRaw = one((req.query as any).caseId);
+  const caseId = caseIdRaw ? Number(caseIdRaw) : NaN;
+  const caseIdValue = Number.isFinite(caseId) && caseId > 0 ? Number(caseId) : null;
+  const r = rdb(req);
+
+  const [responsibleLawyers, approvingPartners] = await Promise.all([
+    r
+      .select({
+        id: usersTable.id,
+        name: usersTable.name,
+        roleId: usersTable.roleId,
+        roleName: rolesTable.name,
+      })
+      .from(usersTable)
+      .leftJoin(rolesTable, eq(rolesTable.id, usersTable.roleId))
+      .where(and(
+        eq(usersTable.firmId, firmId),
+        eq(usersTable.status, "active"),
+      ))
+      .orderBy(asc(usersTable.name)),
+    r
+      .select({
+        id: usersTable.id,
+        name: usersTable.name,
+        roleId: usersTable.roleId,
+        roleName: rolesTable.name,
+      })
+      .from(usersTable)
+      .leftJoin(rolesTable, eq(rolesTable.id, usersTable.roleId))
+      .where(and(
+        eq(usersTable.firmId, firmId),
+        eq(usersTable.status, "active"),
+      ))
+      .orderBy(asc(usersTable.name)),
+  ]);
+
+  const filteredLawyers = responsibleLawyers.filter((u) => isLawyerRoleName(u.roleName));
+  const filteredPartners = approvingPartners.filter((u) => isExactPartnerOrManagerRoleName(u.roleName));
+
+  let quotations: Array<{ id: number; referenceNo: string | null; caseId: number | null; status: string | null; clientName: string | null }> = [];
+  if (caseIdValue) {
+    quotations = await r
+      .select({
+        id: quotationsTable.id,
+        referenceNo: quotationsTable.referenceNo,
+        caseId: quotationsTable.caseId,
+        status: quotationsTable.status,
+        clientName: quotationsTable.clientName,
+      })
+      .from(quotationsTable)
+      .where(and(
+        eq(quotationsTable.firmId, firmId),
+        eq(quotationsTable.caseId, caseIdValue),
+        isNull(quotationsTable.deletedAt),
+      ))
+      .orderBy(desc(quotationsTable.createdAt));
+  }
+
+  let responsibleLawyerId: number | null = null;
+  if (caseIdValue) {
+    const fromAssignments = await loadResponsibleLawyerFromCase(r, firmId, caseIdValue);
+    if (fromAssignments) {
+      responsibleLawyerId = fromAssignments;
+    }
+  }
+  if (!responsibleLawyerId && filteredLawyers.length === 1) {
+    responsibleLawyerId = Number(filteredLawyers[0].id);
+  }
+
+  const approvingPartnerId = filteredPartners.length > 0 ? Number(filteredPartners[0].id) : null;
+  const quotationId = quotations.length === 1 ? Number(quotations[0].id) : null;
+
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    responsibleLawyers: filteredLawyers.map((u) => ({
+      id: Number(u.id),
+      name: String(u.name ?? ""),
+      roleName: u.roleName ? String(u.roleName) : null,
+    })),
+    approvingPartners: filteredPartners.map((u) => ({
+      id: Number(u.id),
+      name: String(u.name ?? ""),
+      roleName: u.roleName ? String(u.roleName) : null,
+    })),
+    quotations: quotations.map((q) => ({
+      id: Number(q.id),
+      referenceNo: q.referenceNo ? String(q.referenceNo) : null,
+      caseId: q.caseId ? Number(q.caseId) : null,
+      status: q.status ? String(q.status) : null,
+      clientName: q.clientName ? String(q.clientName) : null,
+    })),
+    defaults: {
+      responsibleLawyerId,
+      approvingPartnerId,
+      quotationId,
+    },
+  });
+});
+
+router.get("/payment-vouchers/my-approvals", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.payment_voucher"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const firmId = req.firmId!;
+  const userId = req.userId!;
+  const r = rdb(req);
+
+  try {
+    const rows = await r
+      .select({
+        id: paymentVouchersTable.id,
+        voucherNo: paymentVouchersTable.voucherNo,
+        caseId: paymentVouchersTable.caseId,
+        caseReferenceNo: casesTable.referenceNo,
+        clientName: clientsTable.name,
+        payeeName: paymentVouchersTable.payeeName,
+        purpose: paymentVouchersTable.purpose,
+        amount: paymentVouchersTable.amount,
+        approvalStatus: paymentVouchersTable.approvalStatus,
+        status: paymentVouchersTable.status,
+        createdAt: paymentVouchersTable.createdAt,
+      })
+      .from(paymentVouchersTable)
+      .leftJoin(casesTable, and(eq(casesTable.id, paymentVouchersTable.caseId), eq(casesTable.firmId, firmId)))
+      .leftJoin(casePurchasersTable, and(eq(casePurchasersTable.caseId, casesTable.id), eq(casePurchasersTable.orderNo, 1)))
+      .leftJoin(clientsTable, eq(clientsTable.id, casePurchasersTable.clientId))
+      .where(and(
+        eq(paymentVouchersTable.firmId, firmId),
+        eq(paymentVouchersTable.approvingPartnerId, userId),
+        eq(paymentVouchersTable.approvalStatus, "pending_approval"),
+      ))
+      .orderBy(desc(paymentVouchersTable.createdAt));
+
+    res.setHeader("Cache-Control", "no-store");
+    res.json(rows.map((r) => ({
+      id: Number(r.id),
+      referenceNo: r.voucherNo ? String(r.voucherNo) : null,
+      caseRef: r.caseId && r.caseReferenceNo ? `#${r.caseId} ${String(r.caseReferenceNo)}` : (r.caseId ? `#${r.caseId}` : null),
+      client: r.clientName ? String(r.clientName) : null,
+      payee: r.payeeName ? String(r.payeeName) : null,
+      purpose: r.purpose ? String(r.purpose) : null,
+      amount: r.amount ? String(r.amount) : null,
+      approvalStatus: r.approvalStatus ? String(r.approvalStatus) : null,
+      status: r.status ? String(r.status) : null,
+      createdAt: r.createdAt,
+    })));
+  } catch (err) {
+    if (isMissingSchemaError(err)) {
+      res.status(500).json({ error: "Database migration missing. Apply required migration for payment voucher approvals fields.", code: "MIGRATION_MISSING" });
+      return;
+    }
+    throw err;
+  }
+});
+
 // List
 router.get("/payment-vouchers", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.payment_voucher"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();
@@ -929,7 +1104,8 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requireUserFeature
   const safePage = Number.isFinite(page) && page > 0 ? page : 1;
   const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.min(50, limit) : 50;
   const offset = (safePage - 1) * safeLimit;
-  const conds = [eq(paymentVouchersTable.firmId, req.firmId!)];
+  const firmId = req.firmId!;
+  const conds = [eq(paymentVouchersTable.firmId, firmId)];
   if (caseId) {
     const n = Number(caseId);
     if (!Number.isFinite(n)) { res.status(400).json({ error: "Invalid caseId" }); return; }
@@ -982,17 +1158,53 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requireUserFeature
           paidBy: paymentVouchersTable.paidBy,
           updatedAt: paymentVouchersTable.updatedAt,
           createdAt: paymentVouchersTable.createdAt,
+          caseReferenceNo: casesTable.referenceNo,
+          clientName: clientsTable.name,
+          projectId: casesTable.projectId,
+          propertyDetails: casesTable.propertyDetails,
+          projectName: (projectsTable as any).name,
+          projectOrProperty: (casesTable as any).propertyDetails,
         })
         .from(paymentVouchersTable)
+        .leftJoin(casesTable, and(eq(casesTable.id, paymentVouchersTable.caseId), eq(casesTable.firmId, firmId)))
+        .leftJoin(projectsTable, and(eq(projectsTable.id, casesTable.projectId), eq((projectsTable as any).firmId, firmId)))
+        .leftJoin(casePurchasersTable, and(eq(casePurchasersTable.caseId, casesTable.id), eq(casePurchasersTable.orderNo, 1)))
+        .leftJoin(clientsTable, eq(clientsTable.id, casePurchasersTable.clientId))
         .where(and(...conds))
         .orderBy(desc(paymentVouchersTable.createdAt))
         .limit(safeLimit)
         .offset(offset);
     });
+    const enriched = rows.map((row) => {
+      const projectOrProperty = (() => {
+        if (row.projectName) return String(row.projectName);
+        if (row.projectId) return `Project #${row.projectId}`;
+        try {
+          const pd = row.propertyDetails;
+          if (pd && typeof pd === "object") {
+            const anyPd = pd as any;
+            if (anyPd.parcelNo) return String(anyPd.parcelNo);
+            if (anyPd.address) return String(anyPd.address).slice(0, 120);
+            if (anyPd.description) return String(anyPd.description).slice(0, 120);
+          }
+        } catch {}
+        return row.caseId ? `Case #${row.caseId}` : null;
+      })();
+      return {
+        ...row,
+        referenceNo: row.voucherNo ? String(row.voucherNo) : null,
+        fileReference: row.caseReferenceNo ? String(row.caseReferenceNo) : (row.caseId ? `#${row.caseId}` : null),
+        clientName: row.clientName ? String(row.clientName) : null,
+        payee: row.payeeName ? String(row.payeeName) : null,
+        approval: row.approvalStatus ? String(row.approvalStatus) : null,
+        projectOrProperty,
+        currency: "MYR",
+      };
+    });
     const queryMs = Date.now() - queryStartedAt;
     const durationMs = Date.now() - startedAt;
     const serializeStartedAt = Date.now();
-    const payload = JSON.stringify(rows);
+    const payload = JSON.stringify(enriched);
     const serializeMs = Date.now() - serializeStartedAt;
     const timing = {
       authMs: req.timing?.sections?.authSessionMs ?? null,
@@ -1003,6 +1215,7 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requireUserFeature
       serializeMs,
       totalMs: durationMs,
     };
+    res.setHeader("Cache-Control", "no-store");
     res.setHeader("x-lawcaspro-timing", JSON.stringify(timing));
     res.type("application/json").send(payload);
     if (durationMs >= 2000) {
@@ -2191,6 +2404,63 @@ router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, 
   }
 });
 
+router.post("/payment-vouchers/discard-draft", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.payment_voucher"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const firmId = req.firmId!;
+  const bodyRaw = req.body as any;
+  const clientRequestIdRaw = bodyRaw?.clientRequestId;
+  const clientRequestId = typeof clientRequestIdRaw === "string" && clientRequestIdRaw.trim() ? clientRequestIdRaw.trim() : null;
+  if (!clientRequestId) {
+    res.status(400).json({ error: "clientRequestId is required", code: "CLIENT_REQUEST_ID_REQUIRED" });
+    return;
+  }
+  const r = rdb(req);
+  try {
+    const [existing] = await r
+      .select({ id: paymentVouchersTable.id, status: paymentVouchersTable.status, clientRequestId: paymentVouchersTable.clientRequestId })
+      .from(paymentVouchersTable)
+      .where(and(
+        eq(paymentVouchersTable.firmId, firmId),
+        eq(paymentVouchersTable.clientRequestId, clientRequestId),
+      ))
+      .limit(1);
+    if (!existing) {
+      res.status(200).json({ ok: true, discarded: false, reason: "not_found" });
+      return;
+    }
+    if (String(existing.status ?? "") !== "draft") {
+      res.status(200).json({ ok: true, discarded: false, reason: "not_draft", currentStatus: existing.status });
+      return;
+    }
+    await r
+      .update(paymentVouchersTable)
+      .set({ status: "discarded", updatedAt: new Date() } as any)
+      .where(and(
+        eq(paymentVouchersTable.id, Number(existing.id)),
+        eq(paymentVouchersTable.firmId, firmId),
+      ));
+    await writeAuditLog({
+      firmId,
+      actorId: req.userId,
+      actorType: req.userType,
+      action: "payment_voucher.discard_draft",
+      entityType: "payment_voucher",
+      entityId: Number(existing.id),
+      detail: `clientRequestId=${clientRequestId} status from draft to discarded`,
+      ipAddress: req.ip,
+      userAgent: req.headers["user-agent"],
+    });
+    res.setHeader("Cache-Control", "no-store");
+    res.status(200).json({ ok: true, discarded: true, id: Number(existing.id) });
+  } catch (err) {
+    const code = typeof (err as any)?.code === "string" ? String((err as any).code) : null;
+    if (code === "57014") {
+      res.status(503).json({ error: "Discard draft timed out", code: "QUERY_TIMEOUT" });
+      return;
+    }
+    throw err;
+  }
+});
+
 // Status transition
 router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAuth, requireFirmUser, requireReAuth, async (req: AuthRequest, res: Response): Promise<void> => {
   const idStr = one(req.params.id);
@@ -2942,6 +3212,7 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
       });
     }
   }
+  res.setHeader("Cache-Control", "no-store");
   res.json(updated);
 });
 

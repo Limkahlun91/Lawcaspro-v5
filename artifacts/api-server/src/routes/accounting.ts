@@ -488,6 +488,84 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
   });
 });
 
+router.get("/accounting/dashboard/counters", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const firmId = req.firmId!;
+  try {
+    const rows = await queryRowsFromReq(req, sql`
+      SELECT
+        COUNT(*)::bigint AS total,
+        COUNT(*) FILTER (WHERE approval_status = 'pending_approval')::bigint AS waiting_approval,
+        COUNT(*) FILTER (
+          WHERE status = 'pending_account'
+            AND received_at IS NULL
+            AND (approval_status IS NULL OR approval_status <> 'pending_approval')
+        )::bigint AS awaiting_accounts_receipt,
+        COUNT(*) FILTER (
+          WHERE status IN ('pending_account', 'paid_pending_collection')
+            AND received_at IS NOT NULL
+        )::bigint AS processing,
+        COUNT(*) FILTER (
+          WHERE status = 'paid_pending_collection'
+            AND date(paid_at) = current_date
+        )::bigint AS paid_today,
+        COUNT(*) FILTER (
+          WHERE status = 'completed'
+            AND date(created_at) = current_date
+        )::bigint AS completed_today,
+        COUNT(*) FILTER (
+          WHERE date(created_at) = current_date
+        )::bigint AS new_payments_today,
+        COUNT(*) FILTER (
+          WHERE status = 'pending_account'
+            AND received_at IS NOT NULL
+            AND payment_due_at <= NOW() + INTERVAL '2 hours'
+        )::bigint AS due_soon,
+        COUNT(*) FILTER (
+          WHERE status = 'pending_account'
+            AND received_at IS NOT NULL
+            AND payment_due_at <= NOW()
+        )::bigint AS overdue,
+        COUNT(*) FILTER (WHERE status = 'rejected')::bigint AS rejected,
+        COUNT(*) FILTER (WHERE status = 'completed')::bigint AS completed
+      FROM payment_vouchers
+      WHERE firm_id = ${firmId}
+    `);
+    const row = rows[0] ?? {};
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      total: Number(row.total ?? 0),
+      waitingApproval: Number(row.waiting_approval ?? 0),
+      awaitingAccountsReceipt: Number(row.awaiting_accounts_receipt ?? 0),
+      processing: Number(row.processing ?? 0),
+      paidToday: Number(row.paid_today ?? 0),
+      completedToday: Number(row.completed_today ?? 0),
+      newPaymentsToday: Number(row.new_payments_today ?? 0),
+      dueSoon: Number(row.due_soon ?? 0),
+      overdue: Number(row.overdue ?? 0),
+      rejected: Number(row.rejected ?? 0),
+      completed: Number(row.completed ?? 0),
+    });
+  } catch (err: any) {
+    const sqlState = err?.sqlstate ?? err?.sqlState ?? err?.code ?? null;
+    if (sqlState === "42P01" || sqlState === "42703") {
+      res.status(503).json({
+        code: "MIGRATION_MISSING",
+        error: "Database migration missing for accounting dashboard counters.",
+      });
+      return;
+    }
+    if (sqlState === "57014" || sqlState === "57P01" || sqlState === "57P02") {
+      res.status(503).json({ code: "QUERY_TIMEOUT", error: "Accounting dashboard counters timed out" });
+      return;
+    }
+    if (sqlState === "55P03") {
+      res.status(503).json({ code: "LOCK_TIMEOUT", error: "Accounting dashboard counters lock timeout" });
+      return;
+    }
+    throw err;
+  }
+});
+
 router.get("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const rows = await queryRows(sql`
     SELECT

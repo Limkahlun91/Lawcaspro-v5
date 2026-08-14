@@ -1125,6 +1125,66 @@ async function formatCaseDetail(r: DbConn, c: typeof casesTable.$inferSelect) {
       full_settlement_date: pickDateString(kd, "fullSettlementDate", "full_settlement_date"),
       completion_date: pickDateString(kd, "completionDate", "completion_date"),
     } : null,
+    financingSummary: (() => {
+      const pickStr = (o: any, ...keys: string[]): string | null => {
+        for (const k of keys) {
+          const v = o?.[k];
+          if (typeof v === "string" && v.trim()) return v.trim();
+          if (typeof v === "number") return String(v);
+        }
+        return null;
+      };
+      const pickNum = (o: any, ...keys: string[]): number | null => {
+        for (const k of keys) {
+          const v = o?.[k];
+          if (typeof v === "number" && Number.isFinite(v)) return v;
+          if (typeof v === "string") {
+            const n = Number(v);
+            if (Number.isFinite(n)) return n;
+          }
+        }
+        return null;
+      };
+      const ld = loanDetails ?? {};
+      const sd = spaDetails ?? {};
+      const kdr = (kd ?? {}) as Record<string, unknown>;
+      const bankName = pickStr(
+        ld,
+        "bankName",
+        "bank_name",
+        "endFinancier",
+        "end_financier",
+        "financier",
+        "bank",
+        "financierName",
+        "lenderName",
+      );
+      const bankReference =
+        pickStr(
+          ld,
+          "bankReference",
+          "bank_reference",
+          "loanAccountNo",
+          "loanAccountNumber",
+          "loan_ref",
+          "loanReference",
+          "referenceNo",
+        ) ?? pickStr(kdr, "letter_of_offer_reference_nos", "letterOfOfferReferenceNos");
+      const financingAmount =
+        pickNum(ld, "financingAmount", "financing_amount", "loanAmount", "loan_amount", "approvedLoanAmount") ??
+        pickNum(kdr, "loan_amount", "approvedLoanAmount", "financingAmount");
+      const totalLoan =
+        financingAmount ??
+        pickNum(ld, "totalLoan", "total_loan", "totalLoanAmount") ??
+        pickNum(sd, "totalLoan", "total_loan") ??
+        (c.spaPrice ? Number(c.spaPrice) : null);
+      return {
+        bankName,
+        bankReference,
+        financingAmount,
+        totalLoan,
+      };
+    })(),
     purchasers,
     assignments,
     createdBy: c.createdBy ?? null,

@@ -7,7 +7,7 @@ import { z } from "zod/v4";
 import { casesTable, db, developersTable, projectDocumentsTable, projectsTable, sql } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, writeAuditLog, type AuthRequest } from "../lib/auth.js";
 import { logger } from "../lib/logger.js";
-import { ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage.js";
+import { getSupabaseStorageConfigError, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage.js";
 
 type ReqLike = IncomingMessage & {
   body?: unknown;
@@ -597,11 +597,11 @@ routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUs
 
     const body = req.body as Record<string, unknown>;
     const category = typeof body.category === "string" ? body.category.trim() : "general";
-  if (!["general", "advertisement_permit", "developer_license", "developer_mlu", "bank_mlu"].includes(category)) {
+    if (!["general", "advertisement_permit", "developer_license", "developer_mlu", "bank_mlu"].includes(category)) {
       res.status(400).json({ error: "Invalid category" });
       return;
     }
-  const licenseNumber = typeof body.licenseNumber === "string" && body.licenseNumber.trim() ? body.licenseNumber.trim() : null;
+    const licenseNumber = typeof body.licenseNumber === "string" && body.licenseNumber.trim() ? body.licenseNumber.trim() : null;
     const documentName = typeof body.documentName === "string" ? body.documentName.trim() : "";
     if (!documentName) {
       res.status(400).json({ error: "documentName is required" });
@@ -610,34 +610,55 @@ routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUs
     const bankName = typeof body.bankName === "string" && body.bankName.trim() ? body.bankName.trim() : null;
     const documentDate = normalizeDateOnly(body.documentDate);
 
-  const apOrDl = category === "advertisement_permit" || category === "developer_license";
-  if (apOrDl && !licenseNumber) {
-    res.status(400).json({ error: "licenseNumber is required for Advertisement Permit / Developer License" });
-    return;
-  }
+    const apOrDl = category === "advertisement_permit" || category === "developer_license";
+    if (apOrDl && !licenseNumber) {
+      res.status(400).json({ error: "licenseNumber is required for Advertisement Permit / Developer License" });
+      return;
+    }
 
-  const hasExpiry = apOrDl ? true : normalizeBoolean(body.hasExpiry);
-  const validFrom = hasExpiry ? normalizeDateOnly(body.validFrom) : null;
-  const validTo = hasExpiry ? normalizeDateOnly(body.validTo) : null;
-  if (apOrDl && (!validFrom || !validTo)) {
-    res.status(400).json({ error: "validFrom and validTo are required for Advertisement Permit / Developer License" });
-    return;
-  }
+    const hasExpiry = apOrDl ? true : normalizeBoolean(body.hasExpiry);
+    const validFrom = hasExpiry ? normalizeDateOnly(body.validFrom) : null;
+    const validTo = hasExpiry ? normalizeDateOnly(body.validTo) : null;
+    if (apOrDl && (!validFrom || !validTo)) {
+      res.status(400).json({ error: "validFrom and validTo are required for Advertisement Permit / Developer License" });
+      return;
+    }
 
     const fileName = typeof f.originalname === "string" && f.originalname.trim() ? f.originalname.trim() : "document";
     const safeName = safeFilenameAscii(fileName).replace(/\s+/g, "_");
-    const primaryObjectPath = `/objects/projects/${req.firmId!}/${projectId}/${randomUUID()}-${safeName}`;
-    let objectPath = primaryObjectPath;
+    const objectPath = `/objects/projects/${req.firmId!}/${projectId}/${randomUUID()}-${safeName}`;
     try {
       await supabaseStorage.uploadPrivateObject({
-        objectPath: primaryObjectPath,
+        objectPath,
         fileBytes: f.buffer,
         contentType: typeof f.mimetype === "string" && f.mimetype.trim() ? f.mimetype.trim() : "application/octet-stream",
       });
     } catch (err) {
-      console.warn(err);
-      objectPath = `pending_upload/projects/${req.firmId!}/${projectId}/${randomUUID()}-${safeName}`;
-      warnings.push("Storage service is currently unavailable. File metadata saved but file content was not uploaded.");
+      const cfgErr = getSupabaseStorageConfigError(err);
+      logger.error(
+        {
+          err,
+          path: req.path,
+          firmId: req.firmId,
+          userId: req.userId,
+          projectId,
+          objectPath,
+          cfgErr: cfgErr ?? null,
+        },
+        "[projects.documents.upload] storage_upload_failed",
+      );
+      if (cfgErr) {
+        res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_CONFIG_ERROR", retryable: false });
+      } else if (err instanceof ObjectNotFoundError) {
+        res.status(503).json({ error: "Storage bucket not found", code: "STORAGE_BUCKET_MISSING", retryable: false });
+      } else {
+        res.status(502).json({
+          error: "Failed to upload file to storage. No metadata was saved. Please retry.",
+          code: "STORAGE_UPLOAD_FAILED",
+          retryable: true,
+        });
+      }
+      return;
     }
 
     const [created] = await r
@@ -697,11 +718,207 @@ routerInternal.post("/projects/:projectId/documents", requireAuth, requireFirmUs
       ...(warnings.length ? { warning: warnings[0], warnings } : {}),
     });
   } catch (err) {
-    console.error(err);
-    logger.error({ err, path: req.path, firmId: req.firmId, userId: req.userId }, "[projects.documents.upload]");
+    logger.error(
+      {
+        err,
+        path: req.path,
+        firmId: req.firmId,
+        userId: req.userId,
+        route: "POST /projects/:projectId/documents",
+      },
+      "[projects.documents.upload] unexpected_error",
+    );
+    res.status(500).json({
+      error: "Upload failed. No metadata was saved. Please retry.",
+      code: "UPLOAD_UNEXPECTED_ERROR",
+      retryable: true,
+    });
+  }
+});
+
+routerInternal.patch("/projects/:projectId/documents/:docId", requireAuth, requireFirmUser, requirePermission("projects", "update"), upload.single("file"), async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  try {
+    const r = req.rlsDb;
+    if (!r) {
+      logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[projects.documents.reupload] missing tenant database context");
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
+    const params = z
+      .object({ projectId: z.coerce.number().int().min(1), docId: z.coerce.number().int().min(1) })
+      .safeParse(req.params);
+    if (!params.success) {
+      res.status(400).json({ error: params.error.message });
+      return;
+    }
+    const { projectId, docId } = params.data;
+    const [existing] = await r
+      .select({
+        id: projectDocumentsTable.id,
+        objectPath: projectDocumentsTable.objectPath,
+        fileName: projectDocumentsTable.fileName,
+        category: projectDocumentsTable.category,
+        documentName: projectDocumentsTable.documentName,
+      })
+      .from(projectDocumentsTable)
+      .where(
+        and(
+          eq(projectDocumentsTable.id, docId),
+          eq(projectDocumentsTable.projectId, projectId),
+          eq(projectDocumentsTable.firmId, req.firmId!),
+        ),
+      )
+      .limit(1);
+    if (!existing) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+
+    const f = (req as any).file as { originalname?: string; mimetype?: string; buffer?: Buffer; size?: number } | undefined;
+    if (!f || !Buffer.isBuffer(f.buffer) || f.buffer.length === 0) {
+      res.status(400).json({ error: "file is required" });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown>;
+    const category = typeof body.category === "string" && body.category.trim() ? body.category.trim() : existing.category;
+    const licenseNumber = typeof body.licenseNumber === "string" && body.licenseNumber.trim() ? body.licenseNumber.trim() : undefined;
+    const documentName = typeof body.documentName === "string" && body.documentName.trim() ? body.documentName.trim() : existing.documentName;
+    const bankName = typeof body.bankName === "string" && body.bankName.trim() ? body.bankName.trim() : undefined;
+    const documentDate = typeof body.documentDate !== "undefined" ? normalizeDateOnly(body.documentDate) : undefined;
+    const hasExpiryRaw = typeof body.hasExpiry !== "undefined" ? normalizeBoolean(body.hasExpiry) : undefined;
+    const apOrDl = category === "advertisement_permit" || category === "developer_license";
+    const hasExpiry = apOrDl ? true : hasExpiryRaw;
+    const validFrom = hasExpiry ? normalizeDateOnly(body.validFrom) ?? null : undefined;
+    const validTo = hasExpiry ? normalizeDateOnly(body.validTo) ?? null : undefined;
+
+    const fileName = typeof f.originalname === "string" && f.originalname.trim() ? f.originalname.trim() : existing.fileName;
+    const safeName = safeFilenameAscii(fileName).replace(/\s+/g, "_");
+    const newObjectPath = `/objects/projects/${req.firmId!}/${projectId}/${randomUUID()}-${safeName}`;
+
+    try {
+      await supabaseStorage.uploadPrivateObject({
+        objectPath: newObjectPath,
+        fileBytes: f.buffer,
+        contentType: typeof f.mimetype === "string" && f.mimetype.trim() ? f.mimetype.trim() : "application/octet-stream",
+      });
+    } catch (err) {
+      const cfgErr = getSupabaseStorageConfigError(err);
+      logger.error(
+        {
+          err,
+          path: req.path,
+          firmId: req.firmId,
+          userId: req.userId,
+          projectId,
+          docId,
+          newObjectPath,
+          cfgErr: cfgErr ?? null,
+        },
+        "[projects.documents.reupload] storage_upload_failed",
+      );
+      if (cfgErr) {
+        res.status(cfgErr.statusCode).json({ error: cfgErr.error, code: "STORAGE_CONFIG_ERROR", retryable: false });
+      } else {
+        res.status(502).json({
+          error: "Failed to upload file to storage. Existing metadata unchanged. Please retry.",
+          code: "STORAGE_UPLOAD_FAILED",
+          retryable: true,
+        });
+      }
+      return;
+    }
+
+    const priorObjectPath = existing.objectPath;
+    const updateValues: Record<string, unknown> = {
+      objectPath: newObjectPath,
+      fileName,
+      mimeType: typeof f.mimetype === "string" ? f.mimetype : null,
+      fileSize: Math.floor(f.buffer.length),
+      updatedAt: new Date(),
+    };
+    if (category !== undefined) updateValues.category = category;
+    if (documentName !== undefined) updateValues.documentName = documentName;
+    if (licenseNumber !== undefined) updateValues.licenseNumber = licenseNumber;
+    if (bankName !== undefined) updateValues.bankName = bankName;
+    if (documentDate !== undefined) updateValues.documentDate = documentDate;
+    if (hasExpiry !== undefined) updateValues.hasExpiry = hasExpiry;
+    if (validFrom !== undefined) updateValues.validFrom = validFrom;
+    if (validTo !== undefined) updateValues.validTo = validTo;
+
+    const [updated] = await r
+      .update(projectDocumentsTable)
+      .set(updateValues)
+      .where(
+        and(
+          eq(projectDocumentsTable.id, docId),
+          eq(projectDocumentsTable.projectId, projectId),
+          eq(projectDocumentsTable.firmId, req.firmId!),
+        ),
+      )
+      .returning();
+
+    if (priorObjectPath && priorObjectPath !== newObjectPath && priorObjectPath.startsWith("/objects/")) {
+      try {
+        await supabaseStorage.deletePrivateObject(priorObjectPath);
+      } catch (delErr) {
+        if (!(delErr instanceof ObjectNotFoundError)) {
+          logger.error(
+            { err: delErr, path: req.path, firmId: req.firmId, userId: req.userId, objectPath: priorObjectPath },
+            "[projects.documents.reupload] delete_old_object_failed",
+          );
+        }
+      }
+    }
+
+    try {
+      await writeAuditLog({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "projects.documents.reupload",
+        entityType: "project_document",
+        entityId: docId,
+        detail: `projectId=${projectId} docId=${docId} name=${documentName}`,
+        ipAddress: req.ip,
+        userAgent: getHeader(req, "user-agent"),
+      });
+    } catch (auditErr) {
+      logger.error({ err: auditErr, path: req.path, firmId: req.firmId, userId: req.userId }, "[projects.documents.reupload] audit log failed");
+    }
+
     res.status(200).json({
-      warning: "Upload completed with degraded mode. If the document does not appear, please try uploading again.",
-      warnings: ["Upload completed with degraded mode. If the document does not appear, please try uploading again."],
+      id: updated.id,
+      projectId: updated.projectId,
+      category: updated.category,
+      documentName: updated.documentName,
+      licenseNumber: updated.licenseNumber ?? null,
+      bankName: updated.bankName ?? null,
+      documentDate: updated.documentDate ? String(updated.documentDate) : null,
+      fileName: updated.fileName,
+      mimeType: updated.mimeType ?? null,
+      fileSize: updated.fileSize ?? null,
+      hasExpiry: updated.hasExpiry,
+      validFrom: updated.validFrom ? String(updated.validFrom) : null,
+      validTo: updated.validTo ? String(updated.validTo) : null,
+      createdAt: updated.createdAt.toISOString(),
+      updatedAt: updated.updatedAt.toISOString(),
+    });
+  } catch (err) {
+    logger.error(
+      {
+        err,
+        path: req.path,
+        firmId: req.firmId,
+        userId: req.userId,
+        route: "PATCH /projects/:projectId/documents/:docId",
+      },
+      "[projects.documents.reupload] unexpected_error",
+    );
+    res.status(500).json({
+      error: "Re-upload failed. Existing metadata unchanged. Please retry.",
+      code: "REUPLOAD_UNEXPECTED_ERROR",
+      retryable: true,
     });
   }
 });
