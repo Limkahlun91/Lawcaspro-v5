@@ -72,6 +72,7 @@ import documentIntelligenceRouter from "./document-intelligence.js";
 import templateMigrationsRouter from "./template-migrations.js";
 import bankAdaptersRouter from "./bank-adapters.js";
 import himsRouter from "./hims.js";
+import entitlementsRouter from "./entitlements.js";
 import cronJobsRouter from "./cron-jobs.js";
 import { requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate";
 
@@ -155,6 +156,7 @@ routerInternal.use(documentIntelligenceRouter);
 routerInternal.use(templateMigrationsRouter);
 routerInternal.use(bankAdaptersRouter);
 routerInternal.use(himsRouter);
+routerInternal.use("/entitlements", entitlementsRouter);
 
 routerInternal.use(partiesRouter);
 routerInternal.use(complianceRouter);

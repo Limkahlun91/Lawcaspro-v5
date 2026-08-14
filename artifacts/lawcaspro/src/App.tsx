@@ -16,7 +16,7 @@ import { GlobalCaseSearch } from "@/components/GlobalCaseSearch";
 import { getApiOrigin } from "@/lib/api-base";
 import { getStoredAuthToken } from "@/lib/auth-token";
 import { DeveloperGuard } from "@/components/developer-guard";
-import { isEmailControlEnabled, isEmailSettingsEnabled, isWhatsAppInboxEnabled, isHRModuleEnabled, PHASE2_NOTICE, HR_DISABLED_NOTICE } from "@/lib/feature-flags";
+import { isWhatsAppInboxEnabled, PHASE2_NOTICE, isHRModuleEnabled, HR_DISABLED_NOTICE } from "@/lib/feature-flags";
 import { FeatureGuard } from "@/lib/feature-guards";
 import { Card, CardContent } from "@/components/ui/card";
 import { useEffect, lazy, Suspense, type ReactNode } from "react";
@@ -140,6 +140,7 @@ const HrDepartments = lazy(() => import("@/pages/app/hr/departments"));
 const HrPositions = lazy(() => import("@/pages/app/hr/positions"));
 const HrReports = lazy(() => import("@/pages/app/hr/reports"));
 const HrSettings = lazy(() => import("@/pages/app/hr/settings"));
+const HimsTrackerIndex = lazy(() => import("@/pages/app/hims"));
 
 // My Work / Self Service — keep static (core user landing)
 import MyDashboard from "@/pages/app/my/dashboard";
@@ -399,11 +400,11 @@ function AppRoutes() {
           )} />
 
           <Route path="/app/communication/email" component={() => (
-            <Phase2RedirectGuard enabled={isEmailControlEnabled()}>
+            <FeatureGuard feature="module.communications" allOf={["communications.email"]} hideDisabled={false}>
               <PermissionGuard module="communications" action="read">
                 <EmailControlCenterPage />
               </PermissionGuard>
-            </Phase2RedirectGuard>
+            </FeatureGuard>
           )} />
           <Route path="/app/communication/whatsapp" component={() => (
             <Phase2RedirectGuard enabled={isWhatsAppInboxEnabled()}>
@@ -526,11 +527,11 @@ function AppRoutes() {
             </PermissionGuard>
           )} />
           <Route path="/app/settings/email" component={() => (
-            <Phase2RedirectGuard enabled={isEmailSettingsEnabled()}>
+            <FeatureGuard feature="module.communications" allOf={["communications.email", "communications.email.settings"]} hideDisabled={false}>
               <PermissionGuard module="communications" action="read">
                 <Redirect to="/app/settings?tab=email" />
               </PermissionGuard>
-            </Phase2RedirectGuard>
+            </FeatureGuard>
           )} />
           <Route path="/app/settings" component={() => (
             <PermissionGuard module="settings" action="read">
@@ -551,25 +552,32 @@ function AppRoutes() {
           {/* Bank Adapters */}
           <Route path="/app/bank-adapters" component={BankAdaptersPage} />
 
-          {/* HR Full Admin (HRRedirectGuard wraps module.hr) */}
-          <Route path="/app/hr/dashboard" component={() => <HRRedirectGuard><PermissionGuard module="hr" action="read" mode="silent"><HrDashboard /></PermissionGuard></HRRedirectGuard>} />
-          <Route path="/app/hr/employees" component={() => <HRRedirectGuard><PermissionGuard module="hr" action="read" mode="silent"><HrEmployees /></PermissionGuard></HRRedirectGuard>} />
-          <Route path="/app/hr/attendance" component={() => <HRRedirectGuard><HrAttendance /></HRRedirectGuard>} />
-          <Route path="/app/hr/leave" component={() => <HRRedirectGuard><HrLeave /></HRRedirectGuard>} />
-          <Route path="/app/hr/claims" component={() => <HRRedirectGuard><HrClaims /></HRRedirectGuard>} />
-          <Route path="/app/hr/payroll" component={() => <HRRedirectGuard><HrPayroll /></HRRedirectGuard>} />
-          <Route path="/app/hr/recruitment" component={() => <HRRedirectGuard><HrRecruitment /></HRRedirectGuard>} />
-          <Route path="/app/hr/performance" component={() => <HRRedirectGuard><HrPerformance /></HRRedirectGuard>} />
-          <Route path="/app/hr/training" component={() => <HRRedirectGuard><HrTraining /></HRRedirectGuard>} />
-          <Route path="/app/hr/assets" component={() => <HRRedirectGuard><HrAssets /></HRRedirectGuard>} />
-          <Route path="/app/hr/documents" component={() => <HRRedirectGuard><HrDocuments /></HRRedirectGuard>} />
-          <Route path="/app/hr/onboarding" component={() => <HRRedirectGuard><HrOnboarding /></HRRedirectGuard>} />
-          <Route path="/app/hr/offboarding" component={() => <HRRedirectGuard><HrOffboarding /></HRRedirectGuard>} />
-          <Route path="/app/hr/departments" component={() => <HRRedirectGuard><HrDepartments /></HRRedirectGuard>} />
-          <Route path="/app/hr/positions" component={() => <HRRedirectGuard><HrPositions /></HRRedirectGuard>} />
-          <Route path="/app/hr/reports" component={() => <HRRedirectGuard><HrReports /></HRRedirectGuard>} />
-          <Route path="/app/hr/settings" component={() => <HRRedirectGuard><HrSettings /></HRRedirectGuard>} />
+          <Route path="/app/hr/dashboard" component={() => <FeatureGuard feature="module.hr" allOf={["hr.dashboard"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrDashboard /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/employees" component={() => <FeatureGuard feature="module.hr" allOf={["hr.employees"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrEmployees /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/attendance" component={() => <FeatureGuard feature="module.hr" allOf={["hr.attendance"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrAttendance /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/leave" component={() => <FeatureGuard feature="module.hr" allOf={["hr.leave"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrLeave /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/claims" component={() => <FeatureGuard feature="module.hr" allOf={["hr.claims"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrClaims /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/payroll" component={() => <FeatureGuard feature="module.hr" allOf={["hr.payroll"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrPayroll /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/recruitment" component={() => <FeatureGuard feature="module.hr" allOf={["hr.recruitment"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrRecruitment /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/performance" component={() => <FeatureGuard feature="module.hr" allOf={["hr.performance"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrPerformance /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/training" component={() => <FeatureGuard feature="module.hr" allOf={["hr.training"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrTraining /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/assets" component={() => <FeatureGuard feature="module.hr" allOf={["hr.assets"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrAssets /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/documents" component={() => <FeatureGuard feature="module.hr" allOf={["hr.documents"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrDocuments /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/onboarding" component={() => <FeatureGuard feature="module.hr" allOf={["hr.onboarding"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrOnboarding /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/offboarding" component={() => <FeatureGuard feature="module.hr" allOf={["hr.offboarding"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrOffboarding /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/departments" component={() => <FeatureGuard feature="module.hr" allOf={["hr.departments"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrDepartments /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/positions" component={() => <FeatureGuard feature="module.hr" allOf={["hr.positions"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrPositions /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/reports" component={() => <FeatureGuard feature="module.hr" allOf={["hr.reports"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrReports /></PermissionGuard></FeatureGuard>} />
+          <Route path="/app/hr/settings" component={() => <FeatureGuard feature="module.hr" allOf={["hr.settings"]} hideDisabled={false}><PermissionGuard module="hr" action="read"><HrSettings /></PermissionGuard></FeatureGuard>} />
           <Route path="/app/hr" component={() => <Redirect to="/app/hr/dashboard" />} />
+
+          <Route path="/app/hims" component={() => (
+            <FeatureGuard feature="module.hims" allOf={["hims.tracker"]} hideDisabled={false}>
+              <PermissionGuard module="cases" action="read">
+                <HimsTrackerIndex />
+              </PermissionGuard>
+            </FeatureGuard>
+          )} />
 
           {/* Self Service My Work */}
           <Route path="/app/my/dashboard" component={() => <PermissionGuard module="dashboard" action="read" mode="silent"><MyDashboard /></PermissionGuard>} />

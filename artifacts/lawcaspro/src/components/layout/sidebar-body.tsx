@@ -138,6 +138,13 @@ export function navGroupsForUser(): Array<{
         { label: "Projects", href: "/app/projects", icon: Building2, perm: ["projects", "read"] },
         { label: "Developers", href: "/app/developers", icon: HardHat, perm: ["developers", "read"] },
         { label: "Clients", href: "/app/clients", icon: Users, perm: ["contacts", "read"] },
+        {
+          label: "HIMS / eSPA",
+          href: "/app/hims",
+          icon: Shield,
+          perm: ["cases", "read"],
+          featureKey: "hims.tracker",
+        },
       ],
     },
     {

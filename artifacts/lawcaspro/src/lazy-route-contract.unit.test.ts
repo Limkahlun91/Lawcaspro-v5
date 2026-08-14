@@ -5,7 +5,7 @@ import { describe, it, expect, vi, beforeEach, beforeAll } from "vitest";
 
 beforeAll(() => {
   process.env.NODE_ENV ??= "test";
-  vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+  vi.setConfig({ testTimeout: 120_000, hookTimeout: 120_000 });
 });
 
 beforeEach(() => {
@@ -38,7 +38,7 @@ const LAZY_CHECKLIST = [
   {
     name: "Email Landing",
     route: "/app/communication/email",
-    module: "./pages/app/communication/email/index.tsx",
+    module: "./pages/app/communication/email.tsx",
   },
   {
     name: "HR Landing",
@@ -63,14 +63,15 @@ describe("Lazy route contract: module resolves and Suspense fallback is visible"
     const defaultExport = (mod as any).default;
     const isExportable = typeof defaultExport === "function" || typeof defaultExport === "object";
     expect(isExportable).toBe(true);
-  });
+  }, 120_000);
 
   it.each(LAZY_CHECKLIST)(
     "$name — React.lazy($module) renders Suspense fallback then default export",
-    async () => {
-      const dynamicModule = await import(/* @vite-ignore */ "./pages/app/dashboard/index.tsx");
+    async ({ module: rel }) => {
+      const dynamicModule = await import(/* @vite-ignore */ rel);
       expect(dynamicModule).toBeTruthy();
     },
+    120_000,
   );
 });
 

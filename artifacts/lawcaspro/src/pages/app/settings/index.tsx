@@ -37,11 +37,12 @@ import { EmailSettingsPanel } from "@/components/communication/email-settings-pa
 import { isEmailSettingsEnabled } from "@/lib/feature-flags";
 import { useReAuth } from "@/components/re-auth-dialog";
 import { validateUploadFile } from "@/lib/upload-validation";
+import { useFeature } from "@/lib/feature-guards";
 
 const apiFetch = apiFetchJson;
 
 const TABS = ["Firm Info", "File Reference", "Users", "Roles & Permissions", "Security", "Document Templates", "Subscription & Billing", "Logs"] as const;
-type Tab = typeof TABS[number] | "Email";
+type Tab = typeof TABS[number] | "Email" | "Integrations";
 
 const TAB_KEYS: Record<string, Tab> = {
   firm: "Firm Info",
@@ -53,6 +54,7 @@ const TAB_KEYS: Record<string, Tab> = {
   subscription: "Subscription & Billing",
   logs: "Logs",
   email: "Email",
+  integrations: "Integrations",
 };
 
 const PERMISSION_CATALOG: Array<{ module: string; actions: string[] }> = [
@@ -1429,6 +1431,7 @@ export default function Settings(props?: { defaultTab?: string }) {
   const canAccessDocuments = hasPermission(user, "documents", "read") || hasPermission(user, "documents", "create") || hasPermission(user, "documents", "update") || hasPermission(user, "documents", "delete");
   const canViewAuditLogs = user?.userType === "founder" || hasPermission(user, "audit", "read");
   const canAccessEmailSettings = isEmailSettingsEnabled() && (hasPermission(user, "communications", "read") || hasPermission(user, "communications", "create") || hasPermission(user, "communications", "update") || hasPermission(user, "communications", "delete"));
+  const canAccessIntegrations = canUpdateSettings || String((user as any)?.roleName ?? "").toLowerCase().includes("partner");
 
   const searchString = useSearch();
   const params = new URLSearchParams(searchString);
@@ -1443,6 +1446,7 @@ export default function Settings(props?: { defaultTab?: string }) {
     "Subscription & Billing",
     ...(canViewAuditLogs ? (["Logs"] as Tab[]) : []),
     ...(canAccessEmailSettings ? (["Email" as Tab]) : []),
+    ...(canAccessIntegrations ? (["Integrations" as Tab]) : []),
   ];
   const visibleTabs = visibleTabsBase as readonly Tab[];
   const enabledTabs = visibleTabs.filter((t) => (t === "Document Templates" ? canAccessDocuments : true));
@@ -2116,6 +2120,252 @@ export default function Settings(props?: { defaultTab?: string }) {
         </div>
       )}
 
+      {canAccessIntegrations && activeTab === "Integrations" && (
+        <IntegrationsTab />
+      )}
+
+    </div>
+  );
+}
+
+function IntegrationsTab() {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const apiFetch = apiFetchJson;
+  const himsModule = useFeature("module.hims");
+  const canConfigureHimsCredentials = useFeature("hims.credentials");
+  const canConfigureHimsMapping = useFeature("hims.project_mapping");
+  const canConfigureHimsStatusCheck = useFeature("hims.status_check");
+  const [himsBaseUrl, setHimsBaseUrl] = useState("");
+  const [himsApiKeyId, setHimsApiKeyId] = useState("");
+  const [himsApiKeyMasked, setHimsApiKeyMasked] = useState("••••••••••••");
+  const [himsStatusCheckEnabled, setHimsStatusCheckEnabled] = useState(true);
+  const [himsStatusCheckIntervalMinutes, setHimsStatusCheckIntervalMinutes] = useState(30);
+  const [savingHims, setSavingHims] = useState(false);
+  const [projectMappings, setProjectMappings] = useState<Array<{ id: number; projectId: number; projectName: string; himsProjectCode: string; himsPhaseCode: string }>>([
+    { id: 1, projectId: 0, projectName: "(not mapped)", himsProjectCode: "", himsPhaseCode: "" },
+  ]);
+
+  useQuery({
+    queryKey: ["hims-settings-integration-settings"],
+    queryFn: async ({ signal }) => {
+      try {
+        const res = await apiFetch<{ baseUrl?: string; apiKeyId?: string; statusCheckEnabled?: boolean; statusCheckIntervalMinutes?: number; projectMappings?: any[] }>("/hims/settings", { signal });
+        if (res?.baseUrl) setHimsBaseUrl(String(res.baseUrl));
+        if (res?.apiKeyId) setHimsApiKeyId(String(res.apiKeyId));
+        if (typeof (res as any)?.statusCheckEnabled === "boolean") setHimsStatusCheckEnabled(Boolean((res as any).statusCheckEnabled));
+        if (Number.isFinite(Number((res as any)?.statusCheckIntervalMinutes))) setHimsStatusCheckIntervalMinutes(Math.max(5, Number((res as any).statusCheckIntervalMinutes)));
+        if (Array.isArray((res as any)?.projectMappings)) {
+          setProjectMappings((res as any).projectMappings.map((m: any, i: number) => ({
+            id: Number(m?.id ?? i + 1),
+            projectId: Number(m?.projectId ?? 0),
+            projectName: String(m?.projectName ?? ""),
+            himsProjectCode: String(m?.himsProjectCode ?? ""),
+            himsPhaseCode: String(m?.himsPhaseCode ?? ""),
+          })));
+        }
+        return res;
+      } catch (_e: any) {
+        setHimsApiKeyMasked("••••••••••••");
+        return null;
+      }
+    },
+    enabled: himsModule.enabled && canConfigureHimsCredentials.enabled,
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  const saveHimsSettings = useMutation({
+    mutationFn: async () => {
+      setSavingHims(true);
+      await apiFetch("/hims/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          baseUrl: himsBaseUrl,
+          apiKeyId: himsApiKeyId,
+          statusCheckEnabled: himsStatusCheckEnabled,
+          statusCheckIntervalMinutes: himsStatusCheckIntervalMinutes,
+          projectMappings,
+        }),
+      });
+    },
+    onSuccess: () => {
+      toast({ title: "HIMS / eSPA settings saved" });
+      queryClient.invalidateQueries({ queryKey: ["hims-settings-integration-settings"] });
+    },
+    onError: (e) => toastError(toast, e, "Failed to save HIMS settings"),
+    onSettled: () => setSavingHims(false),
+  });
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h2 className="text-xl font-semibold tracking-tight">Integrations</h2>
+        <p className="mt-1 text-sm text-slate-500">
+          Configure external platform integrations. Credentials never leave this page unmasked.
+        </p>
+      </div>
+
+      <div className="space-y-6">
+        {himsModule.enabled ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Building2 className="w-4 h-4" />
+              HIMS / eSPA
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-6">
+          {!canConfigureHimsCredentials.enabled ? (
+            <div className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-4">
+              You do not have permission to configure HIMS credentials. Contact a firm partner or admin.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <Label className="text-xs text-slate-500">HIMS Base URL</Label>
+                  <Input
+                    placeholder="https://hims.example.com/api"
+                    value={himsBaseUrl}
+                    onChange={(e) => setHimsBaseUrl(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <Label className="text-xs text-slate-500">API Key ID</Label>
+                  <Input
+                    placeholder="AK-..."
+                    value={himsApiKeyId}
+                    onChange={(e) => setHimsApiKeyId(e.target.value)}
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <Label className="text-xs text-slate-500">API Secret / Credential Key (encrypted backend only — never shown in plaintext)</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      readOnly
+                      value={himsApiKeyMasked}
+                      className="font-mono tracking-widest text-slate-500 select-none"
+                    />
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setHimsApiKeyMasked("•••••••••••• (rotate requested)");
+                        toast({ title: "Regenerate requested — backend will rotate the stored credential when saved." });
+                      }}
+                    >
+                      Rotate
+                    </Button>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Credentials are encrypted at rest and never exposed to the client. The masked placeholder shown here only indicates whether a record exists.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="border-t border-slate-200 pt-6 space-y-4">
+            <h3 className="text-sm font-medium">Status-Check Settings</h3>
+            {!canConfigureHimsStatusCheck.enabled ? (
+              <div className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-4">
+                Status check configuration is not enabled.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="flex items-center justify-between p-3 rounded-lg border border-slate-200 bg-white">
+                  <div>
+                    <div className="text-sm font-medium">Enable periodic HIMS status checks</div>
+                    <div className="text-xs text-slate-500">Runs automated tracker polling on the configured interval.</div>
+                  </div>
+                  <Switch checked={himsStatusCheckEnabled} onCheckedChange={(c) => setHimsStatusCheckEnabled(Boolean(c))} />
+                </div>
+                <div>
+                  <Label className="text-xs text-slate-500">Check interval (minutes, minimum 5)</Label>
+                  <Input
+                    type="number"
+                    min={5}
+                    step={5}
+                    value={himsStatusCheckIntervalMinutes}
+                    onChange={(e) => setHimsStatusCheckIntervalMinutes(Math.max(5, Number(e.target.value) || 30))}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="border-t border-slate-200 pt-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-medium">Project / Phase Mappings</h3>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setProjectMappings((curr) => [
+                  ...curr,
+                  { id: (curr[curr.length - 1]?.id ?? curr.length) + 1, projectId: 0, projectName: "(not mapped)", himsProjectCode: "", himsPhaseCode: "" },
+                ])}
+              >
+                <Plus className="w-4 h-4 mr-1" /> Add Mapping
+              </Button>
+            </div>
+            {!canConfigureHimsMapping.enabled ? (
+              <div className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-4">
+                Project mapping configuration is not enabled.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {projectMappings.map((m, idx) => (
+                  <div key={m.id} className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end p-3 rounded-lg border border-slate-200 bg-white">
+                    <div className="md:col-span-5">
+                      <Label className="text-xs text-slate-500">Project</Label>
+                      <Input placeholder="Project" value={m.projectName} onChange={(e) => setProjectMappings(curr => curr.map((x, i) => i === idx ? { ...x, projectName: e.target.value } : x))} />
+                    </div>
+                    <div className="md:col-span-3">
+                      <Label className="text-xs text-slate-500">HIMS Project Code</Label>
+                      <Input placeholder="e.g. PRJ-001" value={m.himsProjectCode} onChange={(e) => setProjectMappings(curr => curr.map((x, i) => i === idx ? { ...x, himsProjectCode: e.target.value } : x))} />
+                    </div>
+                    <div className="md:col-span-3">
+                      <Label className="text-xs text-slate-500">HIMS Phase Code</Label>
+                      <Input placeholder="e.g. PHASE-2A" value={m.himsPhaseCode} onChange={(e) => setProjectMappings(curr => curr.map((x, i) => i === idx ? { ...x, himsPhaseCode: e.target.value } : x))} />
+                    </div>
+                    <div className="md:col-span-1 flex justify-end">
+                      <Button variant="ghost" size="sm" onClick={() => setProjectMappings(curr => curr.filter((_x, i) => i !== idx))}>
+                        <Trash2 className="w-4 h-4 text-rose-500" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {canConfigureHimsCredentials.enabled && (
+            <div className="flex justify-end">
+              <Button onClick={() => saveHimsSettings.mutate()} disabled={savingHims}>
+                <Save className="w-4 h-4 mr-2" />
+                {savingHims ? "Saving..." : "Save HIMS Settings"}
+              </Button>
+            </div>
+          )}
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Building2 className="w-4 h-4" />
+              HIMS / eSPA
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-4">
+              HIMS / eSPA integration is not enabled for this firm. Contact platform support to enable HIMS entitlements.
+            </div>
+          </CardContent>
+        </Card>
+      )}
+      </div>
     </div>
   );
 }

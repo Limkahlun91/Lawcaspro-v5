@@ -1,7 +1,18 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { z } from "zod";
-import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
-import { one } from "../lib/http.js";
+import { count, desc, eq, and, inArray, isNull, sql } from "drizzle-orm";
+import {
+  db,
+  casesTable,
+  casePurchasersTable,
+  clientsTable,
+  projectsTable,
+  himsStatusChecksTable,
+  himsConnectionsTable,
+  himsDataComparisonsTable,
+} from "@workspace/db";
+import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, canAccessCase } from "../lib/auth.js";
+import { one, queryOne } from "../lib/http.js";
 import { assertFirmFeatureEnabled } from "../modules/platform/firm-feature-service.js";
 import { publicCredentialStatus, encryptSecret, decryptSecret, isSecretEncryptionConfigured } from "../lib/security/secret-crypto.js";
 import { ApiError } from "../lib/api-response.js";
@@ -42,6 +53,205 @@ const HimsCreateConnectionSchema = z.object({
   refreshToken: z.string().trim().min(1).max(5000).optional(),
   endpointBaseUrl: z.string().trim().url(),
   mode: z.enum(["tracker_only", "full_write"]).default("tracker_only"),
+});
+
+router.get("/hims/cases", requireAuth, requireFirmUser, requirePermission("cases", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
+    const firmId = req.firmId!;
+    const userId = req.userId!;
+    const r = req.rlsDb ?? db;
+    const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : undefined;
+
+    let roleName: string | null = null;
+    const roleCache = (req as any)._roleCache as { firmId: number; roleId: number; name: string; permissions?: ReadonlyArray<{ module: string; action: string }> } | undefined;
+    if (roleCache && roleCache.firmId === firmId && roleCache.roleId === roleId) {
+      roleName = roleCache.name;
+    }
+
+    const connections = await r
+      .select({ count: count() })
+      .from(himsConnectionsTable)
+      .where(and(eq(himsConnectionsTable.firmId, firmId), eq(himsConnectionsTable.status, "active")));
+    const activeConnections = Number(connections?.[0]?.count ?? 0);
+
+    const qRaw = queryOne(req.query, "q")?.trim();
+    const q = qRaw && qRaw.length >= 2 ? `%${qRaw.replace(/[%_]/g, (ch) => `\\${ch}`)}%` : null;
+
+    const baseCaseWhere: any[] = [eq(casesTable.firmId, firmId)];
+    if (q) {
+      baseCaseWhere.push(
+        sql`(${casesTable.referenceNo} ilike ${q} or ${casesTable.parcelNo} ilike ${q} or exists (
+          select 1 from ${casePurchasersTable} cp
+          inner join ${clientsTable} cl on cl.id = cp.client_id
+          where cp.case_id = ${casesTable.id} and cl.name ilike ${q}
+        ))`,
+      );
+    }
+
+    const baseCaseQb = r
+      .select({
+        caseId: casesTable.id,
+        caseReference: casesTable.referenceNo,
+        project: projectsTable.name,
+        phase: projectsTable.phase,
+        parcelNo: casesTable.parcelNo,
+        lotNo: sql<string>`${casesTable.propertyDetails}->>'lotNo'`,
+        titleNo: sql<string>`${casesTable.propertyDetails}->>'hakmilikNo'`,
+      })
+      .from(casesTable)
+      .leftJoin(projectsTable, eq(projectsTable.id, casesTable.projectId))
+      .where(and(...baseCaseWhere));
+
+    const caseList: any[] = await baseCaseQb.orderBy(desc(casesTable.updatedAt)).limit(500);
+
+    const caseIds: number[] = [];
+    for (const c of caseList) {
+      if (typeof c.caseId === "number" && c.caseId > 0) caseIds.push(c.caseId);
+    }
+
+    const accessibleCaseIds: number[] = [];
+    for (const cid of caseIds) {
+      const access = await canAccessCase({
+        r: r as any,
+        firmId,
+        userId,
+        roleId: roleId ?? null,
+        roleName,
+        caseId: cid,
+        purpose: "view_case",
+      });
+      if (access.ok === true) accessibleCaseIds.push(cid);
+    }
+
+    const latestChecks = new Map<number, any>();
+    if (accessibleCaseIds.length > 0) {
+      const checks = await r
+        .select({
+          caseId: himsStatusChecksTable.caseId,
+          lastCheckedAt: himsStatusChecksTable.lastCheckedAt,
+          himsStatus: himsStatusChecksTable.lastStatus,
+          himsStatusCode: himsStatusChecksTable.lastStatusCode,
+          sourceSnapshotJson: himsStatusChecksTable.sourceSnapshotJson,
+        })
+        .from(himsStatusChecksTable)
+        .innerJoin(
+          sql`(
+            select firm_id, case_id, max(last_checked_at) as mx
+            from hims_status_checks
+            where firm_id = ${firmId} and case_id is not null
+            group by firm_id, case_id
+          ) latest`,
+          sql`latest.firm_id = ${himsStatusChecksTable.firmId} and latest.case_id = ${himsStatusChecksTable.caseId} and latest.mx = ${himsStatusChecksTable.lastCheckedAt}`,
+        )
+        .where(and(
+          eq(himsStatusChecksTable.firmId, firmId),
+          inArray(himsStatusChecksTable.caseId, accessibleCaseIds),
+        ));
+      for (const chk of checks) {
+        if (typeof chk.caseId === "number") latestChecks.set(chk.caseId, chk);
+      }
+    }
+
+    const matchSummary = new Map<number, { matched: number; total: number }>();
+    if (accessibleCaseIds.length > 0) {
+      const comps = await r
+        .select({
+          caseId: himsDataComparisonsTable.caseId,
+          status: himsDataComparisonsTable.status,
+          cnt: count(),
+        })
+        .from(himsDataComparisonsTable)
+        .where(and(
+          eq(himsDataComparisonsTable.firmId, firmId),
+          inArray(himsDataComparisonsTable.caseId, accessibleCaseIds),
+        ))
+        .groupBy(himsDataComparisonsTable.caseId, himsDataComparisonsTable.status);
+      for (const row of comps) {
+        if (typeof row.caseId !== "number") continue;
+        const cur = matchSummary.get(row.caseId) ?? { matched: 0, total: 0 };
+        const c = Number(row.cnt ?? 0);
+        cur.total += c;
+        if (String(row.status) === "match") cur.matched += c;
+        matchSummary.set(row.caseId, cur);
+      }
+    }
+
+    const purchasers = new Map<number, string>();
+    if (accessibleCaseIds.length > 0) {
+      const pRows = await r
+        .select({
+          caseId: casePurchasersTable.caseId,
+          name: clientsTable.name,
+          orderNo: casePurchasersTable.orderNo,
+        })
+        .from(casePurchasersTable)
+        .innerJoin(clientsTable, eq(clientsTable.id, casePurchasersTable.clientId))
+        .where(and(
+          eq(clientsTable.firmId, firmId),
+          inArray(casePurchasersTable.caseId, accessibleCaseIds),
+        ))
+        .orderBy(casePurchasersTable.caseId, casePurchasersTable.orderNo);
+      for (const pr of pRows as any[]) {
+        if (typeof pr.caseId !== "number" || purchasers.has(pr.caseId)) continue;
+        if (typeof pr.name === "string" && pr.name.trim().length > 0) purchasers.set(pr.caseId, pr.name);
+      }
+    }
+
+    const items: any[] = [];
+    for (const c of caseList) {
+      const caseId = Number(c.caseId ?? 0);
+      if (!accessibleCaseIds.includes(caseId)) continue;
+      const chk = latestChecks.get(caseId);
+      const snap = chk?.sourceSnapshotJson ?? null;
+      const espaStatus = (snap && typeof snap === "object" && "espaStatus" in snap ? String((snap as any).espaStatus ?? "") :
+        (snap && typeof snap === "object" && "spaStatus" in snap ? String((snap as any).spaStatus ?? "") : null));
+      const summary = matchSummary.get(caseId);
+      let dataMatch: boolean | string | null = null;
+      if (summary && summary.total > 0) {
+        dataMatch = summary.matched === summary.total;
+      }
+      const unitLotTitleRaw = [c.parcelNo, c.lotNo, c.titleNo].filter((v) => typeof v === "string" && v.trim().length > 0).join(" / ");
+      items.push({
+        caseId,
+        caseReference: c.caseReference ?? null,
+        purchaser: purchasers.get(caseId) ?? null,
+        project: c.project ?? null,
+        phase: typeof c.phase === "string" && c.phase.trim().length > 0 ? c.phase : null,
+        unitLotTitle: unitLotTitleRaw.length > 0 ? unitLotTitleRaw : null,
+        himsStatus: typeof chk?.himsStatus === "string" ? chk.himsStatus : (typeof chk?.himsStatusCode === "string" ? chk.himsStatusCode : null),
+        espaStatus: espaStatus ?? null,
+        dataMatch,
+        lastChecked: chk?.lastCheckedAt ? (chk.lastCheckedAt instanceof Date ? chk.lastCheckedAt.toISOString() : String(chk.lastCheckedAt)) : null,
+      });
+    }
+
+    const filteredByQuery = q !== null;
+    const hasChecks = latestChecks.size > 0;
+    let configurationStatus: "configured" | "no_connections" | "no_mappings" | "no_data" = "configured";
+    if (activeConnections === 0) {
+      configurationStatus = "no_connections";
+    } else if (!hasChecks && !filteredByQuery) {
+      configurationStatus = "no_data";
+    }
+
+    res.json({
+      items,
+      configurationStatus,
+      total: items.length,
+    });
+  } catch (err: any) {
+    if (err?.code === "FEATURE_DISABLED") {
+      res.status(403).json({ code: err.code, error: err.message ?? "Feature disabled", details: err.details ?? null });
+      return;
+    }
+    req.log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "hims.list_cases_failed");
+    res.status(err?.status ?? 500).json({
+      code: err?.code ?? "HIMS_CASES_LIST_FAILED",
+      error: err?.message ?? "Unable to load HIMS status",
+      requestId: (req as any).id ?? `hims-${Number(process.hrtime.bigint() & 0xffffffffn).toString(16)}`,
+    });
+  }
 });
 
 router.get("/hims/connections", requireAuth, requireFirmUser, requirePermission("module.hims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {

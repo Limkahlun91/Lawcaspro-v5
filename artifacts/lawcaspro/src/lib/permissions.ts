@@ -78,6 +78,7 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
     "cases:update",
     "projects:read",
     "documents:read",
+    "hr:read",
   ]);
 
   if (isCoreStaff && coreStaffBypass.has(key)) return true;
@@ -105,6 +106,10 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
 
   const partner = new Set<string>([
     "dashboard:read",
+    "hr:read",
+    "hr:manage",
+    "hims:read",
+    "hims:manage",
     "case_monitor:view",
     "case_monitor:manage",
     "file_custody:view",
@@ -198,6 +203,9 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
 
   const hrFullAccessHROnly = new Set<string>([
     "dashboard:read",
+    "hr:read",
+    "hr:manage",
+    "hims:read",
     "hr_enabled:view",
     "hr_dashboard:read", "hr_dashboard:export",
     "hr_settings:view",
@@ -247,6 +255,7 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
 
   const hrEmployee = new Set<string>([
     "dashboard:read",
+    "hr:read",
     ...Array.from(hrSelfServiceBypass),
   ]);
 

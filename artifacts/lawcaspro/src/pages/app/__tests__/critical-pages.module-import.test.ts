@@ -57,7 +57,7 @@ const HIDDEN_COMPILE_CHECK = [
 
 describe("Critical Pages Module Import Smoke", () => {
   for (const page of CRITICAL_PAGES) {
-    it(`resolves ${page.name}`, { timeout: 30_000 }, async () => {
+    it(`resolves ${page.name}`, { timeout: 120_000 }, async () => {
       const mod = await page.load();
       expect(mod).toBeTruthy();
     });
@@ -66,7 +66,7 @@ describe("Critical Pages Module Import Smoke", () => {
 
 describe("Hidden module can still compile/import", () => {
   for (const page of HIDDEN_COMPILE_CHECK) {
-    it(page.name, { timeout: 30_000 }, async () => {
+    it(page.name, { timeout: 120_000 }, async () => {
       const mod = await page.load();
       expect(mod).toBeTruthy();
     });

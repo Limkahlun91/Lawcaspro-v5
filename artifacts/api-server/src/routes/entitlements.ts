@@ -1,5 +1,5 @@
 import express, { type Router as ExpressRouter } from "express";
-import { and, eq, inArray, gte, isNull, or } from "drizzle-orm";
+import { and, eq, inArray, gte, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod/v4";
 import {
   db,
@@ -9,6 +9,8 @@ import {
   planEntitlementsTable,
   billingLedgerTable,
   firmsTable,
+  rolesTable,
+  permissionsTable,
 } from "@workspace/db";
 import {
   resolveEntitlementsBulk,
@@ -47,6 +49,7 @@ import {
   writeAuditLog,
   requireFounderPermission,
   type AuthRequest,
+  ensureRolePermissionsInitialized,
 } from "../lib/auth.js";
 import { ApiError, sendError, sendOk, parseIntParam, type ResLike } from "../lib/api-response.js";
 
@@ -822,6 +825,134 @@ router.get("/platform/feature-registry", requireAuth, async (_req: AuthRequest, 
       jobGuards: f.jobGuards ?? [],
     }));
     sendOk(res, { registry, jobGuardMap: collectJobGuardToFeatureMap() });
+  } catch (err) { sendError(res, err); }
+});
+
+// ---------------------------------------------------------------------------
+// N. Partner-only visibility diagnostic endpoint (DEV-safe, no secrets)
+// ---------------------------------------------------------------------------
+
+type VisibilityKeyInfo = { key: string; module: string; action: "read" | "create" | "manage" | "update" };
+
+const VISIBILITY_KEYS: VisibilityKeyInfo[] = [
+  { key: "module.hr", module: "hr", action: "read" },
+  { key: "hr.dashboard", module: "hr", action: "read" },
+  { key: "communications.email", module: "communications", action: "read" },
+  { key: "cases.legacy_import", module: "cases", action: "create" },
+  { key: "module.hims", module: "cases", action: "read" },
+  { key: "hims.tracker", module: "cases", action: "read" },
+];
+
+async function checkUserPermission(
+  firmId: number,
+  roleId: number | null,
+  info: VisibilityKeyInfo,
+  rlsDb: NonNullable<AuthRequest["rlsDb"]> | typeof db,
+): Promise<boolean> {
+  if (!roleId) return false;
+  try {
+    const ensured = new Set<number>();
+    try {
+      if (!ensured.has(roleId) && firmId) {
+        await ensureRolePermissionsInitialized(rlsDb as any, firmId, roleId);
+        ensured.add(roleId);
+      }
+    } catch {
+      // no-op, continue anyway
+    }
+    const [perm] = await rlsDb
+      .select({ allowed: permissionsTable.allowed })
+      .from(permissionsTable)
+      .where(and(
+        eq(permissionsTable.roleId, roleId),
+        eq(permissionsTable.module, info.module),
+        eq(permissionsTable.action, info.action),
+      ));
+    return Boolean(perm?.allowed);
+  } catch {
+    return false;
+  }
+}
+
+router.get("/_self/visibility-debug", requireAuth, requireFirmUser, async (req: AuthRequest, res: ResLike) => {
+  try {
+    const firmId = Number(req.firmId);
+    const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : null;
+    const userId = req.userId ?? null;
+    if (!firmId || !roleId) throw new ApiError({ status: 400, code: "NO_FIRM_OR_ROLE", message: "Firm or role context required", retryable: false });
+
+    const r = req.rlsDb ?? db;
+
+    // Partner-only gate
+    let roleName: string | null = null;
+    try {
+      const cached = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
+      if (cached && cached.firmId === firmId && cached.roleId === roleId) {
+        roleName = cached.name;
+      } else {
+        const [role] = await r
+          .select({ name: rolesTable.name })
+          .from(rolesTable)
+          .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)))
+          .limit(1);
+        roleName = role?.name ?? null;
+        if (roleName) (req as any)._roleCache = { firmId, roleId, name: roleName };
+      }
+    } catch { roleName = null; }
+
+    const isPartner = typeof roleName === "string" && roleName.toLowerCase().includes("partner");
+    if (!isPartner) {
+      res.status(403).json({ code: "PARTNER_ONLY", error: "This diagnostic endpoint is restricted to Partner role users only." });
+      return;
+    }
+
+    const effectiveBulk = await resolveEntitlementsBulk(
+      firmId,
+      VISIBILITY_KEYS.map((k) => k.key),
+      { conn: req.rlsDb ?? undefined },
+    );
+    const entMap = new Map<string, any>();
+    for (const e of Object.values(effectiveBulk ?? {})) entMap.set(String(e.featureKey ?? ""), e);
+
+    const rows: any[] = [];
+    for (const info of VISIBILITY_KEYS) {
+      const eff = entMap.get(info.key) ?? null;
+      const firmEnabled = Boolean(eff?.enabled ?? (eff && typeof eff.enabled === "boolean" ? eff.enabled : false));
+      const userPermission = await checkUserPermission(firmId, roleId, info, r);
+      const effectiveEnabled = firmEnabled && userPermission;
+      let denialCode: string | null = null;
+      if (!firmEnabled) denialCode = "FEATURE_DISABLED";
+      else if (!userPermission) denialCode = "PERMISSION_DENIED";
+      const rawSrc = String(eff?.source ?? "registry_default");
+      const source: FirmFeatureStateSrc =
+        rawSrc === "firm_override_temporary" ? "temporary_override" :
+        rawSrc === "firm_override_permanent" ? "founder_override" :
+        rawSrc === "plan_entitlement" ? "plan" :
+        "registry_default";
+      rows.push({
+        featureKey: info.key,
+        firmEnabled,
+        userPermission,
+        effectiveEnabled,
+        denialCode,
+        source,
+      });
+    }
+
+    await writeAuditLog({
+      firmId, actorId: userId, actorType: req.userType,
+      action: "entitlements.visibility_debug",
+      entityType: "firm", entityId: firmId,
+      detail: `keys=${VISIBILITY_KEYS.length} role=${String(roleName ?? "unknown")}`,
+      ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"],
+    }, { db: r as any, strict: false });
+
+    sendOk(res, {
+      firmId,
+      roleName,
+      visibilityKeys: rows,
+      period: currentMonthlyPeriod(),
+    });
   } catch (err) { sendError(res, err); }
 });
 

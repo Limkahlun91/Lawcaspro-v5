@@ -43,6 +43,7 @@ import { amountToEnglishWords, formatRMAmount, toMoneyNumber } from "@/lib/money
 import { calculateLoanAmounts } from "@/lib/loan-amounts";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
+import { useFeature } from "@/lib/feature-guards";
 import { DEFAULT_ALLOWED_MIME_TYPES, validateUploadFile } from "@/lib/upload-validation";
 import { WORKFLOW_ATTACHMENT_ACCEPT, WORKFLOW_ATTACHMENT_ITEMS, isAllowedWorkflowAttachmentFileName, type WorkflowAttachmentDocKey, type WorkflowAttachmentDateKey } from "./components/workflow-attachments";
 
@@ -676,20 +677,222 @@ type HimsTrackerRow = {
   dataMatch: string | boolean | null;
 };
 function HimsTrackerPanel({ caseId }: { caseId: number }) {
-  const q = useQuery({
+  const q = useQuery<{ items: HimsTrackerRow[]; configurationStatus?: string | null }>({
     queryKey: ["hims-espa-tracker", caseId],
     queryFn: async () => {
-      try {
-        return unwrapApiData<{ items: HimsTrackerRow[] }>(await apiFetchJson(`/cases/${String(caseId)}/hims/tracker`));
-      } catch {
-        return { items: [] as HimsTrackerRow[] };
+      const raw = await apiFetchJson(`/cases/${String(caseId)}/hims/tracker`);
+      const unwrapped = unwrapApiData<{ items?: HimsTrackerRow[]; configurationStatus?: string | null }>(raw);
+      if (Array.isArray(unwrapped)) {
+        return { items: unwrapped as HimsTrackerRow[], configurationStatus: null };
       }
+      return {
+        items: Array.isArray((unwrapped as any)?.items) ? (unwrapped as any).items : [],
+        configurationStatus: (unwrapped as any)?.configurationStatus ?? null,
+      };
     },
     staleTime: 30_000,
     retry: false,
     enabled: !!caseId,
   });
+
   const items = q.data?.items ?? [];
+  const configurationStatus = typeof q.data?.configurationStatus === "string" ? q.data.configurationStatus : null;
+
+  function makeErrorId(err: unknown): string {
+    try {
+      const code =
+        (err as any)?.code ??
+        (err as any)?.errorCode ??
+        (err as any)?.statusCode ??
+        (err as any)?.status ??
+        "UNKNOWN";
+      const stamp = Math.abs(
+        Number(
+          (err as any)?.requestId ??
+            ((Date.now() & 0xffff) ^ (Math.trunc(Math.random() * 0xffff) & 0xffff)),
+        ),
+      ).toString(16).toUpperCase().padStart(6, "0");
+      return `HIMS-${String(code).toUpperCase().slice(0, 32)}-${stamp}`;
+    } catch {
+      return "HIMS-ERR-000000";
+    }
+  }
+
+  function extractErrorCode(err: unknown): string | null {
+    try {
+      const code =
+        (err as any)?.code ??
+        (err as any)?.error?.code ??
+        (err as any)?.errorCode ??
+        (err as any)?.body?.code ??
+        null;
+      return typeof code === "string" && code ? code : null;
+    } catch {
+      return null;
+    }
+  }
+
+  if (q.isLoading) {
+    return (
+      <div className="space-y-4">
+        <Card>
+          <CardHeader className="flex flex-row items-start justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">HIMS / eSPA Tracker</CardTitle>
+              <div className="text-xs text-slate-500 mt-1">Tracker data view only — edits managed via workflow steps above.</div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="py-16 text-center">
+              <Loader2 className="w-8 h-8 animate-spin mx-auto text-slate-400" />
+              <div className="mt-3 text-sm text-slate-500">Loading HIMS tracker…</div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (q.isError) {
+    const errorCode = extractErrorCode(q.error);
+    if (errorCode === "FEATURE_DISABLED" || errorCode === "MODULE_NOT_ENABLED" || errorCode === "HIMS_NOT_CONFIGURED") {
+      return (
+        <div className="space-y-4">
+          <Card>
+            <CardHeader className="flex flex-row items-start justify-between gap-3">
+              <div>
+                <CardTitle className="text-base">HIMS / eSPA Tracker</CardTitle>
+                <div className="text-xs text-slate-500 mt-1">Tracker data view only — edits managed via workflow steps above.</div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="py-16 text-center">
+                <AlertTriangle className="w-10 h-10 mx-auto text-amber-500" />
+                <div className="mt-3 text-sm font-medium text-slate-700">HIMS not configured</div>
+                <div className="mt-1 text-xs text-slate-500">Configure developer credentials and project/phase mapping in Settings → Integrations → HIMS / eSPA.</div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      );
+    }
+    if (errorCode === "HIMS_NO_MAPPINGS" || errorCode === "NO_PROJECT_MAPPING") {
+      return (
+        <div className="space-y-4">
+          <Card>
+            <CardHeader className="flex flex-row items-start justify-between gap-3">
+              <div>
+                <CardTitle className="text-base">HIMS / eSPA Tracker</CardTitle>
+                <div className="text-xs text-slate-500 mt-1">Tracker data view only — edits managed via workflow steps above.</div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="py-16 text-center">
+                <AlertTriangle className="w-10 h-10 mx-auto text-amber-500" />
+                <div className="mt-3 text-sm font-medium text-slate-700">No project / phase mappings</div>
+                <div className="mt-1 text-xs text-slate-500">Map your Projects and Phases to HIMS references in Settings → Integrations → HIMS / eSPA.</div>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      );
+    }
+    const errId = makeErrorId(q.error);
+    return (
+      <div className="space-y-4">
+        <Card>
+          <CardHeader className="flex flex-row items-start justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">HIMS / eSPA Tracker</CardTitle>
+              <div className="text-xs text-slate-500 mt-1">Tracker data view only — edits managed via workflow steps above.</div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="py-8">
+              <QueryFallback
+                title="Unable to load HIMS status"
+                error={Object.assign(new Error("Tracker endpoint returned an error."), { cause: q.error })}
+                onRetry={() => void q.refetch()}
+                isRetrying={q.isFetching}
+              />
+              <div className="mt-3 text-xs text-slate-500 text-center">
+                Error ID: <code className="px-2 py-1 bg-slate-100 rounded font-mono">{errId}</code>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (configurationStatus === "no_connections" || configurationStatus === "not_configured") {
+    return (
+      <div className="space-y-4">
+        <Card>
+          <CardHeader className="flex flex-row items-start justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">HIMS / eSPA Tracker</CardTitle>
+              <div className="text-xs text-slate-500 mt-1">Tracker data view only — edits managed via workflow steps above.</div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="py-16 text-center">
+              <AlertTriangle className="w-10 h-10 mx-auto text-amber-500" />
+              <div className="mt-3 text-sm font-medium text-slate-700">HIMS not configured</div>
+              <div className="mt-1 text-xs text-slate-500">Configure developer credentials and project/phase mapping in Settings → Integrations → HIMS / eSPA.</div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (configurationStatus === "no_mappings") {
+    return (
+      <div className="space-y-4">
+        <Card>
+          <CardHeader className="flex flex-row items-start justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">HIMS / eSPA Tracker</CardTitle>
+              <div className="text-xs text-slate-500 mt-1">Tracker data view only — edits managed via workflow steps above.</div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="py-16 text-center">
+              <AlertTriangle className="w-10 h-10 mx-auto text-amber-500" />
+              <div className="mt-3 text-sm font-medium text-slate-700">No project / phase mappings</div>
+              <div className="mt-1 text-xs text-slate-500">Map your Projects and Phases to HIMS references in Settings → Integrations → HIMS / eSPA.</div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  if (items.length === 0) {
+    return (
+      <div className="space-y-4">
+        <Card>
+          <CardHeader className="flex flex-row items-start justify-between gap-3">
+            <div>
+              <CardTitle className="text-base">HIMS / eSPA Tracker</CardTitle>
+              <div className="text-xs text-slate-500 mt-1">Tracker data view only — edits managed via workflow steps above.</div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="py-16 text-center">
+              <div className="mx-auto w-12 h-12 rounded-full bg-slate-50 flex items-center justify-center text-slate-300">
+                <Building2 className="w-6 h-6 text-slate-400" />
+              </div>
+              <div className="mt-3 text-sm font-medium text-slate-700">No tracker data yet</div>
+              <div className="mt-1 text-xs text-slate-500">Run the first HIMS status check or wait for the next scheduled sync to populate tracker records.</div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       <Card>
@@ -716,9 +919,7 @@ function HimsTrackerPanel({ caseId }: { caseId: number }) {
                 </tr>
               </thead>
               <tbody>
-                {items.length === 0 ? (
-                  <tr><td colSpan={9} className="py-10 text-center text-sm text-slate-500">No HIMS tracker records linked yet.</td></tr>
-                ) : items.map((r: HimsTrackerRow, i: number) => (
+                {items.map((r: HimsTrackerRow, i: number) => (
                   <tr key={i} className="border-b border-slate-100">
                     <td className="py-2 px-3">{r.developer ?? "—"}</td>
                     <td className="py-2 px-3">{r.project ?? "—"}</td>
@@ -759,6 +960,11 @@ export default function CaseDetail() {
     const rn = roleName.trim();
     return rn === "Partner" || rn === "Manager" || rn.startsWith("Manager");
   })();
+
+  const himsModuleFeature = useFeature("module.hims");
+  const himsTrackerFeature = useFeature("hims.tracker");
+  const canViewHims = hasPermission(user, "cases", "read");
+  const himsTabVisible = canViewHims && himsModuleFeature.enabled && himsTrackerFeature.enabled;
 
   const {
     data: caseInfo,
@@ -2916,10 +3122,12 @@ export default function CaseDetail() {
             <Upload className="h-4 w-4" />
             <span>Supporting Docs</span>
           </TabsTrigger>
-          <TabsTrigger value="hims-tracker" className="gap-2">
-            <Building2 className="h-4 w-4" />
-            <span>HIMS / eSPA Tracker</span>
-          </TabsTrigger>
+          {himsTabVisible ? (
+            <TabsTrigger value="hims-tracker" className="gap-2">
+              <Building2 className="h-4 w-4" />
+              <span>HIMS / eSPA Tracker</span>
+            </TabsTrigger>
+          ) : null}
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
@@ -4428,9 +4636,11 @@ export default function CaseDetail() {
           <SupportingDocumentsPanel caseId={caseId} projectId={Number(caseInfo?.projectId ?? 0) || null} />
         </TabsContent>
 
-        <TabsContent value="hims-tracker" className="space-y-4">
-          <HimsTrackerPanel caseId={caseId} />
-        </TabsContent>
+        {himsTabVisible ? (
+          <TabsContent value="hims-tracker" className="space-y-4">
+            <HimsTrackerPanel caseId={caseId} />
+          </TabsContent>
+        ) : null}
       </Tabs>
     </div>
   );

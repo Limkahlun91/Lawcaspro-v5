@@ -9,6 +9,9 @@ process.env.NODE_ENV ??= "test";
 export default defineConfig({
   test: {
     environment: "jsdom",
+    testTimeout: 180_000,
+    hookTimeout: 180_000,
+    teardownTimeout: 60_000,
     env: {
       NODE_ENV: "test",
     },

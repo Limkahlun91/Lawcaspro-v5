@@ -30,6 +30,7 @@ import { normalizeAssignedToUserIdParam } from "./case-filter-utils";
 import { Label } from "@/components/ui/label";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { FeatureGuard } from "@/lib/feature-guards";
+import { PermissionGuard } from "@/components/permission-guard";
 
 async function apiFetchCsv(path: string): Promise<Blob> {
   return await apiFetchBlob(path, { timeoutMs: 60000, headers: { accept: "text/csv" } });
@@ -666,13 +667,15 @@ export default function CasesList() {
             <Download className="w-4 h-4 mr-2" />
             Export CSV
           </Button>
-          <FeatureGuard feature="cases.legacy_import">
-            <Link href="/app/cases/import">
-              <Button variant="outline">
-                <FileSpreadsheet className="w-4 h-4 mr-2" />
-                Import Old Cases
-              </Button>
-            </Link>
+          <FeatureGuard feature="cases.legacy_import" hideDisabled={true}>
+            <PermissionGuard module="cases" action="create" mode="silent">
+              <Link href="/app/cases/import">
+                <Button variant="outline">
+                  <FileSpreadsheet className="w-4 h-4 mr-2" />
+                  Import Old Cases
+                </Button>
+              </Link>
+            </PermissionGuard>
           </FeatureGuard>
           <Link href="/app/cases/new">
             <Button className="bg-amber-500 hover:bg-amber-600 text-white">
