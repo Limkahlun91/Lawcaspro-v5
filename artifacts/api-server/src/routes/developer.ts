@@ -643,24 +643,6 @@ function enrichAssignments(
   }
 }
 
-function applyStageFilterPredicate(dto: UnitListDto, stage: DevPortalStageFilter): boolean {
-  switch (stage) {
-    case "spa":
-      return dto.spa.status === "In Progress" || dto.spa.status === "Attention Required" || dto.currentStage === "SPA Signing";
-    case "spa_stamped":
-      return dto.spa.label === "SPA Stamped" && dto.spa.status === "Completed";
-    case "loan":
-      return dto.loan.status === "In Progress" || dto.loan.status === "Attention Required" || dto.loan.status === "Completed";
-    case "attention":
-      return !!dto.nextAction?.attentionRequired || dto.spa.status === "Attention Required" || dto.loan.status === "Attention Required";
-    case "completed":
-      return dto.currentStage === "Completed / Handover";
-    case "all":
-    default:
-      return true;
-  }
-}
-
 routerInternal.get("/developer/portal/projects", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
@@ -699,12 +681,15 @@ routerInternal.get("/developer/portal/overview", requireAuth, requireFirmUser, a
   if (projectId) baseConditions.push(eq(casesTable.projectId, projectId));
 
   const [dev] = await r.select({ name: developersTable.name }).from(developersTable).where(and(eq(developersTable.id, ctx.developerId), eq(developersTable.firmId, ctx.firmId))).limit(1);
-  let resolvedProjectName: string | null = null;
-  let resolvedPhase: string | null = null;
+  const resolvedAllProjectsFlag = !projectId;
+  let resolvedProjectName: string | null;
+  let resolvedPhase: string | null;
+  resolvedProjectName = projectId ? (r as any).select_never_match_placeholder ?? null : null;
+  resolvedPhase = projectId ? (r as any).select_never_match_placeholder ?? null : null;
   if (projectId) {
     const [p] = await r.select({ name: projectsTable.name, phase: projectsTable.phase }).from(projectsTable).where(and(eq(projectsTable.id, projectId), eq(projectsTable.firmId, ctx.firmId), eq(projectsTable.developerId, ctx.developerId))).limit(1);
-    resolvedProjectName = p?.name ?? null;
-    resolvedPhase = p?.phase ?? null;
+    resolvedProjectName = projectId ? (p?.name ?? null) : null;
+    resolvedPhase = projectId ? (p?.phase ?? null) : null;
   }
 
   const [aggSummary] = await r
@@ -750,13 +735,13 @@ routerInternal.get("/developer/portal/overview", requireAuth, requireFirmUser, a
   const attentionIds = attentionRows.map((x) => x.id);
   const attentionAssignments = attentionIds.length ? await loadCaseAssignments(r, ctx.firmId, attentionIds) : {};
   if (attentionIds.length) enrichAssignments(attentionRows as any, attentionAssignments);
-  const attentionDtos: UnitListDto[] = attentionRows.map((row) => mapJoinedCaseToListDto(row as any));
-  const attentionItems = collectAttentionItems(attentionDtos, 8);
+  const dtos: UnitListDto[] = attentionRows.map((row) => mapJoinedCaseToListDto(row as any));
+  const attentionItems = collectAttentionItems(dtos, 8);
 
   res.setHeader("Cache-Control", "no-store");
   res.json({
     project: {
-      allProjects: !projectId,
+      allProjects: resolvedAllProjectsFlag,
       projectId: projectId ?? null,
       name: resolvedProjectName,
       phase: resolvedPhase,
@@ -823,15 +808,11 @@ routerInternal.get("/developer/portal/units", requireAuth, requireFirmUser, asyn
   const ids = rows.map((x) => x.id);
   const assignments = ids.length ? await loadCaseAssignments(r, ctx.firmId, ids) : {};
   if (ids.length) enrichAssignments(rows as any, assignments);
-  const mapped: UnitListDto[] = rows.map((r) => mapJoinedCaseToListDto(r as any));
-
-  let filtered = mapped;
-  if (q.stage !== "all") filtered = filtered.filter((d) => applyStageFilterPredicate(d, q.stage));
-  if (q.attentionOnly) filtered = filtered.filter((d) => !!d.nextAction?.attentionRequired || d.spa.status === "Attention Required" || d.loan.status === "Attention Required");
+  const data: UnitListDto[] = rows.map((r) => mapJoinedCaseToListDto(r as any));
 
   res.setHeader("Cache-Control", "no-store");
   res.json({
-    data: filtered,
+    data,
     total: Number(totalRes?.c ?? 0),
     totalMatchingScope: Number(totalScopeRes?.c ?? 0),
     page: q.page,
@@ -941,9 +922,7 @@ routerInternal.get("/developer/portal/export.xlsx", requireAuth, requireFirmUser
   const ids = rows.map((x) => x.id);
   const assignments = ids.length ? await loadCaseAssignments(r, ctx.firmId, ids) : {};
   if (ids.length) enrichAssignments(rows as any, assignments);
-  let mapped: UnitListDto[] = rows.map((row) => mapJoinedCaseToListDto(row as any));
-  if (q.stage !== "all") mapped = mapped.filter((d) => applyStageFilterPredicate(d, q.stage));
-  if (q.attentionOnly) mapped = mapped.filter((d) => !!d.nextAction?.attentionRequired || d.spa.status === "Attention Required" || d.loan.status === "Attention Required");
+  const mapped: UnitListDto[] = rows.map((row) => mapJoinedCaseToListDto(row as any));
 
   const exportRows = mapped.map((u) => ({
     "Unit / Parcel": u.unitLabel,

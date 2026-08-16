@@ -328,52 +328,160 @@ export type SummaryCards = {
   completedHandover: number;
 };
 
-export function portalSummaryAggregateSelect() {
-  const spaStampedCase = sql<boolean>`${caseKeyDatesTable.spaStampedDate} IS NOT NULL`;
-  const spaSignedCase = sql<boolean>`${caseKeyDatesTable.spaSignedDate} IS NOT NULL OR ${caseKeyDatesTable.spaDate} IS NOT NULL OR ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL`;
-  const spaInProgressCase = sql<boolean>`(NOT ${spaStampedCase}) AND (
-    ${caseKeyDatesTable.spaSignedDate} IS NOT NULL
-    OR ${caseKeyDatesTable.spaDate} IS NOT NULL
-    OR ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL
-  )`;
-  const completedCase = sql<boolean>`${caseKeyDatesTable.completionDate} IS NOT NULL`;
-  const loanAny = sql<boolean>`(
-    ${caseKeyDatesTable.actingLetterIssuedDate} IS NOT NULL
-    OR ${caseKeyDatesTable.bankLuReceivedDate} IS NOT NULL
-    OR ${caseKeyDatesTable.adviceToBankDate} IS NOT NULL
-    OR ${caseKeyDatesTable.letterOfOfferDate} IS NOT NULL
-    OR ${caseKeyDatesTable.letterOfOfferStampedDate} IS NOT NULL
-    OR ${caseKeyDatesTable.loanDocsSignedDate} IS NOT NULL
-    OR ${caseKeyDatesTable.loanDocsPendingDate} IS NOT NULL
-    OR ${caseKeyDatesTable.loanAgreementStampedDate} IS NOT NULL
-  )`;
-  const loanInProgressCase = sql<boolean>`${loanAny} AND ${caseKeyDatesTable.bankLuReceivedDate} IS NULL`;
-  const actingLetterOldNoLu = sql<boolean>`${caseKeyDatesTable.actingLetterIssuedDate} IS NOT NULL
-    AND ${caseKeyDatesTable.bankLuReceivedDate} IS NULL
-    AND (extract(epoch from (now() - ${caseKeyDatesTable.actingLetterIssuedDate}))::int / 86400) > 5`;
-  const spaForwardOldNoSigned = sql<boolean>`${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL
+const ATTENTION_SQL_DAYS = ATTENTION_THRESHOLD_DAYS;
+
+function sqlIsAttentionSpa(): SQL {
+  return sql<boolean>`(
+    ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL
     AND ${caseKeyDatesTable.spaSignedDate} IS NULL
     AND ${caseKeyDatesTable.spaStampedDate} IS NULL
-    AND (extract(epoch from (now() - ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn}))::int / 86400) > 5`;
-  const needsAttentionCase = sql<boolean>`${spaForwardOldNoSigned} OR ${actingLetterOldNoLu}`;
+    AND (extract(epoch from (now() - ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn}))::int / 86400) > ${ATTENTION_SQL_DAYS}
+  )`;
+}
+
+function sqlIsAttentionLoan(): SQL {
+  return sql<boolean>`(
+    ${caseKeyDatesTable.actingLetterIssuedDate} IS NOT NULL
+    AND ${caseKeyDatesTable.bankLuReceivedDate} IS NULL
+    AND (extract(epoch from (now() - ${caseKeyDatesTable.actingLetterIssuedDate}))::int / 86400) > ${ATTENTION_SQL_DAYS}
+  )`;
+}
+
+function sqlIsInProgressSpa(): SQL {
+  const attention = sqlIsAttentionSpa();
+  return sql<boolean>`(
+    (${caseKeyDatesTable.spaStampedDate} IS NULL)
+    AND (
+      ${caseKeyDatesTable.spaSignedDate} IS NOT NULL
+      OR (
+        ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL
+        AND ${caseKeyDatesTable.spaSignedDate} IS NULL
+        AND ${caseKeyDatesTable.spaStampedDate} IS NULL
+        AND (NOT (${attention}))
+      )
+      OR (${attention})
+      OR (
+        ${caseKeyDatesTable.spaDate} IS NOT NULL
+        AND ${caseKeyDatesTable.spaSignedDate} IS NULL
+        AND ${caseKeyDatesTable.spaStampedDate} IS NULL
+        AND ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NULL
+      )
+      OR (
+        ${caseKeyDatesTable.spaDate} IS NULL
+        AND ${caseKeyDatesTable.spaSignedDate} IS NULL
+        AND ${caseKeyDatesTable.spaStampedDate} IS NULL
+        AND ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NULL
+      )
+    )
+  )`;
+}
+
+function sqlLoanStatusCompleted(): SQL<boolean> {
+  return sql<boolean>`${caseKeyDatesTable.bankLuReceivedDate} IS NOT NULL`;
+}
+
+function sqlLoanStatusAttention(): SQL<boolean> {
+  return sqlIsAttentionLoan() as SQL<boolean>;
+}
+
+function sqlLoanStatusInProgress(): SQL<boolean> {
+  return sql<boolean>`(
+    (
+      ${caseKeyDatesTable.actingLetterIssuedDate} IS NOT NULL
+      AND ${caseKeyDatesTable.bankLuReceivedDate} IS NULL
+      AND (NOT (${sqlIsAttentionLoan()}))
+    )
+    OR ${caseKeyDatesTable.letterOfOfferStampedDate} IS NOT NULL
+    OR ${caseKeyDatesTable.letterOfOfferDate} IS NOT NULL
+    OR (
+      (${caseKeyDatesTable.spaSignedDate} IS NOT NULL OR ${caseKeyDatesTable.spaStampedDate} IS NOT NULL)
+      AND ${caseKeyDatesTable.actingLetterIssuedDate} IS NULL
+      AND ${caseKeyDatesTable.bankLuReceivedDate} IS NULL
+      AND ${caseKeyDatesTable.adviceToBankDate} IS NULL
+      AND ${caseKeyDatesTable.letterOfOfferDate} IS NULL
+      AND ${caseKeyDatesTable.letterOfOfferStampedDate} IS NULL
+      AND ${caseKeyDatesTable.loanDocsSignedDate} IS NULL
+      AND ${caseKeyDatesTable.loanDocsPendingDate} IS NULL
+      AND ${caseKeyDatesTable.loanAgreementStampedDate} IS NULL
+    )
+  )`;
+}
+
+function sqlSpaCompleted(): SQL<boolean> {
+  return sql<boolean>`${caseKeyDatesTable.spaStampedDate} IS NOT NULL`;
+}
+
+function sqlSpaCompletedOrSigned(): SQL<boolean> {
+  return sql<boolean>`(${caseKeyDatesTable.spaSignedDate} IS NOT NULL OR ${caseKeyDatesTable.spaStampedDate} IS NOT NULL)`;
+}
+
+export function portalSummaryAggregateSelect() {
+  const spaStamped = sqlSpaCompleted();
+  const loanInProgressCase = sql<boolean>`(${sqlLoanStatusInProgress()} OR ${sqlLoanStatusAttention()})`;
+  const attentionCase = sql<boolean>`(${sqlIsAttentionSpa()} OR ${sqlIsAttentionLoan()})`;
+  const completedCase = sql<boolean>`${caseKeyDatesTable.completionDate} IS NOT NULL`;
+
+  const spaInProgressCase = sql<boolean>`(
+    (NOT ${spaStamped})
+    AND (
+      ${sqlIsAttentionSpa()}
+      OR ${sqlIsInProgressSpa()}
+    )
+  )`;
+
   return {
     totalUnits: sql<number>`COUNT(${casesTable.id})::int`.as("total_units"),
     spaInProgress: sql<number>`COUNT(*) FILTER (WHERE ${spaInProgressCase})::int`.as("spa_in_progress"),
-    spaStamped: sql<number>`COUNT(*) FILTER (WHERE ${spaStampedCase})::int`.as("spa_stamped"),
+    spaStamped: sql<number>`COUNT(*) FILTER (WHERE ${spaStamped})::int`.as("spa_stamped"),
     loanInProgress: sql<number>`COUNT(*) FILTER (WHERE ${loanInProgressCase})::int`.as("loan_in_progress"),
-    needsAttention: sql<number>`COUNT(*) FILTER (WHERE ${needsAttentionCase})::int`.as("needs_attention"),
+    needsAttention: sql<number>`COUNT(*) FILTER (WHERE ${attentionCase})::int`.as("needs_attention"),
     completedHandover: sql<number>`COUNT(*) FILTER (WHERE ${completedCase})::int`.as("completed_handover"),
     lastUpdatedAt: sql<string | null>`MAX(${casesTable.updatedAt})::text`.as("last_updated_at"),
   };
 }
 
 export function portalProgressAggregateSelect() {
-  const stage = classifyStageSqlCaseExpr();
+  const completedStage = sql<boolean>`${caseKeyDatesTable.completionDate} IS NOT NULL`;
+  const motStage = sql<boolean>`(
+    NOT ${completedStage}
+    AND (
+      ${caseKeyDatesTable.motReceivedDate} IS NOT NULL
+      OR ${caseKeyDatesTable.motSignedDate} IS NOT NULL
+      OR ${caseKeyDatesTable.motStampedDate} IS NOT NULL
+      OR ${caseKeyDatesTable.motRegisteredDate} IS NOT NULL
+      OR ${caseKeyDatesTable.dischargeTitleReceivedOn} IS NOT NULL
+      OR ${caseKeyDatesTable.consentToTransferDate} IS NOT NULL
+    )
+  )`;
+  const loanStage = sql<boolean>`(
+    (NOT ${completedStage})
+    AND (NOT ${motStage})
+    AND (
+      ${sqlLoanStatusInProgress()}
+      OR ${sqlLoanStatusAttention()}
+      OR ${sqlLoanStatusCompleted()}
+    )
+    AND ${sqlSpaCompleted()}
+  )`;
+  const spaStage = sql<boolean>`(
+    (NOT ${completedStage})
+    AND (NOT ${motStage})
+    AND (
+      ${sqlSpaCompleted()}
+      AND (NOT (
+        (${sqlLoanStatusInProgress()} OR ${sqlLoanStatusAttention()} OR ${sqlLoanStatusCompleted()})
+      ))
+    )
+    OR (
+      (NOT ${sqlSpaCompleted()})
+    )
+  )`;
+
   return {
-    spa: sql<number>`COUNT(*) FILTER (WHERE (${stage}) IN ('spa','spa_stamped'))::int`.as("spa_progressing"),
-    loan: sql<number>`COUNT(*) FILTER (WHERE (${stage}) = 'loan')::int`.as("loan_progressing"),
-    mot: sql<number>`COUNT(*) FILTER (WHERE (${stage}) = 'mot')::int`.as("mot_progressing"),
-    completed: sql<number>`COUNT(*) FILTER (WHERE (${stage}) = 'completed')::int`.as("completed_progressing"),
+    spa: sql<number>`COUNT(*) FILTER (WHERE (NOT ${completedStage}) AND (NOT ${motStage}) AND (NOT ${loanStage}))::int`.as("spa_progressing"),
+    loan: sql<number>`COUNT(*) FILTER (WHERE ${loanStage})::int`.as("loan_progressing"),
+    mot: sql<number>`COUNT(*) FILTER (WHERE ${motStage})::int`.as("mot_progressing"),
+    completed: sql<number>`COUNT(*) FILTER (WHERE ${completedStage})::int`.as("completed_progressing"),
     total: sql<number>`COUNT(*)::int`.as("total"),
   };
 }
@@ -409,48 +517,26 @@ export function portalStagePredicateSql(stage: DevPortalStageFilter): SQL<unknow
   switch (stage) {
     case "all":
       return null;
-    case "spa":
-      return sql`(
-        (
-          (
-            ${caseKeyDatesTable.spaSignedDate} IS NOT NULL
-            OR ${caseKeyDatesTable.spaDate} IS NOT NULL
-            OR ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL
-          )
-          AND ${caseKeyDatesTable.spaStampedDate} IS NULL
-        )
-        OR (
-          ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL
-          AND ${caseKeyDatesTable.spaSignedDate} IS NULL
-          AND ${caseKeyDatesTable.spaStampedDate} IS NULL
-          AND (extract(epoch from (now() - ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn}))::int / 86400) > 5
-        )
+    case "spa": {
+      const spaStageLabelCase = classifyStageSqlCaseExpr();
+      const jsBranch1or2 = sql<boolean>`(
+        (NOT ${sqlSpaCompleted()})
+        AND (${sqlIsInProgressSpa()} OR ${sqlIsAttentionSpa()})
       )`;
+      const jsBranch3 = sql<boolean>`(${spaStageLabelCase} = 'spa')`;
+      return sql<boolean>`(${jsBranch1or2} OR ${jsBranch3})`;
+    }
     case "spa_stamped":
-      return sql`${caseKeyDatesTable.spaStampedDate} IS NOT NULL`;
+      return sqlSpaCompleted();
     case "loan":
-      return sql`(
-        ${caseKeyDatesTable.actingLetterIssuedDate} IS NOT NULL
-        OR ${caseKeyDatesTable.bankLuReceivedDate} IS NOT NULL
-        OR ${caseKeyDatesTable.adviceToBankDate} IS NOT NULL
-        OR ${caseKeyDatesTable.letterOfOfferDate} IS NOT NULL
-        OR ${caseKeyDatesTable.letterOfOfferStampedDate} IS NOT NULL
-        OR ${caseKeyDatesTable.loanDocsSignedDate} IS NOT NULL
-        OR ${caseKeyDatesTable.loanDocsPendingDate} IS NOT NULL
-        OR ${caseKeyDatesTable.loanAgreementStampedDate} IS NOT NULL
+      return sql<boolean>`(
+        (${sqlLoanStatusInProgress()} OR ${sqlLoanStatusAttention()} OR ${sqlLoanStatusCompleted()})
       )`;
     case "attention": {
-      const actingLetterOldNoLu = sql`${caseKeyDatesTable.actingLetterIssuedDate} IS NOT NULL
-        AND ${caseKeyDatesTable.bankLuReceivedDate} IS NULL
-        AND (extract(epoch from (now() - ${caseKeyDatesTable.actingLetterIssuedDate}))::int / 86400) > 5`;
-      const spaForwardOldNoSigned = sql`${caseKeyDatesTable.spaForwardToDeveloperExecutionOn} IS NOT NULL
-        AND ${caseKeyDatesTable.spaSignedDate} IS NULL
-        AND ${caseKeyDatesTable.spaStampedDate} IS NULL
-        AND (extract(epoch from (now() - ${caseKeyDatesTable.spaForwardToDeveloperExecutionOn}))::int / 86400) > 5`;
-      return sql`(${actingLetterOldNoLu} OR ${spaForwardOldNoSigned})`;
+      return sql<boolean>`(${sqlIsAttentionSpa()} OR ${sqlIsAttentionLoan()})`;
     }
     case "completed":
-      return sql`${caseKeyDatesTable.completionDate} IS NOT NULL`;
+      return sql<boolean>`${caseKeyDatesTable.completionDate} IS NOT NULL`;
     default:
       return null;
   }
