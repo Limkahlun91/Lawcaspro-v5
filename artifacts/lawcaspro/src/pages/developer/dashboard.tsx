@@ -341,6 +341,13 @@ export default function DeveloperDashboardPage() {
   }
 
   const overview = overviewQuery.data;
+  if (!overview) {
+    return (
+      <div className="py-12 flex justify-center">
+        <div className="max-w-lg w-full px-4 text-center text-slate-500 text-sm">Loading overview…</div>
+      </div>
+    );
+  }
   const items = Array.isArray(invQuery.data?.data) ? invQuery.data!.data : [];
   const totalUnits = Number(invQuery.data?.total ?? 0);
   const totalPages = Math.max(1, Math.ceil(totalUnits / LIMIT));
@@ -882,7 +889,7 @@ function OverviewSection(props: { detail: UnitDetailDto | null; fallback: UnitDe
   rows.push(["End Financier", d.endFinancier ?? "—"]);
   rows.push(["Responsible Lawyer", d.responsibleLawyer ?? "—"]);
   rows.push(["Assigned Clerk", d.assignedClerk ?? "—"]);
-  rows.push(["File Opened", formatDateOnly(d.fileOpenedAt ?? d.createdAt as any)]);
+  rows.push(["File Opened", formatDateOnly(d.fileOpenedAt ?? (d as any).createdAt)]);
   rows.push(["Last Activity", formatDateTime(d.lastActivity ?? d.lastUpdatedAt)]);
   return (
     <section>

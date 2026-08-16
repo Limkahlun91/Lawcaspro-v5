@@ -361,10 +361,10 @@ export function useFirmEntitlements<TFirmOverride = FirmOverrideLike>(): {
       } as unknown as FirmEntitlementsBundle;
     },
     staleTime: 60_000,
-    refetchOnWindowFocus: "stale",
+    refetchOnWindowFocus: true,
     retry: 1,
   });
-  return { data: res.data, isLoading: res.isLoading, error: res.error, refetch: res.refetch };
+  return { data: res.data as FirmEntitlementsBundle | undefined, isLoading: res.isLoading, error: res.error, refetch: res.refetch };
 }
 
 export function useFeatureRegistry(): {

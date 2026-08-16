@@ -41,14 +41,15 @@ import { useFeature } from "@/lib/feature-guards";
 
 const apiFetch = apiFetchJson;
 
-const TABS = ["Firm Info", "File Reference", "Users", "Roles & Permissions", "Security", "Document Templates", "Subscription & Billing", "Logs"] as const;
-type Tab = typeof TABS[number] | "Email" | "Integrations";
+const TABS = ["Firm Info", "File Reference", "Users & Access", "Security", "Document Templates", "Subscription & Billing", "Integrations", "Logs"] as const;
+type Tab = typeof TABS[number] | "Email";
 
 const TAB_KEYS: Record<string, Tab> = {
   firm: "Firm Info",
   fileRef: "File Reference",
-  users: "Users",
-  roles: "Roles & Permissions",
+  users: "Users & Access",
+  roles: "Users & Access",
+  "users-access": "Users & Access",
   security: "Security",
   documents: "Document Templates",
   subscription: "Subscription & Billing",
@@ -1426,6 +1427,7 @@ export default function Settings(props?: { defaultTab?: string }) {
   const queryClient = useQueryClient();
   const canManageUsers = hasPermission(user, "users", "create") || hasPermission(user, "users", "update") || hasPermission(user, "users", "delete");
   const canManageRoles = hasPermission(user, "roles", "create") || hasPermission(user, "roles", "update") || hasPermission(user, "roles", "delete");
+  const canManageAccess = canManageUsers || canManageRoles;
   const canUpdateSettings = hasPermission(user, "settings", "update");
   const canReadSettings = hasPermission(user, "settings", "read") || canUpdateSettings;
   const canAccessDocuments = hasPermission(user, "documents", "read") || hasPermission(user, "documents", "create") || hasPermission(user, "documents", "update") || hasPermission(user, "documents", "delete");
@@ -1436,34 +1438,43 @@ export default function Settings(props?: { defaultTab?: string }) {
   const searchString = useSearch();
   const params = new URLSearchParams(searchString);
   const tabFromUrl = params.get("tab");
+  const viewFromUrl = params.get("view");
   const visibleTabsBase: Tab[] = [
     "Firm Info",
     ...(canReadSettings ? (["File Reference"] as Tab[]) : []),
-    ...(canManageUsers ? (["Users"] as Tab[]) : []),
-    ...(canManageRoles ? (["Roles & Permissions"] as Tab[]) : []),
+    ...(canManageAccess ? (["Users & Access"] as Tab[]) : []),
     "Security",
     "Document Templates",
     "Subscription & Billing",
+    ...(canAccessIntegrations ? (["Integrations" as Tab]) : []),
     ...(canViewAuditLogs ? (["Logs"] as Tab[]) : []),
     ...(canAccessEmailSettings ? (["Email" as Tab]) : []),
-    ...(canAccessIntegrations ? (["Integrations" as Tab]) : []),
   ];
   const visibleTabs = visibleTabsBase as readonly Tab[];
   const enabledTabs = visibleTabs.filter((t) => (t === "Document Templates" ? canAccessDocuments : true));
   const resolvedTabFromUrl = (tabFromUrl && TAB_KEYS[tabFromUrl]) ? TAB_KEYS[tabFromUrl] : (props?.defaultTab && TAB_KEYS[props.defaultTab] ? TAB_KEYS[props.defaultTab] : null);
   const initialTab = (resolvedTabFromUrl && enabledTabs.includes(resolvedTabFromUrl)) ? resolvedTabFromUrl : "Firm Info";
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
+  const initialRoleTemplatesFromUrl = tabFromUrl === "roles" || viewFromUrl === "role-templates";
+  const [roleTemplatesOpen, setRoleTemplatesOpen] = useState<boolean>(initialRoleTemplatesFromUrl);
 
   useEffect(() => {
     if (resolvedTabFromUrl && enabledTabs.includes(resolvedTabFromUrl)) {
       setActiveTab(resolvedTabFromUrl);
+      if (tabFromUrl === "roles" || viewFromUrl === "role-templates") {
+        setRoleTemplatesOpen(true);
+      } else if (viewFromUrl !== null) {
+        setRoleTemplatesOpen(false);
+      }
       return;
     }
     if (!enabledTabs.includes(activeTab)) {
       setActiveTab("Firm Info");
     }
-  }, [resolvedTabFromUrl, enabledTabs, activeTab]);
+  }, [resolvedTabFromUrl, enabledTabs, activeTab, tabFromUrl, viewFromUrl]);
   const [userSearch, setUserSearch] = useState("");
+  const [roleFilter, setRoleFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<string>("active");
 
   const userParams = {
     page: 1,
@@ -1477,14 +1488,14 @@ export default function Settings(props?: { defaultTab?: string }) {
     {
       query: {
         queryKey: usersQueryKey,
-        enabled: canManageUsers,
+        enabled: canManageAccess,
         staleTime: 5 * 60 * 1000,
       },
     }
   );
 
   const rolesQuery = useListRoles({
-    query: { queryKey: getListRolesQueryKey(), enabled: canManageRoles },
+    query: { queryKey: getListRolesQueryKey(), enabled: canManageAccess },
   });
   const rolesRes = rolesQuery.data;
   const loadingRoles = rolesQuery.isLoading;
@@ -1689,24 +1700,151 @@ export default function Settings(props?: { defaultTab?: string }) {
         </div>
       )}
 
-      {canManageUsers && activeTab === "Users" && (
-        <div className="space-y-4">
-          <div className="flex justify-between items-center">
+      {canManageAccess && activeTab === "Users & Access" && (
+        <div className="space-y-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-semibold tracking-tight text-slate-900">Users & Access</h2>
+              <p className="mt-1 text-sm text-slate-500">Manage staff roles and what each user can access.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setRoleTemplatesOpen((v) => !v)}
+                className={roleTemplatesOpen ? "border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100" : ""}
+              >
+                {roleTemplatesOpen ? "Hide Role Templates" : "Role Templates"}
+              </Button>
+              <Link href="/app/users/new">
+                <Button className="bg-amber-500 hover:bg-amber-600 text-white">
+                  <Plus className="w-4 h-4 mr-2" />
+                  Add User
+                </Button>
+              </Link>
+            </div>
+          </div>
+
+          {roleTemplatesOpen && (
+            <div className="space-y-3 border border-slate-200 rounded-lg p-4 bg-slate-50/40">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-slate-800">Role Templates</div>
+                  <div className="text-xs text-slate-500 mt-0.5">
+                    Role defaults determine a user's starting access when they are assigned that role.
+                  </div>
+                </div>
+              </div>
+              {rolesQuery.isError ? (
+                <QueryFallback title="Unable to load roles" error={rolesQuery.error} onRetry={() => rolesQuery.refetch()} isRetrying={rolesQuery.isFetching} />
+              ) : loadingRoles ? (
+                <div className="p-6 text-center text-sm text-slate-500">Loading roles...</div>
+              ) : (rolesRes ?? []).length === 0 ? (
+                <div className="p-6 text-center text-sm">
+                  <div className="font-medium text-slate-700">No roles found</div>
+                  <div className="text-slate-500 mt-1">Standard roles were not bootstrapped. Bootstrap them now to continue.</div>
+                  <div className="mt-3">
+                    <Button
+                      variant="outline"
+                      onClick={() => bootstrapRolesMutation.mutate()}
+                      disabled={bootstrapRolesMutation.isPending}
+                    >
+                      {bootstrapRolesMutation.isPending ? "Backfilling..." : "Backfill Standard Roles"}
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {(rolesRes ?? []).map((role: any) => {
+                    const roleName = role.name ? String(role.name) : "";
+                    const defaultAccess = isExactPartnerOrManagerRoleName(roleName)
+                      ? "Full"
+                      : (role.isSystemRole ? "Limited" : "Role Default");
+                    return (
+                      <Card key={role.id} className="overflow-hidden">
+                        <CardContent className="p-4">
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="text-sm font-semibold text-slate-900 truncate">{role.name}</div>
+                              <div className="text-xs text-slate-500 mt-0.5">
+                                Users: <span className="font-medium text-slate-700">{Number(role.userCount ?? 0)}</span>
+                              </div>
+                            </div>
+                            {role.isSystemRole && (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium uppercase tracking-wider bg-slate-100 text-slate-600 shrink-0">
+                                System
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-3 flex items-center justify-between gap-2">
+                            <div className="text-xs text-slate-500">
+                              Default Access:
+                              <span className={cn(
+                                "ml-1 font-medium",
+                                defaultAccess === "Full"
+                                  ? "text-emerald-700"
+                                  : defaultAccess === "Limited"
+                                  ? "text-amber-700"
+                                  : "text-slate-700"
+                              )}>
+                                {defaultAccess}
+                              </span>
+                            </div>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => {
+                                setEditRole(role);
+                                const allowed = new Set<string>(
+                                  (Array.isArray(role.permissions) ? role.permissions : [])
+                                    .filter((p: any) => p && p.allowed)
+                                    .map((p: any) => `${String(p.module)}:${String(p.action)}`)
+                                );
+                                setEditRolePermissionSet(allowed);
+                                setEditRoleOpen(true);
+                              }}
+                            >
+                              Edit Defaults
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-3 items-center">
             <div className="relative flex-1 max-w-sm">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
               <Input
-                placeholder="Search users..."
+                placeholder="Search name or email..."
                 className="pl-9"
                 value={userSearch}
                 onChange={(e) => setUserSearch(e.target.value)}
               />
             </div>
-            <Link href="/app/users/new">
-              <Button className="bg-amber-500 hover:bg-amber-600 text-white">
-                <Plus className="w-4 h-4 mr-2" />
-                New User
-              </Button>
-            </Link>
+            <select
+              className="h-10 border border-slate-200 rounded-md px-3 text-sm bg-white"
+              value={roleFilter}
+              onChange={(e) => setRoleFilter(e.target.value)}
+              disabled={loadingRoles}
+            >
+              <option value="all">All Roles ▾</option>
+              {(rolesRes ?? []).map((r: any) => (
+                <option key={r.id} value={String(r.id)}>{r.name}</option>
+              ))}
+            </select>
+            <select
+              className="h-10 border border-slate-200 rounded-md px-3 text-sm bg-white"
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+            >
+              <option value="active">Active ▾</option>
+              <option value="all">All Status</option>
+              <option value="inactive">Inactive</option>
+            </select>
           </div>
 
           <Card>
@@ -1718,101 +1856,137 @@ export default function Settings(props?: { defaultTab?: string }) {
                   <table className="w-full text-sm text-left">
                     <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200">
                       <tr>
-                        <th className="px-6 py-3 font-semibold">Name</th>
+                        <th className="px-6 py-3 font-semibold">User</th>
                         <th className="px-6 py-3 font-semibold">Role</th>
+                        <th className="px-6 py-3 font-semibold">Access</th>
                         <th className="px-6 py-3 font-semibold">Status</th>
-                        <th className="px-6 py-3 font-semibold text-right">Last Login</th>
-                        <th className="px-6 py-3 font-semibold text-right">Actions</th>
+                        <th className="px-6 py-3 font-semibold">Last Login</th>
+                        <th className="px-6 py-3 font-semibold text-right">Action</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {usersRes?.data?.map((user: any) => (
-                        <tr key={user.id} className="hover:bg-slate-50/50">
-                          <td className="px-6 py-4">
-                            <div className="font-medium text-slate-900">{user.name}</div>
-                            <div className="text-slate-500 text-xs mt-0.5">
-                              {user.email}
-                              {user.initials ? <span className="ml-2 text-slate-600">({String(user.initials).toUpperCase()})</span> : null}
-                            </div>
-                          </td>
-                          <td className="px-6 py-4">
-                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-800">
-                              {user.roleName || "No Role"}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4">
-                            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                              user.status === "active"
-                                ? "bg-green-100 text-green-800"
-                                : "bg-slate-100 text-slate-800"
-                            }`}>
-                              {user.status}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4 text-right text-slate-600">
-                            {user.lastLoginAt
-                              ? new Date(user.lastLoginAt).toLocaleDateString()
-                              : "Never"}
-                          </td>
-                          <td className="px-6 py-4 text-right">
-                            <div className="inline-flex gap-2">
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => {
-                                  setEditUser(user);
-                                  setEditName(user.name || "");
-                                  setEditInitials(String(user.initials ?? ""));
-                                  setEditInitialsTouched(false);
-                                  setEditRoleId(user.roleId ? String(user.roleId) : "");
-                                  setEditDeveloperId(user.developerId ? String(user.developerId) : "");
-                                  setEditUserOpen(true);
-                                }}
-                              >
-                                Edit
-                              </Button>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                onClick={() => {
-                                  const nextStatus = user.status === "active" ? "inactive" : "active";
-                                  updateUserMutation.mutate(
-                                    { userId: user.id, data: { status: nextStatus } },
-                                    {
-                                      onSuccess: () => {
-                                        queryClient.invalidateQueries({ queryKey: usersQueryKey });
-                                        toast({ title: `User ${nextStatus === "active" ? "activated" : "deactivated"}` });
-                                      },
-                                      onError: (e: any) => {
-                                        toast({ title: "Failed to update status", description: e?.error || "Please try again.", variant: "destructive" });
-                                      },
-                                    }
-                                  );
-                                }}
-                                disabled={updateUserMutation.isPending}
-                              >
-                                {user.status === "active" ? "Deactivate" : "Activate"}
-                              </Button>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="text-red-600 hover:text-red-700"
-                                onClick={() => {
-                                  setDeleteTarget(user);
-                                  setDeleteUserOpen(true);
-                                }}
-                                disabled={deleteUserMutation.isPending}
-                              >
-                                <Trash2 className="w-4 h-4 mr-1" />
-                                Delete
-                              </Button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                      {usersRes?.data?.length === 0 && (
+                      {(usersRes?.data ?? [])
+                        .filter((u: any) => {
+                          if (roleFilter !== "all") return String(u.roleId ?? "") === roleFilter;
+                          return true;
+                        })
+                        .filter((u: any) => {
+                          if (statusFilter === "all") return true;
+                          return String(u.status ?? "active") === statusFilter;
+                        })
+                        .map((user: any) => {
+                          const roleName = user.roleName ? String(user.roleName) : "";
+                          let accessLabel = "Role Default";
+                          let accessBadgeClass = "bg-slate-100 text-slate-700";
+                          if (isExactPartnerOrManagerRoleName(roleName)) {
+                            accessLabel = "Full Access";
+                            accessBadgeClass = "bg-emerald-100 text-emerald-700";
+                          } else if (user.hasAccessOverrides) {
+                            accessLabel = "Custom Access";
+                            accessBadgeClass = "bg-amber-100 text-amber-700";
+                          } else if (user.status !== "active") {
+                            accessLabel = "No Access";
+                            accessBadgeClass = "bg-slate-100 text-slate-500";
+                          }
+                          return (
+                            <tr key={user.id} className="hover:bg-slate-50/50">
+                              <td className="px-6 py-4">
+                                <div className="font-medium text-slate-900">{user.name}</div>
+                                <div className="text-slate-500 text-xs mt-0.5">
+                                  {user.email}
+                                  {user.initials ? <span className="ml-2 text-slate-600">({String(user.initials).toUpperCase()})</span> : null}
+                                </div>
+                              </td>
+                              <td className="px-6 py-4">
+                                <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-800">
+                                  {roleName || "No Role"}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4">
+                                <span className={cn("inline-flex items-center px-2 py-0.5 rounded text-xs font-medium", accessBadgeClass)}>
+                                  {accessLabel}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4">
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                                  user.status === "active"
+                                    ? "bg-green-100 text-green-800"
+                                    : "bg-slate-100 text-slate-800"
+                                }`}>
+                                  {String(user.status ?? "active")}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 text-slate-600">
+                                {user.lastLoginAt
+                                  ? new Date(user.lastLoginAt).toLocaleDateString()
+                                  : "Never"}
+                              </td>
+                              <td className="px-6 py-4 text-right">
+                                <div className="inline-flex gap-2">
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => {
+                                      setEditUser(user);
+                                      setEditName(user.name || "");
+                                      setEditInitials(String(user.initials ?? ""));
+                                      setEditInitialsTouched(false);
+                                      setEditRoleId(user.roleId ? String(user.roleId) : "");
+                                      setEditDeveloperId(user.developerId ? String(user.developerId) : "");
+                                      setEditUserOpen(true);
+                                    }}
+                                  >
+                                    Edit
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => {
+                                      const nextStatus = user.status === "active" ? "inactive" : "active";
+                                      updateUserMutation.mutate(
+                                        { userId: user.id, data: { status: nextStatus } },
+                                        {
+                                          onSuccess: () => {
+                                            queryClient.invalidateQueries({ queryKey: usersQueryKey });
+                                            toast({ title: `User ${nextStatus === "active" ? "activated" : "deactivated"}` });
+                                          },
+                                          onError: (e: any) => {
+                                            toast({ title: "Failed to update status", description: e?.error || "Please try again.", variant: "destructive" });
+                                          },
+                                        }
+                                      );
+                                    }}
+                                    disabled={updateUserMutation.isPending}
+                                  >
+                                    {user.status === "active" ? "Deactivate" : "Activate"}
+                                  </Button>
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    className="text-red-600 hover:text-red-700"
+                                    onClick={() => {
+                                      setDeleteTarget(user);
+                                      setDeleteUserOpen(true);
+                                    }}
+                                    disabled={deleteUserMutation.isPending}
+                                  >
+                                    <Trash2 className="w-4 h-4 mr-1" />
+                                    Delete
+                                  </Button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      {((usersRes?.data ?? []).filter((u: any) => {
+                        if (roleFilter !== "all") return String(u.roleId ?? "") === roleFilter;
+                        return true;
+                      }).filter((u: any) => {
+                        if (statusFilter === "all") return true;
+                        return String(u.status ?? "active") === statusFilter;
+                      }).length) === 0 && (
                         <tr>
-                          <td colSpan={5} className="px-6 py-8 text-center text-slate-500">
+                          <td colSpan={6} className="px-6 py-8 text-center text-slate-500">
                             No users found.
                           </td>
                         </tr>
@@ -1835,211 +2009,263 @@ export default function Settings(props?: { defaultTab?: string }) {
               setEditDeveloperId("");
             }
           }}>
-            <DialogContent>
+            <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto">
               <DialogHeader>
                 <DialogTitle>Edit User</DialogTitle>
               </DialogHeader>
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label>Name</Label>
-                  <Input value={editName} onChange={(e) => setEditName(e.target.value)} />
-                </div>
-                <div className="space-y-2">
-                  <Label>Initials (Short Form)</Label>
-                  <Input
-                    value={editInitials}
-                    onChange={(e) => {
-                      setEditInitialsTouched(true);
-                      setEditInitials(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5));
-                    }}
-                    placeholder="e.g. LKL"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Role</Label>
-                  <select
-                    value={editRoleId}
-                    onChange={(e) => setEditRoleId(e.target.value)}
-                    className="w-full h-10 border border-slate-200 rounded-md px-3 text-sm bg-white"
-                    disabled={loadingRoles}
-                  >
-                    <option value="">(No change)</option>
-                    {(rolesRes ?? []).map((r: any) => (
-                      <option key={r.id} value={String(r.id)}>{r.name}</option>
-                    ))}
-                  </select>
-                </div>
-                {(() => {
-                  if (!editRoleId) return null;
-                  const roleId = Number(editRoleId);
-                  const roleName = (rolesRes ?? []).find((r: any) => r.id === roleId)?.name;
-                  if (roleName !== "Developer_User") return null;
-                  return (
+              <div className="space-y-5">
+                <div className="space-y-3">
+                  <div className="text-sm font-semibold text-slate-800 border-b border-slate-200 pb-2">Basic Information</div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <Label>Assigned Developer</Label>
+                      <Label>Name</Label>
+                      <Input value={editName} onChange={(e) => setEditName(e.target.value)} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Email</Label>
+                      <Input value={editUser?.email ?? ""} disabled className="bg-slate-50 text-slate-600" />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Initials</Label>
+                      <Input
+                        value={editInitials}
+                        onChange={(e) => {
+                          setEditInitialsTouched(true);
+                          setEditInitials(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5));
+                        }}
+                        placeholder="e.g. LKL"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Status</Label>
                       <select
-                        value={editDeveloperId}
-                        onChange={(e) => setEditDeveloperId(e.target.value)}
+                        value={editUser?.status ?? "active"}
+                        onChange={(e) => {
+                          if (!editUser) return;
+                          setEditUser({ ...editUser, status: e.target.value });
+                        }}
                         className="w-full h-10 border border-slate-200 rounded-md px-3 text-sm bg-white"
-                        disabled={developersQuery.isLoading}
                       >
-                        <option value="">Select developer</option>
-                        {(developers ?? []).map((d: any) => (
-                          <option key={d.id} value={String(d.id)}>{d.name}</option>
-                        ))}
+                        <option value="active">Active</option>
+                        <option value="inactive">Inactive</option>
                       </select>
-                      {developersQuery.isError ? (
-                        <div className="text-xs text-red-600">Failed to load developers</div>
-                      ) : null}
                     </div>
-                  );
-                })()}
+                  </div>
+                </div>
 
-                {/* Part 2 §7 §22: Access section — cards, human labels only */}
-                <div className="pt-2 border-t border-slate-200">
-                  <div className="flex items-center justify-between mb-3">
-                    <div>
-                      <div className="text-sm font-semibold text-slate-800">Access</div>
-                      <div className="text-xs text-slate-500 mt-0.5">Toggle what this user can see and use.</div>
-                    </div>
+                <div className="space-y-3">
+                  <div className="text-sm font-semibold text-slate-800 border-b border-slate-200 pb-2">Role</div>
+                  <div className="space-y-2">
+                    <Label>Assigned Role</Label>
+                    <select
+                      value={editRoleId}
+                      onChange={(e) => setEditRoleId(e.target.value)}
+                      className="w-full h-10 border border-slate-200 rounded-md px-3 text-sm bg-white"
+                      disabled={loadingRoles}
+                    >
+                      <option value="">(Keep current)</option>
+                      {(rolesRes ?? []).map((r: any) => (
+                        <option key={r.id} value={String(r.id)}>{r.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  {(() => {
+                    const roleId = editRoleId ? Number(editRoleId) : editUser?.roleId;
+                    const roleName = (roleId && rolesRes)
+                      ? ((rolesRes ?? []).find((r: any) => r.id === roleId)?.name ?? editUser?.roleName)
+                      : editUser?.roleName;
+                    if (roleName !== "Developer_User") return null;
+                    return (
+                      <div className="space-y-2">
+                        <Label>Developer Association</Label>
+                        <select
+                          value={editDeveloperId}
+                          onChange={(e) => setEditDeveloperId(e.target.value)}
+                          className="w-full h-10 border border-slate-200 rounded-md px-3 text-sm bg-white"
+                          disabled={developersQuery.isLoading}
+                        >
+                          <option value="">Select developer</option>
+                          {(developers ?? []).map((d: any) => (
+                            <option key={d.id} value={String(d.id)}>{d.name}</option>
+                          ))}
+                        </select>
+                        {developersQuery.isError ? (
+                          <div className="text-xs text-red-600">Failed to load developers</div>
+                        ) : null}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                    <div className="text-sm font-semibold text-slate-800">Access</div>
                     <button
                       type="button"
                       onClick={() => setAdvancedAccessView((v) => !v)}
                       className="text-xs text-slate-500 hover:text-slate-700 underline-offset-2 hover:underline"
                     >
-                      {advancedAccessView ? "Hide technical keys" : "Show advanced"}
+                      {advancedAccessView ? "Hide advanced" : "Show advanced"}
                     </button>
                   </div>
 
-                  {isExactPartnerOrManagerRoleName(
-                    (() => {
+                  {(() => {
+                    const resolvedRoleName = (() => {
                       const rid = editRoleId ? Number(editRoleId) : editUser?.roleId;
                       if (rid && rolesRes) {
                         const r = (rolesRes ?? []).find((x: any) => x.id === rid);
                         if (r?.name) return r.name;
                       }
                       return editUser?.roleName;
-                    })()
-                  ) ? (
-                    <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                      Partner / Manager has full operational access (subject to firm feature switches). No per-user
-                      override needed.
-                    </div>
-                  ) : accessProfileLoading ? (
-                    <div className="py-6 text-center text-sm text-slate-500">Loading access profile…</div>
-                  ) : !accessProfile?.modules?.length ? (
-                    <div className="py-6 text-center text-sm text-slate-500">
-                      No configurable access modules for this user.
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-h-[55vh] overflow-y-auto pr-1">
-                      {accessProfile.modules.map((mod) => {
-                        const total = mod.children.length || 1;
-                        const onCount = mod.children.filter((c) => !!featureToggles[c.featureKey]).length;
-                        let state: "full" | "limited" | "off" = "off";
-                        if (mod.state !== "off") {
-                          if (onCount === 0) state = "off";
-                          else if (onCount === total) state = "full";
-                          else state = "limited";
-                        } else {
-                          state = "off";
-                        }
-                        return (
-                          <Card
-                            key={mod.featureKey}
-                            className={cn(
-                              "overflow-hidden",
-                              mod.state === "off" && "opacity-60"
+                    })();
+                    const roleObj = (rolesRes ?? []).find((r: any) => String(r.name ?? "") === String(resolvedRoleName ?? ""));
+                    const hasOverrides = resetFeatureKeys.size < Object.keys(featureToggles).length && !!accessProfile?.modules?.length;
+                    return (
+                      <div className="space-y-3">
+                        <div className="rounded-md border border-slate-200 bg-slate-50/60 px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-xs text-slate-600">
+                            {hasOverrides ? (
+                              <span><span className="font-medium text-amber-800">Custom access</span> — per-user overrides saved separately from the role.</span>
+                            ) : (
+                              <span>Based on <span className="font-medium text-slate-800">{roleObj?.name ?? resolvedRoleName ?? "Role"}</span> role defaults.</span>
                             )}
+                          </div>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              if (!accessProfile?.modules?.length) return;
+                              const defaultToggles: Record<string, boolean> = {};
+                              const resetAll = new Set<string>();
+                              for (const mod of accessProfile.modules) {
+                                for (const ch of mod.children ?? []) {
+                                  defaultToggles[ch.featureKey] = !!ch.enabled;
+                                  resetAll.add(ch.featureKey);
+                                }
+                              }
+                              setFeatureToggles(defaultToggles);
+                              setResetFeatureKeys(resetAll);
+                            }}
+                            disabled={accessProfileLoading || accessSaving}
                           >
-                            <CardHeader className="py-2.5 px-3 bg-slate-50/70 border-b border-slate-200/70 flex flex-row items-center justify-between space-y-0">
-                              <div className="flex items-center gap-2">
-                                <CardTitle className="text-sm font-medium text-slate-800">
-                                  {mod.label}
-                                </CardTitle>
-                                {advancedAccessView && (
-                                  <code className="text-[10px] text-slate-400 font-mono">
-                                    {mod.featureKey}
-                                  </code>
-                                )}
-                              </div>
-                              <span
-                                className={cn(
-                                  "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium",
-                                  state === "full"
-                                    ? "bg-emerald-100 text-emerald-700"
-                                    : state === "limited"
-                                    ? "bg-amber-100 text-amber-700"
-                                    : "bg-slate-100 text-slate-600"
-                                )}
-                              >
-                                {state === "full"
-                                  ? "Full Access"
-                                  : state === "limited"
-                                  ? "Limited Access"
-                                  : "Off"}
-                              </span>
-                            </CardHeader>
-                            <CardContent className="p-2.5 space-y-1">
-                              {mod.children.length === 0 ? (
-                                <div className="text-xs text-slate-500 px-1 py-1">No child features.</div>
-                              ) : (
-                                mod.children.map((ch) => {
-                                  const disabled = mod.state === "off";
-                                  const checked = disabled ? false : !!featureToggles[ch.featureKey];
-                                  return (
-                                    <label
-                                      key={ch.featureKey}
-                                      className={cn(
-                                        "flex items-start gap-2 px-1.5 py-1 rounded hover:bg-slate-50/60 cursor-pointer select-none",
-                                        disabled && "cursor-not-allowed opacity-60"
+                            Reset to Role Defaults
+                          </Button>
+                        </div>
+                        {isExactPartnerOrManagerRoleName(resolvedRoleName) ? (
+                          <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                            <div className="font-medium">Partner has full operational access</div>
+                            <div className="text-xs text-emerald-700 mt-0.5">
+                              Subject to firm feature availability. No per-feature override is needed.
+                            </div>
+                          </div>
+                        ) : accessProfileLoading ? (
+                          <div className="py-6 text-center text-sm text-slate-500">Loading access profile…</div>
+                        ) : !accessProfile?.modules?.length ? (
+                          <div className="py-6 text-center text-sm text-slate-500">No configurable access modules for this user.</div>
+                        ) : (
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {accessProfile.modules.map((mod) => {
+                              const total = mod.children.length || 1;
+                              const onCount = mod.children.filter((c) => !!featureToggles[c.featureKey]).length;
+                              let state: "full" | "limited" | "off" = "off";
+                              if (mod.state !== "off") {
+                                if (onCount === 0) state = "off";
+                                else if (onCount === total) state = "full";
+                                else state = "limited";
+                              } else {
+                                state = "off";
+                              }
+                              return (
+                                <Card
+                                  key={mod.featureKey}
+                                  className={cn("overflow-hidden", mod.state === "off" && "opacity-60")}
+                                >
+                                  <CardHeader className="py-2.5 px-3 bg-slate-50/70 border-b border-slate-200/70 flex flex-row items-center justify-between space-y-0">
+                                    <div className="flex items-center gap-2">
+                                      <CardTitle className="text-sm font-medium text-slate-800">{mod.label}</CardTitle>
+                                      {advancedAccessView && (
+                                        <code className="text-[10px] text-slate-400 font-mono">{mod.featureKey}</code>
                                       )}
-                                    >
-                                      <Checkbox
-                                        className="mt-0.5"
-                                        checked={checked}
-                                        disabled={disabled || accessSaving}
-                                        onCheckedChange={(v) => {
-                                          const next = typeof v === "boolean" ? v : !!v;
-                                          setFeatureToggles((prev) => ({
-                                            ...prev,
-                                            [ch.featureKey]: next,
-                                          }));
-                                          setResetFeatureKeys((prev) => {
-                                            const nx = new Set(prev);
-                                            nx.delete(ch.featureKey);
-                                            return nx;
-                                          });
-                                        }}
-                                      />
-                                      <div className="flex-1 min-w-0">
-                                        <div className="text-xs text-slate-800 leading-5">
-                                          {ch.label}
-                                        </div>
-                                        {advancedAccessView && (
-                                          <div className="text-[10px] text-slate-400 font-mono truncate">
-                                            {ch.featureKey}
-                                          </div>
-                                        )}
-                                      </div>
-                                    </label>
-                                  );
-                                })
-                              )}
-                              {mod.state === "off" && (
-                                <div className="mt-1 text-[11px] text-slate-500 px-1.5">
-                                  Module disabled at firm level. Contact Founder to enable.
-                                </div>
-                              )}
-                            </CardContent>
-                          </Card>
-                        );
-                      })}
-                    </div>
-                  )}
+                                    </div>
+                                    <span className={cn(
+                                      "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium",
+                                      state === "full"
+                                        ? "bg-emerald-100 text-emerald-700"
+                                        : state === "limited"
+                                        ? "bg-amber-100 text-amber-700"
+                                        : "bg-slate-100 text-slate-600"
+                                    )}>
+                                      {state === "full" ? "Full" : state === "limited" ? "Limited" : "Off"}
+                                    </span>
+                                  </CardHeader>
+                                  {state === "limited" && (
+                                    <CardContent className="p-2.5 space-y-1">
+                                      {mod.children.length === 0 ? (
+                                        <div className="text-xs text-slate-500 px-1 py-1">No child features.</div>
+                                      ) : (
+                                        mod.children.map((ch) => {
+                                          const disabled = mod.state === "off";
+                                          const checked = disabled ? false : !!featureToggles[ch.featureKey];
+                                          return (
+                                            <label
+                                              key={ch.featureKey}
+                                              className={cn(
+                                                "flex items-start gap-2 px-1.5 py-1 rounded hover:bg-slate-50/60 cursor-pointer select-none",
+                                                disabled && "cursor-not-allowed opacity-60"
+                                              )}
+                                            >
+                                              <Checkbox
+                                                className="mt-0.5"
+                                                checked={checked}
+                                                disabled={disabled || accessSaving}
+                                                onCheckedChange={(v) => {
+                                                  const next = typeof v === "boolean" ? v : !!v;
+                                                  setFeatureToggles((prev) => ({ ...prev, [ch.featureKey]: next }));
+                                                  setResetFeatureKeys((prev) => {
+                                                    const nx = new Set(prev);
+                                                    nx.delete(ch.featureKey);
+                                                    return nx;
+                                                  });
+                                                }}
+                                              />
+                                              <div className="flex-1 min-w-0">
+                                                <div className="text-xs text-slate-800 leading-5">{ch.label}</div>
+                                                {advancedAccessView && (
+                                                  <div className="text-[10px] text-slate-400 font-mono truncate">{ch.featureKey}</div>
+                                                )}
+                                              </div>
+                                            </label>
+                                          );
+                                        })
+                                      )}
+                                    </CardContent>
+                                  )}
+                                  {state === "full" && (
+                                    <CardContent className="px-3 py-2">
+                                      <div className="text-[11px] text-emerald-700">All child features enabled.</div>
+                                    </CardContent>
+                                  )}
+                                  {state === "off" && mod.state !== "off" && (
+                                    <CardContent className="px-3 py-2">
+                                      <div className="text-[11px] text-slate-500">All child features disabled.</div>
+                                    </CardContent>
+                                  )}
+                                  {mod.state === "off" && (
+                                    <CardContent className="px-3 py-2">
+                                      <div className="text-[11px] text-slate-500">Module disabled at firm level. Contact Founder to enable.</div>
+                                    </CardContent>
+                                  )}
+                                </Card>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
-              <DialogFooter>
+              <DialogFooter className="mt-4 pt-4 border-t border-slate-200">
                 <Button
                   variant="outline"
                   onClick={() => setEditUserOpen(false)}
@@ -2081,12 +2307,12 @@ export default function Settings(props?: { defaultTab?: string }) {
                       }
                     }
 
-                    // §23: One Save, one TX — PUT access-profile
                     setAccessSaving(true);
                     try {
                       const body: Record<string, any> = {
                         name,
                         initials: editInitials.trim() ? editInitials.trim() : null,
+                        status: String(editUser?.status ?? "active"),
                         features: { ...featureToggles },
                       };
                       if (editRoleId) {
@@ -2101,15 +2327,14 @@ export default function Settings(props?: { defaultTab?: string }) {
                         `/users/${encodeURIComponent(editUser.id)}/access-profile`,
                         {
                           method: "PUT",
-                          body: JSON.stringify(body),
                           headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify(body),
                         },
                       );
-                      if (resp?.error && !resp?.ok) {
-                        throw new Error(resp.error);
-                      }
-                      queryClient.invalidateQueries({ queryKey: usersQueryKey });
-                      // Part 2 §9: Sidebar / route guards re-read cache so target user gets immediate update
+                      if (resp?.error && !resp?.ok) throw new Error(resp.error);
+                      await queryClient.invalidateQueries({ queryKey: usersQueryKey });
+                      queryClient.invalidateQueries({ queryKey: ["firm", "user", "effective-features", ME_QUERY_KEY] });
+                      queryClient.invalidateQueries({ queryKey: getListRolesQueryKey() });
                       toast({ title: "User saved" });
                       setEditUserOpen(false);
                     } catch (e: any) {
@@ -2170,109 +2395,6 @@ export default function Settings(props?: { defaultTab?: string }) {
               </DialogFooter>
             </DialogContent>
           </Dialog>
-        </div>
-      )}
-
-      {activeTab === "Security" && <SecurityTab />}
-
-      {activeTab === "Subscription & Billing" && <FirmSubscriptionFeaturesTab firmId={user?.firmId ? Number(user.firmId) : 0} />}
-
-      {canManageRoles && activeTab === "Roles & Permissions" && (
-        <div className="space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {rolesQuery.isError ? (
-              <div className="col-span-2">
-                <QueryFallback title="Unable to load roles" error={rolesQuery.error} onRetry={() => rolesQuery.refetch()} isRetrying={rolesQuery.isFetching} />
-              </div>
-            ) : loadingRoles ? (
-              <div className="col-span-2 p-8 text-center text-slate-500">Loading roles...</div>
-            ) : (rolesRes ?? []).length === 0 ? (
-              <div className="col-span-2 p-8 text-center text-slate-600">
-                <div className="font-medium">No roles found</div>
-                <div className="text-sm text-slate-500">This usually means the firm roles were never bootstrapped. Backfill the standard roles to restore role management.</div>
-                <div className="mt-4 flex justify-center">
-                  <Button
-                    variant="outline"
-                    onClick={() => bootstrapRolesMutation.mutate()}
-                    disabled={bootstrapRolesMutation.isPending}
-                  >
-                    {bootstrapRolesMutation.isPending ? "Backfilling..." : "Backfill Standard Roles"}
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              (rolesRes ?? []).map((role: any) => (
-                <Card key={role.id} className="cursor-pointer" onClick={() => {
-                  setEditRole(role);
-                  const allowed = new Set<string>(
-                    (Array.isArray(role.permissions) ? role.permissions : [])
-                      .filter((p: any) => p && p.allowed)
-                      .map((p: any) => `${String(p.module)}:${String(p.action)}`)
-                  );
-                  setEditRolePermissionSet(allowed);
-                  setEditRoleOpen(true);
-                }}>
-                  <CardContent className="p-6">
-                    <div className="flex justify-between items-start mb-4">
-                      <div>
-                        <h3 className="text-lg font-bold">{role.name}</h3>
-                        <p className="text-sm text-slate-500">{role.userCount} users</p>
-                      </div>
-                      {role.isSystemRole && (
-                        <span className="bg-slate-100 text-slate-600 px-2 py-1 rounded text-xs font-medium uppercase tracking-wider">
-                          System
-                        </span>
-                      )}
-                    </div>
-                    <div className="space-y-2 mt-4">
-                      <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                        Permissions
-                      </h4>
-                      <div className="flex flex-wrap gap-2">
-                        {role.permissions?.slice(0, 8).map((p: any) => (
-                          <span
-                            key={p.id}
-                            className={`px-2 py-1 rounded text-[10px] font-medium border ${
-                              p.allowed
-                                ? "bg-green-50 text-green-700 border-green-200"
-                                : "bg-red-50 text-red-700 border-red-200"
-                            }`}
-                          >
-                            {p.module}:{p.action}
-                          </span>
-                        ))}
-                        {role.permissions?.length > 8 && (
-                          <span className="px-2 py-1 rounded text-[10px] font-medium border bg-slate-50 text-slate-600 border-slate-200">
-                            +{role.permissions.length - 8} more
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="mt-5 flex justify-end">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          setEditRole(role);
-                          const allowed = new Set<string>(
-                            (Array.isArray(role.permissions) ? role.permissions : [])
-                              .filter((p: any) => p && p.allowed)
-                              .map((p: any) => `${String(p.module)}:${String(p.action)}`)
-                          );
-                          setEditRolePermissionSet(allowed);
-                          setEditRoleOpen(true);
-                        }}
-                      >
-                        Edit
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))
-            )}
-          </div>
 
           <Dialog
             open={editRoleOpen}
@@ -2284,41 +2406,145 @@ export default function Settings(props?: { defaultTab?: string }) {
               }
             }}
           >
-            <DialogContent className="max-w-3xl">
+            <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto">
               <DialogHeader>
-                <DialogTitle>Edit Role Permissions</DialogTitle>
+                <DialogTitle>Edit Role Defaults — {editRole?.name ?? ""}</DialogTitle>
               </DialogHeader>
-              <div className="text-sm text-slate-600">
-                {editRole?.name ? `Role: ${editRole.name}` : ""}
-              </div>
-              <div className="max-h-[60vh] overflow-y-auto border rounded-md">
-                <div className="p-4 space-y-6">
-                  {PERMISSION_CATALOG.map((group) => (
-                    <div key={group.module} className="space-y-2">
-                      <div className="text-sm font-semibold text-slate-900 capitalize">{group.module.replace(/_/g, " ")}</div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {group.actions.map((action) => {
-                          const key = `${group.module}:${action}`;
-                          const checked = editRolePermissionSet.has(key);
-                          return (
-                            <label key={key} className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm text-slate-700">
-                              <Checkbox
-                                checked={checked}
-                                onCheckedChange={(v) => {
-                                  const next = new Set(editRolePermissionSet);
-                                  if (v) next.add(key);
-                                  else next.delete(key);
-                                  setEditRolePermissionSet(next);
-                                }}
-                              />
-                              <span className="font-mono text-xs">{action}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  ))}
+              {isExactPartnerOrManagerRoleName(editRole?.name) ? (
+                <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+                  <div className="font-medium">Partner / Manager roles have full access by default.</div>
+                  <div className="text-xs text-emerald-700 mt-0.5">
+                    Defaults are determined by the system. Use Advanced Permissions to customize at the fine-grained level.
+                  </div>
                 </div>
+              ) : null}
+              <div className="rounded-md border border-slate-200 p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-800">Default Access Modules</div>
+                    <div className="text-xs text-slate-500 mt-0.5">
+                      Users assigned this role receive these defaults unless they receive per-user overrides.
+                    </div>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setAdvancedAccessView((v) => !v)}
+                  >
+                    {advancedAccessView ? "Hide Advanced Permissions" : "Show Advanced Permissions"}
+                  </Button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {(() => {
+                    const moduleSummaries: Array<{ key: string; label: string; keys: string[] }> = [];
+                    const seen = new Set<string>();
+                    for (const group of PERMISSION_CATALOG) {
+                      const key = group.module;
+                      const labelHm: Record<string, string> = {
+                        dashboard: "Dashboard", case_monitor: "Case Monitor", file_custody: "File Custody",
+                        cases: "Cases", projects: "Projects", developers: "Developers",
+                        documents: "Documents", communications: "Communication", accounting: "Accounting",
+                        reports: "Reports", audit: "Audit & Logs", settings: "Settings",
+                        users: "Users", roles: "Roles & Permissions", developer_portal: "Developer Portal",
+                      };
+                      const keysForMod: string[] = [];
+                      for (const action of group.actions) {
+                        const k = `${key}:${action}`;
+                        if (seen.has(k)) continue;
+                        seen.add(k);
+                        keysForMod.push(k);
+                      }
+                      if (keysForMod.length) {
+                        moduleSummaries.push({
+                          key,
+                          label: labelHm[key] ?? key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+                          keys: keysForMod,
+                        });
+                      }
+                    }
+                    return moduleSummaries.map((mod) => {
+                      const total = mod.keys.length;
+                      const onCount = mod.keys.filter((k) => editRolePermissionSet.has(k)).length;
+                      const state: "full" | "limited" | "off" = onCount === 0 ? "off" : onCount === total ? "full" : "limited";
+                      const setAll = () => {
+                        const nx = new Set(editRolePermissionSet);
+                        for (const k of mod.keys) nx.add(k);
+                        setEditRolePermissionSet(nx);
+                      };
+                      const setNone = () => {
+                        const nx = new Set(editRolePermissionSet);
+                        for (const k of mod.keys) nx.delete(k);
+                        setEditRolePermissionSet(nx);
+                      };
+                      return (
+                        <Card key={mod.key} className="overflow-hidden">
+                          <CardHeader className="py-2.5 px-3 bg-slate-50/70 border-b border-slate-200/70 flex flex-row items-center justify-between space-y-0">
+                            <div className="text-sm font-medium text-slate-800">{mod.label}</div>
+                            <div className="flex items-center gap-2">
+                              <span className={cn(
+                                "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium",
+                                state === "full" ? "bg-emerald-100 text-emerald-700"
+                                  : state === "limited" ? "bg-amber-100 text-amber-700"
+                                  : "bg-slate-100 text-slate-600"
+                              )}>
+                                {state === "full" ? "Full" : state === "limited" ? "Limited" : "Off"}
+                              </span>
+                              <div className="flex gap-1 text-[10px]">
+                                <button type="button" onClick={setAll} className="px-1.5 py-0.5 rounded border border-emerald-200 text-emerald-700 hover:bg-emerald-50">All</button>
+                                <button type="button" onClick={setNone} className="px-1.5 py-0.5 rounded border border-slate-200 text-slate-600 hover:bg-slate-50">None</button>
+                              </div>
+                            </div>
+                          </CardHeader>
+                          {state === "limited" && advancedAccessView && (
+                            <CardContent className="p-2.5 space-y-1">
+                              {mod.keys.map((k) => {
+                                const action = k.split(":").slice(1).join(":");
+                                const checked = editRolePermissionSet.has(k);
+                                return (
+                                  <label key={k} className="flex items-start gap-2 px-1.5 py-1 rounded hover:bg-slate-50/60 cursor-pointer select-none">
+                                    <Checkbox
+                                      className="mt-0.5"
+                                      checked={checked}
+                                      onCheckedChange={(v) => {
+                                        const nx = new Set(editRolePermissionSet);
+                                        if (v) nx.add(k); else nx.delete(k);
+                                        setEditRolePermissionSet(nx);
+                                      }}
+                                    />
+                                    <div className="flex-1 min-w-0">
+                                      <div className="text-xs text-slate-800 leading-5 capitalize">{action.replace(/_/g, " ")}</div>
+                                      <div className="text-[10px] text-slate-400 font-mono truncate">{k}</div>
+                                    </div>
+                                  </label>
+                                );
+                              })}
+                            </CardContent>
+                          )}
+                          {state === "full" && (
+                            <CardContent className="px-3 py-2">
+                              <div className="text-[11px] text-emerald-700">All {total} default permissions granted.</div>
+                            </CardContent>
+                          )}
+                          {state === "off" && (
+                            <CardContent className="px-3 py-2">
+                              <div className="text-[11px] text-slate-500">No default permissions for this module.</div>
+                            </CardContent>
+                          )}
+                          {state === "limited" && !advancedAccessView && (
+                            <CardContent className="px-3 py-2">
+                              <div className="text-[11px] text-amber-700">{onCount} of {total} default permissions enabled. Open Advanced Permissions to toggle individual keys.</div>
+                            </CardContent>
+                          )}
+                        </Card>
+                      );
+                    });
+                  })()}
+                </div>
+                {!advancedAccessView && (
+                  <div className="text-xs text-slate-500 text-center pt-1">
+                    Raw permission keys are hidden by default. Click "Show Advanced Permissions" to view and edit them.
+                  </div>
+                )}
               </div>
               <DialogFooter>
                 <Button
@@ -2333,15 +2559,16 @@ export default function Settings(props?: { defaultTab?: string }) {
                     const roleId = Number(editRole?.id);
                     if (!Number.isInteger(roleId) || roleId <= 0) return;
                     const permissions = Array.from(editRolePermissionSet).map((k) => {
-                      const [module, action] = k.split(":");
-                      return { module: String(module), action: String(action), allowed: true };
+                      const [module, ...rest] = k.split(":");
+                      return { module: String(module), action: rest.join(":"), allowed: true };
                     });
                     updateRoleMutation.mutate(
                       { roleId, data: { permissions } },
                       {
                         onSuccess: async () => {
                           await queryClient.invalidateQueries({ queryKey: getListRolesQueryKey() });
-                          toast({ title: "Role updated" });
+                          queryClient.invalidateQueries({ queryKey: ["firm", "user", "effective-features"] });
+                          toast({ title: "Role defaults updated" });
                           setEditRoleOpen(false);
                         },
                         onError: (e: any) => toastError(toast, e, "Failed to update role"),
@@ -2350,13 +2577,17 @@ export default function Settings(props?: { defaultTab?: string }) {
                   }}
                   disabled={updateRoleMutation.isPending || !editRole}
                 >
-                  {updateRoleMutation.isPending ? "Saving..." : "Save"}
+                  {updateRoleMutation.isPending ? "Saving..." : "Save Role Defaults"}
                 </Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
         </div>
       )}
+      {activeTab === "Security" && <SecurityTab />}
+
+      {activeTab === "Subscription & Billing" && <FirmSubscriptionFeaturesTab firmId={user?.firmId ? Number(user.firmId) : 0} />}
+
 
       {canViewAuditLogs && activeTab === "Logs" && <UnifiedLogsPage />}
 
