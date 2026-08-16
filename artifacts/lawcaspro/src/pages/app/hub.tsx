@@ -1,6 +1,6 @@
 import { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,10 +11,8 @@ import {
 } from "@/components/ui/dialog";
 import {
   MessageSquare, Send, Plus, Paperclip, X, File, ArrowRight, ArrowLeft, Download,
-  FileText, Search,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { Input as SearchInput } from "@/components/ui/input";
 import { QueryFallback } from "@/components/query-fallback";
 import { apiFetchBlob, apiFetchJson } from "@/lib/api-client";
 import { toastError } from "@/lib/toast-error";
@@ -57,18 +55,6 @@ interface Message {
   attachments: Attachment[];
 }
 
-interface SystemDoc {
-  id: number;
-  name: string;
-  description: string | null;
-  category: string;
-  fileName: string;
-  fileType: string;
-  fileSize: number | null;
-  objectPath: string;
-  createdAt: string;
-}
-
 function formatBytes(bytes: number | null) {
   if (!bytes) return "";
   if (bytes < 1024) return `${bytes} B`;
@@ -97,11 +83,9 @@ export default function HubPage() {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [activeTab, setActiveTab] = useState<"messages" | "documents">("messages");
   const [showCompose, setShowCompose] = useState(false);
   const [sending, setSending] = useState(false);
   const [attachments, setAttachments] = useState<File[]>([]);
-  const [docSearch, setDocSearch] = useState("");
 
   const [form, setForm] = useState({ subject: "", body: "" });
 
@@ -109,24 +93,10 @@ export default function HubPage() {
     queryKey: ["hub-messages"],
     queryFn: () => apiFetchJson("/hub/messages"),
     refetchInterval: 15000,
-    enabled: activeTab === "messages",
     retry: false,
   });
   const messages = messagesQuery.data ?? [];
   const loadingMessages = messagesQuery.isLoading;
-
-  const docsQuery = useQuery<SystemDoc[]>({
-    queryKey: ["hub-documents"],
-    queryFn: async ({ signal }) => {
-      const res = await apiFetchJson<any>("/hub/documents", { signal, timeoutMs: 8000 });
-      if (Array.isArray(res)) return res as SystemDoc[];
-      return Array.isArray(res?.documents) ? (res.documents as SystemDoc[]) : [];
-    },
-    enabled: activeTab === "documents",
-    retry: false,
-  });
-  const docs = docsQuery.data ?? [];
-  const loadingDocs = docsQuery.isLoading;
 
   const markReadMutation = useMutation({
     mutationFn: async (msgId: number) => apiFetchJson(`/hub/messages/${msgId}/read`, { method: "PATCH" }),
@@ -145,20 +115,6 @@ export default function HubPage() {
       URL.revokeObjectURL(url);
     } catch (e) {
       toastError(toast, e, "Download failed");
-    }
-  };
-
-  const handleDownloadDoc = async (doc: SystemDoc) => {
-    try {
-      const blob = await apiFetchBlob(`/hub/documents/${doc.id}/download`);
-      const url = URL.createObjectURL(blob);
-      const el = document.createElement("a");
-      el.href = url;
-      el.download = doc.fileName || "download";
-      el.click();
-      URL.revokeObjectURL(url);
-    } catch {
-      toast({ title: "Download failed", variant: "destructive" });
     }
   };
 
@@ -219,7 +175,6 @@ export default function HubPage() {
   };
 
   const unreadCount = messages.filter((m) => m.direction === "incoming" && !m.readAt).length;
-  const filteredDocs = docs.filter((d) => !docSearch || d.name.toLowerCase().includes(docSearch.toLowerCase()));
 
   return (
     <div className="space-y-6">
@@ -230,171 +185,80 @@ export default function HubPage() {
             <Badge className="bg-amber-500 text-white text-xs">{unreadCount} new</Badge>
           )}
         </h1>
-        <p className="text-slate-500 mt-1">Messages and documents from Lawcaspro</p>
+        <p className="text-slate-500 mt-1">Messages and attachments</p>
       </div>
 
-      <div className="border-b border-slate-200">
-        <div className="flex gap-0">
-          {(["messages", "documents"] as const).map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === tab
-                  ? "border-amber-500 text-amber-600"
-                  : "border-transparent text-slate-500 hover:text-slate-700"
-              }`}
-            >
-              {tab === "messages"
-                ? `Messages${unreadCount > 0 ? ` (${unreadCount})` : ""}`
-                : `System Documents (${docs.length})`}
-            </button>
-          ))}
+      <div className="space-y-4">
+        <div className="flex justify-end">
+          <Button onClick={() => setShowCompose(true)} className="gap-2">
+            <Plus className="w-4 h-4" />
+            Send Message
+          </Button>
         </div>
+
+        {messagesQuery.isError ? (
+          <QueryFallback title="Messages unavailable" error={messagesQuery.error} onRetry={() => messagesQuery.refetch()} isRetrying={messagesQuery.isFetching} />
+        ) : loadingMessages ? (
+          <div className="text-slate-500 text-sm py-8 text-center">Loading messages...</div>
+        ) : messages.length === 0 ? (
+          <div className="text-center py-16">
+            <MessageSquare className="w-10 h-10 text-slate-300 mx-auto mb-3" />
+            <p className="text-slate-500 font-medium">No messages yet</p>
+            <p className="text-slate-400 text-sm mt-1">Send a message to get started.</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {messages.map((msg) => {
+              const isIncoming = msg.direction === "incoming";
+              const isUnread = isIncoming && !msg.readAt;
+              return (
+                <Card
+                  key={msg.id}
+                  className={`transition-all cursor-pointer ${isUnread ? "border-amber-300 bg-amber-50/30" : ""}`}
+                  onClick={() => {
+                    if (isUnread) markReadMutation.mutate(msg.id);
+                  }}
+                >
+                  <CardContent className="p-4">
+                    <div className="flex items-start gap-3">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap mb-1">
+                          {isIncoming ? (
+                            <Badge variant="outline" className="text-xs gap-1 text-blue-600 border-blue-200">
+                              <ArrowLeft className="w-3 h-3" />
+                              From Lawcaspro
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-xs gap-1 text-green-600 border-green-200">
+                              <ArrowRight className="w-3 h-3" />
+                              Sent to Lawcaspro
+                            </Badge>
+                          )}
+                          {isUnread && (
+                            <span className="w-2 h-2 bg-amber-500 rounded-full inline-block" />
+                          )}
+                        </div>
+                        <p className="font-semibold text-slate-900 text-sm">{msg.subject}</p>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          {msg.senderName} · {new Date(msg.createdAt).toLocaleString()}
+                        </p>
+                        <p className="text-sm text-slate-700 mt-2 whitespace-pre-line">{msg.body}</p>
+                        {msg.attachments.length > 0 && (
+                          <div className="flex flex-wrap gap-2 mt-3">
+                            {msg.attachments.map((a) => (
+                              <AttachmentChip key={a.id} attachment={a} onDownload={() => handleDownloadAttachment(msg.id, a)} />
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        )}
       </div>
-
-      {activeTab === "messages" && (
-        <div className="space-y-4">
-          <div className="flex justify-end">
-            <Button onClick={() => setShowCompose(true)} className="gap-2">
-              <Plus className="w-4 h-4" />
-              Send Message
-            </Button>
-          </div>
-
-          {messagesQuery.isError ? (
-            <QueryFallback title="Messages unavailable" error={messagesQuery.error} onRetry={() => messagesQuery.refetch()} isRetrying={messagesQuery.isFetching} />
-          ) : loadingMessages ? (
-            <div className="text-slate-500 text-sm py-8 text-center">Loading messages...</div>
-          ) : messages.length === 0 ? (
-            <div className="text-center py-16">
-              <MessageSquare className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-              <p className="text-slate-500 font-medium">No messages yet</p>
-              <p className="text-slate-400 text-sm mt-1">Send a message to Lawcaspro to get started</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {messages.map((msg) => {
-                const isIncoming = msg.direction === "incoming";
-                const isUnread = isIncoming && !msg.readAt;
-                return (
-                  <Card
-                    key={msg.id}
-                    className={`transition-all cursor-pointer ${isUnread ? "border-amber-300 bg-amber-50/30" : ""}`}
-                    onClick={() => {
-                      if (isUnread) markReadMutation.mutate(msg.id);
-                    }}
-                  >
-                    <CardContent className="p-4">
-                      <div className="flex items-start gap-3">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap mb-1">
-                            {isIncoming ? (
-                              <Badge variant="outline" className="text-xs gap-1 text-blue-600 border-blue-200">
-                                <ArrowLeft className="w-3 h-3" />
-                                From Lawcaspro
-                              </Badge>
-                            ) : (
-                              <Badge variant="outline" className="text-xs gap-1 text-green-600 border-green-200">
-                                <ArrowRight className="w-3 h-3" />
-                                Sent to Lawcaspro
-                              </Badge>
-                            )}
-                            {isUnread && (
-                              <span className="w-2 h-2 bg-amber-500 rounded-full inline-block" />
-                            )}
-                          </div>
-                          <p className="font-semibold text-slate-900 text-sm">{msg.subject}</p>
-                          <p className="text-xs text-slate-500 mt-0.5">
-                            {msg.senderName} · {new Date(msg.createdAt).toLocaleString()}
-                          </p>
-                          <p className="text-sm text-slate-700 mt-2 whitespace-pre-line">{msg.body}</p>
-                          {msg.attachments.length > 0 && (
-                            <div className="flex flex-wrap gap-2 mt-3">
-                              {msg.attachments.map((a) => (
-                                <AttachmentChip key={a.id} attachment={a} onDownload={() => handleDownloadAttachment(msg.id, a)} />
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      )}
-
-      {activeTab === "documents" && (
-        <div className="space-y-4">
-          <div className="relative max-w-sm">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-            <SearchInput
-              placeholder="Search documents..."
-              value={docSearch}
-              onChange={(e) => setDocSearch(e.target.value)}
-              className="pl-9"
-            />
-          </div>
-
-          {docsQuery.isError ? (
-            <QueryFallback title="Documents unavailable" error={docsQuery.error} onRetry={() => docsQuery.refetch()} isRetrying={docsQuery.isFetching} />
-          ) : loadingDocs ? (
-            <div className="text-slate-500 text-sm py-8 text-center">Loading documents...</div>
-          ) : filteredDocs.length === 0 ? (
-            <div className="text-center py-16">
-              <FileText className="w-10 h-10 text-slate-300 mx-auto mb-3" />
-              <p className="text-slate-500 font-medium">No documents available</p>
-              <p className="text-slate-400 text-sm mt-1">Lawcaspro will share documents with you here</p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {filteredDocs.map((doc) => {
-                const ext = ALLOWED_TYPES[doc.fileType] ?? doc.fileType.split("/").pop()?.toUpperCase() ?? "FILE";
-                return (
-                  <Card key={doc.id} className="hover:shadow-md transition-shadow">
-                    <CardContent className="p-4">
-                      <div className="flex items-start gap-3">
-                        <div className="w-10 h-10 bg-amber-50 border border-amber-200 rounded-lg flex items-center justify-center shrink-0">
-                          <File className="w-5 h-5 text-amber-600" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="font-semibold text-sm text-slate-900 truncate">{doc.name}</p>
-                          {doc.description && (
-                            <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{doc.description}</p>
-                          )}
-                          <div className="flex flex-wrap gap-1.5 mt-2">
-                            <Badge variant="outline" className="text-xs">{ext}</Badge>
-                            <Badge variant="secondary" className="text-xs capitalize">{doc.category}</Badge>
-                          </div>
-                          <div className="flex items-center gap-2 mt-1">
-                            {doc.fileSize && <span className="text-xs text-slate-400">{formatBytes(doc.fileSize)}</span>}
-                            <span className="text-xs text-slate-300">·</span>
-                            <span className="text-xs text-slate-400">{new Date(doc.createdAt).toLocaleDateString()}</span>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="mt-3 pt-3 border-t border-slate-100">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="w-full text-xs gap-1.5"
-                          onClick={() => handleDownloadDoc(doc)}
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          Download
-                        </Button>
-                      </div>
-                    </CardContent>
-                  </Card>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      )}
 
       <Dialog open={showCompose} onOpenChange={setShowCompose}>
         <DialogContent className="max-w-2xl">
