@@ -1886,14 +1886,46 @@ export async function ensureRolePermissionsInitialized(
 }
 
 /**
- * Restricts access to users with the Partner role (role_id = 1).
+ * Strict partner-family role classification for authorization guards.
+ *
+ * WARNING: Do NOT include manager, firm manager, practice manager, director,
+ * or any other non-partner titles here.  Partner is the ONLY normal firm role
+ * that bypasses per-user feature-access configuration; all other roles must
+ * be individually configurable by a Partner-level actor.
+ *
+ * Used by: requirePartner() for access-profile endpoints, where a Manager
+ * with custom roles:manage permission must still be denied.
+ */
+function isStrictPartnerRoleName(v: unknown): boolean {
+  const n = typeof v === "string" ? v.trim().toLowerCase() : "";
+  if (!n) return false;
+  return (
+    n === "partner" || n === "managing partner" || n === "senior partner"
+  );
+}
+
+/**
+ * Restricts access to users with the Partner role (role-family classification).
  * Must be used after requireAuth + requireFirmUser.
+ *
+ * Strict semantics (§15):  a Manager (or any non-Partner role) that happens to
+ * have been granted the `roles:manage` permission via a custom role must still
+ * be denied access to per-user access-profile endpoints.  Only the Partner
+ * role family (Partner / Managing Partner / Senior Partner) may administer
+ * firm feature access for other users.
  */
 export async function requirePartner(
   req: AuthRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> {
+  if (!isStrictPartnerRoleName(req.roleName)) {
+    res.status(403).json({
+      error: "Partner access required",
+      code: "REQUIRE_PARTNER",
+    });
+    return;
+  }
   return requirePermission("roles", "manage")(req, res, next);
 }
 

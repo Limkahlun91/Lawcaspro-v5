@@ -171,8 +171,10 @@ routerInternal.get("/users", requireAuth, requireFirmUser, requirePermission("us
     eq(usersTable.firmId, req.firmId!),
     ...(status ? [eq(usersTable.status, status)] : []),
     ...(roleId ? [eq(usersTable.roleId, roleId)] : []),
-    ...(search ? [ilike(usersTable.name, `%${search}%`)] : []),
-  ];
+    ...(search ? [
+      sql`(${usersTable.name} ILIKE ${`%${search}%`} OR ${usersTable.email} ILIKE ${`%${search}%`})`
+    ] : []),
+  ] as any[];
 
   const baseSelect = {
     id: usersTable.id,
@@ -208,7 +210,31 @@ routerInternal.get("/users", requireAuth, requireFirmUser, requirePermission("us
     .from(usersTable)
     .where(and(...where));
 
-  const enriched = await Promise.all(users.map((u: UserRow) => enrichUser(r, req.firmId!, u)));
+  const userIds = users.map((u: any) => Number(u.id)).filter((id) => Number.isInteger(id) && id > 0);
+  const overrideCounts = new Map<number, number>();
+  if (userIds.length) {
+    const aggRows: any[] = await r.execute(sql`
+      SELECT user_id AS "userId", COUNT(*) AS cnt
+      FROM firm_user_feature_access
+      WHERE firm_id = ${req.firmId!} AND user_id IN (${sql.join(userIds, sql`, `)})
+      GROUP BY user_id
+    `).then((res2: any) => Array.isArray(res2) ? res2 : (res2?.rows ?? []));
+    for (const row of aggRows) {
+      const uid = Number(row.userId);
+      const cnt = Number(row.cnt ?? 0);
+      if (Number.isInteger(uid)) overrideCounts.set(uid, cnt);
+    }
+  }
+
+  const enriched = await Promise.all(users.map(async (u: UserRow) => {
+    const base = await enrichUser(r, req.firmId!, u);
+    const cnt = overrideCounts.get(Number(u.id)) ?? 0;
+    return {
+      ...base,
+      hasAccessOverrides: cnt > 0,
+      accessOverrideCount: cnt,
+    };
+  }));
   res.json({ data: enriched, total: Number(totalRes?.c ?? 0), page, limit });
 });
 
@@ -738,6 +764,12 @@ function buildModulesView(
   return out;
 }
 
+function isPartnerRoleNameCheck(name: unknown): boolean {
+  const n = typeof name === "string" ? name.trim().toLowerCase() : "";
+  if (!n) return false;
+  return ["partner", "managing partner", "senior partner"].includes(n);
+}
+
 routerInternal.get(
   "/users/:userId/access-profile",
   requireAuth,
@@ -750,6 +782,13 @@ routerInternal.get(
       res.status(400).json({ error: params.error.message });
       return;
     }
+    const one = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+    const previewRoleIdRaw = one((req.query as any)?.previewRoleId);
+    const previewRoleId = previewRoleIdRaw !== undefined ? Number(previewRoleIdRaw) : null;
+    if (previewRoleId !== null && (!Number.isInteger(previewRoleId) || previewRoleId <= 0)) {
+      res.status(400).json({ error: "Invalid previewRoleId" });
+      return;
+    }
     const [userRow] = await r
       .select()
       .from(usersTable)
@@ -758,61 +797,90 @@ routerInternal.get(
       res.status(404).json({ error: "User not found" });
       return;
     }
-    const [role] = userRow.roleId
+    const effectiveRoleId = previewRoleId ?? userRow.roleId ?? null;
+    const [role] = effectiveRoleId
       ? await r
           .select({ id: rolesTable.id, name: rolesTable.name })
           .from(rolesTable)
-          .where(and(eq(rolesTable.id, userRow.roleId), eq(rolesTable.firmId, req.firmId!)))
+          .where(and(eq(rolesTable.id, effectiveRoleId), eq(rolesTable.firmId, req.firmId!)))
           .limit(1)
       : [];
-    // Gather all keys needed for UI view
-    const explicitKeys = new Set<string>();
+    if (previewRoleId !== null && !role) {
+      res.status(400).json({ error: "previewRoleId not found in firm" });
+      return;
+    }
+    const isTargetPartner = isPartnerRoleNameCheck(role?.name ?? null);
+
+    const explicitKeysSet = new Set<string>();
     for (const modKey of MODULE_ORDER) {
       if (!isFeatureRegistered(modKey)) continue;
-      explicitKeys.add(modKey);
+      explicitKeysSet.add(modKey);
       const def = getFeatureDefinition(modKey);
       if (def && (def as any).children && Array.isArray((def as any).children)) {
-        for (const k of (def as any).children) if (typeof k === "string") explicitKeys.add(k);
+        for (const k of (def as any).children) if (typeof k === "string") explicitKeysSet.add(k);
       } else {
         const prefix = modKey.replace(/^module\./, "") + ".";
         for (const k of Array.from(FEATURE_REGISTRY_MAP.keys())) {
-          if (k.startsWith(prefix)) explicitKeys.add(k);
+          if (k.startsWith(prefix)) explicitKeysSet.add(k);
         }
       }
     }
-    const allKeys = Array.from(explicitKeys);
-    const effective = await resolveUserFeatureAccessBulk({
-      r,
-      firmId: req.firmId!,
-      userId: userRow.id,
-      roleId: userRow.roleId ?? null,
-      roleName: role?.name ?? null,
-      featureKeys: allKeys,
-    });
-    const explicitRows = await r
-      .select({
-        featureKey: firmUserFeatureAccessTable.featureKey,
-        isEnabled: firmUserFeatureAccessTable.isEnabled,
-      })
-      .from(firmUserFeatureAccessTable)
-      .where(
-        and(
-          eq(firmUserFeatureAccessTable.firmId, req.firmId!),
-          eq(firmUserFeatureAccessTable.userId, userRow.id),
-        ),
-      );
+    const allKeys = Array.from(explicitKeysSet);
+
+    const isPreview = previewRoleId !== null;
+    const loadExplicitRowsForUser = isPreview ? 0 : userRow.id;
+    const effective = isTargetPartner
+      ? (() => {
+          const out: Record<string, any> = {};
+          for (const k of allKeys) out[k] = { effectiveEnabled: true, firmEnabled: true };
+          return out;
+        })()
+      : await resolveUserFeatureAccessBulk({
+          r,
+          firmId: req.firmId!,
+          userId: isPreview ? 0 : userRow.id,
+          roleId: effectiveRoleId,
+          roleName: role?.name ?? null,
+          featureKeys: allKeys,
+        });
+
+    const explicitRows = isTargetPartner || isPreview
+      ? []
+      : await r
+          .select({
+            featureKey: firmUserFeatureAccessTable.featureKey,
+            isEnabled: firmUserFeatureAccessTable.isEnabled,
+          })
+          .from(firmUserFeatureAccessTable)
+          .where(
+            and(
+              eq(firmUserFeatureAccessTable.firmId, req.firmId!),
+              eq(firmUserFeatureAccessTable.userId, userRow.id),
+            ),
+          );
     const explicit = new Map<string, boolean>();
     for (const row of explicitRows) explicit.set(row.featureKey, row.isEnabled);
+    const explicitKeysArr = Array.from(explicit.keys());
     const user = await enrichUser(r, req.firmId!, userRow as UserRow);
     res.json({
       user,
-      modules: buildModulesView(effective, explicit),
-      advanced: {
-        allKeys,
+      modules: buildModulesView(
+        effective as Record<string, { effectiveEnabled: boolean; firmEnabled: boolean }>,
+        explicit,
+      ),
+      advanced: { allKeys },
+      overrideSummary: {
+        hasOverrides: explicitKeysArr.length > 0,
+        overrideCount: explicitKeysArr.length,
+        explicitKeys: explicitKeysArr,
       },
+      preview: isPreview || undefined,
+      roleName: role?.name ?? null,
     });
   },
 );
+
+const CANONICAL_STATUSES = new Set(["active", "inactive"]);
 
 routerInternal.put(
   "/users/:userId/access-profile",
@@ -839,51 +907,176 @@ routerInternal.put(
       res.status(404).json({ error: "User not found" });
       return;
     }
-    const features =
+
+    const originalRoleId = userRow.roleId;
+    let newRoleId = originalRoleId;
+    const basicUpdate: Record<string, unknown> = {};
+
+    // (A) Validate + stage basic user fields
+    if (typeof body.name === "string") {
+      const trimmed = body.name.trim();
+      if (!trimmed) {
+        res.status(400).json({ error: "name cannot be empty" });
+        return;
+      }
+      basicUpdate.name = trimmed;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "initials") && await usersInitialsExists(r)) {
+      const raw = typeof body.initials === "string" ? body.initials : "";
+      const clean = raw.trim() ? raw.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 5) : "";
+      if (clean && clean.length < 2) {
+        res.status(400).json({ error: "Initials must be 2–5 characters (A-Z/0-9)" });
+        return;
+      }
+      basicUpdate.initials = clean ? clean : null;
+    }
+    if (typeof body.status === "string") {
+      if (!CANONICAL_STATUSES.has(body.status)) {
+        res.status(400).json({ error: `Invalid status. Allowed: ${Array.from(CANONICAL_STATUSES).join(", ")}` });
+        return;
+      }
+      basicUpdate.status = body.status;
+    }
+
+    // (B) Validate role/developer (cross-firm safe)
+    let newDeveloperId: number | null =
+      typeof userRow.developerId === "number" ? userRow.developerId : null;
+    if (typeof body.roleId === "number") {
+      const [role] = await r
+        .select({ id: rolesTable.id, name: rolesTable.name })
+        .from(rolesTable)
+        .where(and(eq(rolesTable.id, body.roleId), eq(rolesTable.firmId, req.firmId!)))
+        .limit(1);
+      if (!role) {
+        res.status(400).json({ error: "Invalid roleId (role not found in firm)" });
+        return;
+      }
+      newRoleId = role.id;
+      basicUpdate.roleId = role.id;
+      const isDeveloperUserRole = role.name === "Developer_User";
+      if (Object.prototype.hasOwnProperty.call(body, "developerId")) {
+        const didRaw = (body as any).developerId;
+        const did = didRaw === null || didRaw === undefined ? null : Number(didRaw);
+        if (isDeveloperUserRole) {
+          if (!did || !Number.isInteger(did) || did <= 0) {
+            res.status(400).json({ error: "developerId is required for Developer_User" });
+            return;
+          }
+          const [devOk] = await r.execute(sql`SELECT 1 AS ok FROM developers WHERE firm_id = ${req.firmId!} AND id = ${did} LIMIT 1`).then(
+            (res2: any) => (Array.isArray(res2) ? res2 : (res2?.rows ?? [])),
+          ) as any[];
+          if (!devOk?.ok) {
+            res.status(400).json({ error: "Invalid developerId (not in firm)" });
+            return;
+          }
+          newDeveloperId = did;
+          basicUpdate.developerId = did;
+        } else {
+          newDeveloperId = null;
+          basicUpdate.developerId = null;
+        }
+      } else if (isDeveloperUserRole) {
+        // developerId not explicitly sent, ensure current developerId belongs to this firm
+        const curDid = newDeveloperId;
+        if (!curDid || !Number.isInteger(curDid) || curDid <= 0) {
+          res.status(400).json({ error: "developerId is required for Developer_User" });
+          return;
+        }
+        const [devOk] = await r.execute(sql`SELECT 1 AS ok FROM developers WHERE firm_id = ${req.firmId!} AND id = ${curDid} LIMIT 1`).then(
+          (res2: any) => (Array.isArray(res2) ? res2 : (res2?.rows ?? [])),
+        ) as any[];
+        if (!devOk?.ok) {
+          res.status(400).json({ error: "Invalid developerId (not in firm)" });
+          return;
+        }
+      }
+    }
+
+    // Parse features + resetFeatureKeys from payload (body.features is DIRTY only)
+    const featuresRaw =
       body.features && typeof body.features === "object" && !Array.isArray(body.features)
         ? (body.features as Record<string, unknown>)
         : null;
-    if (!features) {
+    if (featuresRaw === null) {
       res.status(400).json({ error: "features object required" });
       return;
     }
-    const featureEntries: Array<[string, boolean]> = [];
-    for (const [k, v] of Object.entries(features)) {
+    const dirtyFeatureEntries: Array<[string, boolean]> = [];
+    for (const [k, v] of Object.entries(featuresRaw)) {
       if (typeof v !== "boolean") {
         res.status(400).json({ error: `Invalid value for ${k}: expected boolean` });
         return;
       }
       if (!isFeatureRegistered(k)) continue;
-      featureEntries.push([k, v]);
+      dirtyFeatureEntries.push([k, v]);
+    }
+    const resetKeysArr: string[] = Array.isArray(body.resetFeatureKeys)
+      ? (body.resetFeatureKeys as unknown[]).filter((x): x is string => typeof x === "string")
+      : [];
+
+    // Conflict detection: same key in BOTH resetFeatureKeys AND features => 400
+    const resetSet = new Set(resetKeysArr);
+    for (const [k] of dirtyFeatureEntries) {
+      if (resetSet.has(k)) {
+        res.status(400).json({
+          error: `Conflicting change: feature key "${k}" appears in both resetFeatureKeys and features`,
+          code: "ACCESS_PROFILE_CONFLICTING_CHANGE",
+        });
+        return;
+      }
+    }
+
+    // Role change semantics: IF role changed AND no explicit per-feature customizations after that,
+    // the intention is to reset old overrides. We auto-add all CURRENT explicit keys (for this user)
+    // to resetKeys, EXCEPT those the Partner explicitly dirtied in this request.
+    const roleChanged = newRoleId !== null && originalRoleId !== null && Number(newRoleId) !== Number(originalRoleId);
+    let finalResetKeys = new Set(resetKeysArr);
+    if (roleChanged) {
+      const currentExplicit = await r
+        .select({ featureKey: firmUserFeatureAccessTable.featureKey })
+        .from(firmUserFeatureAccessTable)
+        .where(
+          and(
+            eq(firmUserFeatureAccessTable.firmId, req.firmId!),
+            eq(firmUserFeatureAccessTable.userId, userRow.id),
+          ),
+        );
+      for (const row of currentExplicit) {
+        const isDirtyNow = dirtyFeatureEntries.some(([k]) => k === row.featureKey);
+        if (!isDirtyNow) finalResetKeys.add(row.featureKey);
+      }
     }
 
     try {
       const result = await (r as any).transaction(async (tx: DbConn) => {
-        // (A) Basic user fields if caller wants to save name/initials/status/role/developerId in same PUT (§23)
-        const basicUpdate: Record<string, unknown> = {};
-        if (typeof body.name === "string") basicUpdate.name = body.name;
-        if (Object.prototype.hasOwnProperty.call(body, "initials")) {
-          basicUpdate.initials =
-            typeof body.initials === "string" && body.initials.trim() ? body.initials.trim() : null;
-        }
-        if (typeof body.status === "string") basicUpdate.status = body.status;
-        if (typeof body.roleId === "number") basicUpdate.roleId = body.roleId;
-        if (Object.prototype.hasOwnProperty.call(body, "developerId")) {
-          const did = Number(body.developerId);
-          basicUpdate.developerId = Number.isInteger(did) && did > 0 ? did : null;
-        }
-        let newRoleId = userRow.roleId;
+        // Apply basic user updates first
+        let refreshedRoleId: number | null = userRow.roleId;
         if (Object.keys(basicUpdate).length) {
           const [up] = await tx
             .update(usersTable)
             .set(basicUpdate)
             .where(eq(usersTable.id, userRow.id))
             .returning();
-          if (up?.roleId !== undefined) newRoleId = up.roleId;
+          if (up?.roleId !== undefined) refreshedRoleId = up.roleId;
         }
-        // (B) Upsert feature access rows one TX
-        if (featureEntries.length) {
-          for (const [featureKey, isEnabled] of featureEntries) {
+
+        // (C) DELETE resetFeatureKeys (explicit overrides the Partner wants cleared)
+        if (finalResetKeys.size) {
+          const keysToDelete = Array.from(finalResetKeys);
+          await tx
+            .delete(firmUserFeatureAccessTable)
+            .where(
+              and(
+                eq(firmUserFeatureAccessTable.firmId, req.firmId!),
+                eq(firmUserFeatureAccessTable.userId, userRow.id),
+                inArray(firmUserFeatureAccessTable.featureKey, keysToDelete),
+              ),
+            );
+        }
+
+        // (D) UPSERT dirty features only (NOT every effective key)
+        if (dirtyFeatureEntries.length) {
+          for (const [featureKey, isEnabled] of dirtyFeatureEntries) {
             await tx.execute(sql`
               INSERT INTO firm_user_feature_access (firm_id, user_id, feature_key, is_enabled, updated_by_user_id, created_at, updated_at)
               VALUES (${req.firmId!}, ${userRow.id}, ${featureKey}, ${isEnabled}, ${req.userId ?? null}, NOW(), NOW())
@@ -894,27 +1087,34 @@ routerInternal.put(
             `);
           }
         }
-        // (C) Delete any explicit row where caller sent no feature key AND row existed
-        // (optional cleanup if user wants to reset; otherwise keep explicit rows.)
-        if (Array.isArray(body.resetFeatureKeys)) {
-          const reset = (body.resetFeatureKeys as unknown[]).filter((x): x is string => typeof x === "string");
-          if (reset.length) {
-            await tx
-              .delete(firmUserFeatureAccessTable)
-              .where(
-                and(
-                  eq(firmUserFeatureAccessTable.firmId, req.firmId!),
-                  eq(firmUserFeatureAccessTable.userId, userRow.id),
-                  inArray(firmUserFeatureAccessTable.featureKey, reset),
-                ),
-              );
-          }
+
+        // (E) Ensure role permissions initialized for (possibly new) role
+        if (typeof refreshedRoleId === "number") {
+          await ensureRolePermissionsInitialized(tx as any, req.firmId!, refreshedRoleId);
         }
-        if (typeof newRoleId === "number") {
-          await ensureRolePermissionsInitialized(tx as any, req.firmId!, newRoleId);
-        }
-        const [refreshed] = await tx.select().from(usersTable).where(eq(usersTable.id, userRow.id));
-        return refreshed;
+
+        // (F) refreshed user + refreshed summary
+        const [refreshedUser] = await tx.select().from(usersTable).where(eq(usersTable.id, userRow.id));
+        const [finalRole] = refreshedUser?.roleId
+          ? await tx
+              .select({ id: rolesTable.id, name: rolesTable.name })
+              .from(rolesTable)
+              .where(and(eq(rolesTable.id, refreshedUser.roleId), eq(rolesTable.firmId, req.firmId!)))
+              .limit(1)
+          : [];
+        const finalOverrideRows = await tx
+          .select({
+            featureKey: firmUserFeatureAccessTable.featureKey,
+            isEnabled: firmUserFeatureAccessTable.isEnabled,
+          })
+          .from(firmUserFeatureAccessTable)
+          .where(
+            and(
+              eq(firmUserFeatureAccessTable.firmId, req.firmId!),
+              eq(firmUserFeatureAccessTable.userId, userRow.id),
+            ),
+          );
+        return { user: refreshedUser, finalRole, finalOverrideRows };
       });
 
       invalidateUserFeatureCacheFor(req.firmId!, userRow.id);
@@ -925,15 +1125,23 @@ routerInternal.put(
         action: "users.access_profile.update",
         entityType: "user",
         entityId: userRow.id,
-        detail: `features=${featureEntries.length}; ` +
-          featureEntries.slice(0, 20).map(([k, v]) => `${k}=${v}`).join(",") +
-          (featureEntries.length > 20 ? `...+${featureEntries.length - 20}` : ""),
+        detail: `dirtyFeatures=${dirtyFeatureEntries.length}; resets=${finalResetKeys.size}; roleChanged=${roleChanged}` +
+          (dirtyFeatureEntries.length ? "; " + dirtyFeatureEntries.slice(0, 20).map(([k, v]) => `${k}=${v}`).join(",") : ""),
         ipAddress: req.ip,
         userAgent: getHeader(req, "user-agent"),
       });
+
+      const summaryOverrideKeys = result.finalOverrideRows.map((r2: any) => r2.featureKey);
+      const enriched = result.user ? await enrichUser(r, req.firmId!, result.user as UserRow) : undefined;
       res.json({
         ok: true,
-        user: result ? await enrichUser(r, req.firmId!, result as UserRow) : undefined,
+        user: enriched,
+        roleName: result.finalRole?.name ?? null,
+        overrideSummary: {
+          hasOverrides: summaryOverrideKeys.length > 0,
+          overrideCount: summaryOverrideKeys.length,
+          explicitKeys: summaryOverrideKeys,
+        },
       });
     } catch (err) {
       logger.error(
@@ -945,6 +1153,10 @@ routerInternal.put(
         },
         "users.access_profile.update_failed",
       );
+      if (err instanceof ApiError) {
+        res.status(err.status).json({ error: err.message, code: err.code });
+        return;
+      }
       res.status(500).json({ error: "Failed to save access profile" });
     }
   },

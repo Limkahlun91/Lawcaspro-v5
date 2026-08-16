@@ -918,18 +918,14 @@ async function postLedgerTx(tx: DbTxConn, args: {
   });
 }
 
-function isExactPartnerOrManagerRoleName(roleName: unknown): boolean {
+function isPartnerRoleName(roleName: unknown): boolean {
   const n = typeof roleName === "string" ? roleName.trim().toLowerCase() : "";
   if (!n) return false;
-  return [
-    "partner",
-    "managing partner",
-    "senior partner",
-    "practice manager",
-    "firm manager",
-    "manager",
-    "director",
-  ].includes(n);
+  return (
+    n === "partner" ||
+    n === "managing partner" ||
+    n === "senior partner"
+  );
 }
 
 function isLawyerRoleName(roleName: unknown): boolean {
@@ -977,7 +973,7 @@ router.get("/payment-vouchers/create-options", requireAuth, requireFirmUser, req
   ]);
 
   const filteredLawyers = responsibleLawyers.filter((u) => isLawyerRoleName(u.roleName));
-  const filteredPartners = approvingPartners.filter((u) => isExactPartnerOrManagerRoleName(u.roleName));
+  const filteredPartners = approvingPartners.filter((u) => isPartnerRoleName(u.roleName));
 
   let quotations: Array<{ id: number; referenceNo: string | null; caseId: number | null; status: string | null; clientName: string | null }> = [];
   if (caseIdValue) {

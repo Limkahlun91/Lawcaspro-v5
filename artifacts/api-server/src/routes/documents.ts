@@ -27901,7 +27901,7 @@ router.post(
     const j = rows[0] as { created_by: unknown; firm_id: unknown; status: unknown };
     const owned =
       Number(j.created_by) === Number(req.userId) ||
-      isExactPartnerOrManagerRoleName(
+      isPartnerRoleName(
         (req as any)._roleCache && (req as any)._roleCache.name,
       );
     if (!owned) {
@@ -27915,18 +27915,14 @@ router.post(
   },
 );
 
-function isExactPartnerOrManagerRoleName(roleName: unknown): boolean {
+function isPartnerRoleName(roleName: unknown): boolean {
   const n = typeof roleName === "string" ? roleName.trim().toLowerCase() : "";
   if (!n) return false;
-  return [
-    "partner",
-    "managing partner",
-    "senior partner",
-    "practice manager",
-    "firm manager",
-    "manager",
-    "director",
-  ].includes(n);
+  return (
+    n === "partner" ||
+    n === "managing partner" ||
+    n === "senior partner"
+  );
 }
 
 function fingerprintIds(ids: ReadonlyArray<unknown>): string {

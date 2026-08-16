@@ -108,19 +108,17 @@ function userCachePut(
 // Classification helpers
 // ---------------------------------------------------------------------------
 
-function isExactPartnerOrManagerRoleName(roleName: unknown): boolean {
+function isPartnerRoleName(roleName: unknown): boolean {
   const n = typeof roleName === "string" ? roleName.trim().toLowerCase() : "";
   if (!n) return false;
   return [
     "partner",
     "managing partner",
     "senior partner",
-    "practice manager",
-    "firm manager",
-    "manager",
-    "director",
   ].includes(n);
 }
+
+export { isPartnerRoleName };
 
 function parentKeyOf(featureKey: string): string | null {
   if (!isFeatureRegistered(featureKey)) return null;
@@ -257,7 +255,7 @@ export async function resolveUserFeatureAccessBulk(params: {
   }
 
   // STEP 2 — Partner bypass (firm entitlement still must pass; use flag).
-  const isPartner = isExactPartnerOrManagerRoleName(roleName);
+  const isPartner = isPartnerRoleName(roleName);
 
   // STEP 3 — Explicit user rows.
   const userRows = await loadUserRowsBulk(r, firmId, userId, uniqKeys);

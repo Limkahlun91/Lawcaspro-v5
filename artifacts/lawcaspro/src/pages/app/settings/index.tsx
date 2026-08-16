@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Plus, Search, Save, Trash2, Building2, ShieldCheck, ShieldOff, Monitor, LogOut, Pencil, X } from "lucide-react";
 import { Link, useSearch } from "wouter";
 import { cn } from "@/lib/utils";
@@ -1427,7 +1428,19 @@ export default function Settings(props?: { defaultTab?: string }) {
   const queryClient = useQueryClient();
   const canManageUsers = hasPermission(user, "users", "create") || hasPermission(user, "users", "update") || hasPermission(user, "users", "delete");
   const canManageRoles = hasPermission(user, "roles", "create") || hasPermission(user, "roles", "update") || hasPermission(user, "roles", "delete");
-  const canManageAccess = canManageUsers || canManageRoles;
+
+  function isPartnerRoleName(name: string | null | undefined): boolean {
+    const normalized = String(name ?? "").trim().toLowerCase();
+    return (
+      normalized === "partner" ||
+      normalized === "managing partner" ||
+      normalized === "senior partner"
+    );
+  }
+
+  const isPartnerActor = isPartnerRoleName(String((user as any)?.roleName ?? ""));
+  const canManageAccess = isPartnerActor;
+
   const canUpdateSettings = hasPermission(user, "settings", "update");
   const canReadSettings = hasPermission(user, "settings", "read") || canUpdateSettings;
   const canAccessDocuments = hasPermission(user, "documents", "read") || hasPermission(user, "documents", "create") || hasPermission(user, "documents", "update") || hasPermission(user, "documents", "delete");
@@ -1480,6 +1493,8 @@ export default function Settings(props?: { defaultTab?: string }) {
     page: 1,
     limit: 50,
     search: userSearch || undefined,
+    roleId: roleFilter !== "all" ? Number(roleFilter) : undefined,
+    status: statusFilter !== "all" ? statusFilter : undefined,
   };
   const usersQueryKey = getListUsersQueryKey(userParams);
 
@@ -1510,8 +1525,8 @@ export default function Settings(props?: { defaultTab?: string }) {
   const [editInitialsTouched, setEditInitialsTouched] = useState(false);
   const [editRoleId, setEditRoleId] = useState("");
   const [editDeveloperId, setEditDeveloperId] = useState("");
+  const [originalEditRoleId, setOriginalEditRoleId] = useState<string>("");
 
-  // Part 2 §7 §22: User Access Profile (cards, not spreadsheet matrix)
   const [accessProfileLoading, setAccessProfileLoading] = useState(false);
   const [accessProfile, setAccessProfile] = useState<{
     modules: Array<{
@@ -1522,46 +1537,61 @@ export default function Settings(props?: { defaultTab?: string }) {
       allKeys?: Record<string, boolean>;
     }>;
     user?: any;
+    overrideSummary?: {
+      hasOverrides: boolean;
+      overrideCount: number;
+      explicitKeys?: string[];
+    };
+    preview?: boolean;
+    roleName?: string | null;
   } | null>(null);
   const [featureToggles, setFeatureToggles] = useState<Record<string, boolean>>({});
+  const [originalOverrideKeys, setOriginalOverrideKeys] = useState<Set<string>>(new Set());
+  const [dirtyFeatureKeys, setDirtyFeatureKeys] = useState<Set<string>>(new Set());
   const [resetFeatureKeys, setResetFeatureKeys] = useState<Set<string>>(new Set());
   const [advancedAccessView, setAdvancedAccessView] = useState(false);
   const [accessSaving, setAccessSaving] = useState(false);
-
-  const isExactPartnerOrManagerRoleName = (name: string | null | undefined): boolean => {
-    if (!name) return false;
-    const n = String(name).toLowerCase().trim();
-    return (
-      n === "partner" ||
-      n === "managing partner" ||
-      n === "senior partner" ||
-      n === "practice manager" ||
-      n === "firm manager" ||
-      n === "manager" ||
-      n === "director"
-    );
-  };
 
   useEffect(() => {
     if (!editUserOpen || !editUser?.id) {
       setAccessProfile(null);
       setAccessProfileLoading(false);
       setFeatureToggles({});
+      setOriginalOverrideKeys(new Set());
+      setDirtyFeatureKeys(new Set());
       setResetFeatureKeys(new Set());
+      setOriginalEditRoleId("");
       return;
     }
-    const targetRoleName = String(editUser.roleName ?? "");
-    if (isExactPartnerOrManagerRoleName(targetRoleName)) {
-      // §2: Partner bypass per-user checkbox config
-      setAccessProfile({ modules: [] });
+    const currentRoleId = editRoleId ? editRoleId : (editUser?.roleId ? String(editUser.roleId) : "");
+    if (originalEditRoleId === "") {
+      setOriginalEditRoleId(String(editUser?.roleId ?? ""));
+    }
+    const targetRoleName = String(
+      (currentRoleId && rolesRes)
+        ? ((rolesRes ?? []).find((r: any) => String(r.id) === String(currentRoleId))?.name ?? editUser?.roleName)
+        : editUser?.roleName ?? ""
+    );
+    if (isPartnerRoleName(targetRoleName)) {
+      setAccessProfile({ modules: [], overrideSummary: { hasOverrides: false, overrideCount: 0, explicitKeys: [] }, roleName: targetRoleName });
       setFeatureToggles({});
+      setOriginalOverrideKeys(new Set());
+      setDirtyFeatureKeys(new Set());
+      setResetFeatureKeys(new Set());
       return;
     }
     let cancelled = false;
     setAccessProfileLoading(true);
     (async () => {
       try {
-        const res = await apiFetchJson<any>(`/users/${encodeURIComponent(editUser.id)}/access-profile`);
+        const params: Record<string, string> = {};
+        const rid = editRoleId ? Number(editRoleId) : null;
+        if (rid && originalEditRoleId && String(rid) !== originalEditRoleId) {
+          params.previewRoleId = String(rid);
+        }
+        const qs = new URLSearchParams(params).toString();
+        const url = `/users/${encodeURIComponent(editUser.id)}/access-profile${qs ? "?" + qs : ""}`;
+        const res = await apiFetchJson<any>(url);
         if (cancelled) return;
         const data = res?.data ?? res;
         setAccessProfile(data);
@@ -1572,11 +1602,14 @@ export default function Settings(props?: { defaultTab?: string }) {
           }
         }
         setFeatureToggles(toggles);
+        const originalKeys = new Set<string>(data?.overrideSummary?.explicitKeys ?? []);
+        setOriginalOverrideKeys(originalKeys);
+        setDirtyFeatureKeys(new Set());
         setResetFeatureKeys(new Set());
       } catch (e: any) {
         if (cancelled) return;
         toast({ title: "Failed to load access profile", description: e?.error || e?.message || "Please try again.", variant: "destructive" });
-        setAccessProfile({ modules: [] });
+        setAccessProfile({ modules: [], overrideSummary: { hasOverrides: false, overrideCount: 0, explicitKeys: [] } });
       } finally {
         if (!cancelled) setAccessProfileLoading(false);
       }
@@ -1584,8 +1617,7 @@ export default function Settings(props?: { defaultTab?: string }) {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editUserOpen, editUser?.id]);
+  }, [editUserOpen, editUser?.id, editRoleId, rolesRes, originalEditRoleId]);
 
   const listDevelopersParamsSu = { page: 1 as const, limit: 200 as const };
   const developersQuery = useListDevelopers(listDevelopersParamsSu, {
@@ -1756,7 +1788,7 @@ export default function Settings(props?: { defaultTab?: string }) {
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                   {(rolesRes ?? []).map((role: any) => {
                     const roleName = role.name ? String(role.name) : "";
-                    const defaultAccess = isExactPartnerOrManagerRoleName(roleName)
+                    const defaultAccess = isPartnerRoleName(roleName)
                       ? "Full"
                       : (role.isSystemRole ? "Limited" : "Role Default");
                     return (
@@ -1866,27 +1898,22 @@ export default function Settings(props?: { defaultTab?: string }) {
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {(usersRes?.data ?? [])
-                        .filter((u: any) => {
-                          if (roleFilter !== "all") return String(u.roleId ?? "") === roleFilter;
-                          return true;
-                        })
-                        .filter((u: any) => {
-                          if (statusFilter === "all") return true;
-                          return String(u.status ?? "active") === statusFilter;
-                        })
                         .map((user: any) => {
                           const roleName = user.roleName ? String(user.roleName) : "";
+                          const overrideCount = Number(user.accessOverrideCount ?? 0) > 0
+                            ? Number(user.accessOverrideCount)
+                            : (user.hasAccessOverrides ? 1 : 0);
                           let accessLabel = "Role Default";
                           let accessBadgeClass = "bg-slate-100 text-slate-700";
-                          if (isExactPartnerOrManagerRoleName(roleName)) {
+                          if (isPartnerRoleName(roleName)) {
                             accessLabel = "Full Access";
                             accessBadgeClass = "bg-emerald-100 text-emerald-700";
-                          } else if (user.hasAccessOverrides) {
-                            accessLabel = "Custom Access";
-                            accessBadgeClass = "bg-amber-100 text-amber-700";
-                          } else if (user.status !== "active") {
+                          } else if (String(user.status ?? "active") !== "active") {
                             accessLabel = "No Access";
                             accessBadgeClass = "bg-slate-100 text-slate-500";
+                          } else if (overrideCount > 0) {
+                            accessLabel = "Custom Access";
+                            accessBadgeClass = "bg-amber-100 text-amber-700";
                           }
                           return (
                             <tr key={user.id} className="hover:bg-slate-50/50">
@@ -1978,13 +2005,7 @@ export default function Settings(props?: { defaultTab?: string }) {
                             </tr>
                           );
                         })}
-                      {((usersRes?.data ?? []).filter((u: any) => {
-                        if (roleFilter !== "all") return String(u.roleId ?? "") === roleFilter;
-                        return true;
-                      }).filter((u: any) => {
-                        if (statusFilter === "all") return true;
-                        return String(u.status ?? "active") === statusFilter;
-                      }).length) === 0 && (
+                      {((usersRes?.data ?? []).length) === 0 && (
                         <tr>
                           <td colSpan={6} className="px-6 py-8 text-center text-slate-500">
                             No users found.
@@ -1998,7 +2019,7 @@ export default function Settings(props?: { defaultTab?: string }) {
             </CardContent>
           </Card>
 
-          <Dialog open={editUserOpen} onOpenChange={(open) => {
+          <Sheet open={editUserOpen} onOpenChange={(open) => {
             setEditUserOpen(open);
             if (!open) {
               setEditUser(null);
@@ -2009,11 +2030,11 @@ export default function Settings(props?: { defaultTab?: string }) {
               setEditDeveloperId("");
             }
           }}>
-            <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle>Edit User</DialogTitle>
-              </DialogHeader>
-              <div className="space-y-5">
+            <SheetContent side="right" className="w-full sm:w-[720px] max-w-full h-full overflow-y-auto flex flex-col">
+              <SheetHeader>
+                <SheetTitle>Edit User</SheetTitle>
+              </SheetHeader>
+              <div className="flex-1 space-y-5 mt-4">
                 <div className="space-y-3">
                   <div className="text-sm font-semibold text-slate-800 border-b border-slate-200 pb-2">Basic Information</div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2119,13 +2140,32 @@ export default function Settings(props?: { defaultTab?: string }) {
                       return editUser?.roleName;
                     })();
                     const roleObj = (rolesRes ?? []).find((r: any) => String(r.name ?? "") === String(resolvedRoleName ?? ""));
-                    const hasOverrides = resetFeatureKeys.size < Object.keys(featureToggles).length && !!accessProfile?.modules?.length;
+                    const roleChanged = !!(
+                      originalEditRoleId &&
+                      editRoleId &&
+                      String(originalEditRoleId) !== String(editRoleId)
+                    );
+                    const explicitOverrideCount = (() => {
+                      const afterReset = new Set(originalOverrideKeys);
+                      for (const k of resetFeatureKeys) afterReset.delete(k);
+                      for (const k of dirtyFeatureKeys) afterReset.add(k);
+                      return afterReset.size;
+                    })();
+                    const hasOverrides = explicitOverrideCount > 0;
                     return (
                       <div className="space-y-3">
+                        {roleChanged && (
+                          <div className="rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+                            <div className="font-medium">Role changed to {roleObj?.name ?? resolvedRoleName ?? "new role"}.</div>
+                            <div className="text-xs text-blue-700 mt-0.5">
+                              Access will use {roleObj?.name ?? resolvedRoleName ?? "role"} defaults unless you customize it below.
+                            </div>
+                          </div>
+                        )}
                         <div className="rounded-md border border-slate-200 bg-slate-50/60 px-3 py-2 flex flex-wrap items-center justify-between gap-2">
                           <div className="text-xs text-slate-600">
                             {hasOverrides ? (
-                              <span><span className="font-medium text-amber-800">Custom access</span> — per-user overrides saved separately from the role.</span>
+                              <span><span className="font-medium text-amber-800">Custom access</span> — {explicitOverrideCount} per-user override{explicitOverrideCount === 1 ? "" : "s"} saved separately from the role.</span>
                             ) : (
                               <span>Based on <span className="font-medium text-slate-800">{roleObj?.name ?? resolvedRoleName ?? "Role"}</span> role defaults.</span>
                             )}
@@ -2135,23 +2175,20 @@ export default function Settings(props?: { defaultTab?: string }) {
                             size="sm"
                             onClick={() => {
                               if (!accessProfile?.modules?.length) return;
-                              const defaultToggles: Record<string, boolean> = {};
-                              const resetAll = new Set<string>();
-                              for (const mod of accessProfile.modules) {
-                                for (const ch of mod.children ?? []) {
-                                  defaultToggles[ch.featureKey] = !!ch.enabled;
-                                  resetAll.add(ch.featureKey);
-                                }
-                              }
-                              setFeatureToggles(defaultToggles);
-                              setResetFeatureKeys(resetAll);
+                              const allExplicitKeys = new Set(originalOverrideKeys);
+                              for (const k of dirtyFeatureKeys) allExplicitKeys.add(k);
+                              const nextReset = new Set(allExplicitKeys);
+                              setResetFeatureKeys(nextReset);
+                              const nextDirty = new Set(dirtyFeatureKeys);
+                              for (const k of nextReset) nextDirty.delete(k);
+                              setDirtyFeatureKeys(nextDirty);
                             }}
                             disabled={accessProfileLoading || accessSaving}
                           >
                             Reset to Role Defaults
                           </Button>
                         </div>
-                        {isExactPartnerOrManagerRoleName(resolvedRoleName) ? (
+                        {isPartnerRoleName(resolvedRoleName) ? (
                           <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
                             <div className="font-medium">Partner has full operational access</div>
                             <div className="text-xs text-emerald-700 mt-0.5">
@@ -2175,6 +2212,34 @@ export default function Settings(props?: { defaultTab?: string }) {
                               } else {
                                 state = "off";
                               }
+                              const applyAllOn = () => {
+                                if (mod.state === "off") return;
+                                const nx: Record<string, boolean> = { ...featureToggles };
+                                const nd = new Set(dirtyFeatureKeys);
+                                const nr = new Set(resetFeatureKeys);
+                                for (const ch of mod.children) {
+                                  if (nx[ch.featureKey] !== true) nd.add(ch.featureKey);
+                                  nx[ch.featureKey] = true;
+                                  nr.delete(ch.featureKey);
+                                }
+                                setFeatureToggles(nx);
+                                setDirtyFeatureKeys(nd);
+                                setResetFeatureKeys(nr);
+                              };
+                              const applyAllOff = () => {
+                                if (mod.state === "off") return;
+                                const nx: Record<string, boolean> = { ...featureToggles };
+                                const nd = new Set(dirtyFeatureKeys);
+                                const nr = new Set(resetFeatureKeys);
+                                for (const ch of mod.children) {
+                                  if (nx[ch.featureKey] !== false) nd.add(ch.featureKey);
+                                  nx[ch.featureKey] = false;
+                                  nr.delete(ch.featureKey);
+                                }
+                                setFeatureToggles(nx);
+                                setDirtyFeatureKeys(nd);
+                                setResetFeatureKeys(nr);
+                              };
                               return (
                                 <Card
                                   key={mod.featureKey}
@@ -2187,18 +2252,26 @@ export default function Settings(props?: { defaultTab?: string }) {
                                         <code className="text-[10px] text-slate-400 font-mono">{mod.featureKey}</code>
                                       )}
                                     </div>
-                                    <span className={cn(
-                                      "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium",
-                                      state === "full"
-                                        ? "bg-emerald-100 text-emerald-700"
-                                        : state === "limited"
-                                        ? "bg-amber-100 text-amber-700"
-                                        : "bg-slate-100 text-slate-600"
-                                    )}>
-                                      {state === "full" ? "Full" : state === "limited" ? "Limited" : "Off"}
-                                    </span>
+                                    <div className="flex items-center gap-2">
+                                      {mod.state !== "off" && (
+                                        <div className="flex gap-1 text-[10px]">
+                                          <button type="button" onClick={applyAllOn} className="px-1.5 py-0.5 rounded border border-emerald-200 text-emerald-700 hover:bg-emerald-50">Full</button>
+                                          <button type="button" onClick={applyAllOff} className="px-1.5 py-0.5 rounded border border-slate-200 text-slate-600 hover:bg-slate-50">Off</button>
+                                        </div>
+                                      )}
+                                      <span className={cn(
+                                        "inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium",
+                                        state === "full"
+                                          ? "bg-emerald-100 text-emerald-700"
+                                          : state === "limited"
+                                          ? "bg-amber-100 text-amber-700"
+                                          : "bg-slate-100 text-slate-600"
+                                      )}>
+                                        {state === "full" ? "Full" : state === "limited" ? "Limited" : "Off"}
+                                      </span>
+                                    </div>
                                   </CardHeader>
-                                  {state === "limited" && (
+                                  {(state === "limited" || state === "off" || mod.state === "off") && (
                                     <CardContent className="p-2.5 space-y-1">
                                       {mod.children.length === 0 ? (
                                         <div className="text-xs text-slate-500 px-1 py-1">No child features.</div>
@@ -2221,6 +2294,11 @@ export default function Settings(props?: { defaultTab?: string }) {
                                                 onCheckedChange={(v) => {
                                                   const next = typeof v === "boolean" ? v : !!v;
                                                   setFeatureToggles((prev) => ({ ...prev, [ch.featureKey]: next }));
+                                                  setDirtyFeatureKeys((prev) => {
+                                                    const nx = new Set(prev);
+                                                    nx.add(ch.featureKey);
+                                                    return nx;
+                                                  });
                                                   setResetFeatureKeys((prev) => {
                                                     const nx = new Set(prev);
                                                     nx.delete(ch.featureKey);
@@ -2265,7 +2343,7 @@ export default function Settings(props?: { defaultTab?: string }) {
                   })()}
                 </div>
               </div>
-              <DialogFooter className="mt-4 pt-4 border-t border-slate-200">
+              <SheetFooter className="mt-4 pt-4 border-t border-slate-200">
                 <Button
                   variant="outline"
                   onClick={() => setEditUserOpen(false)}
@@ -2309,11 +2387,15 @@ export default function Settings(props?: { defaultTab?: string }) {
 
                     setAccessSaving(true);
                     try {
+                      const dirtyEntries = [...dirtyFeatureKeys]
+                        .filter((key) => !resetFeatureKeys.has(key))
+                        .map((key) => [key, !!featureToggles[key]] as [string, boolean]);
+                      const features = Object.fromEntries(dirtyEntries);
                       const body: Record<string, any> = {
                         name,
                         initials: editInitials.trim() ? editInitials.trim() : null,
                         status: String(editUser?.status ?? "active"),
-                        features: { ...featureToggles },
+                        features,
                       };
                       if (editRoleId) {
                         body.roleId = Number(editRoleId);
@@ -2351,9 +2433,9 @@ export default function Settings(props?: { defaultTab?: string }) {
                 >
                   {accessSaving ? "Saving…" : "Save User"}
                 </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+              </SheetFooter>
+            </SheetContent>
+          </Sheet>
 
           <Dialog open={deleteUserOpen} onOpenChange={(open) => {
             setDeleteUserOpen(open);
@@ -2410,9 +2492,9 @@ export default function Settings(props?: { defaultTab?: string }) {
               <DialogHeader>
                 <DialogTitle>Edit Role Defaults — {editRole?.name ?? ""}</DialogTitle>
               </DialogHeader>
-              {isExactPartnerOrManagerRoleName(editRole?.name) ? (
+              {isPartnerRoleName(editRole?.name) ? (
                 <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-                  <div className="font-medium">Partner / Manager roles have full access by default.</div>
+                  <div className="font-medium">Partner roles have full operational access by default.</div>
                   <div className="text-xs text-emerald-700 mt-0.5">
                     Defaults are determined by the system. Use Advanced Permissions to customize at the fine-grained level.
                   </div>
