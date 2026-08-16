@@ -10,7 +10,6 @@ import {
   deriveLoanStatus,
   formatPurchasePrice,
   getDeveloperPortalUnitLabel,
-  isDeveloperForbiddenApi,
   summarizeCards,
   collectAttentionItems,
   mapJoinedCaseToListDto,
@@ -193,25 +192,9 @@ describe("DEVPORTAL-9 · Developer user cannot see NRIC/TIN fields in DTO", () =
   });
 });
 
-describe("DEVPORTAL-10 · deny list blocks accounting/PV/ledger APIs", () => {
-  it("forbids all bad paths; allows developer portal + health", () => {
-    const bad = [
-      "/api/accounting",
-      "/api/payment-voucher/any",
-      "/api/invoices/1",
-      "/api/receipts/export",
-      "/api/quotations",
-      "/api/audit/csv",
-      "/api/cases/99/ledger/trust",
-    ];
-    for (const b of bad) expect(isDeveloperForbiddenApi(b)).toBe(true);
-    const good = [
-      "/developer/portal/overview",
-      "/developer/portal/units",
-      "/developer/cases/1/messages",
-      "/api/health",
-    ];
-    for (const g of good) expect(isDeveloperForbiddenApi(g)).toBe(false);
+describe("DEVPORTAL-10 · developerOnlyAllowlist middleware replaces legacy deny list", () => {
+  it("dead isDeveloperForbiddenApi export removed from developer-portal.ts", () => {
+    expect(DEV_PORTAL_SRC_TEXT).not.toMatch(/isDeveloperForbiddenApi|DEV_PORTAL_DENY_APIS_RE/);
   });
 });
 

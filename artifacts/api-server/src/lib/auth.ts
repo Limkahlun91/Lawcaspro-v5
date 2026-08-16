@@ -18,6 +18,7 @@ export interface AuthRequest extends Request {
   founderPermissions?: string[];
   founderRoleLevel?: string | null;
   timing?: { startAt: number; sections: Record<string, number> };
+  _roleCache?: { firmId: number | null; roleId: number | null; name: string | null };
   /**
    * Per-request RLS-enforced Drizzle instance.
    * Set by requireFirmUser. Runs inside a transaction as app_user with
@@ -216,6 +217,8 @@ export async function requireAuth(
         userType: string;
         firmId: number | null;
         roleId: number | null;
+        roleName: string | null;
+        developerId: number | null;
         status: string;
       }
     | undefined;
@@ -301,7 +304,14 @@ export async function requireAuth(
   req.userType = user.userType;
   req.firmId = user.firmId;
   req.roleId = user.roleId;
-  req.developerId = (user as any).developerId ?? null;
+  req.roleName = user.roleName ?? null;
+  req.developerId = user.developerId ?? null;
+  const firmId = req.firmId;
+  const roleId = req.roleId;
+  const roleName = req.roleName;
+  if (firmId !== undefined && roleId !== undefined && roleName !== undefined) {
+    req._roleCache = { firmId, roleId, name: roleName };
+  }
 
   next();
 }
@@ -327,6 +337,7 @@ type SessionUserLookupResult =
             userType: string;
             firmId: number | null;
             roleId: number | null;
+            roleName: string | null;
             developerId: number | null;
             status: string;
           }
@@ -457,10 +468,12 @@ export async function lookupSessionAndUserByTokenHash(
           userType: usersTable.userType,
           firmId: usersTable.firmId,
           roleId: usersTable.roleId,
+          roleName: rolesTable.name,
           developerId: usersTable.developerId,
           status: usersTable.status,
         })
         .from(usersTable)
+        .leftJoin(rolesTable, and(eq(rolesTable.id, usersTable.roleId), eq(rolesTable.firmId, usersTable.firmId)))
         .where(eq(usersTable.id, s.userId))
         .catch(async (err) => {
           const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
@@ -477,7 +490,7 @@ export async function lookupSessionAndUserByTokenHash(
             })
             .from(usersTable)
             .where(eq(usersTable.id, s.userId));
-          return [u2 ? ({ ...u2, developerId: null }) : undefined] as any;
+          return [u2 ? ({ ...u2, developerId: null, roleName: null }) : undefined] as any;
         });
       return { session: s, user: u as any };
     }
@@ -501,12 +514,14 @@ export async function lookupSessionAndUserByTokenHash(
             userType: usersTable.userType,
             firmId: usersTable.firmId,
             roleId: usersTable.roleId,
+            roleName: rolesTable.name,
             developerId: usersTable.developerId,
             status: usersTable.status,
           },
         })
         .from(sessionsTable)
         .innerJoin(usersTable, eq(usersTable.id, sessionsTable.userId))
+        .leftJoin(rolesTable, and(eq(rolesTable.id, usersTable.roleId), eq(rolesTable.firmId, usersTable.firmId)))
         .where(eq(sessionsTable.tokenHash, tokenHash))
         .limit(1);
       if (!row) return null;
@@ -540,7 +555,7 @@ export async function lookupSessionAndUserByTokenHash(
         .where(eq(sessionsTable.tokenHash, tokenHash))
         .limit(1);
       if (!row2) return null;
-      return { session: row2.session as any, user: ({ ...(row2.user as any), developerId: null } as any) };
+      return { session: row2.session as any, user: ({ ...(row2.user as any), developerId: null, roleName: null } as any) };
     }
   };
 
@@ -555,6 +570,7 @@ export async function lookupSessionAndUserByTokenHash(
               userType: string;
               firmId: number | null;
               roleId: number | null;
+              roleName: string | null;
               developerId: number | null;
               status: string;
             }
@@ -574,10 +590,12 @@ export async function lookupSessionAndUserByTokenHash(
           userType: usersTable.userType,
           firmId: usersTable.firmId,
           roleId: usersTable.roleId,
+          roleName: rolesTable.name,
           developerId: usersTable.developerId,
           status: usersTable.status,
         })
         .from(usersTable)
+        .leftJoin(rolesTable, and(eq(rolesTable.id, usersTable.roleId), eq(rolesTable.firmId, usersTable.firmId)))
         .where(eq(usersTable.id, s.userId))
         .catch(async (err) => {
           const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
@@ -594,7 +612,7 @@ export async function lookupSessionAndUserByTokenHash(
             })
             .from(usersTable)
             .where(eq(usersTable.id, s.userId));
-          return [u2 ? ({ ...u2, developerId: null }) : undefined] as any;
+          return [u2 ? ({ ...u2, developerId: null, roleName: null }) : undefined] as any;
         });
       return { session: s, user: u as any };
     });
@@ -611,6 +629,7 @@ export async function lookupSessionAndUserByTokenHash(
               userType: string;
               firmId: number | null;
               roleId: number | null;
+              roleName: string | null;
               developerId: number | null;
               status: string;
             }
@@ -634,10 +653,12 @@ export async function lookupSessionAndUserByTokenHash(
             userType: usersTable.userType,
             firmId: usersTable.firmId,
             roleId: usersTable.roleId,
+            roleName: rolesTable.name,
             developerId: usersTable.developerId,
             status: usersTable.status,
           })
           .from(usersTable)
+          .leftJoin(rolesTable, and(eq(rolesTable.id, usersTable.roleId), eq(rolesTable.firmId, usersTable.firmId)))
           .where(eq(usersTable.id, s.userId))
           .catch(async (err) => {
             const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
@@ -655,7 +676,7 @@ export async function lookupSessionAndUserByTokenHash(
               .from(usersTable)
               .where(eq(usersTable.id, s.userId))
               ;
-            return [u2 ? ({ ...u2, developerId: null }) : undefined] as any;
+            return [u2 ? ({ ...u2, developerId: null, roleName: null }) : undefined] as any;
           });
         return { session: s, user: u as any };
       },

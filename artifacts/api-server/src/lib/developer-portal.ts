@@ -883,21 +883,6 @@ export function mapJoinedCaseToDetailDto(
   };
 }
 
-export const DEV_PORTAL_DENY_APIS_RE = [
-  /^\/?api\/accounting(\/|$)/i,
-  /^\/?api\/payment-voucher/i,
-  /^\/?api\/invoices(\/|$)/i,
-  /^\/?api\/receipts(\/|$)/i,
-  /^\/?api\/quotations(\/|$)/i,
-  /^\/?api\/audit(\/|$)/i,
-  /^\/?api\/cases\/[^/]+\/ledger/i,
-];
-
-export function isDeveloperForbiddenApi(path: string): boolean {
-  const clean = path.startsWith("/") ? path : `/${path}`;
-  return DEV_PORTAL_DENY_APIS_RE.some((r) => r.test(clean));
-}
-
 export type DevCaseAssignmentRow = { userId: number | null; name: string | null; roleInCase: string | null };
 export function extractLawyerClerk(rows: DevCaseAssignmentRow[]): { lawyer: string | null; clerk: string | null } {
   let lawyer: string | null = null;

@@ -872,4 +872,41 @@ describe("REAL_DB_INTEGRATION · Developer Portal PGlite", () => {
     const searchRows = await r.select({ id: casesTable.id }).from(casesTable).where(and(...searchConditions));
     expect(searchRows).toHaveLength(1);
   });
+
+  it("DB-2 · SCHEMA PARITY · required columns exist for all Developer Portal tables (PGlite DDL vs drizzle columns)", async () => {
+    const columnsByTable: Record<string, Set<string>> = {};
+    const tables = [
+      { pgTable: "roles", drizzle: rolesTable, required: ["id", "firmId", "name", "isSystemRole", "createdAt", "updatedAt"] },
+      { pgTable: "users", drizzle: usersTable, required: ["id", "firmId", "developerId", "email", "name", "passwordHash", "userType", "roleId", "status", "createdAt", "updatedAt"] },
+      { pgTable: "developers", drizzle: developersTable, required: ["id", "firmId", "name", "createdAt", "updatedAt"] },
+      { pgTable: "clients", drizzle: clientsTable, required: ["id", "firmId", "name", "createdAt", "updatedAt"] },
+      { pgTable: "projects", drizzle: projectsTable, required: ["id", "firmId", "developerId", "developerName", "name", "phase", "createdAt", "updatedAt"] },
+      { pgTable: "cases", drizzle: casesTable, required: ["id", "firmId", "projectId", "developerId", "referenceNo", "parcelNo", "purchaseMode", "status", "propertyDetails", "createdAt", "updatedAt"] },
+      { pgTable: "case_purchasers", drizzle: casePurchasersTable, required: ["id", "caseId", "clientId", "orderNo"] },
+      { pgTable: "case_assignments", drizzle: caseAssignmentsTable, required: ["id", "caseId", "userId", "roleInCase", "unassignedAt"] },
+      { pgTable: "case_workflow_steps", drizzle: caseWorkflowStepsTable, required: ["id", "caseId", "stepKey", "stepName", "stepOrder", "status"] },
+      { pgTable: "case_key_dates", drizzle: caseKeyDatesTable, required: ["id", "firmId", "caseId"] },
+    ];
+    const colRes = await r.execute(sql<{ table_name: string; column_name: string }>`SELECT table_name::text AS table_name, column_name::text AS column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name IN (${sql.join(tables.map((t) => sql.raw(`'${t.pgTable}'`)), sql`, `)}) ORDER BY table_name, ordinal_position`);
+    for (const row of (colRes as any).rows ?? colRes) {
+      const tn: string = String(row.table_name);
+      const cn: string = String(row.column_name);
+      if (!columnsByTable[tn]) columnsByTable[tn] = new Set();
+      columnsByTable[tn].add(cn);
+    }
+    function toSnake(k: string): string {
+      return k.replace(/[A-Z]/g, (m, off) => `${off > 0 ? "_" : ""}${m.toLowerCase()}`);
+    }
+    for (const t of tables) {
+      const cols = columnsByTable[t.pgTable];
+      expect(cols).toBeDefined();
+      expect(cols.size).toBeGreaterThan(0);
+      const drizzleFields = Object.keys((t.drizzle as any));
+      expect(drizzleFields.length).toBeGreaterThan(0);
+      for (const req of t.required) {
+        const snake = toSnake(req);
+        expect(cols.has(snake) ? snake : snake + " missing").toBe(snake);
+      }
+    }
+  });
 });
