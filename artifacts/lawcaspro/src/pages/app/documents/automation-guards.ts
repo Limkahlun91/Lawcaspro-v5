@@ -33,6 +33,8 @@ export function getProgress(
 }
 
 export function isProgressComplete(snapshot: NormalizedGenerationJob | null): boolean {
+  const st = String(snapshot?.status ?? "").toLowerCase();
+  if (st === "failed") return true;
   const p = getProgress(snapshot);
   return (
     p.total > 0 &&
@@ -59,17 +61,74 @@ export function getDisplayStatus(
   snapshot: NormalizedGenerationJob | null,
 ): DocGenDisplayStatus {
   const st = String(snapshot?.status ?? "").toLowerCase();
+  const nextAction = String(snapshot?.nextAction ?? "").toLowerCase();
   const p = getProgress(snapshot);
   const zipReady = Boolean(
     snapshot?.downloadObjectPath || snapshot?.downloadUrl || snapshot?.downloadManifestUrl,
   );
-  if (!isProgressComplete(snapshot)) return "GENERATING";
+  const active = (snapshot as any)?.active;
+  if (
+    st === "failed" ||
+    nextAction === "stop" ||
+    (active === false && !isProgressComplete(snapshot))
+  ) {
+    return "FAILED";
+  }
   if (st === "cancelled") return "CANCELLED";
+  if (!isProgressComplete(snapshot)) return "GENERATING";
   if (p.success === 0) return "FAILED";
   if (p.failed === 0) {
     return zipReady ? "COMPLETED" : "GENERATED_DOWNLOAD_FAILED";
   }
   return zipReady ? "PARTIALLY_COMPLETED" : "GENERATED_DOWNLOAD_FAILED";
+}
+
+function classifyDocGenErrorSimple(
+  snapshot: NormalizedGenerationJob | null,
+): string {
+  if (!snapshot) return "Unknown error";
+  const errorSummary = safeText(snapshot.errorSummary);
+  if (errorSummary) return errorSummary;
+  const items = snapshot.items ?? [];
+  const firstFailed = items.find((i) => String(i.status).toLowerCase() === "failed");
+  if (firstFailed) {
+    const code = String(firstFailed.errorCode ?? "").toUpperCase();
+    const msg = safeText(firstFailed.errorMessage);
+    if (code.includes("TEMPLATE_FILE_MISSING") || code.includes("TEMPLATE_NOT_FOUND")) {
+      const tpl = safeText(firstFailed.templateName) || "template";
+      return `Template missing: ${tpl}`;
+    }
+    if (code.includes("DOCX_TO_PDF_ENGINE_NOT_CONFIGURED")) {
+      return "PDF conversion not configured for Word templates.";
+    }
+    if (code.includes("OUTPUT_MISSING")) {
+      return "Generation completed but no output file was produced.";
+    }
+    if (code.includes("VARIABLE") || (msg && msg.toLowerCase().includes("variable"))) {
+      return msg || "A required variable could not be resolved.";
+    }
+    if (code.includes("CASE") || (msg && msg.toLowerCase().includes("case"))) {
+      return msg || "Case data could not be loaded.";
+    }
+    if (code.includes("TIMEOUT") || (msg && msg.toLowerCase().includes("timeout"))) {
+      return "Generation timed out. Try with fewer items.";
+    }
+    if (
+      code.includes("PERMISSION") ||
+      code.includes("FORBIDDEN") ||
+      (msg && msg.toLowerCase().includes("permission"))
+    ) {
+      return "You do not have permission to generate this document.";
+    }
+    if (code.includes("RLS") || code.includes("ROW LEVEL")) {
+      return "Access denied by tenant policy.";
+    }
+    if (msg) return msg;
+    if (code) return code;
+  }
+  const lastCode = safeText((snapshot as any).lastErrorCode);
+  if (lastCode) return lastCode;
+  return "Generation stopped due to an error.";
 }
 
 export function getJobTitle(snapshot: NormalizedGenerationJob | null): string {
@@ -82,7 +141,7 @@ export function getJobTitle(snapshot: NormalizedGenerationJob | null): string {
     case "PARTIALLY_COMPLETED":
       return "Partially completed";
     case "FAILED":
-      return "Generation failed";
+      return "Generation stopped";
     case "CANCELLED":
       return "Generation cancelled";
     case "GENERATED_DOWNLOAD_FAILED":
@@ -93,9 +152,11 @@ export function getJobTitle(snapshot: NormalizedGenerationJob | null): string {
 export function getJobSummary(snapshot: NormalizedGenerationJob | null): string {
   const p = getProgress(snapshot);
   const d = getDisplayStatus(snapshot);
+  if (d === "FAILED") {
+    return classifyDocGenErrorSimple(snapshot);
+  }
   if (d === "COMPLETED") return `${p.total} documents generated`;
   if (d === "PARTIALLY_COMPLETED") return `${p.success} succeeded, ${p.failed} failed`;
-  if (d === "FAILED") return `${p.failed} failed (0 succeeded)`;
   if (d === "GENERATED_DOWNLOAD_FAILED") return `${p.success} succeeded, package failed`;
   if (d === "CANCELLED") return `${p.success + p.failed} of ${p.total} before cancellation`;
   const processed = p.success + p.failed;

@@ -436,7 +436,15 @@ export default function DocumentAutomationHub() {
     jobStageRef.current = jobStage;
   }, [jobStage]);
 
-  const storageKey = "lawcaspro_doc_automation_last_job";
+  const storageKey = useMemo(() => {
+    const firmId = user?.firmId ?? "unknown_firm";
+    const userId = user?.id ?? "unknown_user";
+    return `lawcaspro_doc_automation_last_job_${firmId}_${userId}`;
+  }, [user?.firmId, user?.id]);
+
+  const pollTimestampStorageKey = useMemo(() => `${storageKey}_polled_at`, [storageKey]);
+  const maxRetryAttemptsPerPageLoad = 20;
+  const retryAttemptsRef = useRef(0);
 
   const setDownloadPrepError = (message?: string) => {
     setRunnerNotice("Download preparation failed. Retry Download");
@@ -479,6 +487,18 @@ export default function DocumentAutomationHub() {
         const st = await getGenerationJobStatus(jobId);
         setJob(st);
         const p = getProgress(st);
+        const sLower = String(st.status ?? "").toLowerCase();
+        const naLower = String(st.nextAction ?? "").toLowerCase();
+        if (naLower === "stop" || sLower === "failed" || sLower === "cancelled") {
+          const hasDocxErr = Array.isArray(st.items) && st.items.some((i) => i?.errorCode === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED");
+          setJobError(
+            hasDocxErr
+              ? "Word template cannot be exported to PDF because DOCX-to-PDF converter is not configured."
+              : (st.errorSummary ?? "Generation stopped"),
+          );
+          setJobStage("error");
+          return;
+        }
         const progressCompleteNow = isProgressComplete(st);
         if (progressCompleteNow) {
           if (p.success > 0) {
@@ -506,6 +526,18 @@ export default function DocumentAutomationHub() {
           setJob(next);
           runNextConsecutive504Ref.current = 0;
           const p2 = getProgress(next);
+          const nextNa = String(next.nextAction ?? "").toLowerCase();
+          const nextSLower = String(next.status ?? "").toLowerCase();
+          if (nextNa === "stop" || nextSLower === "failed") {
+            const hasDocxErr = Array.isArray(next.items) && next.items.some((i) => i?.errorCode === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED");
+            setJobError(
+              hasDocxErr
+                ? "Word template cannot be exported to PDF because DOCX-to-PDF converter is not configured."
+                : (next.errorSummary ?? "Generation stopped"),
+            );
+            setJobStage("error");
+            return;
+          }
           if (isProgressComplete(next) && p2.success > 0) {
             await finalizeAndDownload(jobId, { snapshot: next });
             return;
@@ -654,21 +686,72 @@ export default function DocumentAutomationHub() {
       try {
         setActiveJobId(jobId);
         const st = await getGenerationJobStatus(jobId);
+
+        const storedCreator = st.creatorUserId;
+        const currentUserId = user?.id;
+        if (storedCreator != null && currentUserId != null && Number(storedCreator) !== Number(currentUserId)) {
+          setActiveJobId(null);
+          try {
+            window.localStorage.removeItem(storageKey);
+          } catch {}
+          return;
+        }
+
         setJob(st);
-        setJobStage("ready");
-        devLog("job:recovered", { jobId, status: String(st.status ?? ""), nextAction: st.nextAction ?? null });
-        setRunnerNotice(
-          canDownloadNow(st)
-            ? "Previous generation job found. You can retry download."
-            : formatProcessingNotice(st),
-        );
+        const displayNow = getDisplayStatus(st);
+        const stLower = String(st.status ?? "").toLowerCase();
+        const nextActionLower = String(st.nextAction ?? "").toLowerCase();
+        const isTerminalFail =
+          displayNow === "FAILED" || stLower === "failed" || nextActionLower === "stop";
+
+        let lastPolled: number | null = null;
+        try {
+          const raw = window.localStorage.getItem(pollTimestampStorageKey);
+          if (raw) lastPolled = Number(raw) || null;
+        } catch {}
+        const now = Date.now();
+        const isStaleGenerating =
+          displayNow === "GENERATING" &&
+          lastPolled != null &&
+          now - lastPolled > 15 * 60 * 1000;
+
+        if (isTerminalFail) {
+          setJobStage("ready");
+          devLog("job:recovered:failed", { jobId, status: String(st.status ?? ""), nextAction: st.nextAction ?? null });
+          setRunnerNotice(null);
+        } else if (isStaleGenerating) {
+          setJobStage("ready");
+          try {
+            const recheck = await getGenerationJobStatus(jobId);
+            setJob(recheck);
+            const stillStuck = getDisplayStatus(recheck) === "GENERATING";
+            setRunnerNotice(
+              stillStuck
+                ? "This job appears to be stalled. Use Refresh Status or Retry Failed Step."
+                : formatProcessingNotice(recheck),
+            );
+          } catch {
+            setRunnerNotice("This job appears to be stalled. Use Refresh Status or Retry Failed Step.");
+          }
+        } else {
+          setJobStage("ready");
+          devLog("job:recovered", { jobId, status: String(st.status ?? ""), nextAction: st.nextAction ?? null });
+          setRunnerNotice(
+            canDownloadNow(st)
+              ? "Previous generation job found. You can retry download."
+              : formatProcessingNotice(st),
+          );
+        }
+        try {
+          window.localStorage.setItem(pollTimestampStorageKey, String(now));
+        } catch {}
       } catch (err) {
         const msg = extractErrorMessage(err);
         setJobError(msg || "Failed to recover previous job");
         setJobStage("error");
       }
     })();
-  }, [busy, job]);
+  }, [busy, job, storageKey, pollTimestampStorageKey, user?.id]);
 
   type AutomationBootstrapResponse = {
     cases:
@@ -2013,6 +2096,30 @@ export default function DocumentAutomationHub() {
     return "Unknown generation error";
   }
 
+  function isRetryableFailure(item: NormalizedGenerationJob["items"][number]): boolean {
+    const code = String(item?.errorCode ?? "").toUpperCase();
+    if (code.includes("DOCX_TO_PDF_ENGINE_NOT_CONFIGURED")) return false;
+    if (code.includes("PERMISSION") || code.includes("FORBIDDEN")) return false;
+    if (code.includes("RLS") || code.includes("ROW LEVEL")) return false;
+    return true;
+  }
+
+  const retryCountExceeded = retryAttemptsRef.current >= maxRetryAttemptsPerPageLoad;
+
+  const initiateRetryContinue = (jobId: string, opts?: { confirm?: boolean }) => {
+    if (!jobId) return;
+    if (retryAttemptsRef.current >= maxRetryAttemptsPerPageLoad) return;
+    retryAttemptsRef.current += 1;
+    if (opts?.confirm === true) {
+      toast({
+        title: "Retrying job",
+        description:
+          "This will retry failed and pending items; successful outputs will NOT be duplicated.",
+      });
+    }
+    void continueJob(jobId);
+  };
+
   function StatusBadge({ status }: { status: DocGenDisplayStatus }) {
     const map: Record<DocGenDisplayStatus, { label: string; className: string; icon: any }> = {
       GENERATING: { label: "Generating", className: "bg-blue-50 text-blue-700 border-blue-200", icon: Loader2 },
@@ -2714,7 +2821,94 @@ export default function DocumentAutomationHub() {
                             </Button>
                             {(() => {
                               const p = getProgress(job);
-                              const showContinue = Boolean(activeJobId) && (p.pending > 0 || p.running > 0) && !canRetryDownload(job);
+                              const stLower = String(job?.status ?? "").toLowerCase();
+                              const naLower = String(job?.nextAction ?? "").toLowerCase();
+                              const hasWorkPending = p.pending > 0 || p.running > 0;
+                              const driveStoppedBy504 = runNextConsecutive504Ref.current >= 3;
+                              const isPausedState = stLower === "paused";
+                              const retryDisabledCommon =
+                                busy || !activeJobId || retryCountExceeded;
+                              const retryBtnTitle = retryCountExceeded
+                                ? "Too many retries this session — please Refresh and try again."
+                                : undefined;
+
+                              if (retryCountExceeded && failedItems.length > 0 && displayStatus === "FAILED") {
+                                return (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    disabled={true}
+                                    title="Too many retries this session — please Refresh and try again."
+                                  >
+                                    Too many retries — Refresh
+                                  </Button>
+                                );
+                              }
+
+                              if (displayStatus === "FAILED" && failedItems.length > 0) {
+                                const allRetryable = failedItems.every(isRetryableFailure);
+                                const someNonRetryable = failedItems.some((i) => !isRetryableFailure(i));
+
+                                if (allRetryable) {
+                                  return (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      disabled={retryDisabledCommon}
+                                      title={retryBtnTitle}
+                                      onClick={() => {
+                                        if (!activeJobId) return;
+                                        initiateRetryContinue(activeJobId, { confirm: false });
+                                      }}
+                                    >
+                                      Retry Failed Step
+                                    </Button>
+                                  );
+                                }
+                                if (someNonRetryable && p.pending === 0 && stLower === "failed") {
+                                  return (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      disabled={retryDisabledCommon}
+                                      title={retryBtnTitle}
+                                      onClick={() => {
+                                        if (!activeJobId) return;
+                                        initiateRetryContinue(activeJobId, { confirm: true });
+                                      }}
+                                    >
+                                      Retry Job
+                                    </Button>
+                                  );
+                                }
+                                if (someNonRetryable) {
+                                  return (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      disabled={retryDisabledCommon}
+                                      title={retryBtnTitle}
+                                      onClick={() => {
+                                        if (!activeJobId) return;
+                                        initiateRetryContinue(activeJobId, { confirm: true });
+                                      }}
+                                    >
+                                      Retry Failed Step
+                                    </Button>
+                                  );
+                                }
+                              }
+
+                              const showContinue =
+                                Boolean(activeJobId) &&
+                                displayStatus === "GENERATING" &&
+                                hasWorkPending &&
+                                (isPausedState || driveStoppedBy504) &&
+                                !canRetryDownload(job);
                               if (showContinue) {
                                 return (
                                   <Button
@@ -2767,14 +2961,19 @@ export default function DocumentAutomationHub() {
                                 Retry Download
                               </Button>
                             ) : null}
-                            {canRetryFailedItems(job) ? (
+                            {canRetryFailedItems(job) && displayStatus !== "FAILED" ? (
                               <Button
                                 type="button"
                                 size="sm"
                                 variant="outline"
-                                disabled={busy || !activeJobId}
+                                disabled={busy || !activeJobId || retryCountExceeded}
+                                title={retryCountExceeded ? "Too many retries this session — please Refresh and try again." : undefined}
+                                onClick={() => {
+                                  if (!activeJobId) return;
+                                  initiateRetryContinue(activeJobId, { confirm: false });
+                                }}
                               >
-                                Retry Failed Items
+                                Retry Failed Step
                               </Button>
                             ) : null}
                             {canClearJob(job) ? (
@@ -2792,7 +2991,7 @@ export default function DocumentAutomationHub() {
                         </div>
                       )}
                       <Button
-                        disabled={busy || hasActiveJob || blocksWordTemplates}
+                        disabled={busy || (hasActiveJob && displayStatus === "GENERATING") || blocksWordTemplates}
                         className="w-full"
                         onClick={() => runGenerate("download")}
                       >
@@ -2808,7 +3007,7 @@ export default function DocumentAutomationHub() {
                                   ? "Downloading..."
                                   : jobStage === "packaging"
                                     ? "Packaging ZIP..."
-                                    : hasActiveJob
+                                    : hasActiveJob && displayStatus === "GENERATING"
                                       ? "Job Active"
                                       : "Generate & Download"}
                       </Button>
@@ -2898,7 +3097,7 @@ export default function DocumentAutomationHub() {
                         </div>
                       )}
                       <Button
-                        disabled={busy || hasActiveJob || blocksWordTemplates}
+                        disabled={busy || (hasActiveJob && displayStatus === "GENERATING") || blocksWordTemplates}
                         className="w-full"
                         onClick={() => runGenerate("print")}
                       >

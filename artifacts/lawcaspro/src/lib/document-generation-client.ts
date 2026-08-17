@@ -57,6 +57,8 @@ export type NormalizedGenerationJob = {
   downloadObjectPath?: string | null;
   downloadFileName?: string | null;
   errorSummary?: string | null;
+  active?: boolean;
+  creatorUserId?: number | null;
   items: NormalizedGenerationJobItem[];
 };
 
@@ -284,6 +286,26 @@ export function normalizeGenerationJob(raw: unknown): NormalizedGenerationJob {
   const totalCount = progress ? progress.total : toInt(jobRaw.totalCount ?? jobRaw.total_count);
   const runningCount = progress ? progress.running : undefined;
 
+  const activeRaw =
+    (jobRaw as any).active !== undefined
+      ? (jobRaw as any).active
+      : (root as any).active !== undefined
+        ? (root as any).active
+        : undefined;
+  const statusLower = String(status).toLowerCase();
+  const active = statusLower === "failed" ? false : typeof activeRaw === "boolean" ? activeRaw : undefined;
+
+  const creatorUserId =
+    asNumber((jobRaw as any).creatorUserId ?? (jobRaw as any).creator_user_id) ??
+    asNumber((root as any).creatorUserId ?? (root as any).creator_user_id) ??
+    asNumber(
+      asRecord((jobRaw as any).creator)?.id ??
+        asRecord((root as any).creator)?.id ??
+        (jobRaw as any).created_by ??
+        (root as any).created_by,
+    ) ??
+    null;
+
   return {
     jobId,
     status,
@@ -301,6 +323,8 @@ export function normalizeGenerationJob(raw: unknown): NormalizedGenerationJob {
     downloadObjectPath,
     downloadFileName,
     errorSummary,
+    active,
+    creatorUserId,
     items,
   };
 }

@@ -570,6 +570,9 @@ type DocGenRunnerSchemaCaps = {
     recoveredAt: boolean;
     errorCode: boolean;
     jobCache: boolean;
+    active: boolean;
+    finishedAt: boolean;
+    errorSummary: boolean;
   };
   items: {
     startedAt: boolean;
@@ -593,6 +596,9 @@ async function getDocGenRunnerSchemaCaps(
     jobRecoveredAt,
     jobErrorCode,
     jobCache,
+    jobActive,
+    jobFinishedAt,
+    jobErrorSummary,
   ] = await Promise.all([
     columnExistsCached(r, cache, {
       schema: "public",
@@ -623,6 +629,21 @@ async function getDocGenRunnerSchemaCaps(
       schema: "public",
       table: "document_generation_jobs",
       column: "job_cache",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_jobs",
+      column: "active",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_jobs",
+      column: "finished_at",
+    }),
+    columnExistsCached(r, cache, {
+      schema: "public",
+      table: "document_generation_jobs",
+      column: "error_summary",
     }),
   ]);
   const [
@@ -679,6 +700,9 @@ async function getDocGenRunnerSchemaCaps(
       recoveredAt: jobRecoveredAt,
       errorCode: jobErrorCode,
       jobCache,
+      active: jobActive,
+      finishedAt: jobFinishedAt,
+      errorSummary: jobErrorSummary,
     },
     items: {
       startedAt: itemStartedAt,
@@ -16333,6 +16357,11 @@ async function computeDocGenJobProgress(
   r: DbConn,
   args: { firmId: number; jobId: string },
 ): Promise<DocGenJobProgress> {
+  const jobRows = await queryRows(
+    r,
+    sql`SELECT status FROM document_generation_jobs WHERE id = ${args.jobId} AND firm_id = ${args.firmId} LIMIT 1`,
+  );
+  const jobStatus = String((jobRows[0] as any)?.status ?? "");
   const rows = await queryRows(
     r,
     sql`
@@ -16347,12 +16376,13 @@ async function computeDocGenJobProgress(
     `,
   );
   const c = rows[0] as any;
+  const isFailed = jobStatus === "failed";
   return {
     total: Number(c?.total ?? 0) || 0,
     success: Number(c?.success ?? 0) || 0,
     failed: Number(c?.failed ?? 0) || 0,
     pending: Number(c?.pending ?? 0) || 0,
-    running: Number(c?.running ?? 0) || 0,
+    running: isFailed ? 0 : (Number(c?.running ?? 0) || 0),
   };
 }
 
@@ -16389,6 +16419,28 @@ async function finalizeDocGenJobIfDone(
   downloadObjectPath?: string | null;
   downloadFileName?: string | null;
 }> {
+  const preJobs = await queryRows(
+    r,
+    sql`SELECT status, action, download_object_path, download_file_name, download_mime_type, config, case_ids FROM document_generation_jobs WHERE id = ${args.jobId} AND firm_id = ${args.firmId} LIMIT 1`,
+  );
+  const preJob = preJobs[0] as any;
+  const preStatus = String(preJob?.status ?? "");
+  if (preStatus === "failed") {
+    const progress = await computeDocGenJobProgress(r, args);
+    return {
+      finalized: false,
+      status: "failed",
+      progress,
+      downloadObjectPath:
+        typeof preJob?.download_object_path === "string"
+          ? String(preJob.download_object_path)
+          : null,
+      downloadFileName:
+        typeof preJob?.download_file_name === "string"
+          ? String(preJob.download_file_name)
+          : null,
+    };
+  }
   const progress = await computeDocGenJobProgress(r, args);
   const done =
     progress.total > 0 &&
@@ -16505,23 +16557,35 @@ async function finalizeDocGenJobIfDone(
 }
 
 type DocGenErrorCode =
+  | "TEMPLATE_NOT_FOUND"
   | "TEMPLATE_FILE_MISSING"
   | "VARIABLE_RESOLUTION_FAILED"
+  | "PDF_RENDER_FAILED"
   | "PDF_GENERATION_FAILED"
+  | "STORAGE_UPLOAD_FAILED"
+  | "STORAGE_WRITE_FAILED"
+  | "WORKER_UNAVAILABLE"
+  | "JOB_STATE_CONFLICT"
+  | "CASE_DATA_FAILED"
   | "DOCX_GENERATION_FAILED"
   | "OUTPUT_MISSING"
-  | "STORAGE_WRITE_FAILED"
   | "ZIP_BUILD_FAILED"
   | "TIMEOUT"
   | "UNKNOWN";
 
 const DOC_GEN_HUMAN_MESSAGE: Record<DocGenErrorCode, string> = {
+  TEMPLATE_NOT_FOUND: "Template database record not found. Refresh the template list and retry.",
   TEMPLATE_FILE_MISSING: "Template source file is missing. Re-upload the template and retry.",
   VARIABLE_RESOLUTION_FAILED: "Failed to resolve document variables. Check that the case data is complete.",
+  PDF_RENDER_FAILED: "PDF rendering failed. Try DOCX output or contact support.",
   PDF_GENERATION_FAILED: "PDF rendering failed. Try DOCX output or contact support.",
+  STORAGE_UPLOAD_FAILED: "Document storage upload failed. Retry in a moment.",
+  STORAGE_WRITE_FAILED: "Document storage write failed. Retry in a moment.",
+  WORKER_UNAVAILABLE: "PDF conversion worker is not configured. Enable DOCX_TO_PDF_ENGINE or use DOCX output.",
+  JOB_STATE_CONFLICT: "Job state conflict. Another runner is in-flight or job is already terminal. Refresh and retry.",
+  CASE_DATA_FAILED: "Failed to load case data for variable resolution. Check case data integrity and retry.",
   DOCX_GENERATION_FAILED: "DOCX rendering failed. Review template tags for syntax errors.",
   OUTPUT_MISSING: "Generated output object was not stored. Retry generation for this item.",
-  STORAGE_WRITE_FAILED: "Document storage write failed. Retry in a moment.",
   ZIP_BUILD_FAILED: "ZIP package build failed. Retry the Download step.",
   TIMEOUT: "Generation timed out. Try a smaller batch.",
   UNKNOWN: "Generation failed.",
@@ -16529,27 +16593,96 @@ const DOC_GEN_HUMAN_MESSAGE: Record<DocGenErrorCode, string> = {
 
 function classifyDocGenError(rawCode: unknown, phaseRaw: unknown, msg: string): DocGenErrorCode {
   const rc = typeof rawCode === "string" ? rawCode.trim() : "";
+  let result: DocGenErrorCode;
   if (rc) {
-    if (rc === "TEMPLATE_FILE_MISSING" || rc === "TEMPLATE_NOT_FOUND" || /template.*(not found|missing|unavailable)/i.test(rc)) return "TEMPLATE_FILE_MISSING";
-    if (rc === "VARIABLE_RESOLUTION_FAILED" || /variable|resolut|placeholder|tag/i.test(rc)) return "VARIABLE_RESOLUTION_FAILED";
-    if (rc === "PDF_GENERATION_FAILED" || /pdf\b.*render|wkhtml|chrome.*pdf/i.test(rc)) return "PDF_GENERATION_FAILED";
-    if (rc === "DOCX_GENERATION_FAILED" || /docx|docxtemplater|pptxgenjs|zip.*template/i.test(rc)) return "DOCX_GENERATION_FAILED";
-    if (rc === "OUTPUT_MISSING" || /output.*missing|object.*not.*found|no.*file/i.test(rc)) return "OUTPUT_MISSING";
-    if (rc === "STORAGE_WRITE_FAILED" || /storage.*(write|upload|save|put)|bucket|s3/i.test(rc)) return "STORAGE_WRITE_FAILED";
-    if (rc === "ZIP_BUILD_FAILED" || /zip|archive/i.test(rc)) return "ZIP_BUILD_FAILED";
-    if (rc === "TIMEOUT" || /timeout|timed.?out|504|etimedout/i.test(rc)) return "TIMEOUT";
+    if (rc === "TEMPLATE_NOT_FOUND" || /template.*db.*(not found|missing)|row.*template.*not.?exist/i.test(rc)) { result = "TEMPLATE_NOT_FOUND"; }
+    else if (rc === "TEMPLATE_FILE_MISSING" || /template.*(not found|missing|unavailable)/i.test(rc)) { result = "TEMPLATE_FILE_MISSING"; }
+    else if (rc === "VARIABLE_RESOLUTION_FAILED" || /variable|resolut|placeholder|tag/i.test(rc)) { result = "VARIABLE_RESOLUTION_FAILED"; }
+    else if (rc === "PDF_RENDER_FAILED" || /pdf.*render|pdf.*conversion|docx.?to.?pdf/i.test(rc)) { result = "PDF_RENDER_FAILED"; }
+    else if (rc === "PDF_GENERATION_FAILED" || /wkhtml|chrome.*pdf/i.test(rc)) { result = "PDF_RENDER_FAILED"; }
+    else if (rc === "STORAGE_UPLOAD_FAILED" || /uploadPrivateObject|upload.*storage|supabase.*upload/i.test(rc)) { result = "STORAGE_UPLOAD_FAILED"; }
+    else if (rc === "STORAGE_WRITE_FAILED" || /storage.*(write|save|put)|bucket|s3/i.test(rc)) { result = "STORAGE_UPLOAD_FAILED"; }
+    else if (rc === "WORKER_UNAVAILABLE" || /DOCX_TO_PDF_ENGINE|worker.*not.*configured|no.*conversion.*engine/i.test(rc)) { result = "WORKER_UNAVAILABLE"; }
+    else if (rc === "JOB_STATE_CONFLICT" || /FOR UPDATE SKIP LOCKED|skip.*locked|heartbeat.*in.?flight|terminal.*run.?next|already.*running/i.test(rc)) { result = "JOB_STATE_CONFLICT"; }
+    else if (rc === "CASE_DATA_FAILED" || /buildCaseContext|cases.*query|case.*data.*failed/i.test(rc)) { result = "CASE_DATA_FAILED"; }
+    else if (rc === "DOCX_GENERATION_FAILED" || /docx|docxtemplater|pptxgenjs|zip.*template/i.test(rc)) { result = "DOCX_GENERATION_FAILED"; }
+    else if (rc === "OUTPUT_MISSING" || /output.*missing|object.*not.*found|no.*file/i.test(rc)) { result = "OUTPUT_MISSING"; }
+    else if (rc === "ZIP_BUILD_FAILED" || /zip|archive/i.test(rc)) { result = "ZIP_BUILD_FAILED"; }
+    else if (rc === "TIMEOUT" || /timeout|timed.?out|504|etimedout/i.test(rc)) { result = "TIMEOUT"; }
+    else {
+      const phase = typeof phaseRaw === "string" ? phaseRaw.toLowerCase() : "";
+      const m = (msg || "").toLowerCase();
+      if (rc === "TEMPLATE_NOT_FOUND") result = "TEMPLATE_NOT_FOUND";
+      else if (phase.includes("template_db") || m.includes("template database") || m.includes("template row") || /template.*not.*found.*db/i.test(m)) result = "TEMPLATE_NOT_FOUND";
+      else if (phase.includes("template") || m.includes("template")) result = "TEMPLATE_FILE_MISSING";
+      else if (phase.includes("variable") || m.includes("variable") || m.includes("tag") || m.includes("resolution")) result = "VARIABLE_RESOLUTION_FAILED";
+      else if (phase === "pdf_render" || /pdf.*render|docx.?to.?pdf|pdf.*conversion/i.test(phase + " " + m)) result = "PDF_RENDER_FAILED";
+      else if (phase.includes("pdf") || m.includes("pdf")) result = "PDF_RENDER_FAILED";
+      else if (phase === "storage_upload" || /uploadPrivateObject|supabase.*upload/i.test(phase + " " + m)) result = "STORAGE_UPLOAD_FAILED";
+      else if (phase.includes("storage") || phase.includes("upload") || m.includes("storage") || m.includes("upload")) result = "STORAGE_UPLOAD_FAILED";
+      else if (/DOCX_TO_PDF_ENGINE|worker.*not.*configured|no.*conversion.*engine/i.test(m)) result = "WORKER_UNAVAILABLE";
+      else if (/FOR UPDATE SKIP LOCKED|skip.*locked|heartbeat.*in.?flight|terminal.*run.?next|already.*running/i.test(phase + " " + m)) result = "JOB_STATE_CONFLICT";
+      else if (phase === "case_data" || /buildCaseContext|cases.*query|case.*data.*failed/i.test(phase + " " + m)) result = "CASE_DATA_FAILED";
+      else if (phase.includes("docx") || m.includes("docx") || m.includes("template syntax")) result = "DOCX_GENERATION_FAILED";
+      else if (phase.includes("output") || phase.includes("object") || m.includes("object not found") || m.includes("no output")) result = "OUTPUT_MISSING";
+      else if (phase.includes("zip") || m.includes("zip") || m.includes("archive")) result = "ZIP_BUILD_FAILED";
+      else if (/timeout|timed.?out|504|etimedout/.test(m)) result = "TIMEOUT";
+      else result = "UNKNOWN";
+    }
+  } else {
+    const phase = typeof phaseRaw === "string" ? phaseRaw.toLowerCase() : "";
+    const m = (msg || "").toLowerCase();
+    if (rc === "TEMPLATE_NOT_FOUND") result = "TEMPLATE_NOT_FOUND";
+    else if (phase.includes("template_db") || m.includes("template database") || m.includes("template row") || /template.*not.*found.*db/i.test(m)) result = "TEMPLATE_NOT_FOUND";
+    else if (phase.includes("template") || m.includes("template")) result = "TEMPLATE_FILE_MISSING";
+    else if (phase.includes("variable") || m.includes("variable") || m.includes("tag") || m.includes("resolution")) result = "VARIABLE_RESOLUTION_FAILED";
+    else if (phase === "pdf_render" || /pdf.*render|docx.?to.?pdf|pdf.*conversion/i.test(phase + " " + m)) result = "PDF_RENDER_FAILED";
+    else if (phase.includes("pdf") || m.includes("pdf")) result = "PDF_RENDER_FAILED";
+    else if (phase === "storage_upload" || /uploadPrivateObject|supabase.*upload/i.test(phase + " " + m)) result = "STORAGE_UPLOAD_FAILED";
+    else if (phase.includes("storage") || phase.includes("upload") || m.includes("storage") || m.includes("upload")) result = "STORAGE_UPLOAD_FAILED";
+    else if (/DOCX_TO_PDF_ENGINE|worker.*not.*configured|no.*conversion.*engine/i.test(m)) result = "WORKER_UNAVAILABLE";
+    else if (/FOR UPDATE SKIP LOCKED|skip.*locked|heartbeat.*in.?flight|terminal.*run.?next|already.*running/i.test(phase + " " + m)) result = "JOB_STATE_CONFLICT";
+    else if (phase === "case_data" || /buildCaseContext|cases.*query|case.*data.*failed/i.test(phase + " " + m)) result = "CASE_DATA_FAILED";
+    else if (phase.includes("docx") || m.includes("docx") || m.includes("template syntax")) result = "DOCX_GENERATION_FAILED";
+    else if (phase.includes("output") || phase.includes("object") || m.includes("object not found") || m.includes("no output")) result = "OUTPUT_MISSING";
+    else if (phase.includes("zip") || m.includes("zip") || m.includes("archive")) result = "ZIP_BUILD_FAILED";
+    else if (/timeout|timed.?out|504|etimedout/.test(m)) result = "TIMEOUT";
+    else result = "UNKNOWN";
   }
-  const phase = typeof phaseRaw === "string" ? phaseRaw.toLowerCase() : "";
-  const m = (msg || "").toLowerCase();
-  if (phase.includes("template") || m.includes("template")) return "TEMPLATE_FILE_MISSING";
-  if (phase.includes("variable") || m.includes("variable") || m.includes("tag") || m.includes("resolution")) return "VARIABLE_RESOLUTION_FAILED";
-  if (phase.includes("pdf") || m.includes("pdf")) return "PDF_GENERATION_FAILED";
-  if (phase.includes("docx") || m.includes("docx") || m.includes("template syntax")) return "DOCX_GENERATION_FAILED";
-  if (phase.includes("output") || phase.includes("object") || m.includes("object not found") || m.includes("no output")) return "OUTPUT_MISSING";
-  if (phase.includes("storage") || phase.includes("upload") || m.includes("storage") || m.includes("upload")) return "STORAGE_WRITE_FAILED";
-  if (phase.includes("zip") || m.includes("zip") || m.includes("archive")) return "ZIP_BUILD_FAILED";
-  if (/timeout|timed.?out|504|etimedout/.test(m)) return "TIMEOUT";
-  return "UNKNOWN";
+  try {
+    if (result === "UNKNOWN") {
+      logger.warn(
+        {
+          requestId: null,
+          jobId: null,
+          jobItemId: null,
+          caseId: null,
+          templateId: null,
+          templateVersion: null,
+          step: "classify_unknown",
+          errorCode: "UNKNOWN",
+          retryable: false,
+        },
+        "docgen.classify.unknown_10field",
+      );
+    } else {
+      logger.info(
+        {
+          requestId: null,
+          jobId: null,
+          jobItemId: null,
+          caseId: null,
+          templateId: null,
+          templateVersion: null,
+          step: "classify",
+          errorCode: result,
+          retryable: false,
+        },
+        "docgen.classify.done_10field",
+      );
+    }
+  } catch {}
+  return result;
 }
 
 async function ensureDocGenJobDownloadObject(
@@ -17094,6 +17227,22 @@ async function ensureDocGenJobDownloadObject(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e ?? "");
     const code = classifyDocGenError((e as any)?.code ?? null, "zip_build", msg);
+    try {
+      logger.error(
+        {
+          requestId: null,
+          jobId: args.jobId,
+          jobItemId: null,
+          caseId: null,
+          templateId: null,
+          templateVersion: null,
+          step: "zip_build_catch",
+          errorCode: code,
+          retryable: true,
+        },
+        "docgen.download.zip_error",
+      );
+    } catch {}
     const hr =
       code === "UNKNOWN"
         ? `ZIP packaging failed (technical code: ${code}).`
@@ -17212,6 +17361,9 @@ async function startDocumentGenerationJobRunner(
         recoveredAt: true,
         errorCode: true,
         jobCache: true,
+        active: true,
+        finishedAt: true,
+        errorSummary: true,
       },
       items: {
         startedAt: true,
@@ -17224,6 +17376,22 @@ async function startDocumentGenerationJobRunner(
       },
     } satisfies DocGenRunnerSchemaCaps);
   try {
+    try {
+      logger.info(
+        {
+          requestId: null,
+          jobId: args.jobId,
+          jobItemId: null,
+          caseId: null,
+          templateId: null,
+          templateVersion: null,
+          step: "runner_start",
+          errorCode: null,
+          retryable: null,
+        },
+        "docgen.runner.start",
+      );
+    } catch {}
     await recoverStaleDocumentGenerationJob(
       r,
       {
@@ -17286,13 +17454,31 @@ async function startDocumentGenerationJobRunner(
     return { stoppedReason: deadlineAt != null ? "budget" : "no_work", stepsRun, elapsedMs: Date.now() - started };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    const code = classifyDocGenError((e as any)?.code ?? null, "runner", message);
+    try {
+      logger.error(
+        {
+          requestId: null,
+          jobId: args.jobId,
+          jobItemId: null,
+          caseId: null,
+          templateId: null,
+          templateVersion: null,
+          step: "runner_catch",
+          errorCode: code,
+          retryable: false,
+        },
+        "docgen.runner.error",
+      );
+    } catch {}
     try {
       const setParts: Array<ReturnType<typeof sql>> = [
         sql`status = 'failed'`,
         sql`pending_count = 0`,
-        sql`finished_at = now()`,
         sql`error_summary = ${message.slice(0, 500)}`,
       ];
+      if (caps.jobs.active) setParts.push(sql`active = false`);
+      if (caps.jobs.finishedAt) setParts.push(sql`finished_at = now()`);
       if (caps.jobs.errorCode) setParts.push(sql`error_code = 'RUNNER_FAILED'`);
       if (caps.jobs.lastHeartbeatAt)
         setParts.push(sql`last_heartbeat_at = now()`);
@@ -17347,6 +17533,22 @@ async function processAutomationGenerationJobStep(
     ];
     if (caps.jobs.lastHeartbeatAt)
       setParts.push(sql`last_heartbeat_at = now()`);
+    try {
+      logger.info(
+        {
+          requestId: null,
+          jobId: args.jobId,
+          jobItemId: null,
+          caseId: null,
+          templateId: null,
+          templateVersion: null,
+          step: "job_status_running",
+          errorCode: null,
+          retryable: null,
+        },
+        "docgen.step.job_status_running",
+      );
+    } catch {}
     await queryRows(
       r,
       sql`
@@ -17357,7 +17559,96 @@ async function processAutomationGenerationJobStep(
     );
   }
 
+  {
+    const templateSrcCol = caps.items.templateSource ? sql`template_source` : sql`''::text`;
+    const templateVerCol = caps.items.templateVersionId ? sql`template_version_id` : sql`NULL::int`;
+    try {
+      const dupSql = sql`
+        WITH dups AS (
+          SELECT p.id AS pending_id
+          FROM document_generation_job_items p
+          WHERE p.job_id = ${args.jobId}
+            AND p.firm_id = ${args.firmId}
+            AND p.status = 'pending'
+            AND EXISTS (
+              SELECT 1
+              FROM document_generation_job_items s
+              WHERE s.job_id = p.job_id
+                AND s.firm_id = p.firm_id
+                AND s.id <> p.id
+                AND s.status = 'success'
+                AND s.object_path IS NOT NULL
+                AND s.case_id IS NOT DISTINCT FROM p.case_id
+                AND s.template_id IS NOT DISTINCT FROM p.template_id
+                AND ${templateSrcCol} IS NOT DISTINCT FROM (SELECT ${templateSrcCol} FROM document_generation_job_items WHERE id = p.id)
+                AND ${templateVerCol} IS NOT DISTINCT FROM (SELECT ${templateVerCol} FROM document_generation_job_items WHERE id = p.id)
+            )
+        )
+        UPDATE document_generation_job_items i
+        SET status = 'duplicate_skipped',
+            error_code = 'DUPLICATE_OUTPUT_PREVENTED',
+            error_message = 'Duplicate of an existing successful output',
+            finished_at = now()
+        FROM dups
+        WHERE i.id = dups.pending_id
+        RETURNING i.id, i.case_id, i.template_id, i.template_version_id
+      `;
+      const dupRows = await queryRows(r, dupSql);
+      for (const dr of dupRows as any[]) {
+        try {
+          logger.warn(
+            {
+              requestId: null,
+              jobId: args.jobId,
+              jobItemId: dr?.id != null ? String(dr.id) : null,
+              caseId: typeof dr?.case_id === "number" ? dr.case_id : null,
+              templateId: typeof dr?.template_id === "number" ? dr.template_id : null,
+              templateVersion: dr?.template_version_id != null ? String(dr.template_version_id) : null,
+              step: "duplicate_skipped",
+              errorCode: "DUPLICATE_OUTPUT_PREVENTED",
+              retryable: false,
+            },
+            "docgen.step.duplicate_skipped",
+          );
+        } catch {}
+      }
+    } catch (idErr) {
+      try {
+        logger.warn(
+          {
+            requestId: null,
+            jobId: args.jobId,
+            jobItemId: null,
+            caseId: null,
+            templateId: null,
+            templateVersion: null,
+            step: "dup_check_failed",
+            errorCode: classifyDocGenError((idErr as any)?.code ?? null, "idempotency", idErr instanceof Error ? idErr.message : String(idErr)),
+            retryable: true,
+          },
+          "docgen.step.dup_check_failed",
+        );
+      } catch {}
+    }
+  }
+
   const claimStartedAt = Date.now();
+  try {
+    logger.info(
+      {
+        requestId: null,
+        jobId: args.jobId,
+        jobItemId: null,
+        caseId: null,
+        templateId: null,
+        templateVersion: null,
+        step: "claim_start",
+        errorCode: null,
+        retryable: null,
+      },
+      "docgen.step.claim_start",
+    );
+  } catch {}
   const claimed = await queryRows(
     r,
     (() => {
@@ -17388,6 +17679,22 @@ async function processAutomationGenerationJobStep(
 
   const item = claimed[0];
   if (!item) {
+    try {
+      logger.info(
+        {
+          requestId: null,
+          jobId: args.jobId,
+          jobItemId: null,
+          caseId: null,
+          templateId: null,
+          templateVersion: null,
+          step: "claim_empty",
+          errorCode: null,
+          retryable: null,
+        },
+        "docgen.step.claim_empty",
+      );
+    } catch {}
     const items = await queryRows(
       r,
       sql`
@@ -17451,6 +17758,24 @@ async function processAutomationGenerationJobStep(
                 )})
             `,
           );
+          for (const mid of missingOutputIds) {
+            try {
+              logger.error(
+                {
+                  requestId: null,
+                  jobId: args.jobId,
+                  jobItemId: String(mid),
+                  caseId: null,
+                  templateId: null,
+                  templateVersion: null,
+                  step: "output_missing_mark_failed",
+                  errorCode: "OUTPUT_MISSING",
+                  retryable: true,
+                },
+                "docgen.step.output_missing",
+              );
+            } catch {}
+          }
         }
         const items2 = await queryRows(
           r,
@@ -17490,14 +17815,31 @@ async function processAutomationGenerationJobStep(
                 : null,
           })),
         });
+        try {
+          logger.warn(
+            {
+              requestId: null,
+              jobId: args.jobId,
+              jobItemId: null,
+              caseId: null,
+              templateId: null,
+              templateVersion: null,
+              step: "aggregate_failure_summary",
+              errorCode: typeof agg.errorCode === "string" ? agg.errorCode : null,
+              retryable: false,
+            },
+            "docgen.step.aggregate_failure",
+          );
+        } catch {}
         {
           const setParts: Array<ReturnType<typeof sql>> = [
             sql`status = 'failed'`,
             sql`failed_count = ${failedItems.length}`,
             sql`pending_count = 0`,
-            sql`finished_at = now()`,
             sql`error_summary = ${agg.errorSummary.slice(0, 500)}`,
           ];
+          if (caps.jobs.active) setParts.push(sql`active = false`);
+          if (caps.jobs.finishedAt) setParts.push(sql`finished_at = now()`);
           if (caps.jobs.errorCode)
             setParts.push(sql`error_code = ${agg.errorCode}`);
           await queryRows(
@@ -17516,11 +17858,29 @@ async function processAutomationGenerationJobStep(
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Internal Server Error";
+      const code = classifyDocGenError((err as any)?.code ?? null, "finalize", message);
+      try {
+        logger.error(
+          {
+            requestId: null,
+            jobId: args.jobId,
+            jobItemId: null,
+            caseId: null,
+            templateId: null,
+            templateVersion: null,
+            step: "finalize_catch",
+            errorCode: code,
+            retryable: false,
+          },
+          "docgen.step.finalize_error",
+        );
+      } catch {}
       const setParts: Array<ReturnType<typeof sql>> = [
         sql`status = 'failed'`,
-        sql`finished_at = now()`,
         sql`error_summary = ${message.slice(0, 500)}`,
       ];
+      if (caps.jobs.active) setParts.push(sql`active = false`);
+      if (caps.jobs.finishedAt) setParts.push(sql`finished_at = now()`);
       if (caps.jobs.lastHeartbeatAt)
         setParts.push(sql`last_heartbeat_at = now()`);
       if (caps.jobs.errorCode)
@@ -17545,8 +17905,27 @@ async function processAutomationGenerationJobStep(
     templateSource === "master"
       ? Number((item as any).platform_document_id)
       : NaN;
+  const templateVersion = caps.items.templateVersionId && (item as any).template_version_id != null
+    ? String((item as any).template_version_id)
+    : null;
 
   const jobItemId = Number((item as any).id) || null;
+  try {
+    logger.info(
+      {
+        requestId: null,
+        jobId: args.jobId,
+        jobItemId: jobItemId != null ? String(jobItemId) : null,
+        caseId: Number.isFinite(caseId) ? caseId : null,
+        templateId: Number.isFinite(templateId) ? templateId : (Number.isFinite(platformDocumentId) ? platformDocumentId : null),
+        templateVersion,
+        step: "item_claimed",
+        errorCode: null,
+        retryable: null,
+      },
+      "docgen.step.item_claimed",
+    );
+  } catch {}
   try {
     logger.info(
       {
@@ -20511,6 +20890,22 @@ router.post(
         },
         caps,
       );
+      try {
+        logger.info(
+          {
+            requestId: requestId ?? null,
+            jobId,
+            jobItemId: null,
+            caseId: null,
+            templateId: null,
+            templateVersion: null,
+            step: "run_next_invocation",
+            errorCode: null,
+            retryable: null,
+          },
+          "docgen.run_next.invoke_10field",
+        );
+      } catch {}
       const runnerOut = await startDocumentGenerationJobRunner(
         r,
         { firmId: req.firmId!, jobId },
@@ -20682,6 +21077,23 @@ router.post(
         typeof (err as any)?.queryName === "string"
           ? String((err as any).queryName)
           : null;
+      const classifiedCode = classifyDocGenError(errCode ?? null, "run_next", errMessage);
+      try {
+        logger.error(
+          {
+            requestId: requestId ?? null,
+            jobId,
+            jobItemId: null,
+            caseId: null,
+            templateId: null,
+            templateVersion: null,
+            step: "run_next_catch",
+            errorCode: classifiedCode,
+            retryable: false,
+          },
+          "docgen.run_next.failed_10field",
+        );
+      } catch {}
       logger.error(
         {
           route: req.originalUrl,
@@ -20703,8 +21115,104 @@ router.post(
         },
         "documents.run-next failed",
       );
+
+      let jobStateUpdated = false;
+      let snapshotStatus: string = "generating";
+      let snapshotProgress: { total: number; success: number; failed: number; pending: number; running: number } = { total: 0, success: 0, failed: 0, pending: 0, running: 0 };
+      let snapshotNextAction: "stop" | "run_next" | "finalize" | "download" | "wait" | "failed" | "download" | "continue" = "run_next";
+      try {
+        const cacheCatch = createRequestCache();
+        const capsCatch = await getDocGenRunnerSchemaCaps(r, cacheCatch);
+        const preCatchProgress = await computeDocGenJobProgress(r, {
+          firmId: req.firmId!,
+          jobId,
+        });
+        snapshotProgress = preCatchProgress;
+        const preCatchJobRows = await queryRows(
+          r,
+          sql`SELECT status FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!} LIMIT 1`,
+        );
+        const preCatchStatus = String((preCatchJobRows[0] as any)?.status ?? "");
+        snapshotStatus = preCatchStatus || snapshotStatus;
+        const claimedCount = preCatchProgress.running;
+        const successCount = preCatchProgress.success;
+        if (claimedCount === 0 && successCount === 0 && preCatchStatus !== "failed" && preCatchStatus !== "completed" && preCatchStatus !== "completed_with_errors") {
+          try {
+            await queryRows(
+              r,
+              sql`
+                UPDATE document_generation_job_items
+                SET status = 'pending'
+                WHERE firm_id = ${req.firmId!}
+                  AND job_id = ${jobId}
+                  AND status = 'running'
+              `,
+            );
+          } catch {}
+          const safeErrText = (() => {
+            const raw = String(errMessage || "");
+            const prefix = "Generation stopped at startup before item could be claimed: ";
+            const combined = prefix + raw;
+            const stripped = combined.replace(/\b[0-9]{12}\b/g, "[NRIC_REDACTED]").replace(/\b[A-Z]{1,2}[0-9]{6,10}[A-Z]?\b/gi, "[ID_REDACTED]");
+            return stripped.slice(0, 500);
+          })();
+          const jobSetParts: Array<ReturnType<typeof sql>> = [
+            sql`status = 'failed'`,
+            sql`error_summary = ${safeErrText}`,
+          ];
+          if (capsCatch.jobs.active) jobSetParts.push(sql`active = false`);
+          if (capsCatch.jobs.finishedAt) jobSetParts.push(sql`finished_at = now()`);
+          if (capsCatch.jobs.errorCode) jobSetParts.push(sql`error_code = 'RUN_NEXT_FAILED'`);
+          if (capsCatch.jobs.lastHeartbeatAt) jobSetParts.push(sql`last_heartbeat_at = now()`);
+          try {
+            await queryRows(
+              r,
+              sql`
+                UPDATE document_generation_jobs
+                SET ${sql.join(jobSetParts, sql`, `)}
+                WHERE id = ${jobId} AND firm_id = ${req.firmId!}
+              `,
+            );
+            jobStateUpdated = true;
+            snapshotStatus = "failed";
+            snapshotNextAction = "stop";
+            snapshotProgress = {
+              ...snapshotProgress,
+              running: 0,
+            };
+          } catch {}
+        } else {
+          const na = resolveDocGenNextAction({
+            status: preCatchStatus,
+            progress: preCatchProgress,
+            downloadObjectPath: null,
+          });
+          snapshotNextAction = (na === "stop" ? "stop" : (preCatchStatus === "failed" ? "stop" : "run_next")) as any;
+        }
+      } catch (stateFixErr) {
+        try {
+          logger.warn(
+            {
+              requestId: requestId ?? null,
+              jobId,
+              jobItemId: null,
+              caseId: null,
+              templateId: null,
+              templateVersion: null,
+              step: "run_next_state_fix_failed",
+              errorCode: classifyDocGenError((stateFixErr as any)?.code ?? null, "state_fix", stateFixErr instanceof Error ? stateFixErr.message : String(stateFixErr)),
+              retryable: false,
+            },
+            "docgen.run_next.state_fix_failed",
+          );
+        } catch {}
+      }
       res.status(500).json({
         ok: false,
+        jobStateUpdated,
+        status: snapshotStatus,
+        progress: snapshotProgress,
+        nextAction: snapshotNextAction,
         error: {
           code: "RUN_NEXT_FAILED",
           message:
@@ -20745,11 +21253,15 @@ router.post(
                   position: info.position ?? null,
                 }
               : undefined,
+          retryable: !jobStateUpdated,
         },
         meta: {
           request_id: requestId ?? null,
           jobId,
           firmId: req.firmId ?? null,
+          jobStateSnapshot: jobStateUpdated
+            ? { status: snapshotStatus, progress: snapshotProgress, nextAction: snapshotNextAction }
+            : null,
           timestamp: new Date().toISOString(),
           duration_ms: Date.now() - startedAt,
         },
@@ -21556,10 +22068,46 @@ router.get(
       return;
     }
     let status = String(job.status ?? "");
+    try {
+      logger.info(
+        {
+          requestId: requestId ?? null,
+          jobId,
+          jobItemId: null,
+          caseId: null,
+          templateId: null,
+          templateVersion: null,
+          step: "status_route_entry",
+          errorCode: null,
+          retryable: null,
+        },
+        "docgen.status.entry_10field",
+      );
+    } catch {}
     let progress = await computeDocGenJobProgress(r, {
       firmId: req.firmId!,
       jobId,
     });
+
+    if (status === "failed") {
+      progress = { ...progress, running: 0 };
+      try {
+        logger.warn(
+          {
+            requestId: requestId ?? null,
+            jobId,
+            jobItemId: null,
+            caseId: null,
+            templateId: null,
+            templateVersion: null,
+            step: "status_failed_detected",
+            errorCode: typeof job.error_code === "string" ? String(job.error_code) : null,
+            retryable: false,
+          },
+          "docgen.status.failed_10field",
+        );
+      } catch {}
+    }
 
     if (
       progress.total > 0 &&
@@ -21586,10 +22134,12 @@ router.get(
         : (progressComplete && progress.success > 0);
 
     const nextAction =
-      status === "generated_download_failed"
+      status === "failed"
+        ? ("stop" as const)
+        : status === "generated_download_failed"
         ? ("download" as const)
         : progress.total > 0 && progress.failed === progress.total
-        ? ("failed" as const)
+        ? ("stop" as const)
         : canDownload
           ? ("download" as const)
           : progress.running > 0
@@ -21601,13 +22151,16 @@ router.get(
       canDownload ? `/documents/jobs/${jobId}/download` : undefined;
     const downloadManifestUrl =
       canDownload ? `/documents/jobs/${jobId}/download-manifest` : undefined;
+    const statusForcedActiveFalse = status === "failed";
     const jobPayload: Record<string, unknown> = {
       ...(job as any),
       status,
+      ...(statusForcedActiveFalse ? { active: false } : {}),
       total_count: progress.total,
       success_count: progress.success,
       failed_count: progress.failed,
       pending_count: progress.pending,
+      running_count: progress.running,
       ...(downloadUrl ? { downloadUrl } : {}),
       ...(downloadManifestUrl ? { downloadManifestUrl } : {}),
     };
