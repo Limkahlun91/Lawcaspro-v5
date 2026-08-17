@@ -95,6 +95,19 @@ function HrClaimsInner() {
         <CardContent>
           {listQuery.isLoading ? (
             <div className="text-center py-12 text-slate-400 text-sm">Loading…</div>
+          ) : listQuery.isError ? (
+            <div className="text-center py-12 text-sm">
+              <FileText className="w-10 h-10 mx-auto mb-3 text-rose-400 opacity-60" />
+              <p className="font-medium text-rose-700">Claims list unavailable</p>
+              <p className="text-xs mt-1 text-slate-500">
+                We couldn&apos;t load claims. Please retry.
+              </p>
+              <div className="mt-4">
+                <Button size="sm" variant="outline" onClick={() => { void listQuery.refetch(); }}>
+                  Retry
+                </Button>
+              </div>
+            </div>
           ) : rows.length === 0 ? (
             <div className="text-center py-16 text-slate-400">
               <FileText className="w-10 h-10 mx-auto mb-3 opacity-30" />
