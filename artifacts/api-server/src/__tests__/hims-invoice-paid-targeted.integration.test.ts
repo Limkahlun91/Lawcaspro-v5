@@ -36,7 +36,7 @@ export type HimsNotificationTargetScope =
 
 const himsUserScopeValidate = (targetScope: HimsNotificationTargetScope, targetUserId: number | undefined | null): void => {
   if (targetScope === "user") {
-    if (!Number.isInteger(targetUserId)) {
+    if (!Number.isInteger(targetUserId) || targetUserId < 1) {
       throw new ApiError({
         status: 400,
         code: "HIMS_NOTIFICATION_TARGET_REQUIRED",
@@ -63,29 +63,80 @@ describe("PART 1 J/L - HIMS notification idempotency + recipient resolution", ()
     await pg.exec(`
       CREATE TABLE IF NOT EXISTS case_assignments (
         id serial PRIMARY KEY,
-        firm_id integer NOT NULL,
         case_id integer NOT NULL,
-        user_id integer,
-        role_in_case text,
+        user_id integer NOT NULL,
+        role_in_case text NOT NULL DEFAULT 'lawyer',
+        assigned_by integer,
+        assigned_at timestamptz NOT NULL DEFAULT now(),
         unassigned_at timestamptz
       );
       CREATE TABLE IF NOT EXISTS hr_employees (
         id serial PRIMARY KEY,
         firm_id integer NOT NULL,
-        user_id integer,
-        employment_status text,
-        department_id integer
+        employee_no text NOT NULL,
+        linked_user_id integer,
+        preferred_name text,
+        legal_full_name text NOT NULL,
+        common_email text,
+        common_mobile text,
+        employment_status text NOT NULL DEFAULT 'draft',
+        ic_passport_no_masked text,
+        nationality text,
+        gender text,
+        marital_status text,
+        date_of_birth date,
+        address_1 text,
+        address_2 text,
+        city text,
+        state text,
+        postcode text,
+        emergency_contact_name text,
+        emergency_contact_relation text,
+        emergency_contact_phone text,
+        join_date date,
+        confirmation_date date,
+        notice_start_date date,
+        termination_date date,
+        last_working_date date,
+        rehire_original_join_date date,
+        branch_id integer,
+        department_id integer,
+        position_id integer,
+        work_location text,
+        employment_type text,
+        reporting_manager_employee_id integer,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        terminated_at timestamptz,
+        last_status_change_at timestamptz,
+        created_by_user_id integer,
+        updated_by_user_id integer,
+        version integer NOT NULL DEFAULT 1
       );
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_hr_employees_firm_employee_no
+        ON hr_employees(firm_id, employee_no);
       CREATE TABLE IF NOT EXISTS hims_notification_audit (
         id serial PRIMARY KEY,
         firm_id integer NOT NULL,
         case_id integer,
-        event_key text,
-        idempotency_key text,
-        notification_type text,
+        idempotency_key text NOT NULL,
+        notification_type text NOT NULL,
         target_user_id integer,
+        target_scope text NOT NULL DEFAULT 'firm',
         payload_json jsonb,
-        delivery_count integer NOT NULL DEFAULT 1,
+        severity text DEFAULT 'info',
+        correlation_id text,
+        source_system text NOT NULL DEFAULT 'HIMS',
+        source_event_name text,
+        source_event_ref text,
+        notification_created boolean NOT NULL DEFAULT false,
+        notification_id integer,
+        deduplicated boolean NOT NULL DEFAULT false,
+        deduplicated_against_id integer,
+        delivery_count integer NOT NULL DEFAULT 0,
+        last_delivery_attempt_at timestamptz,
+        last_delivery_error text,
+        actor_user_id integer,
         created_at timestamptz NOT NULL DEFAULT now(),
         updated_at timestamptz NOT NULL DEFAULT now()
       );
@@ -96,15 +147,25 @@ describe("PART 1 J/L - HIMS notification idempotency + recipient resolution", ()
   });
 
   beforeEach(async () => {
-    await r.delete(himsNotificationAuditTable as any).where(eq(himsNotificationAuditTable.firmId as any, FIRM));
-    await r.delete(caseAssignmentsTable as any).where(eq(caseAssignmentsTable.caseId as any, CASE));
-    await r.delete(hrEmployeesTable as any).where(eq(hrEmployeesTable.firmId as any, FIRM));
+    await pg.query(`DELETE FROM hims_notification_audit WHERE firm_id = $1`, [FIRM]);
+    await pg.query(`DELETE FROM case_assignments WHERE case_id = $1`, [CASE]);
+    await pg.query(`DELETE FROM hr_employees WHERE firm_id = $1`, [FIRM]);
   });
 
   it("HIMS targetScope=user with no valid userId: throws 400 TARGET_REQUIRED", () => {
-    expect(() => himsUserScopeValidate("user", null)).toThrow(/HIMS_NOTIFICATION_TARGET_REQUIRED/);
-    expect(() => himsUserScopeValidate("user", 0)).toThrow(/HIMS_NOTIFICATION_TARGET_REQUIRED/);
-    expect(() => himsUserScopeValidate("user", undefined)).toThrow(/HIMS_NOTIFICATION_TARGET_REQUIRED/);
+    const assertThrows = (val: unknown) => {
+      try {
+        himsUserScopeValidate("user", val as any);
+        throw new Error("__no_throw__");
+      } catch (err: any) {
+        const msg = String(err?.message ?? err ?? "");
+        expect(msg).not.toBe("__no_throw__");
+        expect(msg).toMatch(/valid target user/i);
+      }
+    };
+    assertThrows(null);
+    assertThrows(0);
+    assertThrows(undefined);
   });
 
   it("HIMS targetScope=user with valid integer userId: passes", () => {
@@ -112,20 +173,18 @@ describe("PART 1 J/L - HIMS notification idempotency + recipient resolution", ()
   });
 
   it("resolved responsible_lawyer userIds are real integers, never 0", async () => {
-    await r.insert(caseAssignmentsTable as any).values([
-      { caseId: CASE, userId: LAWYER_USER_ID, roleInCase: "lawyer", unassignedAt: null },
-      { caseId: CASE, userId: 99, roleInCase: "associate", unassignedAt: null },
-    ]);
+    await pg.exec(`
+      INSERT INTO case_assignments (case_id, user_id, role_in_case, assigned_at, unassigned_at) VALUES
+      (${CASE}, ${LAWYER_USER_ID}, 'lawyer', now(), NULL),
+      (${CASE}, 99, 'associate', now(), NULL);
+    `);
 
-    const responsibleRows = await r
-      .select({ userId: caseAssignmentsTable.userId })
-      .from(caseAssignmentsTable)
-      .where(and(
-        eq(caseAssignmentsTable.caseId as any, CASE),
-        eq((caseAssignmentsTable as any).roleInCase, "lawyer"),
-        eq((caseAssignmentsTable as any).unassignedAt, null),
-      ));
-    const responsibleIds = responsibleRows.map((r: any) => Number(r.userId)).filter((n) => Number.isInteger(n) && n > 0);
+    const responsibleRows: any = await pg.query(
+      `SELECT user_id FROM case_assignments WHERE case_id=$1 AND role_in_case=$2 AND unassigned_at IS NULL`,
+      [CASE, "lawyer"],
+    );
+    const rows = responsibleRows.rows ?? responsibleRows;
+    const responsibleIds = rows.map((r: any) => Number(r.user_id ?? r.userId)).filter((n) => Number.isInteger(n) && n > 0);
     expect(responsibleIds.length).toBeGreaterThan(0);
     for (const id of responsibleIds) {
       expect(id).toBeGreaterThan(0);
@@ -134,24 +193,22 @@ describe("PART 1 J/L - HIMS notification idempotency + recipient resolution", ()
 
     for (const id of responsibleIds) {
       const idem = buildIdemKey(CASE, "STATUS_CHANGED", id);
-      await r.insert(himsNotificationAuditTable as any).values({
-        firmId: FIRM,
-        caseId: CASE,
-        eventKey: `evt-${id}`,
-        idempotencyKey: idem,
-        notificationType: "status_change",
-        targetUserId: id,
-      } as any).onConflictDoNothing();
+      await pg.query(
+        `INSERT INTO hims_notification_audit (firm_id, case_id, idempotency_key, notification_type, target_user_id) VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+        [FIRM, CASE, idem, "status_change", id],
+      );
     }
-    const auditRows: any = await r
-      .select()
-      .from(himsNotificationAuditTable)
-      .where(eq(himsNotificationAuditTable.firmId as any, FIRM));
+    const auditResult: any = await pg.query(
+      `SELECT target_user_id FROM hims_notification_audit WHERE firm_id=$1`,
+      [FIRM],
+    );
+    const auditRows = auditResult.rows ?? auditResult;
     expect(auditRows.length).toBe(responsibleIds.length);
     for (const row of auditRows) {
-      expect(Number(row.targetUserId)).toBeGreaterThan(0);
-      expect(Number(row.targetUserId)).not.toBe(0);
-      expect(row.targetUserId).not.toBeNull();
+      const uid = Number(row.target_user_id ?? row.targetUserId);
+      expect(uid).toBeGreaterThan(0);
+      expect(uid).not.toBe(0);
+      expect(uid).not.toBeNull();
     }
   });
 });
@@ -171,30 +228,59 @@ describe("PART 1 K/L - Invoice mark paid atomic rollback", () => {
         firm_id integer NOT NULL,
         seq_name text NOT NULL,
         next_value integer NOT NULL DEFAULT 1,
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        last_prefix text,
         PRIMARY KEY (firm_id, seq_name)
       );
       CREATE TABLE IF NOT EXISTS invoices (
-        id integer PRIMARY KEY,
+        id serial PRIMARY KEY,
         firm_id integer NOT NULL,
         case_id integer,
+        quotation_id integer,
+        invoice_no text NOT NULL,
         status text NOT NULL DEFAULT 'draft',
+        subtotal numeric(18,2) NOT NULL DEFAULT 0,
+        tax_total numeric(18,2) NOT NULL DEFAULT 0,
         grand_total numeric(18,2) NOT NULL DEFAULT 0,
         amount_paid numeric(18,2) NOT NULL DEFAULT 0,
         amount_due numeric(18,2) NOT NULL DEFAULT 0,
+        issued_date date,
+        due_date date,
+        notes text,
+        version integer NOT NULL DEFAULT 0,
         deleted_at timestamptz,
-        updated_at timestamptz
+        created_by integer,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        einvoice_status text NOT NULL DEFAULT 'DRAFT',
+        einvoice_external_submission_id text,
+        einvoice_submitted_at timestamptz,
+        einvoice_last_checked_at timestamptz,
+        einvoice_error_code text,
+        einvoice_error_message text,
+        einvoice_retry_count integer NOT NULL DEFAULT 0,
+        einvoice_classification text,
+        einvoice_source_invoice_id integer
       );
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_invoices_firm_invoice_no ON invoices(firm_id, invoice_no);
       CREATE TABLE IF NOT EXISTS receipts (
         id serial PRIMARY KEY,
         firm_id integer NOT NULL,
         case_id integer,
         invoice_id integer,
-        receipt_no text,
+        receipt_no text NOT NULL,
+        payment_method text NOT NULL DEFAULT 'bank_transfer',
+        bank_account_id integer,
+        account_type text NOT NULL DEFAULT 'client',
         amount numeric(18,2) NOT NULL,
         received_date date NOT NULL,
         reference_no text,
         notes text,
-        created_by integer
+        is_reversed boolean NOT NULL DEFAULT false,
+        reversed_by integer,
+        reversed_at timestamptz,
+        created_by integer,
+        created_at timestamptz NOT NULL DEFAULT now()
       );
       CREATE UNIQUE INDEX IF NOT EXISTS uq_receipts_firm_receipt_no ON receipts(firm_id, receipt_no);
       CREATE TABLE IF NOT EXISTS receipt_allocations (
@@ -202,7 +288,8 @@ describe("PART 1 K/L - Invoice mark paid atomic rollback", () => {
         receipt_id integer NOT NULL,
         invoice_id integer,
         amount numeric(18,2) NOT NULL,
-        notes text
+        notes text,
+        created_at timestamptz NOT NULL DEFAULT now()
       );
       CREATE TABLE IF NOT EXISTS case_ledgers (
         id uuid PRIMARY KEY,
@@ -213,12 +300,14 @@ describe("PART 1 K/L - Invoice mark paid atomic rollback", () => {
         entry_type text NOT NULL,
         description text NOT NULL,
         amount numeric(12,2) NOT NULL,
-        debit_cents bigint NOT NULL DEFAULT 0,
-        credit_cents bigint NOT NULL DEFAULT 0,
+        debit_cents integer NOT NULL DEFAULT 0,
+        credit_cents integer NOT NULL DEFAULT 0,
         source_type text,
         source_id integer,
         source_reference text,
-        event_key text
+        event_key text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
       );
       CREATE UNIQUE INDEX IF NOT EXISTS uq_case_ledgers_firm_event_key ON case_ledgers(firm_id, event_key);
       CREATE TABLE IF NOT EXISTS invoice_audit_trail (
@@ -226,11 +315,28 @@ describe("PART 1 K/L - Invoice mark paid atomic rollback", () => {
         firm_id integer NOT NULL,
         invoice_id integer NOT NULL,
         action_type text NOT NULL,
-        actor_user_id integer,
-        receipt_id integer,
+        before_snapshot jsonb,
+        after_snapshot jsonb,
+        delta jsonb,
+        amount_change numeric(18,2),
         status_before text,
         status_after text,
-        amount_change numeric(18,2),
+        actor_user_id integer,
+        actor_role text,
+        reauth_verified boolean NOT NULL DEFAULT false,
+        confirmation_token text,
+        client_request_id text,
+        ip_address text,
+        user_agent text,
+        error_code text,
+        error_message text,
+        retry_count integer NOT NULL DEFAULT 0,
+        receipt_id integer,
+        payment_method text,
+        bank_reference text,
+        paid_amount numeric(18,2),
+        paid_date timestamptz,
+        notes text,
         created_at timestamptz NOT NULL DEFAULT now()
       );
     `);
@@ -247,12 +353,19 @@ describe("PART 1 K/L - Invoice mark paid atomic rollback", () => {
       id: INVOICE,
       firmId: FIRM,
       caseId: CASE,
+      invoiceNo: `INV-TEST-${INVOICE}`,
       status: "issued",
+      subtotal: "0.00",
+      taxTotal: "0.00",
       grandTotal: "1000.00",
       amountPaid: "0.00",
       amountDue: "1000.00",
       deletedAt: null,
+      createdAt: new Date(),
       updatedAt: new Date(),
+      version: 0,
+      einvoiceStatus: "DRAFT",
+      einvoiceRetryCount: 0,
     } as any);
   });
 

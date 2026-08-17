@@ -6,8 +6,17 @@ import {
   hrEmployeesTable,
   hrLeaveRequestsTable,
   hrEmployeeLeaveBalancesTable,
+  hrLeaveTypesTable,
 } from "@workspace/db";
 import { createHRError, HR_ERROR_CODES } from "../../shared/errors/hr-error-codes.js";
+import {
+  deductLeaveBalanceExactlyOnce,
+  restoreLeaveBalanceOnCancel,
+  reservePendingApprovalDays,
+  releasePendingReservation,
+  buildLeaveBalanceEventKey,
+  isDeductibleLeaveTypeCode,
+} from "../leave-workflow.js";
 
 type DbConnLike = AppDb | RlsDb;
 const pickDbConn = (tx?: unknown): DbConnLike =>
@@ -82,10 +91,13 @@ export async function createLeaveRequest(
   const days = diffDays(startDate, endDate);
   const now = new Date();
   const idempotencyKey = `leave-create:${firmId}:${employeeId}:${leaveType}:${startDate.toISOString().slice(0, 10)}:${endDate.toISOString().slice(0, 10)}`;
-  const conn = pickDbConn(opts.tx);
-  const mutate = async (): Promise<LeaveRequestRecord> => {
-    await assertEmployeeBelongs(conn, firmId, employeeId);
-    const [existing] = await conn
+  const outerConn = pickDbConn(opts.tx);
+  const deductible = isDeductibleLeaveTypeCode(leaveType);
+  const year = new Date(startDate).getFullYear();
+  const mutateInTx = async (tx: any): Promise<LeaveRequestRecord> => {
+    await assertEmployeeBelongs(tx, firmId, employeeId);
+    let typeRows: Array<{ code: string; defaultEntitled: unknown }> | null = null;
+    const [existing] = await tx
       .select()
       .from(hrLeaveRequestsTable as any)
       .where(and(
@@ -95,7 +107,27 @@ export async function createLeaveRequest(
       .execute();
     if (existing) return toLeaveRecord(existing);
 
-    const [inserted] = await (conn as any)
+    if (deductible) {
+      typeRows = await tx
+        .select({
+          code: hrLeaveTypesTable.leaveTypeCode,
+          defaultEntitled: hrLeaveTypesTable.defaultEntitledDays,
+        })
+        .from(hrLeaveTypesTable)
+        .where(and(
+          eq(hrLeaveTypesTable.firmId, firmId),
+          eq(hrLeaveTypesTable.leaveTypeCode, leaveType.toUpperCase()),
+        ))
+        .limit(1);
+      if (typeRows.length === 0) {
+        throw createHRError(
+          HR_ERROR_CODES.HR_LEAVE_BALANCE_NOT_CONFIGURED,
+          `Leave type ${leaveType} is not configured for firm ${firmId}`,
+        );
+      }
+    }
+
+    const [inserted] = await (tx as any)
       .insert(hrLeaveRequestsTable)
       .values({
         firmId,
@@ -113,9 +145,31 @@ export async function createLeaveRequest(
       })
       .returning()
       .execute();
-    return toLeaveRecord(inserted);
+    const leaveRec = toLeaveRecord(inserted);
+
+    if (deductible) {
+      const createdEventKey = buildLeaveBalanceEventKey({ kind: "leave_created", applicationId: leaveRec.id });
+      const reserveResult = await reservePendingApprovalDays(tx, {
+        firmId,
+        employeeId,
+        leaveTypeCode: leaveType,
+        year,
+        daysToReserve: days,
+        eventKey: createdEventKey,
+        applicationId: leaveRec.id,
+        actorId: actorUserId,
+      });
+      if (!reserveResult.balanceConfigured && Number(typeRows?.[0]?.defaultEntitled ?? 0) <= 0) {
+        throw createHRError(
+          HR_ERROR_CODES.HR_LEAVE_BALANCE_NOT_CONFIGURED,
+          `No leave balance configured for employee ${employeeId}, type ${leaveType}, year ${year}`,
+        );
+      }
+    }
+    return leaveRec;
   };
-  return mutate();
+  if (opts.tx) return mutateInTx(outerConn);
+  return db.transaction((tx: any) => mutateInTx(tx));
 }
 
 export async function listMyLeaves(
@@ -141,9 +195,9 @@ export async function approveLeaveIdempotent(
 ): Promise<{ leave: LeaveRequestRecord; wasAlreadyApproved: boolean; balanceDeductedNow: boolean; newBalanceDays: number; approved: boolean; idempotencyKey: string }> {
   const now = new Date();
   const idempotencyKey = `leave-approve:${input.firmId}:${input.leaveId}`;
-  const conn = pickDbConn(opts.tx);
-  const mutate = async () => {
-    const [existing] = await conn
+  const outerConn = pickDbConn(opts.tx);
+  const mutateInTx = async (tx: any) => {
+    const [existing] = await tx
       .select()
       .from(hrLeaveRequestsTable as any)
       .where(and(
@@ -152,17 +206,47 @@ export async function approveLeaveIdempotent(
       ))
       .execute();
     if (!existing) throw createHRError(HR_ERROR_CODES.HR_EMPLOYEE_NOT_FOUND, "Leave not found");
+    await assertEmployeeBelongs(tx, input.firmId, Number(existing.employeeId));
     const wasAlreadyApproved = existing.status === "approved";
+    const deductible = isDeductibleLeaveTypeCode(String(existing.leaveTypeCode));
+    const leaveYear = new Date(existing.startDate).getFullYear();
+    const days = Number(existing.days ?? 0);
     let row: any = existing;
     let balanceDeductedNow = false;
-    if (!wasAlreadyApproved) {
-      const [upd] = await (conn as any)
+
+    if (wasAlreadyApproved) {
+      balanceDeductedNow = false;
+    } else {
+      if (deductible) {
+        const approvedEventKey = buildLeaveBalanceEventKey({ kind: "leave_approved", applicationId: input.leaveId });
+        const deductResult = await deductLeaveBalanceExactlyOnce(tx, {
+          firmId: input.firmId,
+          employeeId: Number(existing.employeeId),
+          leaveTypeCode: String(existing.leaveTypeCode),
+          year: leaveYear,
+          daysToDeduct: days,
+          eventKey: approvedEventKey,
+          applicationId: input.leaveId,
+          actorId: input.actorUserId,
+        });
+        if (!deductResult.balanceConfigured) {
+          throw createHRError(
+            HR_ERROR_CODES.HR_LEAVE_BALANCE_NOT_CONFIGURED,
+            `No leave balance configured for employee ${existing.employeeId}, type ${existing.leaveTypeCode}, year ${leaveYear}`,
+          );
+        }
+        if (!deductResult.alreadyApplied && deductResult.takenUpdated) {
+          balanceDeductedNow = true;
+        }
+      }
+      const balanceDeductedFinal = deductible && balanceDeductedNow;
+      const [upd] = await (tx as any)
         .update(hrLeaveRequestsTable)
         .set({
           status: "approved",
           reviewedByUserId: input.actorUserId,
           reviewedAt: now,
-          balanceDeducted: true,
+          balanceDeducted: balanceDeductedFinal,
           updatedAt: now,
           updatedByUserId: input.actorUserId,
         })
@@ -170,31 +254,27 @@ export async function approveLeaveIdempotent(
         .returning()
         .execute();
       row = upd;
-      balanceDeductedNow = true;
     }
-    const leaveYear = new Date(row.startDate).getFullYear();
+
     let newBalanceDays = 0;
-    try {
-      const [balRow] = await conn
-        .select()
-        .from(hrEmployeeLeaveBalancesTable as any)
-        .where(and(
-          eq((hrEmployeeLeaveBalancesTable as any).firmId, input.firmId),
-          eq((hrEmployeeLeaveBalancesTable as any).employeeId, Number(row.employeeId)),
-          eq((hrEmployeeLeaveBalancesTable as any).leaveTypeCode, String(row.leaveTypeCode)),
-          eq((hrEmployeeLeaveBalancesTable as any).leaveYear, leaveYear),
-        ))
-        .execute();
-      if (balRow) {
-        newBalanceDays = Number(balRow.entitledDays ?? 0) + Number(balRow.carriedForwardDays ?? 0) + Number(balRow.adjustedDays ?? 0) - Number(balRow.takenDays ?? 0) - Number(balRow.pendingApprovalDays ?? 0);
-        newBalanceDays = Math.max(0, newBalanceDays);
-      }
-    } catch {
-      newBalanceDays = 0;
+    const [balRow] = await tx
+      .select()
+      .from(hrEmployeeLeaveBalancesTable as any)
+      .where(and(
+        eq((hrEmployeeLeaveBalancesTable as any).firmId, input.firmId),
+        eq((hrEmployeeLeaveBalancesTable as any).employeeId, Number(row.employeeId)),
+        eq((hrEmployeeLeaveBalancesTable as any).leaveTypeCode, String(row.leaveTypeCode)),
+        eq((hrEmployeeLeaveBalancesTable as any).leaveYear, leaveYear),
+      ))
+      .execute();
+    if (balRow) {
+      newBalanceDays = Number(balRow.entitledDays ?? 0) + Number(balRow.carriedForwardDays ?? 0) + Number(balRow.adjustedDays ?? 0) - Number(balRow.takenDays ?? 0) - Number(balRow.pendingApprovalDays ?? 0);
+      newBalanceDays = Math.max(0, newBalanceDays);
     }
     return { leave: toLeaveRecord(row), wasAlreadyApproved, balanceDeductedNow, newBalanceDays, approved: true, idempotencyKey };
   };
-  return mutate();
+  if (opts.tx) return mutateInTx(outerConn);
+  return db.transaction((tx: any) => mutateInTx(tx));
 }
 
 export async function rejectLeaveRequest(
@@ -202,9 +282,9 @@ export async function rejectLeaveRequest(
   opts: { tx?: unknown } = {},
 ): Promise<{ leave: LeaveRequestRecord; wasAlreadyRejected: boolean; balanceRestored: boolean }> {
   const now = new Date();
-  const conn = pickDbConn(opts.tx);
-  const mutate = async () => {
-    const [existing] = await conn
+  const outerConn = pickDbConn(opts.tx);
+  const mutateInTx = async (tx: any) => {
+    const [existing] = await tx
       .select()
       .from(hrLeaveRequestsTable as any)
       .where(and(
@@ -214,10 +294,28 @@ export async function rejectLeaveRequest(
       .execute();
     if (!existing) throw createHRError(HR_ERROR_CODES.HR_EMPLOYEE_NOT_FOUND, "Leave not found");
     const wasAlreadyRejected = existing.status === "rejected";
+    const deductible = isDeductibleLeaveTypeCode(String(existing.leaveTypeCode));
     let row: any = existing;
-    const balanceRestored = Boolean(existing.balanceDeducted) && !wasAlreadyRejected;
+    let balanceRestored = false;
     if (!wasAlreadyRejected) {
-      const [upd] = await (conn as any)
+      if (deductible) {
+        const createdEventKey = buildLeaveBalanceEventKey({ kind: "leave_created", applicationId: input.leaveId });
+        const rejectEventKey = buildLeaveBalanceEventKey({ kind: "leave_rejected", applicationId: input.leaveId, reservedEventKey: createdEventKey });
+        const year = new Date(existing.startDate).getFullYear();
+        const releaseResult = await releasePendingReservation(tx, {
+          firmId: input.firmId,
+          employeeId: Number(existing.employeeId),
+          leaveTypeCode: String(existing.leaveTypeCode),
+          year,
+          daysToRelease: Number(existing.days ?? 0),
+          eventKey: rejectEventKey,
+          reservedEventKey: createdEventKey,
+          applicationId: input.leaveId,
+          actorId: input.actorUserId,
+        });
+        balanceRestored = releaseResult.releasedNow;
+      }
+      const [upd] = await (tx as any)
         .update(hrLeaveRequestsTable)
         .set({
           status: "rejected",
@@ -235,7 +333,8 @@ export async function rejectLeaveRequest(
     }
     return { leave: toLeaveRecord(row), wasAlreadyRejected, balanceRestored };
   };
-  return mutate();
+  if (opts.tx) return mutateInTx(outerConn);
+  return db.transaction((tx: any) => mutateInTx(tx));
 }
 
 export async function cancelLeaveIdempotent(
@@ -244,9 +343,9 @@ export async function cancelLeaveIdempotent(
 ): Promise<{ leave: LeaveRequestRecord; wasAlreadyCancelled: boolean; balanceRestored: boolean; idempotencyKey: string }> {
   const now = new Date();
   const idempotencyKey = `leave-cancel:${input.firmId}:${input.leaveId}`;
-  const conn = pickDbConn(opts.tx);
-  const mutate = async () => {
-    const [existing] = await conn
+  const outerConn = pickDbConn(opts.tx);
+  const mutateInTx = async (tx: any) => {
+    const [existing] = await tx
       .select()
       .from(hrLeaveRequestsTable as any)
       .where(and(
@@ -256,10 +355,28 @@ export async function cancelLeaveIdempotent(
       .execute();
     if (!existing) throw createHRError(HR_ERROR_CODES.HR_EMPLOYEE_NOT_FOUND, "Leave not found");
     const wasAlreadyCancelled = existing.status === "cancelled";
+    const deductible = isDeductibleLeaveTypeCode(String(existing.leaveTypeCode));
     let row: any = existing;
-    const balanceRestored = Boolean(existing.balanceDeducted) && !wasAlreadyCancelled;
+    let balanceRestored = false;
     if (!wasAlreadyCancelled) {
-      const [upd] = await (conn as any)
+      if (deductible && Boolean(existing.balanceDeducted)) {
+        const originalApproveEventKey = buildLeaveBalanceEventKey({ kind: "leave_approved", applicationId: input.leaveId });
+        const cancelEventKey = buildLeaveBalanceEventKey({ kind: "leave_cancel", applicationId: input.leaveId, reversal: 1 });
+        const year = new Date(existing.startDate).getFullYear();
+        const cancelResult = await restoreLeaveBalanceOnCancel(tx, {
+          firmId: input.firmId,
+          employeeId: Number(existing.employeeId),
+          leaveTypeCode: String(existing.leaveTypeCode),
+          year,
+          daysToRestore: Number(existing.days ?? 0),
+          eventKey: cancelEventKey,
+          originalApproveEventKey,
+          applicationId: input.leaveId,
+          actorId: input.actorUserId,
+        });
+        balanceRestored = cancelResult.takenUpdated && !cancelResult.alreadyRestored;
+      }
+      const [upd] = await (tx as any)
         .update(hrLeaveRequestsTable)
         .set({
           status: "cancelled",
@@ -274,7 +391,8 @@ export async function cancelLeaveIdempotent(
     }
     return { leave: toLeaveRecord(row), wasAlreadyCancelled, balanceRestored, idempotencyKey };
   };
-  return mutate();
+  if (opts.tx) return mutateInTx(outerConn);
+  return db.transaction((tx: any) => mutateInTx(tx));
 }
 
 void or;

@@ -54,6 +54,11 @@ const todayStr = (): string => {
   return `${y}-${m}-${d}`;
 };
 
+const isSchemaParityError = (err: unknown): boolean => {
+  const code = err != null && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+  return code === "42P01" || code === "42703";
+};
+
 export async function getHrDashboardSummary(input: {
   firmId: number;
   userId: number;
@@ -79,7 +84,14 @@ export async function getHrDashboardSummary(input: {
       ))
       .execute();
     totalEmployees = Number(row?.n ?? 0);
-  } catch {
+  } catch (countErr) {
+    if (!isSchemaParityError(countErr)) {
+      throw createHRError(
+        HR_ERROR_CODES.HR_DASHBOARD_DB_FAILURE,
+        "Headcount count failed",
+        { details: { metric: "totalEmployees" } },
+      );
+    }
     totalEmployees = 0;
   }
 
@@ -103,9 +115,17 @@ export async function getHrDashboardSummary(input: {
       .execute();
     metricStatus.attendance = "ready";
     activeToday = Number(row?.n ?? 0);
-  } catch {
-    metricStatus.attendance = "not_configured";
-    activeToday = null;
+  } catch (countErr) {
+    if (isSchemaParityError(countErr)) {
+      metricStatus.attendance = "not_configured";
+      activeToday = null;
+    } else {
+      throw createHRError(
+        HR_ERROR_CODES.HR_DASHBOARD_DB_FAILURE,
+        "Attendance count failed",
+        { details: { metric: "activeToday" } },
+      );
+    }
   }
 
   let onLeaveToday: number | null = null;
@@ -122,9 +142,17 @@ export async function getHrDashboardSummary(input: {
       .execute();
     metricStatus.leave = "ready";
     onLeaveToday = Number(row?.n ?? 0);
-  } catch {
-    metricStatus.leave = "not_configured";
-    onLeaveToday = null;
+  } catch (countErr) {
+    if (isSchemaParityError(countErr)) {
+      metricStatus.leave = "not_configured";
+      onLeaveToday = null;
+    } else {
+      throw createHRError(
+        HR_ERROR_CODES.HR_DASHBOARD_DB_FAILURE,
+        "Leave count failed",
+        { details: { metric: "onLeaveToday" } },
+      );
+    }
   }
 
   let pendingLeave: number | null = null;
@@ -139,8 +167,16 @@ export async function getHrDashboardSummary(input: {
         ))
         .execute();
       pendingLeave = Number(row?.n ?? 0);
-    } catch {
-      pendingLeave = null;
+    } catch (countErr) {
+      if (isSchemaParityError(countErr)) {
+        pendingLeave = null;
+      } else {
+        throw createHRError(
+          HR_ERROR_CODES.HR_DASHBOARD_DB_FAILURE,
+          "Pending leave count failed",
+          { details: { metric: "pendingLeave" } },
+        );
+      }
     }
   }
 
@@ -159,9 +195,17 @@ export async function getHrDashboardSummary(input: {
       .execute();
     metricStatus.claims = "ready";
     pendingClaims = Number(row?.n ?? 0);
-  } catch {
-    metricStatus.claims = "not_configured";
-    pendingClaims = null;
+  } catch (countErr) {
+    if (isSchemaParityError(countErr)) {
+      metricStatus.claims = "not_configured";
+      pendingClaims = null;
+    } else {
+      throw createHRError(
+        HR_ERROR_CODES.HR_DASHBOARD_DB_FAILURE,
+        "Pending claims count failed",
+        { details: { metric: "pendingClaims" } },
+      );
+    }
   }
 
   let payroll: HrDashboardSummary["payroll"] = null;
@@ -186,9 +230,17 @@ export async function getHrDashboardSummary(input: {
     } else {
       payroll = { label: "Not Started", period: null };
     }
-  } catch {
-    metricStatus.payroll = "not_configured";
-    payroll = null;
+  } catch (countErr) {
+    if (isSchemaParityError(countErr)) {
+      metricStatus.payroll = "not_configured";
+      payroll = null;
+    } else {
+      throw createHRError(
+        HR_ERROR_CODES.HR_DASHBOARD_DB_FAILURE,
+        "Payroll latest failed",
+        { details: { metric: "payroll" } },
+      );
+    }
   }
 
   return {
