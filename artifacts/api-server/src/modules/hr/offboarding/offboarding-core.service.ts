@@ -1,6 +1,11 @@
 import { db, type AppDb, type RlsDb } from "@workspace/db";
 import { ApiError } from "../../../lib/api-response.js";
 
+let _offbIdCounter = 1;
+function nextOffbId(): number {
+  return 1_000_000 + _offbIdCounter++;
+}
+
 type DbConnLike = AppDb | RlsDb;
 const pickDbConn = (tx?: unknown): DbConnLike =>
   tx && typeof (tx as any).select === "function" ? (tx as DbConnLike) : db;
@@ -49,7 +54,7 @@ export async function startOffboarding(
   const conn = pickDbConn(opts.tx);
   const now = new Date();
   return {
-    id: Math.floor(Math.random() * 1_000_000) + 1,
+    id: nextOffbId(),
     employeeId: input.employeeId,
     reason: input.reason,
     lastWorkingDay: input.lastWorkingDay,

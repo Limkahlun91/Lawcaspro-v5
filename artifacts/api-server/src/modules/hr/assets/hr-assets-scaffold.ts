@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { createHRError, HR_ERROR_CODES } from "../../shared/errors/hr-error-codes.js";
 
 export interface HrAssetRecord {
@@ -58,7 +59,7 @@ export function createHrAsset(
   }
   const now = new Date().toISOString();
   const rec: HrAssetRecord = {
-    id: `${firmId}-${input.assetCode}-${Math.random().toString(36).slice(2, 10)}`,
+    id: `${firmId}-${input.assetCode}-${randomUUID().slice(0, 8)}`,
     firmId,
     assetCode: input.assetCode,
     assetName: input.assetName,

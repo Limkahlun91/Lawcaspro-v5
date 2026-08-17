@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 import { requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate.js";
 import { createHRError, HR_ERROR_CODES, serializeHRError } from "../modules/shared/errors/hr-error-codes.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
 import { one } from "../lib/http.js";
 import {
   clockIn,
@@ -31,7 +32,7 @@ const correctionRequestSchema = z.object({
   reason: z.string().nullable().optional(),
 });
 
-router.post("/hr/attendance/clock-in", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_attendance", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/attendance/clock-in", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.attendance"), requirePermission("hr_attendance", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const parsed = clockBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -57,7 +58,7 @@ router.post("/hr/attendance/clock-in", requireAuth, requireFirmUser, requireHRMo
   }
 });
 
-router.post("/hr/attendance/clock-out", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_attendance", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/attendance/clock-out", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.attendance"), requirePermission("hr_attendance", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const parsed = clockBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -83,7 +84,7 @@ router.post("/hr/attendance/clock-out", requireAuth, requireFirmUser, requireHRM
   }
 });
 
-router.post("/hr/attendance/correction-request", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_attendance", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/attendance/correction-request", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.attendance"), requirePermission("hr_attendance", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const parsed = correctionRequestSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -108,7 +109,7 @@ router.post("/hr/attendance/correction-request", requireAuth, requireFirmUser, r
   }
 });
 
-router.post("/hr/attendance/corrections/:id/approve", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_attendance", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/attendance/corrections/:id/approve", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.attendance"), requirePermission("hr_attendance", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;

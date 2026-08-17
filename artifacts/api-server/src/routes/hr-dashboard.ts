@@ -1,9 +1,13 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
-import { and, eq, count, or, sql, inArray, like } from "drizzle-orm";
+import { and, eq, count, or, sql, inArray, like, desc, isNotNull, gte, lte } from "drizzle-orm";
 import {
   db,
   hrEmployeesTable,
   hrFirmFeatureFlagsTable,
+  hrAttendanceRecordsTable,
+  hrLeaveRequestsTable,
+  hrClaimsTable,
+  hrPayrollRunsTable,
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 import { requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate.js";
@@ -19,14 +23,21 @@ type RouterInternalLike = {
 const expressRouter: ExpressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
+export type HrModuleStatus = "ready" | "not_configured";
 export type HrDashboardPayrollLabel = "Not Started" | "Draft" | "Processing" | "Completed";
 export type HrDashboardSummary = {
   totalEmployees: number;
-  activeToday: number;
-  onLeaveToday: number;
-  pendingLeave: number;
-  pendingClaims: number;
+  activeToday: number | null;
+  onLeaveToday: number | null;
+  pendingLeave: number | null;
+  pendingClaims: number | null;
   payroll: { label: HrDashboardPayrollLabel; period: string | null } | null;
+  metricStatus: {
+    attendance: HrModuleStatus;
+    leave: HrModuleStatus;
+    claims: HrModuleStatus;
+    payroll: HrModuleStatus;
+  };
 };
 
 export type LegacyHrDashboardStats = {
@@ -35,14 +46,14 @@ export type LegacyHrDashboardStats = {
   pendingClaims: number;
 };
 
-// ---------------------------------------------------------------------------
-// Canonical service (one aggregate DB query per metric, no 6 separate HTTP).
-// NOTE: Current drizzle schema ships hrEmployeesTable + hrFirmFeatureFlagsTable.
-// Attendance / LeaveRequests / Claims / PayrollRuns tables are NOT yet part of
-// @workspace/db canonical schema — those routes remain scaffold-level (mock).
-// We compute totalEmployees from the real table and return zeros for
-// metrics without schema (consistent with scaffold services).
-// ---------------------------------------------------------------------------
+const todayStr = (): string => {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, "0");
+  const d = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+};
+
 export async function getHrDashboardSummary(input: {
   firmId: number;
   userId: number;
@@ -52,6 +63,7 @@ export async function getHrDashboardSummary(input: {
 }): Promise<HrDashboardSummary> {
   const firmId = input.firmId;
   const r = input.tx ?? db;
+  const today = todayStr();
 
   let totalEmployees = 0;
   try {
@@ -71,11 +83,113 @@ export async function getHrDashboardSummary(input: {
     totalEmployees = 0;
   }
 
-  const activeToday = 0;
-  const onLeaveToday = 0;
-  const pendingLeave = 0;
-  const pendingClaims = 0;
-  const payroll: HrDashboardSummary["payroll"] = null;
+  const metricStatus: HrDashboardSummary["metricStatus"] = {
+    attendance: "not_configured",
+    leave: "not_configured",
+    claims: "not_configured",
+    payroll: "not_configured",
+  };
+
+  let activeToday: number | null = null;
+  try {
+    const [row] = await r
+      .select({ n: count(sql`distinct ${(hrAttendanceRecordsTable as any).employeeId}`) })
+      .from(hrAttendanceRecordsTable as any)
+      .where(and(
+        eq((hrAttendanceRecordsTable as any).firmId, firmId),
+        eq((hrAttendanceRecordsTable as any).attendanceDate, today),
+        or(isNotNull((hrAttendanceRecordsTable as any).clockInAt), isNotNull((hrAttendanceRecordsTable as any).clockOutAt)),
+      ))
+      .execute();
+    metricStatus.attendance = "ready";
+    activeToday = Number(row?.n ?? 0);
+  } catch {
+    metricStatus.attendance = "not_configured";
+    activeToday = null;
+  }
+
+  let onLeaveToday: number | null = null;
+  try {
+    const [row] = await r
+      .select({ n: count() })
+      .from(hrLeaveRequestsTable as any)
+      .where(and(
+        eq((hrLeaveRequestsTable as any).firmId, firmId),
+        eq((hrLeaveRequestsTable as any).status, "approved"),
+        lte((hrLeaveRequestsTable as any).startDate, today),
+        gte((hrLeaveRequestsTable as any).endDate, today),
+      ))
+      .execute();
+    metricStatus.leave = "ready";
+    onLeaveToday = Number(row?.n ?? 0);
+  } catch {
+    metricStatus.leave = "not_configured";
+    onLeaveToday = null;
+  }
+
+  let pendingLeave: number | null = null;
+  if (metricStatus.leave === "ready") {
+    try {
+      const [row] = await r
+        .select({ n: count() })
+        .from(hrLeaveRequestsTable as any)
+        .where(and(
+          eq((hrLeaveRequestsTable as any).firmId, firmId),
+          eq((hrLeaveRequestsTable as any).status, "pending"),
+        ))
+        .execute();
+      pendingLeave = Number(row?.n ?? 0);
+    } catch {
+      pendingLeave = null;
+    }
+  }
+
+  let pendingClaims: number | null = null;
+  try {
+    const [row] = await r
+      .select({ n: count() })
+      .from(hrClaimsTable as any)
+      .where(and(
+        eq((hrClaimsTable as any).firmId, firmId),
+        or(
+          eq((hrClaimsTable as any).status, "pending"),
+          eq((hrClaimsTable as any).status, "submitted"),
+        ),
+      ))
+      .execute();
+    metricStatus.claims = "ready";
+    pendingClaims = Number(row?.n ?? 0);
+  } catch {
+    metricStatus.claims = "not_configured";
+    pendingClaims = null;
+  }
+
+  let payroll: HrDashboardSummary["payroll"] = null;
+  try {
+    const latestRows = await r
+      .select()
+      .from(hrPayrollRunsTable as any)
+      .where(eq((hrPayrollRunsTable as any).firmId, firmId))
+      .orderBy(desc((hrPayrollRunsTable as any).createdAt))
+      .limit(1)
+      .execute();
+    metricStatus.payroll = "ready";
+    if (latestRows && latestRows[0]) {
+      const r0 = latestRows[0];
+      let label: HrDashboardPayrollLabel = "Draft";
+      if (r0.status === "finalised") label = "Completed";
+      else if (r0.status === "approved") label = "Processing";
+      else if (r0.status === "processing") label = "Processing";
+      else if (r0.status === "draft") label = "Draft";
+      else label = "Not Started";
+      payroll = { label, period: r0.periodName ? String(r0.periodName) : null };
+    } else {
+      payroll = { label: "Not Started", period: null };
+    }
+  } catch {
+    metricStatus.payroll = "not_configured";
+    payroll = null;
+  }
 
   return {
     totalEmployees,
@@ -84,6 +198,7 @@ export async function getHrDashboardSummary(input: {
     pendingLeave,
     pendingClaims,
     payroll,
+    metricStatus,
   };
 }
 

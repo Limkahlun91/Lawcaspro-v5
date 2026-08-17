@@ -4,6 +4,11 @@ type DbConnLike = AppDb | RlsDb;
 const pickDbConn = (tx?: unknown): DbConnLike =>
   tx && typeof (tx as any).select === "function" ? (tx as DbConnLike) : db;
 
+let _recrIdCounter = 1;
+function nextRecrId(): number {
+  return 1_000_000 + _recrIdCounter++;
+}
+
 const HIRED_CANDIDATES = new Map<string, number>();
 
 export interface PositionRecord {
@@ -75,7 +80,7 @@ export async function createCandidate(
   const conn = pickDbConn(opts.tx);
   const now = new Date();
   return {
-    id: Math.floor(Math.random() * 1_000_000) + 1,
+    id: nextRecrId(),
     positionId: input.positionId,
     fullName: input.fullName,
     email: input.email,
@@ -101,7 +106,7 @@ export async function scheduleInterview(
   const conn = pickDbConn(opts.tx);
   const now = new Date();
   return {
-    id: Math.floor(Math.random() * 1_000_000) + 1,
+    id: nextRecrId(),
     candidateId: input.candidateId,
     scheduledAt: input.scheduledAt,
     interviewerUserId: input.interviewerUserId,
@@ -125,7 +130,7 @@ export async function createOffer(
   const conn = pickDbConn(opts.tx);
   const now = new Date();
   return {
-    id: Math.floor(Math.random() * 1_000_000) + 1,
+    id: nextRecrId(),
     candidateId: input.candidateId,
     positionId: input.positionId,
     salary: input.salary,

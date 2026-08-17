@@ -1,5 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { logger } from "../../../lib/logger.js";
 import { createHRError, HR_ERROR_CODES } from "../../shared/errors/hr-error-codes.js";
+
+function shortId(): string {
+  return randomUUID().replace(/-/g, "").slice(0, 8);
+}
 
 export interface HrTaskChecklistItem {
   id: string;
@@ -78,7 +83,7 @@ export function createOnboardingSession(
   const store = getOnboardingStore(firmId);
   const now = new Date().toISOString();
   const tasks: HrTaskChecklistItem[] = template.map((code, idx) => ({
-    id: `task-onb-${firmId}-${employeeId}-${idx}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `task-onb-${firmId}-${employeeId}-${idx}-${shortId()}`,
     templateCode: code,
     title: code,
     category: "onboarding",
@@ -86,7 +91,7 @@ export function createOnboardingSession(
     sortOrder: idx,
   }));
   const session: HrOnboardingSession = {
-    id: `onb-${firmId}-${employeeId}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `onb-${firmId}-${employeeId}-${shortId()}`,
     firmId,
     employeeId,
     status: "in_progress",
@@ -140,7 +145,7 @@ export function initiateOffboardingSession(
   const now = new Date().toISOString();
   const tpl = options.template ?? ["handover_documents", "return_assets", "exit_interview", "revoke_access", "final_payroll_check"];
   const tasks: HrTaskChecklistItem[] = tpl.map((code, idx) => ({
-    id: `task-off-${firmId}-${employeeId}-${idx}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `task-off-${firmId}-${employeeId}-${idx}-${shortId()}`,
     templateCode: code,
     title: code,
     category: "offboarding",
@@ -148,7 +153,7 @@ export function initiateOffboardingSession(
     sortOrder: idx,
   }));
   const session: HrOffboardingSession = {
-    id: `off-${firmId}-${employeeId}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `off-${firmId}-${employeeId}-${shortId()}`,
     firmId,
     employeeId,
     terminationDate: options.terminationDate ?? null,

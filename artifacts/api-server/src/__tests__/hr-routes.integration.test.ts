@@ -2,6 +2,9 @@ import { describe, it, expect, beforeAll, beforeEach } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { and, eq, count, sql } from "drizzle-orm";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ApiError } from "../lib/api-response.js";
 import {
   hrEmployeesTable,
@@ -21,101 +24,24 @@ const YEAR = new Date().getFullYear();
 let pg: PGlite;
 let r: ReturnType<typeof drizzle>;
 
-const HR_DDL = `
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const MIGRATIONS_DIR = path.resolve(__dirname, "../../../../supabase/migrations");
+
+function preprocessMigrationSql(raw: string): string {
+  let sql = raw;
+  sql = sql.replace(/^\s*CREATE\s+EXTENSION\s+IF\s+NOT\s+EXISTS\s+[a-zA-Z0-9_]+\s*;\s*$/gim, "-- stripped CREATE EXTENSION\n");
+  sql = sql.replace(/^\s*CREATE\s+EXTENSION\s+[a-zA-Z0-9_]+\s*;\s*$/gim, "-- stripped CREATE EXTENSION\n");
+  sql = sql.replace(/^\s*COMMENT\s+ON\s+EXTENSION\s+.*?;\s*$/gim, "-- stripped COMMENT ON EXTENSION\n");
+  const supabaseRoles = ["anon", "authenticated", "service_role", "dashboard_user", "pg_read_all_data", "pg_write_all_data", "pg_monitor"];
+  const rolesRe = new RegExp(`^\\s*(GRANT\\s+.*?|REVOKE\\s+.*?|ALTER\\s+DEFAULT\\s+PRIVILEGES\\s+.*?)\\s+(TO|FROM)\\s+.*?(${supabaseRoles.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\s*;\\s*$`, "gims");
+  sql = sql.replace(rolesRe, "-- stripped supabase role grant/revoke\n");
+  sql = sql.replace(/^\s*DO\s*\$\$.*?\$\$\s*;?\s*$/gims, "-- stripped DO block\n");
+  sql = sql.replace(/^\s*SELECT\s+audit\.pgaudit\s*\(.*?\)\s*;?\s*$/gims, "-- stripped pgaudit\n");
+  return sql;
+}
+
+const SUPPLEMENTARY_DDL = `
 CREATE TABLE IF NOT EXISTS audit_logs (id serial PRIMARY KEY);
-
-CREATE TABLE IF NOT EXISTS hr_employees (
-  id SERIAL PRIMARY KEY,
-  firm_id INTEGER NOT NULL,
-  employee_no TEXT,
-  legal_full_name TEXT,
-  employment_status TEXT NOT NULL DEFAULT 'active',
-  linked_user_id INTEGER,
-  department TEXT,
-  designation TEXT,
-  joining_date DATE,
-  termination_date DATE,
-  last_working_date DATE,
-  terminated_at TIMESTAMPTZ,
-  last_status_change_at TIMESTAMPTZ,
-  created_by_user_id INTEGER,
-  updated_by_user_id INTEGER,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS hr_employee_leave_balances (
-  id SERIAL PRIMARY KEY,
-  firm_id INTEGER NOT NULL,
-  employee_id INTEGER NOT NULL,
-  leave_type_code TEXT NOT NULL,
-  leave_year INTEGER NOT NULL,
-  entitled_days NUMERIC(10,2) NOT NULL DEFAULT 0,
-  carried_forward_days NUMERIC(10,2) NOT NULL DEFAULT 0,
-  adjusted_days NUMERIC(10,2) NOT NULL DEFAULT 0,
-  taken_days NUMERIC(10,2) NOT NULL DEFAULT 0,
-  pending_approval_days NUMERIC(10,2) NOT NULL DEFAULT 0,
-  balance_carried_forward_override NUMERIC(10,2),
-  expiry_date DATE,
-  last_calculation_ref TEXT,
-  note TEXT,
-  created_by_user_id INTEGER,
-  updated_by_user_id INTEGER,
-  version INTEGER NOT NULL DEFAULT 1,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (firm_id, employee_id, leave_type_code, leave_year)
-);
-
-CREATE TABLE IF NOT EXISTS hr_leave_requests (
-  id SERIAL PRIMARY KEY,
-  firm_id INTEGER NOT NULL,
-  employee_id INTEGER NOT NULL,
-  leave_type TEXT NOT NULL,
-  start_date DATE NOT NULL,
-  end_date DATE NOT NULL,
-  reason TEXT,
-  status TEXT NOT NULL DEFAULT 'pending',
-  balance_deducted BOOLEAN NOT NULL DEFAULT FALSE,
-  leave_audit_idempotency_key TEXT,
-  approved_by INTEGER,
-  approved_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS hr_claims (
-  id SERIAL PRIMARY KEY,
-  firm_id INTEGER NOT NULL,
-  employee_id INTEGER NOT NULL,
-  claim_type TEXT NOT NULL,
-  description TEXT,
-  amount NUMERIC(12,2) NOT NULL DEFAULT 0,
-  receipts JSONB,
-  incurrence_date DATE,
-  status TEXT NOT NULL DEFAULT 'draft',
-  accounting_created BOOLEAN NOT NULL DEFAULT FALSE,
-  accounting_payable_id INTEGER,
-  approved_by INTEGER,
-  approved_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS hr_payroll_runs (
-  id SERIAL PRIMARY KEY,
-  firm_id INTEGER NOT NULL,
-  period_id INTEGER,
-  status TEXT NOT NULL DEFAULT 'draft',
-  gross_total NUMERIC(14,2) NOT NULL DEFAULT 0,
-  deductions_total NUMERIC(14,2) NOT NULL DEFAULT 0,
-  net_total NUMERIC(14,2) NOT NULL DEFAULT 0,
-  accounting_posted BOOLEAN NOT NULL DEFAULT FALSE,
-  finalised_by INTEGER,
-  finalised_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
 
 CREATE TABLE IF NOT EXISTS hr_recruitment_candidates (
   id SERIAL PRIMARY KEY,
@@ -217,7 +143,15 @@ describe("HR Routes — PART 2 N leave/claims/payroll/offboarding/recruitment in
   beforeAll(async () => {
     pg = new PGlite({ dataDir: undefined });
     r = drizzle(pg as any);
-    await pg.exec(HR_DDL);
+    const migrationPath = path.join(MIGRATIONS_DIR, "p8_hr_workflow_schema_parity.sql");
+    if (fs.existsSync(migrationPath)) {
+      const raw = fs.readFileSync(migrationPath, "utf8");
+      const processed = preprocessMigrationSql(raw);
+      await pg.exec(processed);
+    } else {
+      throw new Error(`Migration file not found at ${migrationPath} — HR schemas cannot initialise.`);
+    }
+    await pg.exec(SUPPLEMENTARY_DDL);
   });
 
   beforeEach(async () => {
@@ -268,6 +202,10 @@ describe("HR Routes — PART 2 N leave/claims/payroll/offboarding/recruitment in
     `);
     const LEAVE_ID = 3001;
     const DAYS = 2;
+    await pg.exec(`
+      INSERT INTO hr_leave_requests(id, firm_id, employee_id, leave_type_code, start_date, end_date, days, reason, status)
+      VALUES(${LEAVE_ID}, ${FIRM_ID}, ${EMPLOYEE_ID}, 'ANNUAL', CURRENT_DATE, CURRENT_DATE + INTEGER '${DAYS - 1}', ${DAYS}, 'Test leave pending approval', 'pending');
+    `);
 
     const approveOne = await approveLeaveIdempotent(
       { firmId: FIRM_ID, leaveId: LEAVE_ID, actorUserId: ACTOR_USER_ID },
@@ -295,7 +233,7 @@ describe("HR Routes — PART 2 N leave/claims/payroll/offboarding/recruitment in
 
   it("HR-2: Claim approve with payable idempotency — approve twice, payableCreatedNow exactly once", async () => {
     await pg.exec(`
-      INSERT INTO hr_claims(id, firm_id, employee_id, claim_type, description, amount, incurrence_date, status)
+      INSERT INTO hr_claims(id, firm_id, employee_id, claim_type_code, description, amount, claim_date, status)
       VALUES (4001, ${FIRM_ID}, ${EMPLOYEE_ID}, 'transport', 'Client site visit', 120.00, CURRENT_DATE, 'submitted');
     `);
     const CLAIM_ID = 4001;
@@ -319,8 +257,8 @@ describe("HR Routes — PART 2 N leave/claims/payroll/offboarding/recruitment in
 
   it("HR-3: Payroll finalise idempotency — finalise twice, accountingPostedNow exactly once", async () => {
     await pg.exec(`
-      INSERT INTO hr_payroll_runs(id, firm_id, period_id, status, gross_total, deductions_total, net_total, accounting_posted)
-      VALUES (5001, ${FIRM_ID}, 101, 'approved', 50000.00, 5000.00, 45000.00, FALSE);
+      INSERT INTO hr_payroll_runs(id, firm_id, period_name, period_start_date, period_end_date, payroll_type, status, gross_total, deductions_total, net_total, total_employees, accounting_posted)
+      VALUES (5001, ${FIRM_ID}, '2025-01', CURRENT_DATE - INTEGER '14', CURRENT_DATE + INTEGER '14', 'monthly', 'approved', 50000.00, 5000.00, 45000.00, 0, FALSE);
     `);
     const RUN_ID = 5001;
     const one = await finalisePayrollWithPosting(
@@ -388,7 +326,7 @@ describe("HR Routes — PART 2 N leave/claims/payroll/offboarding/recruitment in
         guardContext: { pendingClaims: true },
         prepare: async () => {
           await pg.exec(`
-            INSERT INTO hr_claims(id, firm_id, employee_id, claim_type, description, amount, incurrence_date, status)
+            INSERT INTO hr_claims(id, firm_id, employee_id, claim_type_code, description, amount, claim_date, status)
             VALUES (4100, ${FIRM_ID}, ${EMPLOYEE_ID}, 'meal', 'Unsettled lunch claim', 50.00, CURRENT_DATE, 'submitted');
           `);
         },
@@ -399,8 +337,8 @@ describe("HR Routes — PART 2 N leave/claims/payroll/offboarding/recruitment in
         guardContext: { pendingPayroll: true },
         prepare: async () => {
           await pg.exec(`
-            INSERT INTO hr_payroll_runs(id, firm_id, period_id, status, gross_total, deductions_total, net_total, accounting_posted)
-            VALUES (5100, ${FIRM_ID}, 102, 'draft', 0, 0, 0, FALSE);
+            INSERT INTO hr_payroll_runs(id, firm_id, period_name, period_start_date, period_end_date, payroll_type, status, gross_total, deductions_total, net_total, total_employees, accounting_posted)
+            VALUES (5100, ${FIRM_ID}, '2025-02', CURRENT_DATE - INTEGER '7', CURRENT_DATE + INTEGER '21', 'monthly', 'draft', 0, 0, 0, 0, FALSE);
           `);
         },
       },

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 import { requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate.js";
 import { createHRError, HR_ERROR_CODES, serializeHRError } from "../modules/shared/errors/hr-error-codes.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
 import { one } from "../lib/http.js";
 import {
   createLeaveRequest,
@@ -28,7 +29,7 @@ const createLeaveBodySchema = z.object({
   reason: z.string().nullable().optional(),
 });
 
-router.post("/hr/leave", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_leave", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/leave", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.leave"), requirePermission("hr_leave", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const parsed = createLeaveBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -53,7 +54,7 @@ router.post("/hr/leave", requireAuth, requireFirmUser, requireHRModuleEnabled, r
   }
 });
 
-router.get("/hr/leave/me", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_leave", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/leave/me", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.leave"), requirePermission("hr_leave", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const employeeId = req.userId!;
     const rows = await listMyLeaves({ firmId: req.firmId!, userId: req.userId!, employeeId }, { tx: req.rlsDb });
@@ -63,7 +64,7 @@ router.get("/hr/leave/me", requireAuth, requireFirmUser, requireHRModuleEnabled,
   }
 });
 
-router.post("/hr/leave/:id/approve", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_leave", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/leave/:id/approve", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.leave"), requirePermission("hr_leave", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
@@ -83,7 +84,7 @@ router.post("/hr/leave/:id/approve", requireAuth, requireFirmUser, requireHRModu
   }
 });
 
-router.post("/hr/leave/:id/reject", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_leave", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/leave/:id/reject", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.leave"), requirePermission("hr_leave", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
@@ -104,7 +105,7 @@ router.post("/hr/leave/:id/reject", requireAuth, requireFirmUser, requireHRModul
   }
 });
 
-router.post("/hr/leave/:id/cancel", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_leave", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/leave/:id/cancel", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.leave"), requirePermission("hr_leave", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;

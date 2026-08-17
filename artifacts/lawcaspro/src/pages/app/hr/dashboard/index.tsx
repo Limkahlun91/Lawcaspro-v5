@@ -24,14 +24,20 @@ import { useEffectiveUserFeaturesMap } from "@/lib/feature-guards";
 
 export type HrDashboardSummary = {
   totalEmployees: number;
-  activeToday: number;
-  onLeaveToday: number;
-  pendingLeave: number;
-  pendingClaims: number;
+  activeToday: number | null;
+  onLeaveToday: number | null;
+  pendingLeave: number | null;
+  pendingClaims: number | null;
   payroll: {
     label: "Not Started" | "Draft" | "Processing" | "Completed";
     period: string | null;
   } | null;
+  metricStatus?: {
+    attendance?: "ready" | "not_configured";
+    leave?: "ready" | "not_configured";
+    claims?: "ready" | "not_configured";
+    payroll?: "ready" | "not_configured";
+  };
 };
 
 function isNotFoundApiError(error: unknown): boolean {
@@ -74,25 +80,51 @@ type LegacyStats = {
 async function loadNewDashboard(): Promise<HrDashboardSummary> {
   const res = await apiFetchJson("/hr/me/dashboard");
   const raw = unwrapApiData<any>(res);
+  const totalEmployees = typeof raw?.totalEmployees === "number"
+    ? raw.totalEmployees
+    : typeof raw?.headcount === "number"
+      ? raw.headcount
+      : 0;
+  const activeToday: number | null = typeof raw?.activeToday === "number" ? raw.activeToday : null;
+  const onLeaveToday: number | null = typeof raw?.onLeaveToday === "number" ? raw.onLeaveToday : null;
+  const pendingLeave: number | null = typeof raw?.pendingLeave === "number"
+    ? raw.pendingLeave
+    : typeof raw?.pendingLeaves === "number"
+      ? raw.pendingLeaves
+      : null;
+  const pendingClaims: number | null = typeof raw?.pendingClaims === "number" ? raw.pendingClaims : null;
   return {
-    totalEmployees: Number(raw?.totalEmployees ?? raw?.headcount ?? 0),
-    activeToday: Number(raw?.activeToday ?? 0),
-    onLeaveToday: Number(raw?.onLeaveToday ?? 0),
-    pendingLeave: Number(raw?.pendingLeave ?? raw?.pendingLeaves ?? 0),
-    pendingClaims: Number(raw?.pendingClaims ?? 0),
+    totalEmployees,
+    activeToday,
+    onLeaveToday,
+    pendingLeave,
+    pendingClaims,
     payroll: normalizePayroll(raw?.payroll),
+    metricStatus: typeof raw?.metricStatus === "object" && raw.metricStatus != null
+      ? {
+          attendance: raw.metricStatus.attendance === "ready" ? "ready" : raw.metricStatus.attendance === "not_configured" ? "not_configured" : undefined,
+          leave: raw.metricStatus.leave === "ready" ? "ready" : raw.metricStatus.leave === "not_configured" ? "not_configured" : undefined,
+          claims: raw.metricStatus.claims === "ready" ? "ready" : raw.metricStatus.claims === "not_configured" ? "not_configured" : undefined,
+          payroll: raw.metricStatus.payroll === "ready" ? "ready" : raw.metricStatus.payroll === "not_configured" ? "not_configured" : undefined,
+        }
+      : undefined,
   };
 }
 
 async function loadLegacyDashboard(): Promise<HrDashboardSummary> {
   const res = await apiFetchJson("/hr/dashboard/stats");
   const raw = unwrapApiData<LegacyStats>(res);
+  const totalEmployees = typeof raw?.headcount === "number" ? raw.headcount : 0;
+  const activeToday: number | null = typeof raw?.activeToday === "number" ? raw.activeToday : null;
+  const onLeaveToday: number | null = typeof raw?.onLeaveToday === "number" ? raw.onLeaveToday : null;
+  const pendingLeave: number | null = typeof raw?.pendingLeaves === "number" ? raw.pendingLeaves : null;
+  const pendingClaims: number | null = typeof raw?.pendingClaims === "number" ? raw.pendingClaims : null;
   return {
-    totalEmployees: Number(raw?.headcount ?? 0),
-    activeToday: Number(raw?.activeToday ?? 0),
-    onLeaveToday: Number(raw?.onLeaveToday ?? 0),
-    pendingLeave: Number(raw?.pendingLeaves ?? 0),
-    pendingClaims: Number(raw?.pendingClaims ?? 0),
+    totalEmployees,
+    activeToday,
+    onLeaveToday,
+    pendingLeave,
+    pendingClaims,
     payroll: normalizePayroll(raw?.payroll),
   };
 }
@@ -245,11 +277,21 @@ const ALL_QUICK_ACTIONS: QuickAction[] = [
 
 type CardDef = {
   label: string;
-  value: number | string;
+  value: number | string | null;
+  subLabel?: string | null;
   icon: React.ComponentType<{ className?: string }>;
   color: string;
   href?: string;
   enabled: boolean;
+};
+
+const dashletValue = (n: number | string | null, ready: boolean | undefined): { v: number | string; sub: string | null } => {
+  if (n == null) {
+    if (ready === false) return { v: "—", sub: "Not configured" };
+    return { v: "—", sub: null };
+  }
+  if (typeof n === "string") return { v: n, sub: null };
+  return { v: n, sub: null };
 };
 
 function HrDashboardInner() {
@@ -273,19 +315,30 @@ function HrDashboardInner() {
   });
 
   const summary = dashboardQuery.data;
+  const ms = summary?.metricStatus;
+  const atdReady = ms?.attendance === "ready" ? true : ms?.attendance === "not_configured" ? false : summary?.activeToday != null ? true : undefined;
+  const lvReady = ms?.leave === "ready" ? true : ms?.leave === "not_configured" ? false : (summary?.onLeaveToday != null || summary?.pendingLeave != null) ? true : undefined;
+  const clReady = ms?.claims === "ready" ? true : ms?.claims === "not_configured" ? false : summary?.pendingClaims != null ? true : undefined;
+  const pyReady = ms?.payroll === "ready" ? true : ms?.payroll === "not_configured" ? false : summary?.payroll != null ? true : undefined;
+
   const isEmpty =
     !!summary &&
     summary.totalEmployees <= 0 &&
-    summary.activeToday <= 0 &&
-    summary.onLeaveToday <= 0 &&
-    summary.pendingLeave <= 0 &&
-    summary.pendingClaims <= 0 &&
+    (summary.activeToday == null || summary.activeToday <= 0) &&
+    (summary.onLeaveToday == null || summary.onLeaveToday <= 0) &&
+    (summary.pendingLeave == null || summary.pendingLeave <= 0) &&
+    (summary.pendingClaims == null || summary.pendingClaims <= 0) &&
     !summary.payroll;
+
+  const atdDash = dashletValue(summary?.activeToday ?? null, atdReady);
+  const lvTodayDash = dashletValue(summary?.onLeaveToday ?? null, lvReady);
+  const lvPendingDash = dashletValue(summary?.pendingLeave ?? null, lvReady);
+  const clPendingDash = dashletValue(summary?.pendingClaims ?? null, clReady);
 
   const cards: CardDef[] = [
     {
       label: "Total Employees",
-      value: summary?.totalEmployees ?? 0,
+      value: typeof summary?.totalEmployees === "number" ? summary.totalEmployees : 0,
       icon: Users,
       color: "bg-blue-50 text-blue-600",
       href: "/app/hr/employees",
@@ -293,7 +346,8 @@ function HrDashboardInner() {
     },
     {
       label: "Active Today",
-      value: summary?.activeToday ?? 0,
+      value: atdDash.v,
+      subLabel: atdDash.sub,
       icon: UserCheck,
       color: "bg-emerald-50 text-emerald-600",
       href: "/app/hr/attendance",
@@ -301,7 +355,8 @@ function HrDashboardInner() {
     },
     {
       label: "On Leave Today",
-      value: summary?.onLeaveToday ?? 0,
+      value: lvTodayDash.v,
+      subLabel: lvTodayDash.sub,
       icon: CalendarClock,
       color: "bg-indigo-50 text-indigo-600",
       href: "/app/hr/leave",
@@ -309,7 +364,8 @@ function HrDashboardInner() {
     },
     {
       label: "Pending Leave",
-      value: summary?.pendingLeave ?? 0,
+      value: lvPendingDash.v,
+      subLabel: lvPendingDash.sub,
       icon: CalendarClock,
       color: "bg-amber-50 text-amber-600",
       href: "/app/hr/leave",
@@ -317,7 +373,8 @@ function HrDashboardInner() {
     },
     {
       label: "Pending Claims",
-      value: summary?.pendingClaims ?? 0,
+      value: clPendingDash.v,
+      subLabel: clPendingDash.sub,
       icon: FileText,
       color: "bg-rose-50 text-rose-600",
       href: "/app/hr/claims",
@@ -325,7 +382,8 @@ function HrDashboardInner() {
     },
     {
       label: "Payroll Status",
-      value: summary?.payroll?.label ?? "—",
+      value: summary?.payroll?.label ?? (pyReady === false ? "—" : "Not Started"),
+      subLabel: pyReady === false ? "Not configured" : null,
       icon: Briefcase,
       color: "bg-violet-50 text-violet-600",
       href: "/app/hr/payroll",
@@ -335,7 +393,7 @@ function HrDashboardInner() {
 
   const pendingActions = useMemo(() => {
     const items: { key: string; label: string; href: string; enabled: boolean }[] = [];
-    if (summary && summary.pendingLeave > 0) {
+    if (summary && typeof summary.pendingLeave === "number" && summary.pendingLeave > 0) {
       items.push({
         key: "leave",
         label: `${summary.pendingLeave} Leave Request${summary.pendingLeave === 1 ? "" : "s"}`,
@@ -343,7 +401,7 @@ function HrDashboardInner() {
         enabled: features.enabled("hr.leave"),
       });
     }
-    if (summary && summary.pendingClaims > 0) {
+    if (summary && typeof summary.pendingClaims === "number" && summary.pendingClaims > 0) {
       items.push({
         key: "claims",
         label: `${summary.pendingClaims} Claim${summary.pendingClaims === 1 ? "" : "s"} Awaiting Approval`,
@@ -439,6 +497,11 @@ function HrDashboardInner() {
                         <div className="text-xl font-bold text-slate-900 leading-tight truncate">
                           {c.value}
                         </div>
+                        {c.subLabel ? (
+                          <div className="text-[10px] font-medium text-amber-600 truncate mt-0.5">
+                            {c.subLabel}
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                     {c.label === "Payroll Status" && summary?.payroll?.period ? (

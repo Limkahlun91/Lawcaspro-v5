@@ -3,6 +3,7 @@ import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 import { requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate.js";
 import { createHRError, HR_ERROR_CODES, serializeHRError } from "../modules/shared/errors/hr-error-codes.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
 import { one } from "../lib/http.js";
 import {
   createClaim,
@@ -30,7 +31,7 @@ const createClaimBodySchema = z.object({
   employeeId: z.number().int().positive(),
 });
 
-router.post("/hr/claims", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_claims", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/claims", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.claims"), requirePermission("hr_claims", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const parsed = createClaimBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
@@ -56,7 +57,7 @@ router.post("/hr/claims", requireAuth, requireFirmUser, requireHRModuleEnabled, 
   }
 });
 
-router.post("/hr/claims/:id/submit", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_claims", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/claims/:id/submit", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.claims"), requirePermission("hr_claims", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
@@ -71,7 +72,7 @@ router.post("/hr/claims/:id/submit", requireAuth, requireFirmUser, requireHRModu
   }
 });
 
-router.post("/hr/claims/:id/approve", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_claims", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/claims/:id/approve", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.claims"), requirePermission("hr_claims", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
@@ -97,7 +98,7 @@ router.post("/hr/claims/:id/approve", requireAuth, requireFirmUser, requireHRMod
   }
 });
 
-router.post("/hr/claims/:id/reject", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_claims", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hr/claims/:id/reject", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.claims"), requirePermission("hr_claims", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
@@ -113,7 +114,7 @@ router.post("/hr/claims/:id/reject", requireAuth, requireFirmUser, requireHRModu
   }
 });
 
-router.get("/hr/claims/me", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_claims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/claims/me", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.claims"), requirePermission("hr_claims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const employeeId = req.userId!;
     const rows = await listMyClaims({ firmId: req.firmId!, userId: req.userId!, employeeId }, { tx: req.rlsDb });
@@ -123,7 +124,7 @@ router.get("/hr/claims/me", requireAuth, requireFirmUser, requireHRModuleEnabled
   }
 });
 
-router.get("/hr/claims/admin", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_claims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/claims/admin", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.claims"), requirePermission("hr_claims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const rows = await listAdminClaims({ firmId: req.firmId!, actorUserId: req.userId! }, { tx: req.rlsDb });
     res.json({ ok: true, items: rows });
