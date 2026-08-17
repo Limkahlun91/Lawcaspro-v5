@@ -162,8 +162,7 @@ const EFFECTIVE_PAYROLL_OFF: typeof EFFECTIVE_ON = {
       userEnabled: false,
       effectiveEnabled: false,
       source: "firm_entitlement_denied",
-      denialCode: "FIRM_ENTITLEMENT_OFF",
-    },
+    } as any,
   },
 };
 
@@ -206,14 +205,14 @@ afterEach(() => {
 // Load page modules DYNAMICALLY inside each test to apply fresh mockbag, React global set above before mocks applied before
 
 describe("HR Dashboard fallback rules — §2 §3", () => {
-  it("HR-1 primary 200 → no legacy request & cards render", async () => {
+  it("HR-1 canonical 200 → no fallback request & cards render", async () => {
     const calls: string[] = [];
     M.apiFetchJsonMock.mockImplementation(async (url: string) => {
       const u = String(url).split("?")[0];
       calls.push(u);
       if (u === "/users/_self/effective-features") return ok(EFFECTIVE_ON, "eff_1");
       if (u === "/entitlements/platform/feature-registry") return ok({ version: 1, features: [] }, "reg_1");
-      if (u === "/hr/me/dashboard") {
+      if (u === "/hr/dashboard/summary") {
         return ok(
           { totalEmployees: 5, activeToday: 4, onLeaveToday: 1, pendingLeave: 2, pendingClaims: 1 },
           "hr_hr_1",
@@ -235,19 +234,26 @@ describe("HR Dashboard fallback rules — §2 §3", () => {
       },
       { timeout: 15_000 },
     );
-    expect(calls).toContain("/hr/me/dashboard");
+    expect(calls).toContain("/hr/dashboard/summary");
+    expect(calls).not.toContain("/hr/me/dashboard");
     expect(calls).not.toContain("/hr/dashboard/stats");
   });
 
-  it("HR-2 primary 404 → falls back to legacy", async () => {
+  it("HR-2 canonical 404 → falls back to deprecated alias then legacy", async () => {
     const calls: string[] = [];
     M.apiFetchJsonMock.mockImplementation(async (url: string) => {
       const u = String(url).split("?")[0];
       calls.push(u);
       if (u === "/users/_self/effective-features") return ok(EFFECTIVE_ON, "eff_2");
       if (u === "/entitlements/platform/feature-registry") return ok({ version: 1, features: [] }, "reg_2");
+      if (u === "/hr/dashboard/summary") {
+        const err: any = new Error("not found summary");
+        err.status = 404;
+        err.code = "ROUTE_NOT_FOUND";
+        throw err;
+      }
       if (u === "/hr/me/dashboard") {
-        const err: any = new Error("not found");
+        const err: any = new Error("not found deprecated");
         err.status = 404;
         err.code = "ROUTE_NOT_FOUND";
         throw err;
@@ -270,18 +276,19 @@ describe("HR Dashboard fallback rules — §2 §3", () => {
       },
       { timeout: 15_000 },
     );
+    expect(calls).toContain("/hr/dashboard/summary");
     expect(calls).toContain("/hr/me/dashboard");
     expect(calls).toContain("/hr/dashboard/stats");
   });
 
-  it("HR-3 primary 500 → ERROR UI legacy NOT called", async () => {
+  it("HR-3 canonical 500 → ERROR UI fallbacks NOT called", async () => {
     const calls: string[] = [];
     M.apiFetchJsonMock.mockImplementation(async (url: string) => {
       const u = String(url).split("?")[0];
       calls.push(u);
       if (u === "/users/_self/effective-features") return ok(EFFECTIVE_ON, "eff_3");
       if (u === "/entitlements/platform/feature-registry") return ok({ version: 1, features: [] }, "reg_3");
-      if (u === "/hr/me/dashboard") {
+      if (u === "/hr/dashboard/summary") {
         const err: any = new Error("DB down");
         err.status = 500;
         err.code = "INTERNAL_ERROR";
@@ -293,11 +300,15 @@ describe("HR Dashboard fallback rules — §2 §3", () => {
         };
         throw err;
       }
-      if (u === "/hr/dashboard/stats") {
-        // Legacy should NOT be called, so error if called
-        const err2: any = new Error("FORBIDDEN CALL");
+      if (u === "/hr/me/dashboard") {
+        const err2: any = new Error("FORBIDDEN CALL deprecated");
         err2.status = 500;
         throw err2;
+      }
+      if (u === "/hr/dashboard/stats") {
+        const err3: any = new Error("FORBIDDEN CALL legacy");
+        err3.status = 500;
+        throw err3;
       }
       const err: any = new Error(`bad:${String(url)}`);
       err.status = 404;
@@ -315,16 +326,22 @@ describe("HR Dashboard fallback rules — §2 §3", () => {
     const body = document.body.textContent ?? "";
     expect(body).toMatch(/Retry/i);
     expect(body).toMatch(/reqabcdef12/i);
+    expect(calls).not.toContain("/hr/me/dashboard");
     expect(calls).not.toContain("/hr/dashboard/stats");
   });
 
-  it("HR-4 both routes fail → explicit error not zeros", async () => {
+  it("HR-4 all three routes fail → explicit error not zeros", async () => {
     M.apiFetchJsonMock.mockImplementation(async (url: string) => {
       const u = String(url).split("?")[0];
       if (u === "/users/_self/effective-features") return ok(EFFECTIVE_ON, "eff_4");
       if (u === "/entitlements/platform/feature-registry") return ok({ version: 1, features: [] }, "reg_4");
+      if (u === "/hr/dashboard/summary") {
+        const err: any = new Error("nf sum");
+        err.status = 404;
+        throw err;
+      }
       if (u === "/hr/me/dashboard") {
-        const err: any = new Error("nf");
+        const err: any = new Error("nf alias");
         err.status = 404;
         throw err;
       }
@@ -357,7 +374,7 @@ describe("HR Dashboard fallback rules — §2 §3", () => {
       const u = String(url).split("?")[0];
       if (u === "/users/_self/effective-features") return ok(EFFECTIVE_ON, "eff_5");
       if (u === "/entitlements/platform/feature-registry") return ok({ version: 1, features: [] }, "reg_5");
-      if (u === "/hr/me/dashboard") {
+      if (u === "/hr/dashboard/summary") {
         return ok(
           { totalEmployees: 0, activeToday: 0, onLeaveToday: 0, pendingLeave: 0, pendingClaims: 0, payroll: null },
           "hr_5",
@@ -389,7 +406,7 @@ describe("HR access-aware quick actions — §8", () => {
       const u = String(url).split("?")[0];
       if (u === "/users/_self/effective-features") return ok(EFFECTIVE_PAYROLL_OFF, "eff_hr6");
       if (u === "/entitlements/platform/feature-registry") return ok({ version: 1, features: [] }, "reg_hr6");
-      if (u === "/hr/me/dashboard") {
+      if (u === "/hr/dashboard/summary") {
         return ok(
           {
             totalEmployees: 5,
@@ -427,7 +444,7 @@ describe("HR access-aware quick actions — §8", () => {
       const u = String(url).split("?")[0];
       if (u === "/users/_self/effective-features") return ok(EFFECTIVE_ON, "eff_hr7");
       if (u === "/entitlements/platform/feature-registry") return ok({ version: 1, features: [] }, "reg_hr7");
-      if (u === "/hr/me/dashboard") {
+      if (u === "/hr/dashboard/summary") {
         return ok(
           { totalEmployees: 5, activeToday: 4, onLeaveToday: 1, pendingLeave: 0, pendingClaims: 0 },
           "hr_hr7",

@@ -10,7 +10,7 @@ function MyDashboard() {
   const stats = useQuery({
     queryKey: ["my-dashboard-stats"],
     queryFn: async () => {
-      try { return unwrapApiData<{ assignedCases: number; pendingApprovals: number; leaveBalance: number; upcomingPayslip: string | null }>(await apiFetchJson("/hr/me/dashboard")); }
+      try { return unwrapApiData<{ assignedCases: number; pendingApprovals: number; leaveBalance: number; upcomingPayslip: string | null }>(await apiFetchJson("/hr/dashboard/summary")); }
       catch { return { assignedCases: 0, pendingApprovals: 0, leaveBalance: 0, upcomingPayslip: null }; }
     },
     staleTime: 60_000,

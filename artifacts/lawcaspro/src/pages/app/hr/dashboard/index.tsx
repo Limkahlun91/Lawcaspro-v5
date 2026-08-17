@@ -18,9 +18,14 @@ import {
   AlertCircle,
   ArrowRight,
 } from "lucide-react";
-import { getHttpStatus, getErrorMessage } from "@/lib/error-message";
+import { getHttpStatus, getErrorMessage, getDiscriminatedErrorTitle, getDiscriminatedErrorDetail, shouldShowRetryForError } from "@/lib/error-message";
 import { getApiFailureCodeFromError } from "@/lib/api-failure";
 import { useEffectiveUserFeaturesMap } from "@/lib/feature-guards";
+
+export type HrPayrollStatus = {
+  label: "Not Started" | "Draft" | "Processing" | "Completed";
+  period: string | null;
+};
 
 export type HrDashboardSummary = {
   totalEmployees: number;
@@ -28,10 +33,7 @@ export type HrDashboardSummary = {
   onLeaveToday: number | null;
   pendingLeave: number | null;
   pendingClaims: number | null;
-  payroll: {
-    label: "Not Started" | "Draft" | "Processing" | "Completed";
-    period: string | null;
-  } | null;
+  payroll: HrPayrollStatus | null;
   metricStatus?: {
     attendance?: "ready" | "not_configured";
     leave?: "ready" | "not_configured";
@@ -74,10 +76,44 @@ type LegacyStats = {
   pendingLeaves?: number;
   pendingClaims?: number;
   onLeaveToday?: number;
-  payroll?: HrDashboardSummary["payroll"];
+  payroll?: HrPayrollStatus | null;
 };
 
-async function loadNewDashboard(): Promise<HrDashboardSummary> {
+async function loadCanonicalDashboard(): Promise<HrDashboardSummary> {
+  const res = await apiFetchJson("/hr/dashboard/summary");
+  const raw = unwrapApiData<any>(res);
+  const totalEmployees = typeof raw?.totalEmployees === "number"
+    ? raw.totalEmployees
+    : typeof raw?.headcount === "number"
+      ? raw.headcount
+      : 0;
+  const activeToday: number | null = typeof raw?.activeToday === "number" ? raw.activeToday : null;
+  const onLeaveToday: number | null = typeof raw?.onLeaveToday === "number" ? raw.onLeaveToday : null;
+  const pendingLeave: number | null = typeof raw?.pendingLeave === "number"
+    ? raw.pendingLeave
+    : typeof raw?.pendingLeaves === "number"
+      ? raw.pendingLeaves
+      : null;
+  const pendingClaims: number | null = typeof raw?.pendingClaims === "number" ? raw.pendingClaims : null;
+  return {
+    totalEmployees,
+    activeToday,
+    onLeaveToday,
+    pendingLeave,
+    pendingClaims,
+    payroll: normalizePayroll(raw?.payroll),
+    metricStatus: typeof raw?.metricStatus === "object" && raw.metricStatus != null
+      ? {
+          attendance: raw.metricStatus.attendance === "ready" ? "ready" : raw.metricStatus.attendance === "not_configured" ? "not_configured" : undefined,
+          leave: raw.metricStatus.leave === "ready" ? "ready" : raw.metricStatus.leave === "not_configured" ? "not_configured" : undefined,
+          claims: raw.metricStatus.claims === "ready" ? "ready" : raw.metricStatus.claims === "not_configured" ? "not_configured" : undefined,
+          payroll: raw.metricStatus.payroll === "ready" ? "ready" : raw.metricStatus.payroll === "not_configured" ? "not_configured" : undefined,
+        }
+      : undefined,
+  };
+}
+
+async function loadDeprecatedAliasDashboard(): Promise<HrDashboardSummary> {
   const res = await apiFetchJson("/hr/me/dashboard");
   const raw = unwrapApiData<any>(res);
   const totalEmployees = typeof raw?.totalEmployees === "number"
@@ -131,16 +167,16 @@ async function loadLegacyDashboard(): Promise<HrDashboardSummary> {
 
 function normalizePayroll(
   raw: unknown,
-): HrDashboardSummary["payroll"] {
+): HrPayrollStatus | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as { label?: unknown; period?: unknown; status?: unknown };
-  const allowedLabels: HrDashboardSummary["payroll"]["label"][] = [
+  const allowedLabels: HrPayrollStatus["label"][] = [
     "Not Started",
     "Draft",
     "Processing",
     "Completed",
   ];
-  let label: HrDashboardSummary["payroll"]["label"] | null = null;
+  let label: HrPayrollStatus["label"] | null = null;
   const cand = typeof r.label === "string" ? r.label : typeof r.status === "string" ? r.status : "";
   for (const a of allowedLabels) {
     if (cand.toLowerCase() === a.toLowerCase()) {
@@ -192,6 +228,7 @@ function DashboardError({
   onRetry: () => void;
   isRetrying: boolean;
 }) {
+  const showRetry = shouldShowRetryForError(error);
   return (
     <Card>
       <CardContent className="pt-6 pb-6 px-6">
@@ -202,19 +239,21 @@ function DashboardError({
           <div className="flex-1 space-y-3">
             <div>
               <div className="font-semibold text-slate-900 text-base">
-                Unable to load HR Dashboard
+                {getDiscriminatedErrorTitle(error, "HR Dashboard")}
               </div>
               <p className="text-sm text-slate-500 mt-1">
-                We couldn&apos;t load the latest HR information.
+                {getDiscriminatedErrorDetail(error, "HR Dashboard")}
               </p>
               <p className="text-xs text-slate-400 mt-2 break-words">
                 {getErrorMessage(error)}
               </p>
             </div>
             <div className="flex items-center gap-3 flex-wrap">
-              <Button onClick={onRetry} disabled={isRetrying} size="sm">
-                {isRetrying ? "Retrying…" : "Retry"}
-              </Button>
+              {showRetry ? (
+                <Button onClick={onRetry} disabled={isRetrying} size="sm">
+                  {isRetrying ? "Retrying…" : "Retry"}
+                </Button>
+              ) : null}
               <div className="text-xs text-slate-500">
                 Error ID:{" "}
                 <code className="px-2 py-1 bg-slate-100 rounded font-mono">
@@ -299,15 +338,22 @@ function HrDashboardInner() {
   const features = useEffectiveUserFeaturesMap();
 
   const dashboardQuery = useQuery<HrDashboardSummary>({
-    queryKey: ["hr-dashboard-summary-v2"],
+    queryKey: ["hr-dashboard-summary-v3"],
     queryFn: async (): Promise<HrDashboardSummary> => {
       try {
-        return await loadNewDashboard();
+        return await loadCanonicalDashboard();
       } catch (error) {
         if (!isNotFoundApiError(error)) {
           throw error;
         }
-        return await loadLegacyDashboard();
+        try {
+          return await loadDeprecatedAliasDashboard();
+        } catch (error2) {
+          if (!isNotFoundApiError(error2)) {
+            throw error2;
+          }
+          return await loadLegacyDashboard();
+        }
       }
     },
     staleTime: 60_000,

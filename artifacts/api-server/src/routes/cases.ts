@@ -422,9 +422,6 @@ function pickIsoString(row: unknown, ...keys: string[]): string | null {
 }
 
 async function fetchKeyDatesRow(r: DbConn, firmId: number, caseId: number): Promise<Record<string, unknown> | null> {
-  const kdExists = await tableExists(r, "public.case_key_dates");
-  if (!kdExists) return null;
-
   try {
     const [kd] = await r
       .select()
@@ -434,8 +431,25 @@ async function fetchKeyDatesRow(r: DbConn, firmId: number, caseId: number): Prom
     return kd ? (kd as any) : null;
   } catch (err) {
     const code = getPgCode(err);
-    if (code === "42P01" || code === "42501") return null;
-    if (!isUndefinedColumnError(err)) throw err;
+    if (!isUndefinedColumnError(err)) {
+      logger.error({
+        queryName: "case_key_dates.fetch_helper",
+        caseId,
+        firmId,
+        sqlstate: code,
+        dbErr: extractDbErrorInfo(err),
+        err,
+      }, "[cases] fetchKeyDatesRow failed");
+      throw err;
+    }
+    logger.error({
+      queryName: "case_key_dates_column_migration_fallback",
+      caseId,
+      firmId,
+      sqlstate: code,
+      dbErr: extractDbErrorInfo(err),
+      err,
+    }, "[cases] case_key_dates missing column, falling back to SELECT *");
     try {
       const rows = await queryRows(r, sql`
         SELECT *
@@ -446,7 +460,14 @@ async function fetchKeyDatesRow(r: DbConn, firmId: number, caseId: number): Prom
       return rows[0] ?? null;
     } catch (rawErr) {
       const rawCode = getPgCode(rawErr);
-      if (rawCode === "42P01" || rawCode === "42501") return null;
+      logger.error({
+        queryName: "case_key_dates_column_migration_fallback",
+        caseId,
+        firmId,
+        sqlstate: rawCode,
+        dbErr: extractDbErrorInfo(rawErr),
+        err: rawErr,
+      }, "[cases] case_key_dates fallback also failed");
       throw rawErr;
     }
   }
@@ -3030,54 +3051,63 @@ router.get("/cases", requireAuthHandler, requireFirmUserHandler, requirePermissi
   res.setHeader("Cache-Control", "no-store");
   try {
     const r = rdb(req);
-    let hasKeyDates = await tableExists(r, "public.case_key_dates");
-    let hasWorkflowSteps = await tableExists(r, "public.case_workflow_steps");
-    if (hasKeyDates) {
-      try {
-        await r.execute(sql`
-          SELECT
-            ${caseKeyDatesTable.spaDate},
-            ${caseKeyDatesTable.spaStampedDate},
-            ${caseKeyDatesTable.letterOfOfferDate},
-            ${caseKeyDatesTable.loanDocsSignedDate},
-            ${caseKeyDatesTable.completionDate},
-            ${caseKeyDatesTable.completionSlaActivatedAt},
-            ${caseKeyDatesTable.adviceToBankDate}
-          FROM ${caseKeyDatesTable}
-          WHERE ${caseKeyDatesTable.firmId} = ${req.firmId!}
-          LIMIT 1
-        `);
-      } catch (err) {
-        const code = getPgCode(err);
-        if (code === "42P01" || code === "42703" || code === "42501") {
-          hasKeyDates = false;
-        } else {
-          throw err;
-        }
-      }
+    let hasKeyDates = true;
+    let hasWorkflowSteps = true;
+    const queryName = "case_list.probes";
+    try {
+      await r.execute(sql`
+        SELECT
+          ${caseKeyDatesTable.spaDate},
+          ${caseKeyDatesTable.spaStampedDate},
+          ${caseKeyDatesTable.letterOfOfferDate},
+          ${caseKeyDatesTable.loanDocsSignedDate},
+          ${caseKeyDatesTable.completionDate},
+          ${caseKeyDatesTable.completionSlaActivatedAt},
+          ${caseKeyDatesTable.adviceToBankDate}
+        FROM ${caseKeyDatesTable}
+        WHERE ${caseKeyDatesTable.firmId} = ${req.firmId!}
+        LIMIT 1
+      `);
+    } catch (err) {
+      const code = getPgCode(err);
+      logger.error({
+        err,
+        queryName,
+        requestId: res.locals.requestId,
+        firmId: req.firmId,
+        userId: req.userId,
+        sqlstate: code,
+        dbErr: extractDbErrorInfo(err),
+        table: "case_key_dates",
+      }, "[cases] list handler case_key_dates probe failed");
+      throw err;
     }
-    if (hasWorkflowSteps) {
-      try {
-        await r.execute(sql`
-          SELECT
-            ${caseWorkflowStepsTable.stepName},
-            ${caseWorkflowStepsTable.caseId},
-            ${caseWorkflowStepsTable.pathType},
-            ${caseWorkflowStepsTable.status},
-            ${caseWorkflowStepsTable.stepOrder},
-            ${caseWorkflowStepsTable.stepKey},
-            ${caseWorkflowStepsTable.completedAt}
-          FROM ${caseWorkflowStepsTable}
-          LIMIT 1
-        `);
-      } catch (err) {
-        const code = getPgCode(err);
-        if (code === "42P01" || code === "42703" || code === "42501") {
-          hasWorkflowSteps = false;
-        } else {
-          throw err;
-        }
-      }
+    try {
+      await r.execute(sql`
+        SELECT
+          ${caseWorkflowStepsTable.stepName},
+          ${caseWorkflowStepsTable.caseId},
+          ${caseWorkflowStepsTable.pathType},
+          ${caseWorkflowStepsTable.status},
+          ${caseWorkflowStepsTable.stepOrder},
+          ${caseWorkflowStepsTable.stepKey},
+          ${caseWorkflowStepsTable.completedAt}
+        FROM ${caseWorkflowStepsTable}
+        LIMIT 1
+      `);
+    } catch (err) {
+      const code = getPgCode(err);
+      logger.error({
+        err,
+        queryName,
+        requestId: res.locals.requestId,
+        firmId: req.firmId,
+        userId: req.userId,
+        sqlstate: code,
+        dbErr: extractDbErrorInfo(err),
+        table: "case_workflow_steps",
+      }, "[cases] list handler case_workflow_steps probe failed");
+      throw err;
     }
     const params = ListCasesQueryParams.safeParse(req.query);
     const search = params.success ? params.data.search : undefined;
@@ -5317,14 +5347,16 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
     kd = await fetchKeyDatesRow(r, req.firmId!, params.data.caseId);
   } catch (err) {
     const code = getPgCode(err);
-    if (code === "42P01" || code === "42703") {
-      logger.warn({ queryName, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(err) }, "[cases] get key-dates missing schema, returning empty");
-      kd = null;
-    } else {
-      logger.error({ err, queryName, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(err) }, "[cases] get key-dates failed");
-      res.status(500).json({ error: "Internal Server Error" });
-      return;
-    }
+    logger.error({
+      err,
+      queryName,
+      requestId: res.locals.requestId,
+      caseId: params.data.caseId,
+      firmId: req.firmId,
+      sqlstate: code,
+      dbErr: extractDbErrorInfo(err),
+    }, "[cases] get key-dates failed");
+    throw err;
   }
 
   const out: Record<string, unknown> = kd ? {
@@ -5478,9 +5510,7 @@ router.get("/cases/:caseId/progress", requireAuthHandler, requireFirmUserHandler
       }
     })();
 
-  const docsExists = await tableExists(r, "public.case_workflow_documents");
-  const workflowDocsRows = docsExists
-    ? await r
+  const workflowDocsRows = await r
         .select({
           milestoneKey: caseWorkflowDocumentsTable.milestoneKey,
           objectPath: caseWorkflowDocumentsTable.objectPath,
@@ -5493,8 +5523,7 @@ router.get("/cases/:caseId/progress", requireAuthHandler, requireFirmUserHandler
           eq(caseWorkflowDocumentsTable.caseId, caseId),
           sql`${caseWorkflowDocumentsTable.deletedAt} IS NULL`,
         ))
-        .orderBy(desc(caseWorkflowDocumentsTable.updatedAt))
-    : [];
+        .orderBy(desc(caseWorkflowDocumentsTable.updatedAt));
   const workflowDocsByKey = new Map<string, { hasFile: boolean }>();
   for (const d of workflowDocsRows) {
     const normalized = normalizeWorkflowDocumentKeyFromDb(String(d.milestoneKey));
@@ -5556,9 +5585,7 @@ router.get("/cases/:caseId/progress", requireAuthHandler, requireFirmUserHandler
   const purchaseMode = String(caseRow.purchaseMode || "").trim().toLowerCase();
   const titleType = normalizeTitleType(caseRow.titleType);
 
-  const stampingExists = await tableExists(r, "public.case_loan_stamping_items");
-  const stampingRows = stampingExists
-    ? await r
+  const stampingRows = await r
         .select({
           id: caseLoanStampingItemsTable.id,
           itemKey: caseLoanStampingItemsTable.itemKey,
@@ -5575,8 +5602,7 @@ router.get("/cases/:caseId/progress", requireAuthHandler, requireFirmUserHandler
           eq(caseLoanStampingItemsTable.caseId, caseId),
           sql`${caseLoanStampingItemsTable.deletedAt} IS NULL`,
         ))
-        .orderBy(asc(caseLoanStampingItemsTable.sortOrder), asc(caseLoanStampingItemsTable.id))
-    : [];
+        .orderBy(asc(caseLoanStampingItemsTable.sortOrder), asc(caseLoanStampingItemsTable.id));
 
   const fixedKeys: LoanStampingItemKey[] = ["facility_agreement", "deed_of_assignment", "power_of_attorney", "charge_annexure"];
   const fixed: StampingItemInput[] = [];
@@ -6950,11 +6976,6 @@ router.get("/cases/:caseId/workflow-documents", requireAuthHandler, requireFirmU
     res.status(422).json({ error: "Invalid milestoneKey" });
     return;
   }
-  const exists = await tableExists(r, "public.case_workflow_documents");
-  if (!exists) {
-    res.json([]);
-    return;
-  }
   const whereBase = and(
     eq(caseWorkflowDocumentsTable.firmId, req.firmId!),
     eq(caseWorkflowDocumentsTable.caseId, caseId),
@@ -7367,11 +7388,6 @@ router.get("/cases/:caseId/loan-stamping", requireAuthHandler, requireFirmUserHa
   }
   const ok = await enforceCaseAccess(r, req, res, caseId);
   if (!ok) return;
-  const exists = await tableExists(r, "public.case_loan_stamping_items");
-  if (!exists) {
-    res.json([]);
-    return;
-  }
   const rows = await r
     .select({
       id: caseLoanStampingItemsTable.id,
@@ -8037,11 +8053,6 @@ router.get("/cases/:caseId/supp-lo-documents", requireAuthHandler, requireFirmUs
   }
   const ok = await enforceCaseAccess(r, req, res, caseId);
   if (!ok) return;
-  const exists = await tableExists(r, "public.case_loan_supp_documents");
-  if (!exists) {
-    res.json([]);
-    return;
-  }
   const rows = await r
     .select({
       id: caseLoanSuppDocumentsTable.id,
@@ -8717,27 +8728,41 @@ router.get("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandler
   } catch (e) {
     const code = getPgCode(e);
     if (code === "42703") {
-      logger.warn({ queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] case_messages missing channel column, falling back");
+      logger.error({
+        err: e,
+        queryName: "case_messages_channel_migration_fallback",
+        requestId: res.locals.requestId,
+        caseId: params.data.caseId,
+        firmId: req.firmId,
+        sqlstate: code,
+        dbErr: extractDbErrorInfo(e),
+      }, "[cases] case_messages missing channel column, falling back");
       try {
         rows = await fetchWithoutChannel();
       } catch (e2) {
         const code2 = getPgCode(e2);
-        if (code2 === "42P01" || code2 === "42501" || code2 === "42703") {
-          logger.warn({ queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e2) }, "[cases] case_messages table missing or denied, returning empty");
-          rows = [];
-        } else {
-          logger.error({ err: e2, queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e2) }, "[cases] case_messages fallback fetch failed");
-          res.status(500).json({ error: "Internal Server Error" });
-          return;
-        }
+        logger.error({
+          err: e2,
+          queryName: "case_messages_channel_migration_fallback",
+          requestId: res.locals.requestId,
+          caseId: params.data.caseId,
+          firmId: req.firmId,
+          sqlstate: code2,
+          dbErr: extractDbErrorInfo(e2),
+        }, "[cases] case_messages fallback fetch also failed");
+        throw e2;
       }
-    } else if (code === "42P01" || code === "42501") {
-      logger.warn({ queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] case_messages table missing or denied, returning empty");
-      rows = [];
     } else {
-      logger.error({ err: e, queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] case_messages fetch failed");
-      res.status(500).json({ error: "Internal Server Error" });
-      return;
+      logger.error({
+        err: e,
+        queryName,
+        requestId: res.locals.requestId,
+        caseId: params.data.caseId,
+        firmId: req.firmId,
+        sqlstate: code,
+        dbErr: extractDbErrorInfo(e),
+      }, "[cases] case_messages fetch failed");
+      throw e;
     }
   }
 
@@ -8794,8 +8819,29 @@ router.get("/cases/:caseId/messages/unread-count", requireAuthHandler, requireFi
           return Number((row as any)?.c ?? 0);
         } catch (e) {
           const code = getPgCode(e);
-          if (code === "42703" && withChannel) return await countUnreadSince(lastReadAt, false);
-          if (code === "42P01" || code === "42501" || code === "42703") return 0;
+          if (code === "42703" && withChannel) {
+            logger.error({
+              err: e,
+              queryName: "case_messages_channel_migration_fallback",
+              requestId: res.locals.requestId,
+              caseId: params.data.caseId,
+              firmId: req.firmId,
+              sqlstate: code,
+              dbErr: extractDbErrorInfo(e),
+              channel: ch,
+            }, "[cases] countUnreadSince missing channel column, falling back");
+            return await countUnreadSince(lastReadAt, false);
+          }
+          logger.error({
+            err: e,
+            queryName: "case_messages.unread_count.count",
+            requestId: res.locals.requestId,
+            caseId: params.data.caseId,
+            firmId: req.firmId,
+            sqlstate: code,
+            dbErr: extractDbErrorInfo(e),
+            channel: ch,
+          }, "[cases] countUnreadSince failed");
           throw e;
         }
       };
@@ -8814,11 +8860,17 @@ router.get("/cases/:caseId/messages/unread-count", requireAuthHandler, requireFi
         byChannel[ch] = await countUnreadSince(lastReadAt, true);
       } catch (e) {
         const code = getPgCode(e);
-        if (code === "42P01" || code === "42501") {
-          byChannel[ch] = 0;
-          continue;
-        }
         if (code === "42703") {
+          logger.error({
+            err: e,
+            queryName: "case_messages_channel_migration_fallback",
+            requestId: res.locals.requestId,
+            caseId: params.data.caseId,
+            firmId: req.firmId,
+            sqlstate: code,
+            dbErr: extractDbErrorInfo(e),
+            channel: ch,
+          }, "[cases] case_message_read_status missing channel column, falling back");
           try {
             const [readStatusLegacy] = await r
               .select({ lastReadAt: caseMessageReadStatusTable.lastReadAt })
@@ -8832,22 +8884,48 @@ router.get("/cases/:caseId/messages/unread-count", requireAuthHandler, requireFi
             byChannel[ch] = await countUnreadSince(lastReadAt, true);
           } catch (legacyErr) {
             const legacyCode = getPgCode(legacyErr);
-            if (legacyCode === "42P01" || legacyCode === "42501" || legacyCode === "42703") {
-              byChannel[ch] = 0;
-              continue;
-            }
+            logger.error({
+              err: legacyErr,
+              queryName: "case_messages_channel_migration_fallback",
+              requestId: res.locals.requestId,
+              caseId: params.data.caseId,
+              firmId: req.firmId,
+              sqlstate: legacyCode,
+              dbErr: extractDbErrorInfo(legacyErr),
+              channel: ch,
+            }, "[cases] case_message_read_status fallback also failed");
             throw legacyErr;
           }
           continue;
         }
+        logger.error({
+          err: e,
+          queryName: "case_messages.unread_count.read_status",
+          requestId: res.locals.requestId,
+          caseId: params.data.caseId,
+          firmId: req.firmId,
+          sqlstate: code,
+          dbErr: extractDbErrorInfo(e),
+          channel: ch,
+        }, "[cases] unread-count byChannel lookup failed");
         throw e;
       }
     }
 
     res.json({ totalUnreadCount: byChannel.client + byChannel.developer, unreadCountByChannel: byChannel });
   } catch (e) {
-    logger.error({ err: e, queryName, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] get unread-count failed");
-    res.status(500).json({ error: "Internal Server Error" });
+    const code = getPgCode(e);
+    logger.error({
+      err: e,
+      queryName,
+      firmId: req.firmId,
+      userId: req.userId,
+      caseId: params.data.caseId,
+      requestId: res.locals.requestId,
+      sqlstate: code,
+      dbErr: extractDbErrorInfo(e),
+    }, "[cases] get unread-count failed");
+    throw e;
   }
 }));
 
@@ -9031,13 +9109,6 @@ router.get("/cases/:caseId/advances", requireAuthHandler, requireFirmUserHandler
   const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
   if (!ok) return;
 
-  const exists = await tableExists(r, "public.case_ledgers");
-  if (!exists) {
-    logger.warn({ queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId }, "[cases] case_ledgers table missing, returning 0");
-    res.json({ outstanding_advances: 0 });
-    return;
-  }
-
   try {
     const [row] = await r
       .select({
@@ -9052,13 +9123,16 @@ router.get("/cases/:caseId/advances", requireAuthHandler, requireFirmUserHandler
     res.json({ outstanding_advances: Number(row?.outstanding ?? 0) });
   } catch (e) {
     const code = getPgCode(e);
-    if (code === "42P01" || code === "42703") {
-      logger.warn({ queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] case_ledgers schema drift, returning 0");
-      res.json({ outstanding_advances: 0 });
-      return;
-    }
-    logger.error({ err: e, queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] advances fetch failed");
-    res.status(500).json({ error: "Internal Server Error" });
+    logger.error({
+      err: e,
+      queryName: "case_advances_aggregate",
+      requestId: res.locals.requestId,
+      caseId: params.data.caseId,
+      firmId: req.firmId,
+      sqlstate: code,
+      dbErr: extractDbErrorInfo(e),
+    }, "[cases] advances fetch failed");
+    throw e;
   }
 }));
 

@@ -28,7 +28,7 @@ import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
 import { useEffectiveUserFeature } from "@/lib/feature-guards";
-import { getErrorMessage } from "@/lib/error-message";
+import { getErrorMessage, getDiscriminatedErrorTitle, getDiscriminatedErrorDetail, shouldShowRetryForError } from "@/lib/error-message";
 
 export type HimsCaseRow = {
   caseId: number;
@@ -412,25 +412,27 @@ export default function HimsTrackerIndexPage() {
               <div className="flex-1 space-y-3">
                 <div>
                   <div className="font-semibold text-slate-900 text-base">
-                    Unable to load HIMS status
+                    {getDiscriminatedErrorTitle(listQuery.error, "HIMS status")}
                   </div>
                   <p className="text-sm text-slate-500 mt-1">
-                    We couldn&apos;t load the latest tracker information.
+                    {getDiscriminatedErrorDetail(listQuery.error, "HIMS status")}
                   </p>
                   <p className="text-xs text-slate-400 mt-2 break-words">
                     {getErrorMessage(listQuery.error)}
                   </p>
                 </div>
                 <div className="flex items-center gap-3 flex-wrap">
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      void listQuery.refetch();
-                    }}
-                    disabled={listQuery.isFetching}
-                  >
-                    Retry
-                  </Button>
+                  {shouldShowRetryForError(listQuery.error) ? (
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        void listQuery.refetch();
+                      }}
+                      disabled={listQuery.isFetching}
+                    >
+                      Retry
+                    </Button>
+                  ) : null}
                   <div className="text-xs text-slate-500">
                     Error ID:{" "}
                     <code className="px-2 py-1 bg-slate-100 rounded font-mono">

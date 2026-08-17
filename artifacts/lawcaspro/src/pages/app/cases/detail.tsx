@@ -303,7 +303,14 @@ function CaseLedgerTab({ caseId }: { caseId: number }) {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {ledgerQuery.isError ? <div className="text-sm text-red-600">Failed to load ledger.</div> : null}
+          {ledgerQuery.isError ? (
+            <QueryFallback
+              title="Unable to load Ledger"
+              error={ledgerQuery.error}
+              onRetry={() => void ledgerQuery.refetch()}
+              isRetrying={ledgerQuery.isFetching}
+            />
+          ) : null}
           {ledgerQuery.isLoading ? (
             <div className="text-sm text-slate-500 py-6 text-center">Loading...</div>
           ) : displayEntries.length === 0 ? (
@@ -2227,10 +2234,24 @@ export default function CaseDetail() {
     return { fixed, others };
   }, [stampingDraft, fixedStampingKeys.map((x) => x.visible).join("|")]);
 
+  function SectionErrorCard({ title, error, onRetry, isRetrying }: { title: string; error?: unknown; onRetry?: () => void; isRetrying?: boolean }) {
+    return (
+      <Card className="border-red-200 bg-red-50">
+        <CardContent className="pt-6">
+          <QueryFallback
+            title={`Unable to load ${title}`}
+            error={error}
+            onRetry={onRetry}
+            isRetrying={isRetrying}
+          />
+        </CardContent>
+      </Card>
+    );
+  }
+
   if (!caseId) return <div className="py-10 text-sm text-slate-500">Case not found</div>;
-  if (isLoadingCase || isLoadingWorkflow) return <div className="py-10 text-sm text-slate-500">Loading case details...</div>;
+  if (isLoadingCase) return <div className="py-10 text-sm text-slate-500">Loading case details...</div>;
   if (isCaseError) return <div className="py-10"><QueryFallback title="Case unavailable" error={caseError} onRetry={() => refetchCase()} isRetrying={isFetchingCase} /></div>;
-  if (isWorkflowError) return <div className="py-10"><QueryFallback title="Workflow unavailable" error={workflowError} onRetry={() => refetchWorkflow()} isRetrying={isFetchingWorkflow} /></div>;
   if (!caseInfo) return <div className="py-10 text-sm text-slate-500">Case not found</div>;
 
   const handleCompleteStep = (stepId: number) => {
@@ -2925,6 +2946,16 @@ export default function CaseDetail() {
                 ⚠️ This case has <span className="font-semibold">{formatRMAmount(outstandingAdvances)}</span> in outstanding advances. Please issue an Invoice / Collect payment.
               </div>
             ) : null}
+            {advancesQuery.isError ? (
+              <div className="mt-3">
+                <SectionErrorCard
+                  title="Advances Summary"
+                  error={advancesQuery.error}
+                  onRetry={() => void advancesQuery.refetch()}
+                  isRetrying={advancesQuery.isFetching}
+                />
+              </div>
+            ) : null}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -3501,7 +3532,7 @@ export default function CaseDetail() {
             </CardHeader>
             <CardContent>
               {keyDatesQuery.isError ? (
-                <QueryFallback title="Key dates unavailable" error={keyDatesQuery.error} onRetry={() => keyDatesQuery.refetch()} isRetrying={keyDatesQuery.isFetching} />
+                <QueryFallback title="Unable to load Key Dates" error={keyDatesQuery.error} onRetry={() => void keyDatesQuery.refetch()} isRetrying={keyDatesQuery.isFetching} />
               ) : (
                 <Accordion type="multiple" defaultValue={["spa", "loan", "titleWithConsent", "title"]} className="w-full">
                   <AccordionItem value="spa">
@@ -3626,7 +3657,7 @@ export default function CaseDetail() {
                           </Button>
                         </div>
                         {suppLoDocsQuery.isError ? (
-                          <QueryFallback title="Supplementary loan documents unavailable" error={suppLoDocsQuery.error} onRetry={() => suppLoDocsQuery.refetch()} isRetrying={suppLoDocsQuery.isFetching} />
+                          <QueryFallback title="Unable to load Supplementary LO Documents" error={suppLoDocsQuery.error} onRetry={() => void suppLoDocsQuery.refetch()} isRetrying={suppLoDocsQuery.isFetching} />
                         ) : (
                           <div className="space-y-2">
                             {suppLoDocsDraft.length === 0 ? (
@@ -3925,7 +3956,7 @@ export default function CaseDetail() {
                         </CardHeader>
                         <CardContent>
                           {loanStampingQuery.isError ? (
-                            <QueryFallback title="Stamping unavailable" error={loanStampingQuery.error} onRetry={() => loanStampingQuery.refetch()} isRetrying={loanStampingQuery.isFetching} />
+                            <QueryFallback title="Unable to load Loan Stamping" error={loanStampingQuery.error} onRetry={() => void loanStampingQuery.refetch()} isRetrying={loanStampingQuery.isFetching} />
                           ) : (
                             <div className="overflow-x-auto">
                               <table className="w-full min-w-[980px] text-sm">
@@ -4161,101 +4192,51 @@ export default function CaseDetail() {
         </TabsContent>
 
         <TabsContent value="workflow" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Workflow Attachments</CardTitle>
-            </CardHeader>
-            <CardContent className="min-w-0">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 min-w-0">
-                {visibleWorkflowAttachmentItems.map((it) => (
-                  <WorkflowFileCard key={it.docKey} label={it.label} docKey={it.docKey} dateKey={it.dateKey} />
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle>Conveyancing Workflow</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-8">
-                {/* Common Steps */}
-                <div>
-                  <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-                    <span className="w-6 h-6 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs">1</span>
-                    Initial SPA Stage
-                  </h3>
-                  <div className="space-y-3 pl-3 border-l-2 border-slate-200 ml-3">
-                    {commonSteps.map(step => (
-                      <div key={step.id} className="relative pl-6">
-                        <div className={`absolute -left-[23px] top-1 w-5 h-5 rounded-full border-2 bg-white flex items-center justify-center ${
-                          step.status === 'completed' ? 'border-amber-500' : 'border-slate-300'
-                        }`}>
-                          {step.status === 'completed' && <CheckCircle2 className="w-3 h-3 text-amber-500" />}
-                        </div>
-                        
-                        <div className={`p-4 rounded-lg border ${
-                          step.status === 'completed' ? 'bg-amber-50/30 border-amber-100' : 'bg-white border-slate-200 shadow-sm'
-                        }`}>
-                          <div className="flex justify-between items-start mb-2">
-                            <h4 className="font-semibold text-slate-900">{step.stepName}</h4>
-                            <span className="text-xs text-slate-500">
-                              {step.status === "completed"
-                                ? `Done by ${step.completedByName}`
-                                : (Array.isArray(progressQuery.data?.workflowSteps)
-                                  ? (progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus
-                                    ? String(progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus).replace(/_/g, " ")
-                                    : "Pending")
-                                  : "Pending")}
-                            </span>
-                          </div>
-                          
-                          {step.status === 'completed' && step.notes && (
-                            <p className="text-sm text-slate-600 mt-2 italic border-l-2 border-amber-200 pl-2">"{step.notes}"</p>
-                          )}
-
-                          {step.status !== 'completed' && activeStepId === step.id && (
-                            <div className="mt-4 space-y-3">
-                              <Textarea 
-                                placeholder="Add optional notes for this step..." 
-                                value={stepNote}
-                                onChange={e => setStepNote(e.target.value)}
-                                className="text-sm"
-                              />
-                              <div className="flex gap-2">
-                                <Button size="sm" onClick={() => handleCompleteStep(step.id)} disabled={updateStepMutation.isPending}>
-                                  Confirm Completion
-                                </Button>
-                                <Button size="sm" variant="outline" onClick={() => setActiveStepId(null)}>Cancel</Button>
-                              </div>
-                            </div>
-                          )}
-
-                          {step.status !== "completed"
-                            && activeStepId !== step.id
-                            && !(Array.isArray(progressQuery.data?.workflowSteps) && progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus)
-                            && (
-                              <Button size="sm" variant="secondary" className="mt-2 text-xs" onClick={() => setActiveStepId(step.id)}>
-                                Mark Complete
-                              </Button>
-                            )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+          {workflowDocsQuery.isError ? (
+            <SectionErrorCard
+              title="Workflow Documents"
+              error={workflowDocsQuery.error}
+              onRetry={() => void workflowDocsQuery.refetch()}
+              isRetrying={workflowDocsQuery.isFetching}
+            />
+          ) : (
+            <Card>
+              <CardHeader>
+                <CardTitle>Workflow Attachments</CardTitle>
+              </CardHeader>
+              <CardContent className="min-w-0">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 min-w-0">
+                  {visibleWorkflowAttachmentItems.map((it) => (
+                    <WorkflowFileCard key={it.docKey} label={it.label} docKey={it.docKey} dateKey={it.dateKey} />
+                  ))}
                 </div>
-
-                {/* Loan Steps */}
-                {loanSteps.length > 0 && (
+              </CardContent>
+            </Card>
+          )}
+          {isWorkflowError ? (
+            <SectionErrorCard
+              title="Workflow Steps"
+              error={workflowError}
+              onRetry={() => void refetchWorkflow()}
+              isRetrying={isFetchingWorkflow}
+            />
+          ) : (
+            <Card>
+              <CardHeader>
+                <CardTitle>Conveyancing Workflow</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-8">
+                  {/* Common Steps */}
                   <div>
                     <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-                      <span className="w-6 h-6 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs">2</span>
-                      Loan Stage
+                      <span className="w-6 h-6 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs">1</span>
+                      Initial SPA Stage
                     </h3>
                     <div className="space-y-3 pl-3 border-l-2 border-slate-200 ml-3">
-                      {loanSteps.map(step => (
+                      {commonSteps.map(step => (
                         <div key={step.id} className="relative pl-6">
-                           <div className={`absolute -left-[23px] top-1 w-5 h-5 rounded-full border-2 bg-white flex items-center justify-center ${
+                          <div className={`absolute -left-[23px] top-1 w-5 h-5 rounded-full border-2 bg-white flex items-center justify-center ${
                             step.status === 'completed' ? 'border-amber-500' : 'border-slate-300'
                           }`}>
                             {step.status === 'completed' && <CheckCircle2 className="w-3 h-3 text-amber-500" />}
@@ -4268,7 +4249,7 @@ export default function CaseDetail() {
                               <h4 className="font-semibold text-slate-900">{step.stepName}</h4>
                               <span className="text-xs text-slate-500">
                                 {step.status === "completed"
-                                  ? "Completed"
+                                  ? `Done by ${step.completedByName}`
                                   : (Array.isArray(progressQuery.data?.workflowSteps)
                                     ? (progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus
                                       ? String(progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus).replace(/_/g, " ")
@@ -4277,6 +4258,10 @@ export default function CaseDetail() {
                               </span>
                             </div>
                             
+                            {step.status === 'completed' && step.notes && (
+                              <p className="text-sm text-slate-600 mt-2 italic border-l-2 border-amber-200 pl-2">"{step.notes}"</p>
+                            )}
+
                             {step.status !== 'completed' && activeStepId === step.id && (
                               <div className="mt-4 space-y-3">
                                 <Textarea 
@@ -4307,10 +4292,74 @@ export default function CaseDetail() {
                       ))}
                     </div>
                   </div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
+
+                  {/* Loan Steps */}
+                  {loanSteps.length > 0 && (
+                    <div>
+                      <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+                        <span className="w-6 h-6 rounded-full bg-slate-900 text-white flex items-center justify-center text-xs">2</span>
+                        Loan Stage
+                      </h3>
+                      <div className="space-y-3 pl-3 border-l-2 border-slate-200 ml-3">
+                        {loanSteps.map(step => (
+                          <div key={step.id} className="relative pl-6">
+                             <div className={`absolute -left-[23px] top-1 w-5 h-5 rounded-full border-2 bg-white flex items-center justify-center ${
+                              step.status === 'completed' ? 'border-amber-500' : 'border-slate-300'
+                            }`}>
+                              {step.status === 'completed' && <CheckCircle2 className="w-3 h-3 text-amber-500" />}
+                            </div>
+
+                            <div className={`p-4 rounded-lg border ${
+                              step.status === 'completed' ? 'bg-amber-50/30 border-amber-100' : 'bg-white border-slate-200 shadow-sm'
+                            }`}>
+                              <div className="flex justify-between items-start mb-2">
+                                <h4 className="font-semibold text-slate-900">{step.stepName}</h4>
+                                <span className="text-xs text-slate-500">
+                                  {step.status === "completed"
+                                    ? "Completed"
+                                    : (Array.isArray(progressQuery.data?.workflowSteps)
+                                      ? (progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus
+                                        ? String(progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus).replace(/_/g, " ")
+                                        : "Pending")
+                                      : "Pending")}
+                                </span>
+                              </div>
+
+                              {step.status !== 'completed' && activeStepId === step.id && (
+                                <div className="mt-4 space-y-3">
+                                  <Textarea
+                                    placeholder="Add optional notes for this step..."
+                                    value={stepNote}
+                                    onChange={e => setStepNote(e.target.value)}
+                                    className="text-sm"
+                                  />
+                                  <div className="flex gap-2">
+                                    <Button size="sm" onClick={() => handleCompleteStep(step.id)} disabled={updateStepMutation.isPending}>
+                                      Confirm Completion
+                                    </Button>
+                                    <Button size="sm" variant="outline" onClick={() => setActiveStepId(null)}>Cancel</Button>
+                                  </div>
+                                </div>
+                              )}
+
+                              {step.status !== "completed"
+                                && activeStepId !== step.id
+                                && !(Array.isArray(progressQuery.data?.workflowSteps) && progressQuery.data.workflowSteps.find((x: any) => x?.stepKey === step.stepKey)?.derivedStatus)
+                                && (
+                                  <Button size="sm" variant="secondary" className="mt-2 text-xs" onClick={() => setActiveStepId(step.id)}>
+                                    Mark Complete
+                                  </Button>
+                                )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          )}
         </TabsContent>
 
         <TabsContent value="documents">
@@ -4366,10 +4415,16 @@ export default function CaseDetail() {
                 {caseMessagesQuery.isLoading && (
                   <div className="text-sm text-slate-500">Loading messages...</div>
                 )}
-                {caseMessagesQuery.isError && (
-                  <div className="text-sm text-red-600">Failed to load messages.</div>
-                )}
-                {!caseMessagesQuery.isLoading && !caseMessagesQuery.isError && (
+                {caseMessagesQuery.isError ? (
+                  <div className="pt-2">
+                    <SectionErrorCard
+                      title="Messages"
+                      error={caseMessagesQuery.error}
+                      onRetry={() => void caseMessagesQuery.refetch()}
+                      isRetrying={caseMessagesQuery.isFetching}
+                    />
+                  </div>
+                ) : !caseMessagesQuery.isLoading ? (
                   <div className="space-y-2">
                     {(Array.isArray(caseMessagesQuery.data?.data) ? caseMessagesQuery.data!.data : []).map((m) => {
                       const isExternal = m.senderType !== "staff";
@@ -4393,7 +4448,7 @@ export default function CaseDetail() {
                       </div>
                     )}
                   </div>
-                )}
+                ) : null}
 
                 <div className="pt-2 border-t border-slate-200 space-y-2">
                   <Textarea

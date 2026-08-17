@@ -7,6 +7,10 @@ export type ApiErrorLike = {
   stage?: unknown;
   retryable?: unknown;
   suggestion?: unknown;
+  source?: unknown;
+  feature?: unknown;
+  error?: unknown;
+  details?: unknown;
 };
 
 type ErrorLike = { name?: unknown; message?: unknown; code?: unknown; cause?: unknown };
@@ -27,6 +31,131 @@ function asApiFailure(data: unknown): ApiFailureShape | null {
   if (typeof d.error.retryable !== "boolean") return null;
   if (typeof d.meta.request_id !== "string") return null;
   return d as ApiFailureShape;
+}
+
+function getErrorDataField(err: unknown, field: string): unknown {
+  if (!err || typeof err !== "object") return undefined;
+  const rec = err as Record<string, unknown>;
+  const data = rec.data;
+  if (data && typeof data === "object") {
+    const d = data as Record<string, unknown>;
+    if (field in d) return d[field];
+  }
+  if (field in rec) return rec[field];
+  const errorField = rec.error;
+  if (errorField && typeof errorField === "object") {
+    const ef = errorField as Record<string, unknown>;
+    if (field in ef) return ef[field];
+  }
+  return undefined;
+}
+
+export function getErrorDenialCode(err: unknown): string | null {
+  const code = getErrorDataField(err, "code");
+  return typeof code === "string" && code.trim() ? code.trim() : null;
+}
+
+export function getErrorDenialSource(err: unknown): string | null {
+  const source = getErrorDataField(err, "source");
+  return typeof source === "string" && source.trim() ? source.trim() : null;
+}
+
+const FIRM_ENTITLEMENT_CODES = new Set(["FIRM_ENTITLEMENT_OFF", "FEATURE_DISABLED", "PARENT_OFF"]);
+const FIRM_ENTITLEMENT_SOURCES = new Set(["firm_entitlement_denied", "denial"]);
+
+const USER_ACCESS_DENIED_CODES = new Set([
+  "USER_OVERRIDE_OFF",
+  "ROLE_PERMISSION_DENIED",
+  "USER_FEATURE_ACCESS_REQUIRED",
+  "ROLE_DENIED",
+  "FEATURE_OFF",
+  "UNKNOWN_FEATURE",
+]);
+const USER_ACCESS_DENIED_SOURCES = new Set([
+  "user_row_false",
+  "role_permission_denied",
+  "user_feature_middleware",
+  "unknown_feature_deny",
+]);
+
+export function isFirmEntitlementDenied(err: unknown): boolean {
+  const code = getErrorDenialCode(err);
+  const source = getErrorDenialSource(err);
+  const status = getHttpStatus(err);
+  if (code && FIRM_ENTITLEMENT_CODES.has(code)) return true;
+  if (status === 403 && source && FIRM_ENTITLEMENT_SOURCES.has(source)) return true;
+  return false;
+}
+
+export function isUserAccessDenied(err: unknown): boolean {
+  if (isFirmEntitlementDenied(err)) return false;
+  const code = getErrorDenialCode(err);
+  const source = getErrorDenialSource(err);
+  const status = getHttpStatus(err);
+  if (code && USER_ACCESS_DENIED_CODES.has(code)) return true;
+  if (status === 403 && source && USER_ACCESS_DENIED_SOURCES.has(source)) return true;
+  if (status === 403 && !code && !source) return true;
+  return false;
+}
+
+export function isGenericNetworkError(err: unknown): boolean {
+  return (
+    isRequestTimeoutError(err) ||
+    isNetworkUnavailableError(err) ||
+    isAbortError(err) ||
+    (getHttpStatus(err) === null && !isApiErrorLike(err))
+  );
+}
+
+export type ErrorDiscrimination =
+  | { kind: "firm_entitlement_off" }
+  | { kind: "user_access_denied" }
+  | { kind: "network_error" }
+  | { kind: "other" };
+
+export function discriminateError(err: unknown): ErrorDiscrimination {
+  if (isFirmEntitlementDenied(err)) return { kind: "firm_entitlement_off" };
+  if (isUserAccessDenied(err)) return { kind: "user_access_denied" };
+  if (isGenericNetworkError(err)) return { kind: "network_error" };
+  return { kind: "other" };
+}
+
+export function getDiscriminatedErrorTitle(err: unknown, resourceLabel: string): string {
+  const d = discriminateError(err);
+  switch (d.kind) {
+    case "firm_entitlement_off":
+      return "This feature is not enabled for your firm.";
+    case "user_access_denied":
+      return "You do not have access to this feature.";
+    case "network_error":
+      return `Unable to load ${resourceLabel}.`;
+    default:
+      return `Unable to load ${resourceLabel}.`;
+  }
+}
+
+export function getDiscriminatedErrorDetail(err: unknown, resourceLabel: string): string {
+  const d = discriminateError(err);
+  switch (d.kind) {
+    case "firm_entitlement_off":
+      return "Contact your firm Partner or administrator to enable this feature for your subscription.";
+    case "user_access_denied":
+      return "Contact your firm Partner or administrator to request access to this feature.";
+    case "network_error":
+      return `A network error prevented ${resourceLabel.toLowerCase()} from loading. Please check your connection and retry.`;
+    default: {
+      const specific = getErrorMessage(err);
+      if (specific && specific !== "Something went wrong") return specific;
+      return `We couldn't load the latest ${resourceLabel.toLowerCase()} information.`;
+    }
+  }
+}
+
+export function shouldShowRetryForError(err: unknown): boolean {
+  const d = discriminateError(err);
+  if (d.kind === "firm_entitlement_off") return false;
+  if (d.kind === "user_access_denied") return false;
+  return true;
 }
 
 export function isApiErrorLike(err: unknown): err is ApiErrorLike {
@@ -87,7 +216,15 @@ export function getErrorMessage(err: unknown): string {
   ]);
   const status = getHttpStatus(err);
   if (status === 401) return "Session expired. Please sign in again.";
-  if (status === 403) return "You do not have permission to perform this action.";
+  if (status === 403) {
+    if (isFirmEntitlementDenied(err)) {
+      return "This feature is not enabled for your firm. Contact your Partner or administrator to enable it.";
+    }
+    if (isUserAccessDenied(err)) {
+      return "You do not have access to this feature. Contact your Partner or administrator to request access.";
+    }
+    return "You do not have permission to perform this action.";
+  }
   if (status === 404) {
     if (apiMsg && (allowDetailedCodes.has(apiCode) || apiMsg.includes("找不到"))) return apiMsg;
     return "File or template not found.";
@@ -137,7 +274,11 @@ export function getFriendlyErrorTitle(err: unknown): string {
   }
   const status = getHttpStatus(err);
   if (status === 401) return "Not authenticated";
-  if (status === 403) return "Forbidden";
+  if (status === 403) {
+    if (isFirmEntitlementDenied(err)) return "Feature not enabled for firm";
+    if (isUserAccessDenied(err)) return "Feature access denied";
+    return "Forbidden";
+  }
   if (status === 404) return "Not found";
   if (status === 400 || status === 422) return "Invalid request";
   return "Request failed";

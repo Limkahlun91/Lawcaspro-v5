@@ -262,14 +262,9 @@ function resolveRoleName(req: AuthRequest): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// §10: Canonical dashboard route (ME dashboard — self or admin scope)
+// Shared handler for admin dashboard routes (summary response)
 // ---------------------------------------------------------------------------
-router.get("/hr/me/dashboard",
-  requireAuth, requireFirmUser,
-  requireHRModuleEnabled,
-  requireUserFeatureAccess("hr.self_service"),
-  requirePermission("hr_self_service", "read"),
-  async (req: AuthRequest, res: Response): Promise<void> => {
+async function handleDashboardSummary(req: AuthRequest, res: Response): Promise<void> {
   try {
     const firmId = req.firmId!;
     const userId = req.userId!;
@@ -277,14 +272,12 @@ router.get("/hr/me/dashboard",
     const roleName = resolveRoleName(req);
     const isPartner = isPartnerRoleName(roleName) || Boolean((req as any).isFirmManagement);
     const summary = await getHrDashboardSummary({ firmId, userId, roleName, roleId, tx: req.rlsDb });
-    // Self service: if user is NOT Partner/admin, still return canonical 6 fields.
-    // UI will render Quick Actions filtered by feature access.
     res.json({
       ok: true,
       data: summary,
       meta: {
         request_id: (req as any).id ?? `hr-dash-${Number(process.hrtime.bigint() & 0xffffffffn).toString(16)}`,
-        scope: isPartner ? "firm" : "self",
+        scope: isPartner ? "firm" : "admin",
         timestamp: new Date().toISOString(),
       },
     });
@@ -297,8 +290,7 @@ router.get("/hr/me/dashboard",
       )));
       return;
     }
-    req.log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId, stage: "hr_me_dashboard" }, "hr.me_dashboard_failed");
-    // §14 safe wrap: never expose SQL / params / NRIC
+    req.log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId, stage: "hr_dashboard_summary" }, "hr.dashboard_summary_failed");
     res.status(500).json({
       ok: false,
       error: {
@@ -310,10 +302,48 @@ router.get("/hr/me/dashboard",
     });
     return;
   }
-});
+}
 
 // ---------------------------------------------------------------------------
-// §10 Compatibility: Legacy /hr/dashboard/stats. Calls SAME SERVICE as me/dashboard
+// §11 Canonical ADMIN / MANAGEMENT route
+// Guards: requireAuth → requireFirmUser → requireHRModuleEnabled (module.hr)
+//         → requireUserFeatureAccess("hr.dashboard") (firm: hr.dashboard + user access, Partner auto-allowed via STEP2)
+//         → requirePermission("hr_dashboard", "read") (RBAC layer if present)
+// ---------------------------------------------------------------------------
+router.get("/hr/dashboard/summary",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.dashboard"),
+  requirePermission("hr_dashboard", "read"),
+  handleDashboardSummary,
+);
+
+// ---------------------------------------------------------------------------
+// §12 Backward Compatibility: DEPRECATED COMPATIBILITY alias for /hr/me/dashboard
+// Uses SAME ADMIN guards as /hr/dashboard/summary (NOT self-service guards)
+// Logs deprecation warning then proxies to same handler
+// ---------------------------------------------------------------------------
+router.get("/hr/me/dashboard",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.dashboard"),
+  requirePermission("hr_dashboard", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+    const requestId = (req as any).id ?? `hr-deprecated-${Number(process.hrtime.bigint() & 0xffffffffn).toString(16)}`;
+    req.log?.warn?.({
+      route: req.originalUrl,
+      firmId: req.firmId,
+      userId: req.userId,
+      requestId,
+      routeDeprecation: "hr_me_dashboard_alias",
+      recommended: "/hr/dashboard/summary",
+    }, "DEPRECATED: /hr/me/dashboard called — use /hr/dashboard/summary instead");
+    await handleDashboardSummary(req, res);
+  },
+);
+
+// ---------------------------------------------------------------------------
+// §10 Compatibility: Legacy /hr/dashboard/stats. Calls SAME SERVICE as summary
 // to eliminate conflicting business definitions
 // ---------------------------------------------------------------------------
 router.get("/hr/dashboard/stats", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.dashboard"), requirePermission("hr_dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {

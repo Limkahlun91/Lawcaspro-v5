@@ -58,7 +58,7 @@ const HimsCreateConnectionSchema = z.object({
   mode: z.enum(["tracker_only", "full_write"]).default("tracker_only"),
 });
 
-router.get("/hims/cases", requireAuth, requireFirmUser, requireUserFeatureAccess("hims.tracker"), requirePermission("cases", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hims/cases", requireAuth, requireFirmUser, requireUserFeatureAccess("hims.tracker"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const firmId = req.firmId!;
@@ -318,9 +318,11 @@ router.get("/hims/cases", requireAuth, requireFirmUser, requireUserFeatureAccess
     }
 
     res.json({
+      data: items,
       items,
       total: items.length,
       configurationStatus,
+      errorMessage: null,
       summary: {
         trackedCases,
         needsAttention,
@@ -330,7 +332,12 @@ router.get("/hims/cases", requireAuth, requireFirmUser, requireUserFeatureAccess
     });
   } catch (err: any) {
     if (err?.code === "FEATURE_DISABLED") {
-      res.status(403).json({ code: err.code, error: err.message ?? "Feature disabled", details: err.details ?? null });
+      res.status(403).json({
+        code: "FIRM_ENTITLEMENT_OFF",
+        source: "firm_entitlement_denied",
+        error: err.message ?? "Feature disabled",
+        details: err.details ?? null,
+      });
       return;
     }
     const status4xx = err?.status && err.status >= 400 && err.status < 500;
@@ -406,7 +413,12 @@ router.get("/hims/connections", requireAuth, requireFirmUser, requireUserFeature
     res.json({ connections: sanitized });
   } catch (err: any) {
     if (err?.code === "FEATURE_DISABLED") {
-      res.status(403).json({ code: err.code, error: err.message ?? "Feature disabled", details: err.details ?? null });
+      res.status(403).json({
+        code: "FIRM_ENTITLEMENT_OFF",
+        source: "firm_entitlement_denied",
+        error: err.message ?? "Feature disabled",
+        details: err.details ?? null,
+      });
       return;
     }
     req.log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "hims.get_connections_failed");
@@ -465,7 +477,16 @@ router.post("/hims/connections", requireAuth, requireFirmUser, requireUserFeatur
       credential: publicCredentialStatus(envelope as any),
     });
   } catch (err: any) {
-    if (err?.code === "FEATURE_DISABLED" || err?.code === "HIMS_MODE_RESTRICTED_TO_TRACKER_ONLY" || err?.code === "SECRET_ENCRYPTION_NOT_CONFIGURED") {
+    if (err?.code === "FEATURE_DISABLED") {
+      res.status(err.status ?? 403).json({
+        code: "FIRM_ENTITLEMENT_OFF",
+        source: "firm_entitlement_denied",
+        error: err.message ?? "Denied",
+        details: err.details ?? null,
+      });
+      return;
+    }
+    if (err?.code === "HIMS_MODE_RESTRICTED_TO_TRACKER_ONLY" || err?.code === "SECRET_ENCRYPTION_NOT_CONFIGURED") {
       res.status(err.status ?? 403).json({ code: err.code, error: err.message ?? "Denied", details: err.details ?? null });
       return;
     }
@@ -512,7 +533,16 @@ router.patch("/hims/connections/:id", requireAuth, requireFirmUser, requireUserF
     const result = await patchHimsConnection(patchInput, { tx: req.rlsDb });
     res.json({ result, credentialRotated: updatedSecrets, credential: { hasCredential: true } });
   } catch (err: any) {
-    if (err?.code === "FEATURE_DISABLED" || err?.code === "SECRET_ENCRYPTION_NOT_CONFIGURED") {
+    if (err?.code === "FEATURE_DISABLED") {
+      res.status(err.status ?? 403).json({
+        code: "FIRM_ENTITLEMENT_OFF",
+        source: "firm_entitlement_denied",
+        error: err.message ?? "Denied",
+        details: err.details ?? null,
+      });
+      return;
+    }
+    if (err?.code === "SECRET_ENCRYPTION_NOT_CONFIGURED") {
       res.status(err.status ?? 403).json({ code: err.code, error: err.message ?? "Denied", details: err.details ?? null });
       return;
     }
@@ -521,7 +551,7 @@ router.patch("/hims/connections/:id", requireAuth, requireFirmUser, requireUserF
   }
 });
 
-router.get("/hims/cases/:caseId/status", requireAuth, requireFirmUser, requireUserFeatureAccess("hims.tracker"), requirePermission("module.hims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hims/cases/:caseId/status", requireAuth, requireFirmUser, requireUserFeatureAccess("hims.tracker"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const firmId = req.firmId!;
@@ -544,7 +574,12 @@ router.get("/hims/cases/:caseId/status", requireAuth, requireFirmUser, requireUs
     res.json(status);
   } catch (err: any) {
     if (err?.code === "FEATURE_DISABLED") {
-      res.status(403).json({ code: err.code, error: err.message ?? "Feature disabled", details: err.details ?? null });
+      res.status(403).json({
+        code: "FIRM_ENTITLEMENT_OFF",
+        source: "firm_entitlement_denied",
+        error: err.message ?? "Feature disabled",
+        details: err.details ?? null,
+      });
       return;
     }
     req.log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "hims.get_case_status_failed");
@@ -585,7 +620,12 @@ router.post("/hims/cases/:caseId/check", requireAuth, requireFirmUser, requireUs
     res.status(202).json(result);
   } catch (err: any) {
     if (err?.code === "FEATURE_DISABLED") {
-      res.status(403).json({ code: err.code, error: err.message ?? "Feature disabled", details: err.details ?? null });
+      res.status(403).json({
+        code: "FIRM_ENTITLEMENT_OFF",
+        source: "firm_entitlement_denied",
+        error: err.message ?? "Feature disabled",
+        details: err.details ?? null,
+      });
       return;
     }
     req.log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "hims.check_case_failed");
@@ -616,7 +656,12 @@ router.get("/hims/cases/:caseId/comparisons", requireAuth, requireFirmUser, requ
     res.json(comparisons);
   } catch (err: any) {
     if (err?.code === "FEATURE_DISABLED") {
-      res.status(403).json({ code: err.code, error: err.message ?? "Feature disabled", details: err.details ?? null });
+      res.status(403).json({
+        code: "FIRM_ENTITLEMENT_OFF",
+        source: "firm_entitlement_denied",
+        error: err.message ?? "Feature disabled",
+        details: err.details ?? null,
+      });
       return;
     }
     req.log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "hims.get_case_comparisons_failed");
@@ -660,7 +705,12 @@ router.post("/hims/cases/:caseId/compare", requireAuth, requireFirmUser, require
     res.status(202).json(result);
   } catch (err: any) {
     if (err?.code === "FEATURE_DISABLED") {
-      res.status(403).json({ code: err.code, error: err.message ?? "Feature disabled", details: err.details ?? null });
+      res.status(403).json({
+        code: "FIRM_ENTITLEMENT_OFF",
+        source: "firm_entitlement_denied",
+        error: err.message ?? "Feature disabled",
+        details: err.details ?? null,
+      });
       return;
     }
     req.log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "hims.compare_case_failed");

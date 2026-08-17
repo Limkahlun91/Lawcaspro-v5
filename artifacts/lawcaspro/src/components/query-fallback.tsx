@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Spinner } from "@/components/ui/spinner";
-import { getErrorMessage, getFriendlyErrorTitle } from "@/lib/error-message";
+import { getErrorMessage, getDiscriminatedErrorTitle, getDiscriminatedErrorDetail, shouldShowRetryForError } from "@/lib/error-message";
 import { CloudOff } from "lucide-react";
 
 export function QueryFallback({
@@ -21,8 +21,14 @@ export function QueryFallback({
   if (children) {
     return <>{children}</>;
   }
-  const t = title ?? getFriendlyErrorTitle(error);
-  const d = error ? getErrorMessage(error) : "Unable to load data";
+  const resourceLabel = title ?? "data";
+  const t = error
+    ? getDiscriminatedErrorTitle(error, resourceLabel)
+    : title ?? "Unable to load";
+  const d = error
+    ? getDiscriminatedErrorDetail(error, resourceLabel)
+    : "Unable to load data";
+  const showRetry = error ? shouldShowRetryForError(error) : Boolean(onRetry);
 
   return (
     <Empty>
@@ -33,7 +39,7 @@ export function QueryFallback({
         <EmptyTitle>{t}</EmptyTitle>
         <EmptyDescription>{d}</EmptyDescription>
       </EmptyHeader>
-      {onRetry && (
+      {showRetry && onRetry && (
         <EmptyContent>
           <Button onClick={onRetry} disabled={isRetrying}>
             {isRetrying ? (
