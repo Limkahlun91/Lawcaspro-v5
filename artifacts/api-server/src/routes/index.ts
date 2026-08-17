@@ -68,6 +68,7 @@ import hrSettingsRouter from "./hr-settings.js";
 import hrReportsRouter from "./hr-reports.js";
 import hrSelfServiceRouter from "./hr-self-service.js";
 import hrIntegrationEventsRouter from "./hr-integration-events.js";
+import hrDashboardRouter from "./hr-dashboard.js";
 import documentIntelligenceRouter from "./document-intelligence.js";
 import templateMigrationsRouter from "./template-migrations.js";
 import bankAdaptersRouter from "./bank-adapters.js";
@@ -136,6 +137,7 @@ routerInternal.use(projectStatusReportRouter);
 routerInternal.use(supportSessionsRouter);
 
 routerInternal.use(requireHRModuleEnabled);
+routerInternal.use(hrDashboardRouter);
 routerInternal.use(hrEmployeesRouter);
 routerInternal.use(hrDepartmentsRouter);
 routerInternal.use(hrPositionsRouter);

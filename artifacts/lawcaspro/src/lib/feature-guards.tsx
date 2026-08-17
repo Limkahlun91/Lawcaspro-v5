@@ -45,7 +45,8 @@ export type UserEffectiveFeatureBundle = {
   explicitOverrides: Array<{ featureKey: string; isEnabled: boolean }>;
 };
 
-const USER_EFFECTIVE_QUERY_KEY = ["firm", "user", "effective-features"];
+export const EFFECTIVE_FEATURES_QUERY_KEY = ["firm", "user", "effective-features"];
+const USER_EFFECTIVE_QUERY_KEY = EFFECTIVE_FEATURES_QUERY_KEY;
 
 export function fetchUserEffectiveFeatures(): Promise<UserEffectiveFeatureBundle> {
   return apiFetchJson<any>("/users/_self/effective-features").then(
@@ -62,8 +63,8 @@ export function useUserEffectiveFeatures(): {
   const res = useQuery<UserEffectiveFeatureBundle>({
     queryKey: USER_EFFECTIVE_QUERY_KEY,
     queryFn: fetchUserEffectiveFeatures,
-    staleTime: 45_000,
-    refetchOnWindowFocus: "always",
+    staleTime: 60_000,
+    refetchOnWindowFocus: "stale",
     retry: 2,
   });
   return {

@@ -26,7 +26,7 @@ import {
   getHimsCaseComparisons,
   compareHimsCase,
 } from "../modules/hims/hims-tracker.service.js";
-import { requireUserFeatureAccess } from "../services/user-feature-access.js";
+import { requireUserFeatureAccess, isPartnerRoleName } from "../services/user-feature-access.js";
 import { canUserAccessCase, listAccessibleCaseIds } from "../services/case-access.js";
 
 type RouterInternalLike = {
@@ -85,6 +85,20 @@ router.get("/hims/cases", requireAuth, requireFirmUser, requireUserFeatureAccess
       .from(himsConnectionsTable)
       .where(and(eq(himsConnectionsTable.firmId, firmId), eq(himsConnectionsTable.status, "active")));
     const activeConnections = Number(connections?.[0]?.count ?? 0);
+
+    // §3: mapping = active connections with project_id set (canonical via hims_connections.projectId, NOT parallel system)
+    let mappedProjects = 0;
+    if (activeConnections > 0) {
+      const [row] = await r
+        .select({ n: count() })
+        .from(himsConnectionsTable)
+        .where(and(
+          eq(himsConnectionsTable.firmId, firmId),
+          eq(himsConnectionsTable.status, "active"),
+          sql`${himsConnectionsTable.projectId} is not null`,
+        ));
+      mappedProjects = Number(row?.n ?? 0);
+    }
 
     const qRaw = queryOne(req.query, "q")?.trim();
     const q = qRaw && qRaw.length >= 2 ? `%${qRaw.replace(/[%_]/g, (ch) => `\\${ch}`)}%` : null;
@@ -244,33 +258,135 @@ router.get("/hims/cases", requireAuth, requireFirmUser, requireUserFeatureAccess
 
     const filteredByQuery = q !== null;
     const hasChecks = latestChecks.size > 0;
+    // §3 EXACT rule: Search filtering must NOT change configurationStatus.
+    // no_connections → no_mappings → no_data → configured
     let configurationStatus: "configured" | "no_connections" | "no_mappings" | "no_data" = "configured";
     if (activeConnections === 0) {
       configurationStatus = "no_connections";
-    } else if (!hasChecks && !filteredByQuery) {
+    } else if (mappedProjects === 0) {
+      configurationStatus = "no_mappings";
+    } else if (latestChecks.size === 0) {
       configurationStatus = "no_data";
+    }
+
+    // §4 Summary: firm-scoped dataset (NOT current filtered page)
+    // trackedCases = total checks unique caseId; needsAttention = mismatch OR status includes error/fail; matchedCases = 100% match; lastCheckedAt = latest lastCheckedAt timestamp
+    let trackedCases = 0;
+    let needsAttention = 0;
+    let matchedCases = 0;
+    let lastCheckedAt: string | null = null;
+    if (accessibleCaseIds.length > 0) {
+      const checks = await r
+        .select({
+          caseId: himsStatusChecksTable.caseId,
+          lastCheckedAt: himsStatusChecksTable.lastCheckedAt,
+          himsStatus: himsStatusChecksTable.lastStatus,
+          himsStatusCode: himsStatusChecksTable.lastStatusCode,
+          lastErrorCode: himsStatusChecksTable.lastErrorCode,
+        })
+        .from(himsStatusChecksTable)
+        .innerJoin(
+          sql`(
+            select firm_id, case_id, max(last_checked_at) as mx
+            from hims_status_checks
+            where firm_id = ${firmId} and case_id is not null
+            group by firm_id, case_id
+          ) latest`,
+          sql`latest.firm_id = ${himsStatusChecksTable.firmId} and latest.case_id = ${himsStatusChecksTable.caseId} and latest.mx = ${himsStatusChecksTable.lastCheckedAt}`,
+        )
+        .where(and(
+          eq(himsStatusChecksTable.firmId, firmId),
+          inArray(himsStatusChecksTable.caseId, accessibleCaseIds),
+        ));
+      trackedCases = checks.length;
+      let latest: number = 0;
+      for (const row of checks as any[]) {
+        const lc = row.lastCheckedAt ? new Date(row.lastCheckedAt).getTime() : 0;
+        if (lc > latest) { latest = lc; }
+        const stat = String(row.himsStatus ?? row.himsStatusCode ?? "").toLowerCase();
+        const errc = String(row.lastErrorCode ?? "").toLowerCase();
+        const hasError =
+          stat.includes("error") || stat.includes("fail") || stat.includes("invalid") ||
+          errc.includes("error") || errc.includes("fail") || stat.includes("timeout") ||
+          stat.includes("attention") || stat.includes("discrepancy");
+        const comp = matchSummary.get(Number(row.caseId));
+        const mismatch = comp && comp.total > 0 && comp.matched < comp.total;
+        if (hasError || mismatch) needsAttention++;
+        if (comp && comp.total > 0 && comp.matched === comp.total) matchedCases++;
+      }
+      if (latest > 0) lastCheckedAt = new Date(latest).toISOString();
     }
 
     res.json({
       items,
-      configurationStatus,
       total: items.length,
+      configurationStatus,
+      summary: {
+        trackedCases,
+        needsAttention,
+        matchedCases,
+        lastCheckedAt,
+      },
     });
   } catch (err: any) {
     if (err?.code === "FEATURE_DISABLED") {
       res.status(403).json({ code: err.code, error: err.message ?? "Feature disabled", details: err.details ?? null });
       return;
     }
-    req.log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "hims.list_cases_failed");
+    const status4xx = err?.status && err.status >= 400 && err.status < 500;
+    if (status4xx) {
+      res.status(err.status).json({ code: err.code ?? "HIMS_4XX", error: err.message ?? "Denied" });
+      return;
+    }
+    // §14 safe wrap: server-log PG code/table/col/constraint/stage; frontend only code/message/requestId.
+    req.log?.error?.({
+      err,
+      route: req.originalUrl,
+      firmId: req.firmId,
+      userId: req.userId,
+      stage: "hims.list_cases_failed",
+      pgCode: err?.code || err?.pgCode || (err && typeof err.code === "string" ? err.code : null),
+      table: err?.table ?? null,
+      column: err?.column ?? null,
+      constraint: err?.constraint ?? null,
+    }, "hims.list_cases_failed");
     res.status(err?.status ?? 500).json({
-      code: err?.code ?? "HIMS_CASES_LIST_FAILED",
-      error: err?.message ?? "Unable to load HIMS status",
+      ok: false,
+      error: {
+        code: err?.code ?? "HIMS_CASES_LIST_FAILED",
+        message: "Unable to load HIMS tracker. Please try again shortly.",
+        retryable: true,
+      },
       requestId: (req as any).id ?? `hims-${Number(process.hrtime.bigint() & 0xffffffffn).toString(16)}`,
     });
   }
 });
 
-router.get("/hims/connections", requireAuth, requireFirmUser, requirePermission("module.hims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+// §5 §6: HIMS credentials require hims.credentials feature + Partner/Admin role.
+// Clerk granted hims.tracker must NOT gain credential management.
+function requireHimsCredentialsRoleGate(req: AuthRequest, res: Response, next: any): void {
+  const roleCache = (req as any)._roleCache as { name?: string } | undefined;
+  const rname = roleCache?.name ?? (typeof (req as any).roleName === "string" ? (req as any).roleName : "");
+  const ok = isPartnerRoleName(rname)
+    || String(rname).toLowerCase().includes("manager")
+    || String(rname).toLowerCase().includes("admin")
+    || String(rname).toLowerCase() === "founder";
+  if (!ok) {
+    res.status(403).json({
+      ok: false,
+      error: {
+        code: "HIMS_CREDENTIAL_ROLE_REQUIRED",
+        message: "HIMS connection credentials may only be managed by a Partner or firm-level Admin.",
+        retryable: false,
+      },
+      requestId: (req as any).id ?? `hims-${Number(process.hrtime.bigint() & 0xffffffffn).toString(16)}`,
+    });
+    return;
+  }
+  next();
+}
+
+router.get("/hims/connections", requireAuth, requireFirmUser, requireUserFeatureAccess("hims.credentials"), requireHimsCredentialsRoleGate, requirePermission("module.hims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const wrapped = await getHimsConnections({ firmId: req.firmId! }, { tx: req.rlsDb });
@@ -298,7 +414,7 @@ router.get("/hims/connections", requireAuth, requireFirmUser, requirePermission(
   }
 });
 
-router.post("/hims/connections", requireAuth, requireFirmUser, requirePermission("module.hims", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hims/connections", requireAuth, requireFirmUser, requireUserFeatureAccess("hims.credentials"), requireHimsCredentialsRoleGate, requirePermission("module.hims", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     if (!isSecretEncryptionConfigured()) {
@@ -358,7 +474,7 @@ router.post("/hims/connections", requireAuth, requireFirmUser, requirePermission
   }
 });
 
-router.patch("/hims/connections/:id", requireAuth, requireFirmUser, requirePermission("module.hims", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.patch("/hims/connections/:id", requireAuth, requireFirmUser, requireUserFeatureAccess("hims.credentials"), requireHimsCredentialsRoleGate, requirePermission("module.hims", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const id = parseIntParam(one(req.params?.id), "connectionId");
@@ -405,7 +521,7 @@ router.patch("/hims/connections/:id", requireAuth, requireFirmUser, requirePermi
   }
 });
 
-router.get("/hims/cases/:caseId/status", requireAuth, requireFirmUser, requirePermission("module.hims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hims/cases/:caseId/status", requireAuth, requireFirmUser, requireUserFeatureAccess("hims.tracker"), requirePermission("module.hims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const firmId = req.firmId!;
@@ -436,7 +552,7 @@ router.get("/hims/cases/:caseId/status", requireAuth, requireFirmUser, requirePe
   }
 });
 
-router.post("/hims/cases/:caseId/check", requireAuth, requireFirmUser, requirePermission("module.hims", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hims/cases/:caseId/check", requireAuth, requireFirmUser, requireUserFeatureAccess("hims.status_check"), requirePermission("module.hims", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const firmId = req.firmId!;
@@ -477,7 +593,7 @@ router.post("/hims/cases/:caseId/check", requireAuth, requireFirmUser, requirePe
   }
 });
 
-router.get("/hims/cases/:caseId/comparisons", requireAuth, requireFirmUser, requirePermission("module.hims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hims/cases/:caseId/comparisons", requireAuth, requireFirmUser, requireUserFeatureAccess("hims.compare_lawcaspro_hims"), requirePermission("module.hims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const firmId = req.firmId!;
@@ -508,7 +624,7 @@ router.get("/hims/cases/:caseId/comparisons", requireAuth, requireFirmUser, requ
   }
 });
 
-router.post("/hims/cases/:caseId/compare", requireAuth, requireFirmUser, requirePermission("module.hims", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/hims/cases/:caseId/compare", requireAuth, requireFirmUser, requireUserFeatureAccess("hims.compare_lawcaspro_hims"), requirePermission("module.hims", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const firmId = req.firmId!;
