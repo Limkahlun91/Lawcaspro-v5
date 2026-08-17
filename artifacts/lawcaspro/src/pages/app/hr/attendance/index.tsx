@@ -220,9 +220,5 @@ function HrAttendanceInner() {
 }
 
 export default function HRAttendancePage() {
-  return (
-    <PermissionGuard module="hr" action="read" mode="silent">
-      <HrAttendanceInner />
-    </PermissionGuard>
-  );
+  return <HrAttendanceInner />;
 }

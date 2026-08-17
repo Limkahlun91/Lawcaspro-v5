@@ -129,9 +129,5 @@ function HrDashboardInner() {
 }
 
 export default function HRDashboardPage() {
-  return (
-    <PermissionGuard module="hr" action="read" mode="silent">
-      <HrDashboardInner />
-    </PermissionGuard>
-  );
+  return <HrDashboardInner />;
 }

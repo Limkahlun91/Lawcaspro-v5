@@ -9,6 +9,7 @@ import {
 } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetchJson } from "@/lib/api-client";
+import { PermissionGuard } from "@/components/permission-guard";
 
 // Part 2 §9 §10: Per-user effective feature access (Firm entitlement + user explicit row OR role fallback)
 // Unified API so sidebar === route === button visibility share one computation.
@@ -310,12 +311,48 @@ export type FeatureRegistryBundle = {
   jobGuardMap: Record<string, readonly string[]>;
 };
 
-const EFFECTIVE_FEATURES_QUERY_KEY = ["firm", "user", "effective-features"];
 const REGISTRY_QUERY_KEY = ["platform", "feature-registry"];
 const INVALIDATION_POLL_INTERVAL_MS = 15_000; // Poll server-epoch every 15s for fast propagation; server invalidation also returns via headers.
 
+const ACCEPTED_ENTITLEMENT_SOURCES: EntitlementLike["source"][] = [
+  "feature_default",
+  "plan_entitlement",
+  "firm_override_permanent",
+  "firm_override_temporary",
+  "denial",
+];
+
+function mapEntitlementSource(
+  src: UserEffectiveFeature["source"] | null | undefined,
+): EntitlementLike["source"] {
+  if (typeof src === "string" && (ACCEPTED_ENTITLEMENT_SOURCES as string[]).includes(src)) {
+    return src as EntitlementLike["source"];
+  }
+  switch (src) {
+    case "firm_entitlement_denied":
+      return "denial";
+    case "partner_allow":
+    case "role_permission_allow":
+    case "role_permission_denied":
+    case "user_row_true":
+    case "user_row_false":
+      return "firm_override_permanent";
+    case "unknown_feature_deny":
+      return "denial";
+    default:
+      return "feature_default";
+  }
+}
+
+function mapOverrideMode(isEnabled: boolean): FirmOverrideLike["overrideMode"] {
+  return isEnabled ? "enabled" : "disabled";
+}
+
 // ---------------------------------------------------------------------------
 // React hooks: fetch entitlements + registry once per user session
+// useFirmEntitlements() is a DERIVED projection from the single canonical
+// UserEffectiveFeatureBundle cached under USER_EFFECTIVE_QUERY_KEY.
+// One HTTP request, one query cache shape — no cache collision.
 // ---------------------------------------------------------------------------
 
 export function useFirmEntitlements<TFirmOverride = FirmOverrideLike>(): {
@@ -324,47 +361,51 @@ export function useFirmEntitlements<TFirmOverride = FirmOverrideLike>(): {
   error: unknown;
   refetch: () => Promise<unknown>;
 } {
-  const res = useQuery<FirmEntitlementsBundle>({
-    queryKey: EFFECTIVE_FEATURES_QUERY_KEY,
-    queryFn: async () => {
-      const r = await apiFetchJson<any>(`/users/_self/effective-features`);
-      const raw = (r?.data ?? r) as any;
-      // Shape-adapt into FirmEntitlementsBundle.items used downstream.
-      const effective: Record<string, any> = raw?.effective ?? {};
-      const items: Record<string, EntitlementLike> = {};
-      for (const k of Object.keys(effective)) {
-        const v = effective[k] as any;
-        items[k] = {
-          enabled: Boolean(v?.enabled),
-          source: v?.source ?? "feature_default",
-          value: v?.value ?? v?.enabled,
-          valueType: v?.valueType ?? "boolean",
-          denied: v?.denied ?? null,
-          denialReason: v?.denialReason ?? null,
-          usage: v?.usage ?? null,
-        } as EntitlementLike;
-      }
-      const overrides: FirmOverrideLike[] = Array.isArray(raw?.explicitOverrides)
-        ? raw.explicitOverrides.map((o: any, i: number) => ({
-            id: i + 1,
-            featureKey: o.featureKey,
-            overrideMode: o.isEnabled ? "enabled" : "disabled",
-            createdAt: new Date().toISOString(),
-          }))
-        : [];
-      return {
-        firm: raw?.firmId ? { id: raw.firmId, status: "active", subStatus: null, planId: null, isCustomPlan: false, customPriceMonthly: null } : null,
-        plan: null,
-        subscriptionPolicy: null,
-        items,
-        overrides,
-      } as unknown as FirmEntitlementsBundle;
-    },
-    staleTime: 60_000,
-    refetchOnWindowFocus: true,
-    retry: 1,
-  });
-  return { data: res.data as FirmEntitlementsBundle | undefined, isLoading: res.isLoading, error: res.error, refetch: res.refetch };
+  const raw = useUserEffectiveFeatures();
+  const data = useMemo<FirmEntitlementsBundle | undefined>(() => {
+    if (!raw.data) return undefined;
+    const eff = raw.data.effective ?? {};
+    const items: Record<string, EntitlementLike> = {};
+    for (const [key, value] of Object.entries(eff)) {
+      const firmOn = Boolean(value.firmEnabled);
+      items[key] = {
+        featureKey: key,
+        enabled: firmOn,
+        value: firmOn,
+        valueType: "boolean",
+        source: mapEntitlementSource(value.source),
+        denied: firmOn ? null : value.denialCode ?? null,
+        denialReason: value.denialReason ?? null,
+        usage: null,
+      };
+    }
+    const overrides: FirmOverrideLike[] = Array.isArray(raw.data.explicitOverrides)
+      ? raw.data.explicitOverrides.map((o, i) => ({
+          id: i + 1,
+          featureKey: o.featureKey,
+          overrideMode: mapOverrideMode(Boolean(o.isEnabled)),
+          createdAt: new Date().toISOString(),
+        }))
+      : [];
+    return {
+      firm: raw.data.firmId
+        ? {
+            id: raw.data.firmId,
+            status: "active",
+            subStatus: null,
+            planId: null,
+            isCustomPlan: false,
+            customPriceMonthly: null,
+          }
+        : null,
+      plan: null,
+      subscriptionPolicy: null,
+      items,
+      overrides,
+    } as FirmEntitlementsBundle;
+  }, [raw.data]);
+
+  return { data, isLoading: raw.isLoading, error: raw.error, refetch: raw.refetch };
 }
 
 export function useFeatureRegistry(): {
@@ -388,7 +429,7 @@ export function useFeatureRegistry(): {
 export function useInvalidateFirmEntitlements(): () => Promise<void> {
   const qc = useQueryClient();
   return useCallback(async () => {
-    await qc.invalidateQueries({ queryKey: EFFECTIVE_FEATURES_QUERY_KEY });
+    await qc.invalidateQueries({ queryKey: USER_EFFECTIVE_QUERY_KEY });
   }, [qc]);
 }
 
@@ -624,4 +665,182 @@ export function wrapRouteWithFeature<P extends object = {}>(
     if (!res.enabled) return <FeatureNotEnabledPage featureKey={featureKey} />;
     return <Component {...props} />;
   };
+}
+
+// ---------------------------------------------------------------------------
+// Route-level feature guard helpers — never return null as full page.
+// These are used exclusively for route-level gating of entire pages.
+// ---------------------------------------------------------------------------
+
+export function RouteFeatureLoading(): ReactElement {
+  return (
+    <div
+      style={{
+        minHeight: "calc(100vh - 80px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 32,
+        background: "transparent",
+      }}
+      data-testid="route-feature-loading"
+    >
+      <div
+        style={{
+          borderRadius: 12,
+          padding: "28px 36px",
+          background: "#ffffff",
+          border: "1px solid #e5e7eb",
+          boxShadow: "0 4px 12px rgba(0,0,0,0.04)",
+          display: "flex",
+          alignItems: "center",
+          gap: 14,
+        }}
+      >
+        <div
+          style={{
+            width: 28,
+            height: 28,
+            borderRadius: "50%",
+            border: "3px solid #d1d5db",
+            borderTopColor: "#111827",
+            animation: "spin 0.9s linear infinite",
+          }}
+        />
+        <div style={{ fontSize: 14, color: "#374151", fontWeight: 500 }}>
+          Loading access…
+        </div>
+      </div>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+    </div>
+  );
+}
+
+export function RouteFeatureError(props: {
+  error: unknown;
+  onRetry: () => void;
+}): ReactElement {
+  const errId = useMemo(() => {
+    const rand = Math.floor(100000 + Math.random() * 900000);
+    return `ACCESS-${rand}`;
+  }, []);
+  return (
+    <div
+      style={{
+        minHeight: "calc(100vh - 80px)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 32,
+      }}
+      data-testid="route-feature-error"
+    >
+      <div
+        style={{
+          maxWidth: 520,
+          width: "100%",
+          borderRadius: 12,
+          padding: 32,
+          textAlign: "center",
+          background: "white",
+          border: "1px solid #fee2e2",
+          boxShadow: "0 4px 12px rgba(0,0,0,0.04)",
+        }}
+      >
+        <div
+          style={{
+            width: 48,
+            height: 48,
+            borderRadius: "50%",
+            background: "#FEF2F2",
+            color: "#DC2626",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontWeight: 700,
+            fontSize: 22,
+            marginBottom: 16,
+          }}
+        >
+          !
+        </div>
+        <h2 style={{ fontSize: 20, fontWeight: 600, margin: "0 0 8px 0" }}>
+          Unable to load your access settings
+        </h2>
+        <p style={{ color: "#4B5563", margin: "0 0 16px 0", fontSize: 14, lineHeight: 1.6 }}>
+          We could not verify your entitlements. Please try again or contact
+          your firm administrator if the problem persists.
+        </p>
+        <div style={{ marginBottom: 12 }}>
+          <button
+            onClick={props.onRetry}
+            type="button"
+            style={{
+              display: "inline-block",
+              padding: "10px 18px",
+              borderRadius: 8,
+              background: "#111827",
+              color: "white",
+              border: "none",
+              cursor: "pointer",
+              fontSize: 14,
+              fontWeight: 500,
+            }}
+            data-testid="route-feature-retry"
+          >
+            Retry
+          </button>
+        </div>
+        <p style={{ margin: 0, color: "#6B7280", fontSize: 12 }}>
+          Error ID: <code style={{ fontWeight: 600 }}>{errId}</code>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+export interface RouteFeatureAccessGuardProps {
+  feature: string;
+  permission?: { module: string; action: string };
+  children: ReactNode;
+}
+
+export function RouteFeatureAccessGuard(
+  props: RouteFeatureAccessGuardProps,
+): ReactElement {
+  const { feature, permission, children } = props;
+  const raw = useUserEffectiveFeatures();
+  const eff = useEffectiveUserFeature(feature);
+
+  if (raw.isLoading || eff.isLoading) {
+    return <RouteFeatureLoading />;
+  }
+  if (raw.error) {
+    return (
+      <RouteFeatureError
+        error={raw.error}
+        onRetry={() => {
+          void raw.refetch();
+        }}
+      />
+    );
+  }
+  // Distinguish firm vs user denial using real truth (firmEnabled/userEnabled)
+  if (!eff.firmEnabled) {
+    return <FeatureNotEnabledPage featureKey={feature} />;
+  }
+  if (!eff.userEnabled || !eff.enabled) {
+    return <UserFeatureNotEnabledPage featureKey={feature} />;
+  }
+  if (permission) {
+    return (
+      <PermissionGuard module={permission.module} action={permission.action}>
+        {children}
+      </PermissionGuard>
+    );
+  }
+  if (typeof children === "function") {
+    return (children as any)(eff);
+  }
+  return <>{children}</>;
 }
