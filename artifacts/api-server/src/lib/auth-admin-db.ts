@@ -1,4 +1,4 @@
-import { createPoolFromDatabaseUrl, makeRlsDb, type Pool, clearTenantContext } from "@workspace/db";
+import { getOrCreateSharedPool, makeRlsDb, type Pool, clearTenantContext } from "@workspace/db";
 import { logger } from "./logger.js";
 import { extractDbErrorInfo } from "./db-error.js";
 
@@ -16,8 +16,6 @@ export function isAuthAdminDbConfigured(): boolean {
   return Boolean(getAuthAdminDatabaseUrl());
 }
 
-let cached: { url: string; pool: Pool } | null = null;
-
 function getAuthAdminPoolOrThrow(): Pool {
   const url = getAuthAdminDatabaseUrl();
   if (!url) {
@@ -25,10 +23,7 @@ function getAuthAdminPoolOrThrow(): Pool {
     e.code = "AUTH_ADMIN_DB_NOT_CONFIGURED";
     throw e;
   }
-  if (cached?.url === url) return cached.pool;
-  const pool = createPoolFromDatabaseUrl(url);
-  cached = { url, pool };
-  return pool;
+  return getOrCreateSharedPool(url);
 }
 
 export async function withAuthAdminDb<T>(

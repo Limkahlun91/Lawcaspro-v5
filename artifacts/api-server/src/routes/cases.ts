@@ -38,6 +38,7 @@ import { parseDateOnlyInput } from "../lib/dateOnly.js";
 import { logger } from "../lib/logger.js";
 import { ApiError } from "../lib/api-response.js";
 import { isTransientDbConnectionError } from "../lib/auth-safe-db.js";
+import { extractDbErrorInfo } from "../lib/db-error.js";
 import {
   canUserAccessCase,
   listAccessibleCaseIds,
@@ -5298,8 +5299,9 @@ async function updateCompletionSlaState(r: DbConn, firmId: number, caseId: numbe
 
 router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
+  const queryName = "case_key_dates.read";
   if (!r) {
-    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    logger.error({ path: req.path, method: req.method, firmId: req.firmId, userId: req.userId, queryName, requestId: res.locals.requestId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -5314,9 +5316,15 @@ router.get("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHandle
   try {
     kd = await fetchKeyDatesRow(r, req.firmId!, params.data.caseId);
   } catch (err) {
-    logger.error({ err, pgCode: getPgCode(err), firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] get key-dates failed");
-    res.status(500).json({ error: "Internal Server Error" });
-    return;
+    const code = getPgCode(err);
+    if (code === "42P01" || code === "42703") {
+      logger.warn({ queryName, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(err) }, "[cases] get key-dates missing schema, returning empty");
+      kd = null;
+    } else {
+      logger.error({ err, queryName, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(err) }, "[cases] get key-dates failed");
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
   }
 
   const out: Record<string, unknown> = kd ? {
@@ -6923,8 +6931,9 @@ router.patch("/cases/:caseId/assignments", requireAuthHandler, requireFirmUserHa
 
 router.get("/cases/:caseId/workflow-documents", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
+  const queryName = "case_workflow_documents.read";
   if (!r) {
-    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    logger.error({ path: req.path, method: req.method, firmId: req.firmId, userId: req.userId, queryName, requestId: res.locals.requestId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -7344,8 +7353,9 @@ const ALLOWED_LOAN_STAMPING_ITEM_KEYS = new Set<string>(LOAN_STAMPING_ITEM_KEYS)
 
 router.get("/cases/:caseId/loan-stamping", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
+  const queryName = "case_loan_stamping.read";
   if (!r) {
-    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    logger.error({ path: req.path, method: req.method, firmId: req.firmId, userId: req.userId, queryName, requestId: res.locals.requestId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -8013,8 +8023,9 @@ router.get("/cases/:caseId/loan-stamping/:id/download", requireAuthHandler, requ
 
 router.get("/cases/:caseId/supp-lo-documents", requireAuthHandler, requireFirmUserHandler, requirePermission("documents", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
+  const queryName = "case_supp_lo_documents.read";
   if (!r) {
-    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    logger.error({ path: req.path, method: req.method, firmId: req.firmId, userId: req.userId, queryName, requestId: res.locals.requestId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -8342,8 +8353,9 @@ router.get("/cases/:caseId/supp-lo-documents/:id/download", requireAuthHandler, 
 
 router.get("/cases/:caseId/workflow", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
+  const queryName = "case_workflow.read";
   if (!r) {
-    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    logger.error({ path: req.path, method: req.method, firmId: req.firmId, userId: req.userId, queryName, requestId: res.locals.requestId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -8365,19 +8377,34 @@ router.get("/cases/:caseId/workflow", requireAuthHandler, requireFirmUserHandler
 
     await ensureCaseWorkflowSteps(r, req.firmId!, params.data.caseId);
 
-    const steps = await r.select().from(caseWorkflowStepsTable)
-      .where(eq(caseWorkflowStepsTable.caseId, params.data.caseId))
-      .orderBy(caseWorkflowStepsTable.stepOrder);
+    let steps: any[] = [];
+    try {
+      steps = await r.select().from(caseWorkflowStepsTable)
+        .where(eq(caseWorkflowStepsTable.caseId, params.data.caseId))
+        .orderBy(caseWorkflowStepsTable.stepOrder);
+    } catch (stepErr) {
+      const code = getPgCode(stepErr);
+      if (code === "42703" || code === "42P01") {
+        logger.warn({ queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(stepErr) }, "[cases] workflow steps schema drift, returning empty");
+        steps = [];
+      } else {
+        throw stepErr;
+      }
+    }
 
     const enriched = await Promise.all(
       steps.map(async (s) => {
         let completedByName: string | null = null;
         if (s.completedBy) {
-          const [user] = await r
-            .select({ name: usersTable.name })
-            .from(usersTable)
-            .where(eq(usersTable.id, s.completedBy));
-          completedByName = user?.name ?? null;
+          try {
+            const [user] = await r
+              .select({ name: usersTable.name })
+              .from(usersTable)
+              .where(eq(usersTable.id, s.completedBy));
+            completedByName = user?.name ?? null;
+          } catch {
+            completedByName = null;
+          }
         }
         return {
           id: s.id,
@@ -8397,7 +8424,7 @@ router.get("/cases/:caseId/workflow", requireAuthHandler, requireFirmUserHandler
 
     res.json(enriched);
   } catch (e) {
-    logger.error({ err: e, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId }, "[cases] get workflow failed");
+    logger.error({ err: e, queryName, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] get workflow failed");
     res.status(500).json({ error: "Internal Server Error" });
   }
 }));
@@ -8623,8 +8650,9 @@ router.post("/cases/:caseId/notes", requireAuthHandler, requireFirmUserHandler, 
 
 router.get("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
+  const queryName = "case_messages.list";
   if (!r) {
-    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    logger.error({ path: req.path, method: req.method, firmId: req.firmId, userId: req.userId, queryName, requestId: res.locals.requestId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -8639,26 +8667,79 @@ router.get("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandler
   const channelRaw = one((req as any).query?.channel);
   const channel = CaseMessageChannel.safeParse(channelRaw).success ? (channelRaw as "client" | "developer") : "client";
 
-  const rows = await r
-    .select({
-      id: caseMessagesTable.id,
-      channel: caseMessagesTable.channel,
-      senderType: caseMessagesTable.senderType,
-      senderId: caseMessagesTable.senderId,
-      senderName: usersTable.name,
-      messageText: caseMessagesTable.messageText,
-      attachments: caseMessagesTable.attachments,
-      createdAt: caseMessagesTable.createdAt,
-    })
-    .from(caseMessagesTable)
-    .leftJoin(usersTable, eq(caseMessagesTable.senderId, usersTable.id))
-    .where(and(
-      eq(caseMessagesTable.firmId, req.firmId!),
-      eq(caseMessagesTable.caseId, params.data.caseId),
-      eq(caseMessagesTable.channel, channel),
-    ))
-    .orderBy(asc(caseMessagesTable.createdAt))
-    .limit(500);
+  const fetchWithChannel = async (): Promise<any[]> => {
+    return await r
+      .select({
+        id: caseMessagesTable.id,
+        channel: caseMessagesTable.channel,
+        senderType: caseMessagesTable.senderType,
+        senderId: caseMessagesTable.senderId,
+        senderName: usersTable.name,
+        messageText: caseMessagesTable.messageText,
+        attachments: caseMessagesTable.attachments,
+        createdAt: caseMessagesTable.createdAt,
+      })
+      .from(caseMessagesTable)
+      .leftJoin(usersTable, eq(caseMessagesTable.senderId, usersTable.id))
+      .where(and(
+        eq(caseMessagesTable.firmId, req.firmId!),
+        eq(caseMessagesTable.caseId, params.data.caseId),
+        eq(caseMessagesTable.channel, channel),
+      ))
+      .orderBy(asc(caseMessagesTable.createdAt))
+      .limit(500);
+  };
+
+  const fetchWithoutChannel = async (): Promise<any[]> => {
+    return await r
+      .select({
+        id: caseMessagesTable.id,
+        senderType: caseMessagesTable.senderType,
+        senderId: caseMessagesTable.senderId,
+        senderName: usersTable.name,
+        messageText: caseMessagesTable.messageText,
+        attachments: caseMessagesTable.attachments,
+        createdAt: caseMessagesTable.createdAt,
+      })
+      .from(caseMessagesTable)
+      .leftJoin(usersTable, eq(caseMessagesTable.senderId, usersTable.id))
+      .where(and(
+        eq(caseMessagesTable.firmId, req.firmId!),
+        eq(caseMessagesTable.caseId, params.data.caseId),
+      ))
+      .orderBy(asc(caseMessagesTable.createdAt))
+      .limit(500);
+  };
+
+  let rows: any[] = [];
+  try {
+    rows = await fetchWithChannel();
+  } catch (e) {
+    const code = getPgCode(e);
+    if (code === "42703") {
+      logger.warn({ queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] case_messages missing channel column, falling back");
+      try {
+        rows = await fetchWithoutChannel();
+      } catch (e2) {
+        const code2 = getPgCode(e2);
+        if (code2 === "42P01" || code2 === "42501" || code2 === "42703") {
+          logger.warn({ queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e2) }, "[cases] case_messages table missing or denied, returning empty");
+          rows = [];
+        } else {
+          logger.error({ err: e2, queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e2) }, "[cases] case_messages fallback fetch failed");
+          res.status(500).json({ error: "Internal Server Error" });
+          return;
+        }
+      }
+    } else if (code === "42P01" || code === "42501") {
+      logger.warn({ queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] case_messages table missing or denied, returning empty");
+      rows = [];
+    } else {
+      logger.error({ err: e, queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] case_messages fetch failed");
+      res.status(500).json({ error: "Internal Server Error" });
+      return;
+    }
+  }
 
   res.json({
     data: rows.map((m) => ({
@@ -8680,8 +8761,9 @@ router.get("/cases/:caseId/messages", requireAuthHandler, requireFirmUserHandler
 
 router.get("/cases/:caseId/messages/unread-count", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
+  const queryName = "case_messages.unread_count";
   if (!r) {
-    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    logger.error({ path: req.path, method: req.method, firmId: req.firmId, userId: req.userId, queryName, requestId: res.locals.requestId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -8693,75 +8775,80 @@ router.get("/cases/:caseId/messages/unread-count", requireAuthHandler, requireFi
   const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
   if (!ok) return;
 
-  const channels: Array<"client" | "developer"> = ["client", "developer"];
-  const byChannel: Record<"client" | "developer", number> = { client: 0, developer: 0 };
-  for (const ch of channels) {
-    const countUnreadSince = async (lastReadAt: Date, withChannel: boolean): Promise<number> => {
+  try {
+    const channels: Array<"client" | "developer"> = ["client", "developer"];
+    const byChannel: Record<"client" | "developer", number> = { client: 0, developer: 0 };
+    for (const ch of channels) {
+      const countUnreadSince = async (lastReadAt: Date, withChannel: boolean): Promise<number> => {
+        try {
+          const [row] = await r
+            .select({ c: sql<number>`COUNT(*)::int` })
+            .from(caseMessagesTable)
+            .where(and(
+              eq(caseMessagesTable.firmId, req.firmId!),
+              eq(caseMessagesTable.caseId, params.data.caseId),
+              ...(withChannel ? [eq(caseMessagesTable.channel, ch)] : []),
+              inArray(caseMessagesTable.senderType, ["client", "developer"]),
+              sql`${caseMessagesTable.createdAt} > ${lastReadAt}`,
+            ));
+          return Number((row as any)?.c ?? 0);
+        } catch (e) {
+          const code = getPgCode(e);
+          if (code === "42703" && withChannel) return await countUnreadSince(lastReadAt, false);
+          if (code === "42P01" || code === "42501" || code === "42703") return 0;
+          throw e;
+        }
+      };
+
       try {
-        const [row] = await r
-          .select({ c: sql<number>`COUNT(*)::int` })
-          .from(caseMessagesTable)
+        const [readStatus] = await r
+          .select({ lastReadAt: caseMessageReadStatusTable.lastReadAt })
+          .from(caseMessageReadStatusTable)
           .where(and(
-            eq(caseMessagesTable.firmId, req.firmId!),
-            eq(caseMessagesTable.caseId, params.data.caseId),
-            ...(withChannel ? [eq(caseMessagesTable.channel, ch)] : []),
-            inArray(caseMessagesTable.senderType, ["client", "developer"]),
-            sql`${caseMessagesTable.createdAt} > ${lastReadAt}`,
+            eq(caseMessageReadStatusTable.firmId, req.firmId!),
+            eq(caseMessageReadStatusTable.caseId, params.data.caseId),
+            eq(caseMessageReadStatusTable.userId, req.userId!),
+            eq(caseMessageReadStatusTable.channel, ch),
           ));
-        return Number((row as any)?.c ?? 0);
+        const lastReadAt = readStatus?.lastReadAt instanceof Date ? readStatus.lastReadAt : new Date(0);
+        byChannel[ch] = await countUnreadSince(lastReadAt, true);
       } catch (e) {
         const code = getPgCode(e);
-        if (code === "42703" && withChannel) return await countUnreadSince(lastReadAt, false);
-        if (code === "42P01" || code === "42501" || code === "42703") return 0;
+        if (code === "42P01" || code === "42501") {
+          byChannel[ch] = 0;
+          continue;
+        }
+        if (code === "42703") {
+          try {
+            const [readStatusLegacy] = await r
+              .select({ lastReadAt: caseMessageReadStatusTable.lastReadAt })
+              .from(caseMessageReadStatusTable)
+              .where(and(
+                eq(caseMessageReadStatusTable.firmId, req.firmId!),
+                eq(caseMessageReadStatusTable.caseId, params.data.caseId),
+                eq(caseMessageReadStatusTable.userId, req.userId!),
+              ));
+            const lastReadAt = readStatusLegacy?.lastReadAt instanceof Date ? readStatusLegacy.lastReadAt : new Date(0);
+            byChannel[ch] = await countUnreadSince(lastReadAt, true);
+          } catch (legacyErr) {
+            const legacyCode = getPgCode(legacyErr);
+            if (legacyCode === "42P01" || legacyCode === "42501" || legacyCode === "42703") {
+              byChannel[ch] = 0;
+              continue;
+            }
+            throw legacyErr;
+          }
+          continue;
+        }
         throw e;
       }
-    };
-
-    try {
-      const [readStatus] = await r
-        .select({ lastReadAt: caseMessageReadStatusTable.lastReadAt })
-        .from(caseMessageReadStatusTable)
-        .where(and(
-          eq(caseMessageReadStatusTable.firmId, req.firmId!),
-          eq(caseMessageReadStatusTable.caseId, params.data.caseId),
-          eq(caseMessageReadStatusTable.userId, req.userId!),
-          eq(caseMessageReadStatusTable.channel, ch),
-        ));
-      const lastReadAt = readStatus?.lastReadAt instanceof Date ? readStatus.lastReadAt : new Date(0);
-      byChannel[ch] = await countUnreadSince(lastReadAt, true);
-    } catch (e) {
-      const code = getPgCode(e);
-      if (code === "42P01" || code === "42501") {
-        byChannel[ch] = 0;
-        continue;
-      }
-      if (code === "42703") {
-        try {
-          const [readStatusLegacy] = await r
-            .select({ lastReadAt: caseMessageReadStatusTable.lastReadAt })
-            .from(caseMessageReadStatusTable)
-            .where(and(
-              eq(caseMessageReadStatusTable.firmId, req.firmId!),
-              eq(caseMessageReadStatusTable.caseId, params.data.caseId),
-              eq(caseMessageReadStatusTable.userId, req.userId!),
-            ));
-          const lastReadAt = readStatusLegacy?.lastReadAt instanceof Date ? readStatusLegacy.lastReadAt : new Date(0);
-          byChannel[ch] = await countUnreadSince(lastReadAt, true);
-        } catch (legacyErr) {
-          const legacyCode = getPgCode(legacyErr);
-          if (legacyCode === "42P01" || legacyCode === "42501" || legacyCode === "42703") {
-            byChannel[ch] = 0;
-            continue;
-          }
-          throw legacyErr;
-        }
-        continue;
-      }
-      throw e;
     }
-  }
 
-  res.json({ totalUnreadCount: byChannel.client + byChannel.developer, unreadCountByChannel: byChannel });
+    res.json({ totalUnreadCount: byChannel.client + byChannel.developer, unreadCountByChannel: byChannel });
+  } catch (e) {
+    logger.error({ err: e, queryName, firmId: req.firmId, userId: req.userId, caseId: params.data.caseId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] get unread-count failed");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 }));
 
 router.post("/cases/:caseId/messages/read", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
@@ -8933,8 +9020,9 @@ router.get("/cases/:caseId/ledger", requireAuthHandler, requireFirmUserHandler, 
 
 router.get("/cases/:caseId/advances", requireAuthHandler, requireFirmUserHandler, requirePermission("cases", "read") as RequestHandler, authed(async (req, res) => {
   const r = req.rlsDb;
+  const queryName = "case_advances.read";
   if (!r) {
-    logger.error({ path: req.path, firmId: req.firmId, userId: req.userId }, "[cases] missing tenant database context");
+    logger.error({ path: req.path, method: req.method, firmId: req.firmId, userId: req.userId, queryName, requestId: res.locals.requestId }, "[cases] missing tenant database context");
     res.status(500).json({ error: "Internal Server Error" });
     return;
   }
@@ -8943,17 +9031,35 @@ router.get("/cases/:caseId/advances", requireAuthHandler, requireFirmUserHandler
   const ok = await enforceCaseAccess(r, req, res, params.data.caseId);
   if (!ok) return;
 
-  const [row] = await r
-    .select({
-      outstanding: sql<string>`
-        COALESCE(SUM(CASE WHEN ${caseLedgersTable.entryType} = 'advance_paid' THEN ${caseLedgersTable.amount} ELSE 0 END), 0)
-        - COALESCE(SUM(CASE WHEN ${caseLedgersTable.entryType} = 'advance_recovered' THEN ${caseLedgersTable.amount} ELSE 0 END), 0)
-      `,
-    })
-    .from(caseLedgersTable)
-    .where(and(eq(caseLedgersTable.firmId, req.firmId!), eq(caseLedgersTable.caseId, params.data.caseId)))
-    .limit(1);
-  res.json({ outstanding_advances: Number(row?.outstanding ?? 0) });
+  const exists = await tableExists(r, "public.case_ledgers");
+  if (!exists) {
+    logger.warn({ queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId }, "[cases] case_ledgers table missing, returning 0");
+    res.json({ outstanding_advances: 0 });
+    return;
+  }
+
+  try {
+    const [row] = await r
+      .select({
+        outstanding: sql<string>`
+          COALESCE(SUM(CASE WHEN ${caseLedgersTable.entryType} = 'advance_paid' THEN ${caseLedgersTable.amount} ELSE 0 END), 0)
+          - COALESCE(SUM(CASE WHEN ${caseLedgersTable.entryType} = 'advance_recovered' THEN ${caseLedgersTable.amount} ELSE 0 END), 0)
+        `,
+      })
+      .from(caseLedgersTable)
+      .where(and(eq(caseLedgersTable.firmId, req.firmId!), eq(caseLedgersTable.caseId, params.data.caseId)))
+      .limit(1);
+    res.json({ outstanding_advances: Number(row?.outstanding ?? 0) });
+  } catch (e) {
+    const code = getPgCode(e);
+    if (code === "42P01" || code === "42703") {
+      logger.warn({ queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] case_ledgers schema drift, returning 0");
+      res.json({ outstanding_advances: 0 });
+      return;
+    }
+    logger.error({ err: e, queryName, caseId: params.data.caseId, firmId: req.firmId, userId: req.userId, requestId: res.locals.requestId, dbErr: extractDbErrorInfo(e) }, "[cases] advances fetch failed");
+    res.status(500).json({ error: "Internal Server Error" });
+  }
 }));
 
 router.post("/cases/:caseId/ledger", requireAuthHandler, requireFirmUserHandler, requirePermission("accounting", "write") as RequestHandler, authed(async (req, res) => {

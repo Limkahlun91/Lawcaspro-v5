@@ -54,11 +54,49 @@ router.post("/hr/leave", requireAuth, requireFirmUser, requireHRModuleEnabled, r
   }
 });
 
-router.get("/hr/leave/me", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.leave"), requirePermission("hr_leave", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/leave/me",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requireUserFeatureAccess("hr.leave"),
+  requirePermission("hr_self_service", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const employeeId = req.userId!;
     const rows = await listMyLeaves({ firmId: req.firmId!, userId: req.userId!, employeeId }, { tx: req.rlsDb });
     res.json({ ok: true, items: rows });
+  } catch (err) {
+    res.status(500).json(serializeHRError(err instanceof Error ? createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, err.message) : createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, "Unknown error")));
+  }
+});
+
+router.post("/hr/leave/me",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requireUserFeatureAccess("hr.leave"),
+  requirePermission("hr_self_service", "create"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const selfCreateSchema = createLeaveBodySchema.omit({ employeeId: true });
+    const parsed = selfCreateSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json(serializeHRError(createHRError(
+        HR_ERROR_CODES.HR_REQUIRED_FIELD_MISSING,
+        parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      )));
+      return;
+    }
+    const result = await createLeaveRequest({
+      firmId: req.firmId!,
+      employeeId: req.userId!,
+      leaveType: parsed.data.leaveType,
+      startDate: parsed.data.startDate,
+      endDate: parsed.data.endDate,
+      reason: parsed.data.reason ?? null,
+      actorUserId: req.userId!,
+    }, { tx: req.rlsDb });
+    res.status(201).json({ ok: true, leave: result });
   } catch (err) {
     res.status(500).json(serializeHRError(err instanceof Error ? createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, err.message) : createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, "Unknown error")));
   }

@@ -114,11 +114,56 @@ router.post("/hr/claims/:id/reject", requireAuth, requireFirmUser, requireHRModu
   }
 });
 
-router.get("/hr/claims/me", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.claims"), requirePermission("hr_claims", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/claims/me",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requireUserFeatureAccess("hr.claims"),
+  requirePermission("hr_self_service", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const employeeId = req.userId!;
     const rows = await listMyClaims({ firmId: req.firmId!, userId: req.userId!, employeeId }, { tx: req.rlsDb });
     res.json({ ok: true, items: rows });
+  } catch (err) {
+    res.status(500).json(serializeHRError(err instanceof Error ? createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, err.message) : createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, "Unknown error")));
+  }
+});
+
+router.post("/hr/claims/me",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requireUserFeatureAccess("hr.claims"),
+  requirePermission("hr_self_service", "create"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const createClaimBodySchema = z.object({
+      claimType: z.string().min(1),
+      amount: z.number().finite().nonnegative(),
+      incurrenceDate: z.coerce.date(),
+      description: z.string().nullable().optional(),
+      receipts: z.array(z.unknown()).nullable().optional(),
+    });
+    const parsed = createClaimBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json(serializeHRError(createHRError(
+        HR_ERROR_CODES.HR_REQUIRED_FIELD_MISSING,
+        parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      )));
+      return;
+    }
+    const claim = await createClaim({
+      firmId: req.firmId!,
+      employeeId: req.userId!,
+      claimType: parsed.data.claimType,
+      amount: parsed.data.amount,
+      incurrenceDate: parsed.data.incurrenceDate,
+      description: parsed.data.description ?? null,
+      receipts: parsed.data.receipts ?? null,
+      actorUserId: req.userId!,
+    }, { tx: req.rlsDb });
+    res.status(201).json({ ok: true, claim });
   } catch (err) {
     res.status(500).json(serializeHRError(err instanceof Error ? createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, err.message) : createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, "Unknown error")));
   }

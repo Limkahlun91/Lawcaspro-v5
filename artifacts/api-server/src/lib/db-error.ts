@@ -1,14 +1,22 @@
 export type DbErrorInfo = {
   sqlstate?: string | null;
   sqlState?: string | null;
+  code?: string | null;
+  name?: string | null;
   table?: string | null;
   column?: string | null;
   constraint?: string | null;
+  schema?: string | null;
   detail?: string | null;
   hint?: string | null;
   position?: string | null;
   message?: string | null;
+  queryName?: string | null;
+  route?: string | null;
+  stage?: string | null;
 };
+
+export type SafeDatabaseError = DbErrorInfo;
 
 function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
@@ -53,10 +61,12 @@ function getFirstDbLikeRecord(err: unknown): Record<string, unknown> | null {
 export function extractDbErrorInfo(err: unknown): DbErrorInfo {
   const rec = getFirstDbLikeRecord(err);
   const message = err instanceof Error ? err.message : rec && typeof rec.message === "string" ? String(rec.message) : null;
-  const sqlstate = getString(rec, "code");
+  const sqlstate = getString(rec, "code") ?? getString(rec, "sqlstate") ?? getString(rec, "sqlState");
+  const name = err instanceof Error ? err.name : getString(rec, "name");
   const table = getString(rec, "table");
   const column = getString(rec, "column");
   const constraint = getString(rec, "constraint");
+  const schema = getString(rec, "schema");
   const detail = getString(rec, "detail");
   const hint = getString(rec, "hint");
   const position = getString(rec, "position");
@@ -64,12 +74,17 @@ export function extractDbErrorInfo(err: unknown): DbErrorInfo {
   return {
     sqlstate,
     sqlState: sqlstate,
+    code: sqlstate,
+    name,
     table: table ?? parsed.table,
     column: column ?? parsed.column,
     constraint,
+    schema,
     detail,
     hint,
     position,
     message: message ? String(message) : null,
   };
 }
+
+export const extractSafeDatabaseError = extractDbErrorInfo;

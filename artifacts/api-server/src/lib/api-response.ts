@@ -2,6 +2,7 @@ import type { RequestHandler } from "express";
 import crypto from "crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logger } from "./logger.js";
+import { extractDbErrorInfo } from "./db-error.js";
 
 type NextLike = (error?: unknown) => void;
 
@@ -189,22 +190,84 @@ export function sendError(res: ResLike, err: unknown, fallback?: { status?: numb
   res.status(status).json(body);
 }
 
+type LogClassification = {
+  level: "info" | "warn" | "error";
+  event: "api.denied" | "api.client_error" | "api.unhandled";
+};
+
+export function classifyErrorForLog(err: unknown): LogClassification {
+  const getStatus = (e: unknown): number | null => {
+    if (!e || typeof e !== "object") return null;
+    const rec = e as Record<string, unknown>;
+    const status = rec.status;
+    return typeof status === "number" && Number.isFinite(status) ? status : null;
+  };
+  const getCode = (e: unknown): string | null => {
+    if (!e || typeof e !== "object") return null;
+    const rec = e as Record<string, unknown>;
+    const code = rec.code;
+    return typeof code === "string" ? code : null;
+  };
+  const status = err instanceof ApiError ? err.status : getStatus(err);
+  if (status !== null && status >= 400 && status < 500) {
+    const code = err instanceof ApiError ? err.code : getCode(err);
+    if (
+      status === 401 ||
+      status === 403 ||
+      code === "FEATURE_DISABLED" ||
+      code === "NOT_AUTHENTICATED" ||
+      code === "NOT_AUTHORIZED" ||
+      code === "PERMISSION_DENIED" ||
+      code === "SESSION_EXPIRED"
+    ) {
+      return { level: "info", event: "api.denied" };
+    }
+    return { level: "warn", event: "api.client_error" };
+  }
+  return { level: "error", event: "api.unhandled" };
+}
+
 export function wrap(handler: (req: ReqLike, res: ResLike) => Promise<void> | void): RequestHandler {
   const wrapped = async (req: ReqLike, res: ResLike): Promise<void> => {
     try {
       await handler(req, res);
     } catch (err) {
-      logger.error(
-        {
-          err,
-          requestId: res.locals.requestId,
-          path: req.path,
-          method: req.method,
-          userId: req.userId,
-          firmId: req.firmId,
-        },
-        "api.unhandled",
+      const classification = classifyErrorForLog(err);
+      const safeDbErr = extractDbErrorInfo(err);
+      const hasDbInfo = Boolean(
+        safeDbErr.sqlstate || safeDbErr.table || safeDbErr.column || safeDbErr.constraint || safeDbErr.schema,
       );
+      const context: Record<string, unknown> = {
+        requestId: res.locals.requestId,
+        path: req.path,
+        method: req.method,
+        userId: req.userId,
+        firmId: req.firmId,
+      };
+      if (hasDbInfo) {
+        context.dbErr = {
+          code: safeDbErr.sqlstate ?? safeDbErr.code,
+          name: safeDbErr.name,
+          sqlstate: safeDbErr.sqlstate,
+          table: safeDbErr.table,
+          column: safeDbErr.column,
+          constraint: safeDbErr.constraint,
+          schema: safeDbErr.schema,
+          detailClass: safeDbErr.detail ? (typeof safeDbErr.detail === "string" ? "string" : typeof safeDbErr.detail) : undefined,
+        };
+      }
+      if (classification.level === "error") {
+        context.err = err;
+      } else {
+        if (err instanceof ApiError) {
+          context.apiErr = { code: err.code, status: err.status, message: err.message, stage: err.stage };
+        } else if (err instanceof Error) {
+          context.apiErr = { name: err.name, message: err.message };
+        } else {
+          context.apiErr = { raw: typeof err };
+        }
+      }
+      (logger[classification.level] as any)(context, classification.event);
       sendError(res, err);
     }
   };

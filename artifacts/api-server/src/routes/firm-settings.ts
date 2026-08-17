@@ -5,6 +5,7 @@ import { db, firmBankAccountsTable, firmsTable, sql } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { one } from "../lib/http.js";
 import { getSupabaseStorageConfigError, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage.js";
+import { extractDbErrorInfo } from "../lib/db-error.js";
 
 const VALID_ACCOUNT_TYPES = ["office", "client"];
 
@@ -178,14 +179,46 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthReque
 });
 
 router.get("/firm-settings/logo", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response) => {
+  const stage: { current: string } = { current: "firm_settings.logo.init" };
+  const requestId = typeof (req as any).id === "string" ? (req as any).id : "req_unknown";
   try {
+    stage.current = "firm_settings.logo.select_firm";
     const r = rdb(req);
     const firmId = req.firmId!;
-    const [firm] = await r.select({ logoUrl: firmsTable.logoUrl }).from(firmsTable).where(eq(firmsTable.id, firmId));
+    let firm: { logoUrl: string | null } | undefined;
+    try {
+      [firm] = await r.select({ logoUrl: firmsTable.logoUrl }).from(firmsTable).where(eq(firmsTable.id, firmId));
+    } catch (firmErr) {
+      const dbErr = extractDbErrorInfo(firmErr);
+      req.log.warn({
+        err: firmErr,
+        stage: stage.current,
+        firmId,
+        requestId,
+        dbErr: {
+          code: dbErr.code ?? null,
+          name: dbErr.name ?? null,
+          sqlstate: dbErr.sqlstate ?? null,
+          table: dbErr.table ?? null,
+          column: dbErr.column ?? null,
+          constraint: dbErr.constraint ?? null,
+          schema: dbErr.schema ?? null,
+        },
+      }, "firm_settings.logo firm lookup degraded");
+      res.status(503).json({
+        error: "Firm logo lookup unavailable",
+        code: "FIRM_LOGO_DB_UNAVAILABLE",
+        stage: stage.current,
+        requestId,
+      });
+      return;
+    }
+    stage.current = "firm_settings.logo.validate_url";
     const logoUrl = typeof firm?.logoUrl === "string" ? firm.logoUrl : "";
-    if (!logoUrl) { res.status(404).json({ error: "Logo not set" }); return; }
-    if (!logoUrl.startsWith("/objects/")) { res.status(400).json({ error: "Invalid logoUrl" }); return; }
+    if (!logoUrl) { res.status(404).json({ error: "Logo not set", requestId }); return; }
+    if (!logoUrl.startsWith("/objects/")) { res.status(400).json({ error: "Invalid logoUrl", requestId }); return; }
 
+    stage.current = "firm_settings.logo.fetch_storage";
     const response = await supabaseStorage.fetchPrivateObjectResponse(logoUrl);
     res.status(response.status);
     response.headers.forEach?.((value, key) => res.setHeader(key, value));
@@ -196,11 +229,39 @@ router.get("/firm-settings/logo", requireAuth, requireFirmUser, async (req: Auth
       res.end();
     }
   } catch (error) {
-    if (error instanceof ObjectNotFoundError) { res.status(404).json({ error: "Logo not found" }); return; }
+    stage.current = "firm_settings.logo.catch";
+    if (error instanceof ObjectNotFoundError) { res.status(404).json({ error: "Logo not found", requestId }); return; }
     const configErr = getSupabaseStorageConfigError(error);
-    if (configErr) { res.status(configErr.statusCode).json({ error: configErr.error, code: configErr.code, missing: configErr.missing }); return; }
-    req.log.error({ err: error }, "firm_settings.logo failed");
-    res.status(500).json({ error: "Internal Server Error" });
+    if (configErr) { res.status(configErr.statusCode).json({ error: configErr.error, code: configErr.code, missing: configErr.missing, stage: stage.current, requestId }); return; }
+    const dbErr = extractDbErrorInfo(error);
+    const likelyInfra = Boolean(
+      dbErr.code ||
+      (error instanceof Error && error.name === "PoolConnectError") ||
+      (error instanceof Error && /ETIMEDOUT|timeout|ENOTFOUND|ECONNREFUSED/i.test(error.message)),
+    );
+    req.log[likelyInfra ? "warn" : "error"]({
+      err: error,
+      stage: stage.current,
+      firmId: req.firmId ?? null,
+      requestId,
+      dbErr: {
+        code: dbErr.code ?? null,
+        name: dbErr.name ?? null,
+        sqlstate: dbErr.sqlstate ?? null,
+        table: dbErr.table ?? null,
+        column: dbErr.column ?? null,
+        constraint: dbErr.constraint ?? null,
+        schema: dbErr.schema ?? null,
+      },
+    }, `firm_settings.logo failed (stage=${stage.current})`);
+    const status = likelyInfra ? 503 : 500;
+    const code = likelyInfra ? "FIRM_LOGO_INFRA_UNAVAILABLE" : "FIRM_LOGO_UNEXPECTED";
+    res.status(status).json({
+      error: likelyInfra ? "Firm logo storage unavailable" : "Internal Server Error",
+      code,
+      stage: stage.current,
+      requestId,
+    });
   }
 });
 

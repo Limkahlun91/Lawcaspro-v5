@@ -81,7 +81,14 @@ const stripped = stripSslmodeFromDatabaseUrl(databaseUrl);
 const shouldUseSsl =
   isPooler || stripped.hadSslmode || loweredDatabaseUrl.includes("supabase.co") || loweredDatabaseUrl.includes("supabase.com");
 
-export const pool = new Pool({
+const poolRegistry = new Map<string, pg.Pool>();
+
+function normalizedKeyForPool(databaseUrlRaw: string): string {
+  const stripped = stripSslmodeFromDatabaseUrl(databaseUrlRaw.trim());
+  return stripped.url;
+}
+
+export const pool: pg.Pool = new Pool({
   connectionString: stripped.url,
   connectionTimeoutMillis: connectTimeoutMs,
   idleTimeoutMillis: idleTimeoutMs,
@@ -89,6 +96,8 @@ export const pool = new Pool({
   ...(keepAlive ? { keepAlive: true, keepAliveInitialDelayMillis: keepAliveDelayMs } : {}),
   ...(shouldUseSsl ? (isPooler ? { ssl: { rejectUnauthorized: false } } : { ssl: true }) : {}),
 });
+poolRegistry.set(normalizedKeyForPool(databaseUrl), pool);
+
 export const db = drizzle(pool, { schema });
 
 export { schema };
@@ -113,6 +122,15 @@ export function createPoolFromDatabaseUrl(databaseUrlRaw: string) {
     ...(keepAlive ? { keepAlive: true, keepAliveInitialDelayMillis: keepAliveDelayMs } : {}),
     ...(shouldUseSsl ? (isPooler ? { ssl: { rejectUnauthorized: false } } : { ssl: true }) : {}),
   });
+}
+
+export function getOrCreateSharedPool(databaseUrlRaw: string): pg.Pool {
+  const key = normalizedKeyForPool(databaseUrlRaw);
+  const existing = poolRegistry.get(key);
+  if (existing) return existing;
+  const fresh = createPoolFromDatabaseUrl(databaseUrlRaw);
+  poolRegistry.set(key, fresh);
+  return fresh;
 }
 
 export * from "./schema";

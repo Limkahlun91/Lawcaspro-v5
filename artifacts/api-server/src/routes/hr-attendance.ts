@@ -11,8 +11,10 @@ import {
   requestCorrection,
   approveCorrection,
 } from "../modules/hr/attendance/attendance-core.service.js";
+import { getMyAttendance } from "../modules/hr/self/self-service-core.service.js";
 
 type RouterInternalLike = {
+  get: (path: string, ...handlers: unknown[]) => unknown;
   post: (path: string, ...handlers: unknown[]) => unknown;
 };
 
@@ -119,6 +121,89 @@ router.post("/hr/attendance/corrections/:id/approve", requireAuth, requireFirmUs
     }
     const result = await approveCorrection({ firmId: req.firmId!, correctionId: id, actorUserId: req.userId! }, { tx: req.rlsDb });
     res.json({ ok: true, correction: result.correction, wasAlreadyApproved: result.wasAlreadyApproved });
+  } catch (err) {
+    res.status(500).json(serializeHRError(err instanceof Error ? createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, err.message) : createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, "Unknown error")));
+  }
+});
+
+const selfClockBodySchema = z.object({
+  location: z.object({ lat: z.number(), lng: z.number() }).nullable().optional(),
+});
+
+router.get("/hr/attendance/me",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requireUserFeatureAccess("hr.attendance"),
+  requirePermission("hr_self_service", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const rows = await getMyAttendance({ firmId: req.firmId!, userId: req.userId!, employeeId: req.userId! }, { tx: req.rlsDb });
+    res.json({ ok: true, items: rows });
+  } catch (err) {
+    res.status(500).json(serializeHRError(err instanceof Error ? createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, err.message) : createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, "Unknown error")));
+  }
+});
+
+router.post("/hr/attendance/me/clock-in",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requireUserFeatureAccess("hr.attendance"),
+  requirePermission("hr_self_service", "create"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const parsed = selfClockBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json(serializeHRError(createHRError(
+        HR_ERROR_CODES.HR_REQUIRED_FIELD_MISSING,
+        parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      )));
+      return;
+    }
+    const locationIn: { lat: number; lng: number } | null =
+      parsed.data.location && parsed.data.location.lat != null && parsed.data.location.lng != null
+        ? ({ lat: parsed.data.location.lat as number, lng: parsed.data.location.lng as number } as { lat: number; lng: number })
+        : null;
+    const result = await clockIn({
+      firmId: req.firmId!,
+      employeeId: req.userId!,
+      actorUserId: req.userId!,
+      location: locationIn,
+    }, { tx: req.rlsDb });
+    res.status(201).json({ ok: true, record: result.record, wasAlreadyClockedIn: result.wasAlreadyClockedIn });
+  } catch (err) {
+    res.status(500).json(serializeHRError(err instanceof Error ? createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, err.message) : createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, "Unknown error")));
+  }
+});
+
+router.post("/hr/attendance/me/clock-out",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requireUserFeatureAccess("hr.attendance"),
+  requirePermission("hr_self_service", "create"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const parsed = selfClockBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json(serializeHRError(createHRError(
+        HR_ERROR_CODES.HR_REQUIRED_FIELD_MISSING,
+        parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      )));
+      return;
+    }
+    const locationOut: { lat: number; lng: number } | null =
+      parsed.data.location && parsed.data.location.lat != null && parsed.data.location.lng != null
+        ? ({ lat: parsed.data.location.lat as number, lng: parsed.data.location.lng as number } as { lat: number; lng: number })
+        : null;
+    const result = await clockOut({
+      firmId: req.firmId!,
+      employeeId: req.userId!,
+      actorUserId: req.userId!,
+      location: locationOut,
+    }, { tx: req.rlsDb });
+    res.json({ ok: true, record: result.record, wasAlreadyClockedOut: result.wasAlreadyClockedOut });
   } catch (err) {
     res.status(500).json(serializeHRError(err instanceof Error ? createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, err.message) : createHRError(HR_ERROR_CODES.HR_PERMISSION_DENIED, "Unknown error")));
   }

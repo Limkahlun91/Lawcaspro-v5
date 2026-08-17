@@ -212,7 +212,12 @@ function resolveRoleName(req: AuthRequest): string | null {
 // ---------------------------------------------------------------------------
 // §10: Canonical dashboard route (ME dashboard — self or admin scope)
 // ---------------------------------------------------------------------------
-router.get("/hr/me/dashboard", requireAuth, requireFirmUser, requireHRModuleEnabled, requireUserFeatureAccess("hr.dashboard"), requirePermission("hr_dashboard", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/me/dashboard",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requirePermission("hr_self_service", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const firmId = req.firmId!;
     const userId = req.userId!;

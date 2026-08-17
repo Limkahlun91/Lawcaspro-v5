@@ -2,6 +2,7 @@ import express, { type Response, type Router as ExpressRouter } from "express";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
 import { requireHRModuleEnabled } from "../modules/hr/permissions/hr-feature-gate.js";
 import { createHRError, HR_ERROR_CODES, serializeHRError } from "../modules/shared/errors/hr-error-codes.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
 import { one } from "../lib/http.js";
 import {
   getProfile,
@@ -20,7 +21,12 @@ type RouterInternalLike = {
 const expressRouter: ExpressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
-router.get("/hr/self/profile", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_self_service", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/self/profile",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requirePermission("hr_self_service", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const employeeId = req.userId!;
     const profile = await getProfile({ firmId: req.firmId!, userId: req.userId!, employeeId }, { tx: req.rlsDb });
@@ -34,7 +40,13 @@ router.get("/hr/self/profile", requireAuth, requireFirmUser, requireHRModuleEnab
   }
 });
 
-router.get("/hr/self/leave", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_self_service", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/self/leave",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requireUserFeatureAccess("hr.leave"),
+  requirePermission("hr_self_service", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const employeeId = req.userId!;
     const rows = await getMyLeave({ firmId: req.firmId!, userId: req.userId!, employeeId }, { tx: req.rlsDb });
@@ -44,7 +56,13 @@ router.get("/hr/self/leave", requireAuth, requireFirmUser, requireHRModuleEnable
   }
 });
 
-router.get("/hr/self/claims", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_self_service", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/self/claims",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requireUserFeatureAccess("hr.claims"),
+  requirePermission("hr_self_service", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const employeeId = req.userId!;
     const rows = await getMyClaims({ firmId: req.firmId!, userId: req.userId!, employeeId }, { tx: req.rlsDb });
@@ -54,7 +72,13 @@ router.get("/hr/self/claims", requireAuth, requireFirmUser, requireHRModuleEnabl
   }
 });
 
-router.get("/hr/self/payslips", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_self_service", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/self/payslips",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requireUserFeatureAccess("hr.payroll"),
+  requirePermission("hr_self_service", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const employeeId = req.userId!;
     const rows = await getMyPayslips({ firmId: req.firmId!, userId: req.userId!, employeeId }, { tx: req.rlsDb });
@@ -64,7 +88,13 @@ router.get("/hr/self/payslips", requireAuth, requireFirmUser, requireHRModuleEna
   }
 });
 
-router.get("/hr/self/attendance", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_self_service", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/self/attendance",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requireUserFeatureAccess("hr.attendance"),
+  requirePermission("hr_self_service", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const employeeId = req.userId!;
     const startStr = one((req.query as any).startDate);
@@ -78,7 +108,12 @@ router.get("/hr/self/attendance", requireAuth, requireFirmUser, requireHRModuleE
   }
 });
 
-router.get("/hr/self/documents", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_self_service", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/self/documents",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requirePermission("hr_self_service", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const employeeId = req.userId!;
     const rows = await getMyDocuments({ firmId: req.firmId!, userId: req.userId!, employeeId }, { tx: req.rlsDb });
@@ -88,7 +123,12 @@ router.get("/hr/self/documents", requireAuth, requireFirmUser, requireHRModuleEn
   }
 });
 
-router.get("/hr/self/assets", requireAuth, requireFirmUser, requireHRModuleEnabled, requirePermission("hr_self_service", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/hr/self/assets",
+  requireAuth, requireFirmUser,
+  requireHRModuleEnabled,
+  requireUserFeatureAccess("hr.self_service"),
+  requirePermission("hr_self_service", "read"),
+  async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const employeeId = req.userId!;
     const rows = await getMyAssets({ firmId: req.firmId!, userId: req.userId!, employeeId }, { tx: req.rlsDb });
