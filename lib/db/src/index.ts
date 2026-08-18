@@ -4,6 +4,12 @@ import * as schema from "./schema";
 
 const { Pool } = pg;
 
+declare const globalThis: {
+  __lawcasproDbPool?: pg.Pool;
+  __lawcasproDrizzleDb?: ReturnType<typeof drizzle>;
+  __lawcasproDbPoolRegistry?: Map<string, pg.Pool>;
+};
+
 const allowMissingDatabaseUrl =
   process.env.NODE_ENV === "test" && process.env.VITEST_SKIP_DB === "1";
 if (!process.env.DATABASE_URL && !allowMissingDatabaseUrl) {
@@ -12,35 +18,41 @@ if (!process.env.DATABASE_URL && !allowMissingDatabaseUrl) {
   );
 }
 
+const isServerlessEnv =
+  process.env.VERCEL === "1" ||
+  Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) ||
+  process.env.NEXT_RUNTIME === "edge" ||
+  process.env.FUNCTIONS_WORKER === "1";
+
 const rawConnectTimeoutMs = process.env.PG_CONNECT_TIMEOUT_MS;
 const connectTimeoutMs =
   rawConnectTimeoutMs && !Number.isNaN(Number(rawConnectTimeoutMs))
     ? Number(rawConnectTimeoutMs)
-    : (process.env.VERCEL === "1" || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME))
-      ? 5_000
+    : isServerlessEnv
+      ? 4_000
       : 10_000;
 
 const rawPoolMax = process.env.PG_POOL_MAX;
 const poolMax =
   rawPoolMax && !Number.isNaN(Number(rawPoolMax)) && Number(rawPoolMax) > 0
     ? Number(rawPoolMax)
-    : (process.env.VERCEL === "1" || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME))
-      ? 10
+    : isServerlessEnv
+      ? 5
       : undefined;
 
 const rawIdleTimeoutMs = process.env.PG_IDLE_TIMEOUT_MS;
 const idleTimeoutMs =
   rawIdleTimeoutMs && !Number.isNaN(Number(rawIdleTimeoutMs)) && Number(rawIdleTimeoutMs) >= 0
     ? Number(rawIdleTimeoutMs)
-    : (process.env.VERCEL === "1" || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME))
-      ? 5_000
+    : isServerlessEnv
+      ? 3_000
       : 30_000;
 
 const rawKeepAlive = process.env.PG_KEEPALIVE;
 const keepAlive =
   rawKeepAlive && (rawKeepAlive === "0" || rawKeepAlive.toLowerCase() === "false")
     ? false
-    : true;
+    : !isServerlessEnv;
 
 const rawKeepAliveDelayMs = process.env.PG_KEEPALIVE_DELAY_MS;
 const keepAliveDelayMs =
@@ -74,31 +86,64 @@ const stripSslmodeFromDatabaseUrl = (
   return { url: hash ? `${rebuilt}#${hash}` : rebuilt, hadSslmode };
 };
 
+type PoolOptions = ConstructorParameters<typeof Pool>[0];
+
+function buildPoolOptions(
+  strippedConnectionUrl: string,
+  isPoolerFlag: boolean,
+  loweredDatabaseUrlRaw: string,
+  hadSslmodeFlag: boolean,
+): PoolOptions {
+  const shouldUseSsl =
+    isPoolerFlag ||
+    hadSslmodeFlag ||
+    loweredDatabaseUrlRaw.includes("supabase.co") ||
+    loweredDatabaseUrlRaw.includes("supabase.com");
+  return {
+    connectionString: strippedConnectionUrl,
+    connectionTimeoutMillis: connectTimeoutMs,
+    idleTimeoutMillis: idleTimeoutMs,
+    ...(poolMax ? { max: poolMax } : {}),
+    ...(keepAlive ? { keepAlive: true, keepAliveInitialDelayMillis: keepAliveDelayMs } : {}),
+    ...(shouldUseSsl ? (isPoolerFlag ? { ssl: { rejectUnauthorized: false } } : { ssl: true }) : {}),
+    allowExitOnIdle: isServerlessEnv ? true : undefined,
+  };
+}
+
 const databaseUrl = process.env.DATABASE_URL ?? "postgres://127.0.0.1:1/postgres";
 const isPooler = isSupabasePoolerDatabaseUrl(databaseUrl);
 const loweredDatabaseUrl = databaseUrl.toLowerCase();
 const stripped = stripSslmodeFromDatabaseUrl(databaseUrl);
-const shouldUseSsl =
-  isPooler || stripped.hadSslmode || loweredDatabaseUrl.includes("supabase.co") || loweredDatabaseUrl.includes("supabase.com");
+const defaultPoolKey = stripped.url;
 
-const poolRegistry = new Map<string, pg.Pool>();
+const poolRegistry: Map<string, pg.Pool> =
+  globalThis.__lawcasproDbPoolRegistry ?? new Map<string, pg.Pool>();
+globalThis.__lawcasproDbPoolRegistry = poolRegistry;
 
 function normalizedKeyForPool(databaseUrlRaw: string): string {
-  const stripped = stripSslmodeFromDatabaseUrl(databaseUrlRaw.trim());
-  return stripped.url;
+  const strippedKey = stripSslmodeFromDatabaseUrl(databaseUrlRaw.trim());
+  return strippedKey.url;
 }
 
-export const pool: pg.Pool = new Pool({
-  connectionString: stripped.url,
-  connectionTimeoutMillis: connectTimeoutMs,
-  idleTimeoutMillis: idleTimeoutMs,
-  ...(poolMax ? { max: poolMax } : {}),
-  ...(keepAlive ? { keepAlive: true, keepAliveInitialDelayMillis: keepAliveDelayMs } : {}),
-  ...(shouldUseSsl ? (isPooler ? { ssl: { rejectUnauthorized: false } } : { ssl: true }) : {}),
-});
-poolRegistry.set(normalizedKeyForPool(databaseUrl), pool);
+function instantiateDefaultPool(): pg.Pool {
+  const opts = buildPoolOptions(stripped.url, isPooler, loweredDatabaseUrl, stripped.hadSslmode);
+  return new Pool(opts);
+}
 
-export const db = drizzle(pool, { schema });
+const cachedPool: pg.Pool | undefined = globalThis.__lawcasproDbPool;
+export const pool: pg.Pool = cachedPool ?? instantiateDefaultPool();
+if (!cachedPool) {
+  globalThis.__lawcasproDbPool = pool;
+}
+if (!poolRegistry.has(defaultPoolKey)) {
+  poolRegistry.set(defaultPoolKey, pool);
+}
+
+const cachedDb: ReturnType<typeof drizzle> | undefined = globalThis.__lawcasproDrizzleDb;
+export const db = cachedDb ?? drizzle(pool, { schema });
+if (!cachedDb) {
+  globalThis.__lawcasproDrizzleDb = db;
+}
 
 export { schema };
 export type AppDb = typeof db;
@@ -109,19 +154,8 @@ export function createPoolFromDatabaseUrl(databaseUrlRaw: string) {
   const isPooler = isSupabasePoolerDatabaseUrl(databaseUrl);
   const loweredDatabaseUrl = databaseUrl.toLowerCase();
   const stripped = stripSslmodeFromDatabaseUrl(databaseUrl);
-  const shouldUseSsl =
-    isPooler ||
-    stripped.hadSslmode ||
-    loweredDatabaseUrl.includes("supabase.co") ||
-    loweredDatabaseUrl.includes("supabase.com");
-  return new Pool({
-    connectionString: stripped.url,
-    connectionTimeoutMillis: connectTimeoutMs,
-    idleTimeoutMillis: idleTimeoutMs,
-    ...(poolMax ? { max: poolMax } : {}),
-    ...(keepAlive ? { keepAlive: true, keepAliveInitialDelayMillis: keepAliveDelayMs } : {}),
-    ...(shouldUseSsl ? (isPooler ? { ssl: { rejectUnauthorized: false } } : { ssl: true }) : {}),
-  });
+  const opts = buildPoolOptions(stripped.url, isPooler, loweredDatabaseUrl, stripped.hadSslmode);
+  return new Pool(opts);
 }
 
 export function getOrCreateSharedPool(databaseUrlRaw: string): pg.Pool {

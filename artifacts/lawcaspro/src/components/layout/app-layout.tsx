@@ -106,6 +106,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     retry: false,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
+    placeholderData: (prev) => prev ?? { count: 0 },
   });
   const unreadCount = unreadData?.count ?? 0;
 
@@ -117,6 +118,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     retry: false,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
+    placeholderData: (prev) => prev ?? { totalUnreadCount: 0 },
   });
   const caseUnreadCount = caseUnreadData?.totalUnreadCount ?? 0;
 
@@ -128,6 +130,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     retry: false,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
+    placeholderData: (prev) => prev ?? { count: 0 },
   });
   const accountingUnreadCount = accountingUnreadData?.count ?? 0;
 
@@ -167,6 +170,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
     staleTime: 30_000,
     refetchOnWindowFocus: false,
     retry: false,
+    placeholderData: (prev) => prev ?? { unread: 0, urgent: 0, escalated: 0, overdue: 0, monitorUniqueCount: 0 },
   });
   const notifSummary = notifSummaryQuery.data ?? { unread: 0, urgent: 0, escalated: 0, overdue: 0, monitorUniqueCount: 0 };
 

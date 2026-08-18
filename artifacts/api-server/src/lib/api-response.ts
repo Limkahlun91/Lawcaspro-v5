@@ -108,6 +108,71 @@ export function getApiMeta(res: ResLike): ApiMeta {
   };
 }
 
+type DbBusyResponse = { status: 503; code: "DB_BUSY"; message: string };
+
+function isDbBusyErrorCode(code: unknown): boolean {
+  if (typeof code !== "string") return false;
+  const lowered = code.toLowerCase();
+  return (
+    lowered === "etimedout" ||
+    lowered === "econnrefused" ||
+    lowered === "ehostunreach" ||
+    lowered === "econnreset" ||
+    lowered === "53300" ||
+    lowered === "53400" ||
+    lowered === "08000" ||
+    lowered === "08003" ||
+    lowered === "08006" ||
+    lowered === "57p01" ||
+    lowered === "57p02" ||
+    lowered === "57p03" ||
+    lowered === "too_many_connections" ||
+    lowered === "db_busy" ||
+    lowered === "connection_timeout" ||
+    lowered === "pool_timeout"
+  );
+}
+
+function detectDbBusyResponse(err: unknown): DbBusyResponse | null {
+  if (!err || typeof err !== "object") return null;
+  const rec = err as Record<string, unknown>;
+  const errCode = rec.code;
+  const errStatus = rec.status;
+  const dbErrCode =
+    ((rec as { sqlState?: unknown; sqlstate?: unknown }).sqlState ?? (rec as { sqlState?: unknown; sqlstate?: unknown }).sqlstate) as unknown;
+  if (isDbBusyErrorCode(errCode) || isDbBusyErrorCode(dbErrCode)) {
+    return { status: 503, code: "DB_BUSY", message: "資料庫繁忙，請稍後重試" };
+  }
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  const lowered = typeof msg === "string" ? msg.toLowerCase() : "";
+  if (
+    lowered.includes("timeout exceeded when trying to connect") ||
+    (lowered.includes("pool") && lowered.includes("timeout")) ||
+    lowered.includes("connection terminated due to connection timeout") ||
+    lowered.includes("connection terminated unexpectedly") ||
+    lowered.includes("server closed the connection unexpectedly") ||
+    lowered.includes("too many connections") ||
+    lowered.includes("database is busy") ||
+    lowered.includes("db busy") ||
+    lowered.includes("資料庫繁忙")
+  ) {
+    return { status: 503, code: "DB_BUSY", message: "資料庫繁忙，請稍後重試" };
+  }
+  if (
+    typeof errStatus === "number" &&
+    errStatus === 503 &&
+    typeof errCode === "string" &&
+    (errCode === "DB_BUSY" || errCode === "SERVICE_UNAVAILABLE")
+  ) {
+    return { status: 503, code: "DB_BUSY", message: "資料庫繁忙，請稍後重試" };
+  }
+  return null;
+}
+
+export function resolveDbBusyResponse(err: unknown): { status: number; code: string; message: string } | null {
+  return detectDbBusyResponse(err);
+}
+
 export function sendOk<T>(res: ResLike, data: T, opts?: { status?: number; warnings?: ApiWarning[] }): void {
   const body: ApiSuccess<T> = { ok: true, data, meta: getApiMeta(res) };
   if (opts?.warnings?.length) body.warnings = opts.warnings;
@@ -116,6 +181,23 @@ export function sendOk<T>(res: ResLike, data: T, opts?: { status?: number; warni
 
 export function sendError(res: ResLike, err: unknown, fallback?: { status?: number; code?: string; message?: string }): void {
   const meta = getApiMeta(res);
+
+  const dbBusy = detectDbBusyResponse(err);
+  if (dbBusy) {
+    const body: ApiFailure = {
+      ok: false,
+      error: {
+        code: dbBusy.code,
+        message: dbBusy.message,
+        retryable: true,
+        suggestion: "請等待數秒後重新整理頁面或重試操作",
+      },
+      meta,
+    };
+    res.status(dbBusy.status).json(body);
+    return;
+  }
+
   const isApiErrorLike = (value: unknown): value is {
     status: number;
     code: string;
@@ -129,7 +211,7 @@ export function sendError(res: ResLike, err: unknown, fallback?: { status?: numb
     const v = value as Record<string, unknown>;
     const status = v.status;
     const code = v.code;
-    const message = (v as any).message;
+    const message = (v as { message?: unknown }).message;
     return (
       typeof status === "number" &&
       Number.isFinite(status) &&
@@ -143,20 +225,20 @@ export function sendError(res: ResLike, err: unknown, fallback?: { status?: numb
   };
 
   if (err instanceof ApiError || isApiErrorLike(err)) {
-    const e = err as ApiError;
+    const e = err as ApiError & { details?: unknown; stage?: string; suggestion?: string };
     const body: ApiFailure = {
       ok: false,
       error: {
-        code: (e as any).code,
-        message: (e as any).message,
-        retryable: Boolean((e as any).retryable),
-        ...((e as any).details !== undefined ? { details: (e as any).details } : {}),
-        ...((e as any).stage ? { stage: (e as any).stage } : {}),
-        ...((e as any).suggestion ? { suggestion: (e as any).suggestion } : {}),
+        code: e.code,
+        message: e.message,
+        retryable: Boolean(e.retryable),
+        ...(e.details !== undefined ? { details: e.details } : {}),
+        ...(e.stage ? { stage: e.stage } : {}),
+        ...(e.suggestion ? { suggestion: e.suggestion } : {}),
       },
       meta,
     };
-    res.status((e as any).status).json(body);
+    res.status(e.status).json(body);
     return;
   }
 
@@ -166,8 +248,10 @@ export function sendError(res: ResLike, err: unknown, fallback?: { status?: numb
   const allowDetails =
     process.env.API_ERROR_DETAILS === "1" ||
     process.env.NODE_ENV !== "production" ||
-    Boolean((res.locals as any)?.allowErrorDetails);
-  const allowStack = allowDetails && (process.env.API_ERROR_STACK === "1" || Boolean((res.locals as any)?.allowErrorDetails));
+    Boolean((res.locals as { allowErrorDetails?: boolean }).allowErrorDetails);
+  const allowStack =
+    allowDetails &&
+    (process.env.API_ERROR_STACK === "1" || Boolean((res.locals as { allowErrorDetails?: boolean }).allowErrorDetails));
   const details =
     allowDetails && err instanceof Error
       ? {
@@ -192,10 +276,10 @@ export function sendError(res: ResLike, err: unknown, fallback?: { status?: numb
 
 type LogClassification = {
   level: "info" | "warn" | "error";
-  event: "api.denied" | "api.client_error" | "api.unhandled";
+  event: "api.denied" | "api.client_error" | "api.db_busy" | "api.unhandled";
 };
 
-export function classifyErrorForLog(err: unknown): LogClassification {
+export function classifyErrorForLog(err: unknown): LogClassification & { retrySuggestion?: "DB_BUSY" | null } {
   const getStatus = (e: unknown): number | null => {
     if (!e || typeof e !== "object") return null;
     const rec = e as Record<string, unknown>;
@@ -208,6 +292,10 @@ export function classifyErrorForLog(err: unknown): LogClassification {
     const code = rec.code;
     return typeof code === "string" ? code : null;
   };
+  const dbBusy = detectDbBusyResponse(err);
+  if (dbBusy) {
+    return { level: "warn", event: "api.db_busy", retrySuggestion: "DB_BUSY" };
+  }
   const status = err instanceof ApiError ? err.status : getStatus(err);
   if (status !== null && status >= 400 && status < 500) {
     const code = err instanceof ApiError ? err.code : getCode(err);
@@ -253,7 +341,8 @@ export function wrap(handler: (req: ReqLike, res: ResLike) => Promise<void> | vo
           column: safeDbErr.column,
           constraint: safeDbErr.constraint,
           schema: safeDbErr.schema,
-          detailClass: safeDbErr.detail ? (typeof safeDbErr.detail === "string" ? "string" : typeof safeDbErr.detail) : undefined,
+          detailClass:
+            safeDbErr.detail ? (typeof safeDbErr.detail === "string" ? "string" : typeof safeDbErr.detail) : undefined,
         };
       }
       if (classification.level === "error") {
@@ -267,7 +356,7 @@ export function wrap(handler: (req: ReqLike, res: ResLike) => Promise<void> | vo
           context.apiErr = { raw: typeof err };
         }
       }
-      (logger[classification.level] as any)(context, classification.event);
+      (logger[classification.level] as typeof logger.error)(context, classification.event);
       sendError(res, err);
     }
   };
@@ -286,17 +375,33 @@ export function parseIntParam(
   const v = one(raw);
   if (!v || !String(v).trim()) {
     if (opts?.required) {
-      throw new ApiError({ status: 400, code: "MISSING_REQUIRED_FIELD", message: `${name} is required`, retryable: false });
+      throw new ApiError({
+        status: 400,
+        code: "MISSING_REQUIRED_FIELD",
+        message: `${name} is required`,
+        retryable: false,
+      });
     }
     return null;
   }
   const n = Number.parseInt(String(v), 10);
   if (!Number.isFinite(n)) {
-    throw new ApiError({ status: 400, code: "INVALID_INPUT", message: `Invalid ${name}`, retryable: false, details: { name } });
+    throw new ApiError({
+      status: 400,
+      code: "INVALID_INPUT",
+      message: `Invalid ${name}`,
+      retryable: false,
+      details: { name },
+    });
   }
   if (opts?.min !== undefined && n < opts.min) {
-    throw new ApiError({ status: 400, code: "INVALID_INPUT", message: `Invalid ${name}`, retryable: false, details: { name } });
+    throw new ApiError({
+      status: 400,
+      code: "INVALID_INPUT",
+      message: `Invalid ${name}`,
+      retryable: false,
+      details: { name },
+    });
   }
   return n;
 }
-

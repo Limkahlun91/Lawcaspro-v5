@@ -7,7 +7,7 @@ import { unwrapApiData } from "@/lib/api-contract";
 import { PermissionGuard } from "@/components/permission-guard";
 import { useToast } from "@/hooks/use-toast";
 import { toastError } from "@/lib/toast-error";
-import { CalendarDays, CheckCircle2, XCircle } from "lucide-react";
+import { CalendarDays, CheckCircle2, FileText, XCircle } from "lucide-react";
 
 type LeaveRow = {
   id: number;

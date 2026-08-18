@@ -59,19 +59,39 @@ export function useUserEffectiveFeatures(): {
   isLoading: boolean;
   error: unknown;
   refetch: () => Promise<unknown>;
+  isRefetching: boolean;
+  isFetching: boolean;
 } {
-  const res = useQuery<UserEffectiveFeatureBundle>({
+  const res = useQuery<UserEffectiveFeatureBundle, Error, UserEffectiveFeatureBundle>({
     queryKey: USER_EFFECTIVE_QUERY_KEY,
-    queryFn: fetchUserEffectiveFeatures,
+    queryFn: async () => {
+      try {
+        return await fetchUserEffectiveFeatures();
+      } catch (err) {
+        const cached = (globalThis as any).__lawcasproCachedEffectiveFeatures as UserEffectiveFeatureBundle | undefined;
+        if (cached && cached.userId && cached.effective) return cached;
+        throw err;
+      }
+    },
     staleTime: 60_000,
-    refetchOnWindowFocus: "stale",
-    retry: 2,
+    gcTime: 10 * 60_000,
+    refetchOnWindowFocus: true,
+    retry: 0,
+    placeholderData: (prev) => prev as UserEffectiveFeatureBundle | undefined,
   });
+  if (res.data) {
+    try {
+      (globalThis as any).__lawcasproCachedEffectiveFeatures = res.data;
+    } catch {
+    }
+  }
   return {
     data: res.data,
     isLoading: res.isLoading,
     error: res.error,
     refetch: res.refetch,
+    isRefetching: res.isRefetching,
+    isFetching: res.isFetching,
   };
 }
 
@@ -636,16 +656,21 @@ export function useEffectiveUserFeaturesMap(): {
   enabled: (featureKey: string) => boolean;
   get: (featureKey: string) => UserEffectiveFeature | undefined;
   loaded: boolean;
+  loadingOrRefetching: boolean;
 } {
-  const { data, isLoading } = useUserEffectiveFeatures();
+  const { data, isLoading, isRefetching, isFetching } = useUserEffectiveFeatures();
   return useMemo(() => {
     const eff = data?.effective ?? {};
-    return {
-      enabled: (k) => Boolean(eff[k]?.effectiveEnabled),
-      get: (k) => eff[k],
-      loaded: !isLoading && Boolean(data),
-    };
-  }, [data, isLoading]);
+    const fallback = (globalThis as any).__lawcasproCachedEffectiveFeatures as UserEffectiveFeatureBundle | undefined;
+    const resolvedEffective: Record<string, UserEffectiveFeature> =
+      Object.keys(eff).length > 0 ? eff : fallback?.effective ?? {};
+    const enabled = (k: string) => Boolean(resolvedEffective[k]?.effectiveEnabled);
+    const get = (k: string) => resolvedEffective[k];
+    const hasAny = Object.keys(resolvedEffective).length > 0 || Boolean(data);
+    const loaded = !isLoading && (hasAny || Boolean(fallback?.effective));
+    const loadingOrRefetching = isLoading || isRefetching || isFetching;
+    return { enabled, get, loaded, loadingOrRefetching };
+  }, [data, isLoading, isRefetching, isFetching]);
 }
 
 // ---------------------------------------------------------------------------

@@ -130,11 +130,20 @@ function pickFirstNonEmpty(...values: Array<string | undefined | null>): string 
   return "";
 }
 
-function assertSupabaseHttpUrl(rawValue: string, variableName: string): void {
+function sanitizeSupabaseHttpUrl(rawValue: string): string {
+  const trimmed = rawValue.trim();
+  if (!trimmed) return trimmed;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (/^postgres(ql)?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed.replace(/^\/+/, "")}`;
+}
+
+function assertSupabaseHttpUrl(rawValue: string, variableName: string): string {
+  const sanitized = sanitizeSupabaseHttpUrl(rawValue);
   try {
-    const parsed = new URL(rawValue);
+    const parsed = new URL(sanitized);
     const protocol = parsed.protocol;
-    if (protocol === "https:") return;
+    if (protocol === "https:") return sanitized;
     if (protocol === "postgres:" || protocol === "postgresql:") {
       try {
         console.error("[supabase_storage_config]", {
@@ -227,10 +236,10 @@ function getSupabaseStorageConfig(): SupabaseStorageConfig {
     throw new Error(`Supabase storage not configured: missing ${missing.join(", ")}`);
   }
 
-  assertSupabaseHttpUrl(supabaseUrlRaw, supabaseUrlVariable);
+  const validatedUrl = assertSupabaseHttpUrl(supabaseUrlRaw, supabaseUrlVariable);
 
   const effectiveBucketPrivate = bucketPrivate || "lawcaspro-private";
-  const normalized = supabaseUrlRaw.replace(/\/+$/, "");
+  const normalized = validatedUrl.replace(/\/+$/, "");
   const storageUrl = `${normalized}/storage/v1`;
 
   return { supabaseUrl: normalized, serviceRoleKey, bucketPrivate: effectiveBucketPrivate, storageUrl };

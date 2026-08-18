@@ -5,7 +5,7 @@ import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
 import router from "./routes/index.js";
 import { logger } from "./lib/logger.js";
-import { getApiMeta, requestMetaMiddleware, sendError } from "./lib/api-response.js";
+import { ApiError, classifyErrorForLog, getApiMeta, requestMetaMiddleware, resolveDbBusyResponse, sendError } from "./lib/api-response.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 type Next = (error?: unknown) => void;
@@ -279,25 +279,90 @@ const errorHandler: ErrorMiddlewareLike = (err: unknown, req: ReqLike, res: ResL
     return;
   }
 
-  const stack = err instanceof Error ? err.stack : undefined;
-  const rawMessage = err instanceof Error ? err.message : String(err);
   const requestId = typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : "unknown";
+  const classification = classifyErrorForLog(err);
+  const dbBusy = resolveDbBusyResponse(err);
+  const rawMessage = err instanceof Error ? err.message : String(err);
   const safeMessage = String(rawMessage ?? "")
     .replace(/\binsert\s+into\s+"[^"]*"(\s*\([^)]*\))?\s*values[\s\S]*$/gi, "[REDACTED_SQL_VALUES]")
     .replace(/\bfailed\s+query:[\s\S]*$/gi, "[REDACTED_FAILED_QUERY]")
     .replace(/\$\d+/g, "?")
     .slice(0, 300);
+
+  const isApiError = err instanceof ApiError;
+  const errStatus = dbBusy
+    ? dbBusy.status
+    : isApiError
+      ? err.status
+      : (err && typeof err === "object" && typeof (err as Record<string, unknown>).status === "number"
+        ? ((err as Record<string, unknown>).status as number)
+        : null);
+  const errCode = dbBusy
+    ? dbBusy.code
+    : isApiError
+      ? err.code
+      : (err && typeof err === "object" && typeof (err as Record<string, unknown>).code === "string"
+        ? ((err as Record<string, unknown>).code as string)
+        : null);
+
   const safeErrMeta = {
     name: err instanceof Error ? err.name : typeof err,
-    code: String((err as any)?.code ?? "").slice(0, 32),
+    code: errCode || String((err as any)?.code ?? "").slice(0, 32),
     sqlstate: String((err as any)?.sqlstate ?? (err as any)?.sqlState ?? "").slice(0, 16),
     constraint: String((err as any)?.constraint ?? "").slice(0, 120),
     column: String((err as any)?.column ?? "").slice(0, 120),
     table: String((err as any)?.table ?? "").slice(0, 120),
   };
-  console.error("[api.unhandled]", { requestId, method: req.method, path: req.path, message: safeMessage, safeErrMeta });
-  logger.error({ safeErrMeta, message: safeMessage, path: req.path, method: req.method, status: 500, requestId }, "Unhandled error");
-  sendErrorUnsafe(res, err, { status: 500, code: "INTERNAL_SERVER_ERROR", message: "Internal server error" });
+  const context: Record<string, unknown> = {
+    requestId,
+    method: req.method,
+    path: req.path,
+    message: safeMessage,
+    ...(dbBusy
+      ? { apiErr: { code: errCode, status: errStatus } }
+      : classification.event === "api.denied" || classification.level !== "error"
+        ? { apiErr: { code: errCode, status: errStatus } }
+        : { safeErrMeta }),
+  };
+
+  if (dbBusy) {
+    console.warn("[api.db_busy]", context);
+    logger.warn(
+      { ...context, status: errStatus, retryable: true },
+      classification.event,
+    );
+    sendErrorUnsafe(res, err);
+    return;
+  }
+
+  if (classification.level === "error") {
+    console.error("[api.unhandled]", context);
+    logger.error({ ...context, safeErrMeta, status: errStatus ?? 500 }, "Unhandled error");
+    sendErrorUnsafe(res, err, { status: 500, code: "INTERNAL_SERVER_ERROR", message: "Internal server error" });
+    return;
+  }
+
+  if (classification.level === "warn") {
+    console.warn("[api.client_error]", context);
+    logger.warn({ ...context, status: errStatus ?? 400 }, classification.event);
+  } else {
+    console.info("[api.denied]", context);
+    logger.info({ ...context, status: errStatus ?? 403 }, classification.event);
+  }
+
+  if (isApiError) {
+    sendErrorUnsafe(res, err);
+    return;
+  }
+  if (errStatus !== null && errCode) {
+    sendErrorUnsafe(res, err, { status: errStatus, code: errCode, message: safeMessage || "Request failed" });
+    return;
+  }
+  if (errStatus !== null) {
+    sendErrorUnsafe(res, err, { status: errStatus, code: classification.event === "api.denied" ? "ACCESS_DENIED" : "BAD_REQUEST", message: safeMessage || "Request failed" });
+    return;
+  }
+  sendErrorUnsafe(res, err, { status: 400, code: "BAD_REQUEST", message: safeMessage || "Request failed" });
 };
 
 app.get("/api/health", healthHandler);

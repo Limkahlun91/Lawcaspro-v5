@@ -2,6 +2,7 @@ import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import type { AuthUser } from "@workspace/api-client-react";
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard,
@@ -306,6 +307,7 @@ export function SidebarBody({
     retry: false,
     refetchOnWindowFocus: false,
     enabled: !!user && user.userType === "firm_user",
+    placeholderData: (prev) => prev ?? { count: 0 },
   }).data?.count ?? 0;
   const unreadCount = useQuery({
     queryKey: ["unread-count", "sidebar"],
@@ -319,6 +321,7 @@ export function SidebarBody({
       user.userType === "firm_user" &&
       !!userFeatures.enabled("communications.email") &&
       hasPermission(user, "communications", "read"),
+    placeholderData: (prev) => prev ?? { count: 0 },
   }).data?.count ?? 0;
   const notifSummary = useQuery({
     queryKey: ["user-notifications", "summary", "sidebar"],
@@ -343,6 +346,9 @@ export function SidebarBody({
     retry: false,
     refetchOnWindowFocus: false,
     enabled: !!user && user.userType === "firm_user",
+    placeholderData: (prev) =>
+      prev ??
+      { unread: 0, urgent: 0, escalated: 0, overdue: 0, monitorUniqueCount: 0, activeDistinctCount: 0 },
   }).data ?? { unread: 0, urgent: 0, escalated: 0, overdue: 0, monitorUniqueCount: 0, activeDistinctCount: 0 };
   const globalUnreadCount = accountingUnreadCount + unreadCount;
   const badgeUrgent = Number(notifSummary.urgent ?? 0);
@@ -393,8 +399,23 @@ export function SidebarBody({
       key: g.key,
       label: g.label,
       items: g.items.filter((i) => {
-        if (!hasPermission(user, i.perm[0], i.perm[1])) return false;
-        if (i.featureKey && !userFeatures.enabled(i.featureKey)) return false;
+        const permOk = hasPermission(user, i.perm[0], i.perm[1]);
+        if (!permOk && userFeatures.loadingOrRefetching && !userFeatures.loaded) {
+          const cachedUser = (globalThis as any).__lawcasproCachedEffectiveUser as AuthUser | undefined;
+          if (cachedUser) {
+            const fallback = hasPermission(cachedUser, i.perm[0], i.perm[1]);
+            if (fallback) return true;
+          }
+        }
+        if (!permOk) return false;
+        if (i.featureKey) {
+          const featureOk = userFeatures.enabled(i.featureKey);
+          if (!featureOk && userFeatures.loadingOrRefetching) {
+            const fallback = (globalThis as any).__lawcasproCachedEffectiveFeatures?.effective?.[i.featureKey] as { effectiveEnabled?: boolean } | undefined;
+            if (fallback?.effectiveEnabled) return true;
+          }
+          if (!featureOk) return false;
+        }
         if (typeof i.roleCheck === "function" && !i.roleCheck(ctx)) return false;
         return true;
       }),
