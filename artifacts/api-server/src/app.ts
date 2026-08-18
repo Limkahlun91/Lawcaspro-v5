@@ -335,8 +335,18 @@ const errorHandler: ErrorMiddlewareLike = (err: unknown, req: ReqLike, res: ResL
   };
 
   if (dbBusy) {
-    const dbLogToken = dbCategory === "DB_UNAVAILABLE" ? "[api.db_unavailable]" : "[api.db_busy]";
-    const dbEvent = dbCategory === "DB_UNAVAILABLE" ? "api.db_unavailable" : classification.event;
+    const dbLogToken =
+      dbCategory === "DB_UNAVAILABLE"
+        ? "[api.db_unavailable]"
+        : dbCategory === "DB_RESOURCE_EXHAUSTED"
+        ? "[api.db_resource_exhausted]"
+        : "[api.db_busy]";
+    const dbEvent =
+      dbCategory === "DB_UNAVAILABLE"
+        ? "api.db_unavailable"
+        : dbCategory === "DB_RESOURCE_EXHAUSTED"
+        ? "api.db_resource_exhausted"
+        : classification.event;
     console.warn(dbLogToken, context);
     logger.warn(
       { ...context, status: errStatus, retryable: true, dbCategory: dbCategory ?? "DB_BUSY" },

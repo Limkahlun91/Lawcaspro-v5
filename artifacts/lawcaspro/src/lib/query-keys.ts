@@ -112,13 +112,6 @@ export function clearIdentityScopedQueries(opts: ClearIdentityScopedQueriesOptio
   } catch {
     canceled = 0;
   }
-  try {
-    queryClient.removeQueries({
-      queryKey: ME_QUERY_KEY,
-      exact: true,
-    });
-  } catch {
-  }
   let removed = 0;
   try {
     removed = queryClient.removeQueries({

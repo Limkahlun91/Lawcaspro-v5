@@ -21,14 +21,14 @@ export type SafeDatabaseError = DbErrorInfo;
 export type DatabaseAvailabilityCategory =
   | "DB_BUSY"
   | "DB_UNAVAILABLE"
+  | "DB_RESOURCE_EXHAUSTED"
   | "DATA_ERROR"
   | "INTEGRITY_ERROR"
   | "AUTHZ_ERROR"
   | "UNKNOWN";
 
-const DB_BUSY_SQLSTATES = new Set(["53300", "53400", "53200", "53100", "53000"]);
+const DB_BUSY_SQLSTATES = new Set(["53300"]);
 const DB_BUSY_CODES = new Set([
-  "PROTOCOL_CONNECTION_LOST",
   "ERR_POOL_TIMED_OUT",
   "POOL_TIMEOUT",
   "TIMEOUT",
@@ -41,6 +41,19 @@ const DB_BUSY_MESSAGE_TOKENS = [
   "connection acquisition",
   "saturation",
   "remaining connection slots are reserved",
+];
+
+const DB_RESOURCE_EXHAUSTED_SQLSTATES = new Set(["53000", "53100", "53200", "53400"]);
+const DB_RESOURCE_EXHAUSTED_CODES = new Set<string>([]);
+const DB_RESOURCE_EXHAUSTED_MESSAGE_TOKENS = [
+  "insufficient_resources",
+  "insufficient resources",
+  "disk_full",
+  "disk full",
+  "out_of_memory",
+  "out of memory",
+  "configuration_limit_exceeded",
+  "configuration limit exceeded",
 ];
 
 const DB_UNAVAILABLE_SQLSTATES = new Set([
@@ -58,6 +71,7 @@ const DB_UNAVAILABLE_SQLSTATES = new Set([
   "58030",
 ]);
 const DB_UNAVAILABLE_CODES = new Set([
+  "PROTOCOL_CONNECTION_LOST",
   "ECONNREFUSED",
   "ECONNRESET",
   "EHOSTUNREACH",
@@ -184,6 +198,10 @@ export function classifyDatabaseError(err: unknown): DatabaseAvailabilityCategor
   if (code && DB_BUSY_CODES.has(code)) return "DB_BUSY";
   for (const token of DB_BUSY_MESSAGE_TOKENS) if (msg.includes(token)) return "DB_BUSY";
 
+  if (state && DB_RESOURCE_EXHAUSTED_SQLSTATES.has(state)) return "DB_RESOURCE_EXHAUSTED";
+  if (code && DB_RESOURCE_EXHAUSTED_CODES.has(code)) return "DB_RESOURCE_EXHAUSTED";
+  for (const token of DB_RESOURCE_EXHAUSTED_MESSAGE_TOKENS) if (msg.includes(token)) return "DB_RESOURCE_EXHAUSTED";
+
   if (state && DB_UNAVAILABLE_SQLSTATES.has(state)) return "DB_UNAVAILABLE";
   if (code && DB_UNAVAILABLE_CODES.has(code)) return "DB_UNAVAILABLE";
   for (const token of DB_UNAVAILABLE_MESSAGE_TOKENS) if (msg.includes(token)) return "DB_UNAVAILABLE";
@@ -196,6 +214,7 @@ export function classifyDatabaseError(err: unknown): DatabaseAvailabilityCategor
 
 export function databaseErrorHttpStatus(category: DatabaseAvailabilityCategory): number {
   if (category === "DB_BUSY") return 503;
+  if (category === "DB_RESOURCE_EXHAUSTED") return 503;
   if (category === "DB_UNAVAILABLE") return 503;
   if (category === "INTEGRITY_ERROR") return 409;
   if (category === "DATA_ERROR") return 400;
@@ -207,6 +226,8 @@ export function databaseErrorCode(category: DatabaseAvailabilityCategory): strin
   switch (category) {
     case "DB_BUSY":
       return "DB_BUSY";
+    case "DB_RESOURCE_EXHAUSTED":
+      return "DB_RESOURCE_EXHAUSTED";
     case "DB_UNAVAILABLE":
       return "DB_UNAVAILABLE";
     case "INTEGRITY_ERROR":
@@ -224,6 +245,8 @@ export function databaseErrorSafeMessage(category: DatabaseAvailabilityCategory)
   switch (category) {
     case "DB_BUSY":
       return "Our database is currently under heavy load. Please try again in a few moments.";
+    case "DB_RESOURCE_EXHAUSTED":
+      return "Our database service is experiencing resource constraints. Please try again shortly or contact support if the issue persists.";
     case "DB_UNAVAILABLE":
       return "Our database service is temporarily unavailable. Please try again shortly or contact support if the issue persists.";
     case "INTEGRITY_ERROR":
@@ -238,9 +261,12 @@ export function databaseErrorSafeMessage(category: DatabaseAvailabilityCategory)
 }
 
 export function databaseErrorRetryable(category: DatabaseAvailabilityCategory): boolean {
-  return category === "DB_BUSY" || category === "DB_UNAVAILABLE";
+  return category === "DB_BUSY" || category === "DB_RESOURCE_EXHAUSTED" || category === "DB_UNAVAILABLE";
 }
 
 export function databaseErrorLogToken(category: DatabaseAvailabilityCategory): string {
-  return category === "DB_BUSY" ? "api.db_busy" : category === "DB_UNAVAILABLE" ? "api.db_unavailable" : "api.db_error";
+  if (category === "DB_BUSY") return "api.db_busy";
+  if (category === "DB_RESOURCE_EXHAUSTED") return "api.db_resource_exhausted";
+  if (category === "DB_UNAVAILABLE") return "api.db_unavailable";
+  return "api.db_error";
 }

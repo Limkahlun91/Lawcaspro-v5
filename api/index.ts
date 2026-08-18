@@ -36,20 +36,29 @@ type BridgeErrInfo = {
   isExpected: boolean;
 };
 
-const DB_BUSY_SQLSTATES = new Set(["53300", "53400", "53200", "53100", "53000"]);
+const DB_BUSY_SQLSTATES = new Set(["53300"]);
 const DB_BUSY_SYSCODES = new Set([
-  "err_pool_timed_out", "pool_timeout", "too_many_connections", "db_busy", "protocol_connection_lost",
+  "err_pool_timed_out", "pool_timeout", "too_many_connections", "db_busy",
 ]);
 const DB_BUSY_MSG_TOKENS = [
   "too many connections", "too_many_connections", "pool timed out", "pool_timeout",
   "remaining connection slots are reserved", "connection acquisition", "saturation",
   "database is busy", "db busy", "資料庫繁忙",
 ];
+const DB_RESOURCE_EXHAUSTED_SQLSTATES = new Set(["53000", "53100", "53200", "53400"]);
+const DB_RESOURCE_EXHAUSTED_SYSCODES = new Set<string>([]);
+const DB_RESOURCE_EXHAUSTED_MSG_TOKENS = [
+  "insufficient_resources", "insufficient resources",
+  "disk_full", "disk full",
+  "out_of_memory", "out of memory",
+  "configuration_limit_exceeded", "configuration limit exceeded",
+];
 const DB_UNAVAILABLE_SQLSTATES = new Set([
   "08000", "08001", "08003", "08004", "08006", "08007",
   "57P01", "57P02", "57P03", "57P04", "58000", "58030",
 ]);
 const DB_UNAVAILABLE_SYSCODES = new Set([
+  "protocol_connection_lost",
   "econnrefused", "econnreset", "ehostunreach", "enetunreach", "etimedout",
   "eai_again", "enoent", "err_socket_closed", "connection_closed",
 ]);
@@ -80,6 +89,13 @@ const classifyBridgeError = (err: unknown): BridgeErrInfo => {
     const busyByMsg = DB_BUSY_MSG_TOKENS.some((t) => loweredMsg.includes(t));
     if (busyByState || busyByCode || busyByMsg) {
       return { status: 503, code: "DB_BUSY", message: "Our database is currently under heavy load. Please try again in a few moments.", isExpected: true };
+    }
+
+    const resourceByState = sqlstate && DB_RESOURCE_EXHAUSTED_SQLSTATES.has(sqlstate);
+    const resourceByCode = loweredCode && DB_RESOURCE_EXHAUSTED_SYSCODES.has(loweredCode);
+    const resourceByMsg = DB_RESOURCE_EXHAUSTED_MSG_TOKENS.some((t) => loweredMsg.includes(t));
+    if (resourceByState || resourceByCode || resourceByMsg) {
+      return { status: 503, code: "DB_RESOURCE_EXHAUSTED", message: "Our database service is experiencing resource constraints. Please try again shortly or contact support if the issue persists.", isExpected: true };
     }
 
     const unavailByState = sqlstate && DB_UNAVAILABLE_SQLSTATES.has(sqlstate);

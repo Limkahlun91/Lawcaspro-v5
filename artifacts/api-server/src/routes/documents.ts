@@ -88,6 +88,7 @@ import {
   resolveVariablesForTemplate,
   type PlaceholderWarning,
 } from "../lib/documentVariables.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
 import { applyResolvedAliases, listEffectiveCustomVariables, listVariableAliases, resolveCustomVariables } from "../lib/customVariables.js";
 import { DEFAULT_DOCUMENT_VARIABLES } from "../lib/default-document-variables.js";
 import {
@@ -4709,6 +4710,7 @@ router.get(
   requireAuth,
   requireFirmUser,
   requirePermission("documents", "read"),
+  requireUserFeatureAccess("documents.variables"),
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;
@@ -4773,6 +4775,7 @@ router.get(
   requireAuth,
   requireFirmUser,
   requirePermission("documents", "read"),
+  requireUserFeatureAccess("documents.variables"),
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;
@@ -5343,6 +5346,7 @@ router.get(
   requireAuth,
   requireFirmUser,
   requirePermission("documents", "read"),
+  requireUserFeatureAccess("documents.variables"),
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;
@@ -5389,6 +5393,7 @@ router.post(
   requireAuth,
   requireFirmUser,
   requirePermission("documents", "update"),
+  requireUserFeatureAccess("documents.variables"),
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;
@@ -5547,6 +5552,7 @@ router.put(
   requireAuth,
   requireFirmUser,
   requirePermission("documents", "update"),
+  requireUserFeatureAccess("documents.variables"),
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;
@@ -5641,6 +5647,7 @@ router.get(
   requireAuth,
   requireFirmUser,
   requirePermission("documents", "read"),
+  requireUserFeatureAccess("documents.variables"),
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;

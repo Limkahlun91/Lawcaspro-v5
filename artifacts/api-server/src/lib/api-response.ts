@@ -136,6 +136,8 @@ function detectCategorizedDatabaseResponse(err: unknown): CategorizedDatabaseRes
   const logToken = databaseErrorLogToken(category);
   const suggestion = category === "DB_BUSY"
     ? "Please wait a few seconds and try again."
+    : category === "DB_RESOURCE_EXHAUSTED"
+    ? "Please try again in a minute or contact support if this persists."
     : category === "DB_UNAVAILABLE"
     ? "Please try again in a minute or contact support if this persists."
     : undefined;
@@ -313,11 +315,12 @@ type LogClassification = {
     | "api.denied"
     | "api.client_error"
     | "api.db_busy"
+    | "api.db_resource_exhausted"
     | "api.db_unavailable"
     | "api.unhandled";
 };
 
-export function classifyErrorForLog(err: unknown): LogClassification & { retrySuggestion?: "DB_BUSY" | "DB_UNAVAILABLE" | null } {
+export function classifyErrorForLog(err: unknown): LogClassification & { retrySuggestion?: "DB_BUSY" | "DB_RESOURCE_EXHAUSTED" | "DB_UNAVAILABLE" | null } {
   const getStatus = (e: unknown): number | null => {
     if (!e || typeof e !== "object") return null;
     const rec = e as Record<string, unknown>;
@@ -334,15 +337,25 @@ export function classifyErrorForLog(err: unknown): LogClassification & { retrySu
   if (categorized) {
     const ev = (categorized.logToken === "api.db_busy"
       ? "api.db_busy"
+      : categorized.logToken === "api.db_resource_exhausted"
+      ? "api.db_resource_exhausted"
       : categorized.logToken === "api.db_unavailable"
       ? "api.db_unavailable"
       : "api.unhandled") as LogClassification["event"];
-    const level: LogClassification["level"] = categorized.logToken === "api.db_unavailable" || categorized.logToken === "api.db_busy" ? "warn" : "error";
-    const retrySuggestion: "DB_BUSY" | "DB_UNAVAILABLE" | null = categorized.code === "DB_BUSY"
-      ? "DB_BUSY"
-      : categorized.code === "DB_UNAVAILABLE"
-      ? "DB_UNAVAILABLE"
-      : null;
+    const level: LogClassification["level"] =
+      categorized.logToken === "api.db_unavailable" ||
+      categorized.logToken === "api.db_resource_exhausted" ||
+      categorized.logToken === "api.db_busy"
+        ? "warn"
+        : "error";
+    const retrySuggestion: "DB_BUSY" | "DB_RESOURCE_EXHAUSTED" | "DB_UNAVAILABLE" | null =
+      categorized.code === "DB_BUSY"
+        ? "DB_BUSY"
+        : categorized.code === "DB_RESOURCE_EXHAUSTED"
+        ? "DB_RESOURCE_EXHAUSTED"
+        : categorized.code === "DB_UNAVAILABLE"
+        ? "DB_UNAVAILABLE"
+        : null;
     return { level, event: ev, retrySuggestion };
   }
   const status = err instanceof ApiError ? err.status : getStatus(err);
