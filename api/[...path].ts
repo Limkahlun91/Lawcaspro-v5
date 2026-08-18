@@ -1,31 +1,3 @@
-(function registerDeprecationSuppressions() {
-  try {
-    const suppressCodes = new Set(["DEP0169"]);
-    const suppressMessageContains = ["url.parse() behavior is not standardized"];
-    process.on("warning", (warning) => {
-      const w = warning as unknown as { code?: string; message?: unknown; name?: string };
-      const code = w?.code;
-      const msg = typeof w?.message === "string" ? w.message : "";
-      if (
-        code &&
-        suppressCodes.has(code) &&
-        suppressMessageContains.some((needle) => msg.includes(needle))
-      ) {
-        return;
-      }
-      if (w?.name && w?.message && w.name !== "DeprecationWarning") {
-        console.warn(warning);
-        return;
-      }
-      if (!code || !suppressCodes.has(code)) {
-        console.warn(warning);
-      }
-    });
-  } catch {
-    // best-effort; ignore if process warning listener cannot be attached
-  }
-})();
-
 type ExpressLikeHandler = (
   req: any,
   res: any,
@@ -48,6 +20,33 @@ type BridgeErrInfo = {
   isExpected: boolean;
 };
 
+const DB_BUSY_SQLSTATES = new Set(["53300", "53400", "53200", "53100", "53000"]);
+const DB_BUSY_SYSCODES = new Set([
+  "err_pool_timed_out", "pool_timeout", "too_many_connections", "db_busy", "protocol_connection_lost",
+]);
+const DB_BUSY_MSG_TOKENS = [
+  "too many connections", "too_many_connections", "pool timed out", "pool_timeout",
+  "remaining connection slots are reserved", "connection acquisition", "saturation",
+  "database is busy", "db busy", "資料庫繁忙",
+];
+const DB_UNAVAILABLE_SQLSTATES = new Set([
+  "08000", "08001", "08003", "08004", "08006", "08007",
+  "57P01", "57P02", "57P03", "57P04", "58000", "58030",
+]);
+const DB_UNAVAILABLE_SYSCODES = new Set([
+  "econnrefused", "econnreset", "ehostunreach", "enetunreach", "etimedout",
+  "eai_again", "enoent", "err_socket_closed", "connection_closed",
+]);
+const DB_UNAVAILABLE_MSG_TOKENS = [
+  "connection refused", "connection reset", "no route to host", "host unreachable",
+  "network is unreachable", "connection timed out", "socket hang up",
+  "the database system is starting up", "the database system is shutting down",
+  "aborting any active transactions", "terminating connection due to administrator command",
+  "could not translate host name", "name or service not known", "getaddrinfo",
+  "server closed the connection unexpectedly", "connection terminated unexpectedly",
+  "timeout exceeded when trying to connect", "connection terminated due to connection timeout",
+];
+
 const classifyBridgeError = (err: unknown): BridgeErrInfo => {
   if (err && typeof err === "object") {
     const rec = err as Record<string, unknown>;
@@ -55,30 +54,27 @@ const classifyBridgeError = (err: unknown): BridgeErrInfo => {
     const code = typeof rec.code === "string" ? rec.code : null;
     const messageRaw = (rec as any)?.message;
     const message = typeof messageRaw === "string" ? messageRaw.slice(0, 300) : "";
-    const dbErrCodes = new Set([
-      "53300", "53400", "08000", "08003", "08006", "57P01", "57P02", "57P03",
-      "etimedout", "econnrefused", "ehostunreach", "econnreset",
-      "too_many_connections", "db_busy", "connection_timeout", "pool_timeout",
-    ]);
-    const dbCodeCheck = (c: string | null) =>
-      c ? dbErrCodes.has(c.toLowerCase()) : false;
-    const sqlstate = (rec as { sqlstate?: unknown; sqlState?: unknown }).sqlstate ?? (rec as { sqlstate?: unknown; sqlState?: unknown }).sqlState;
-    if (dbCodeCheck(code) || dbCodeCheck(typeof sqlstate === "string" ? sqlstate : null)) {
-      return { status: 503, code: "DB_BUSY", message: "資料庫繁忙，請稍後重試", isExpected: true };
+    const sqlstateRaw = (rec as { sqlstate?: unknown; sqlState?: unknown }).sqlstate ?? (rec as { sqlstate?: unknown; sqlState?: unknown }).sqlState;
+    const sqlstate = typeof sqlstateRaw === "string" ? sqlstateRaw.toUpperCase() : "";
+    const loweredCode = code ? code.toLowerCase() : "";
+    const loweredMsg = message.toLowerCase();
+
+    const busyByState = sqlstate && DB_BUSY_SQLSTATES.has(sqlstate);
+    const busyByCode = loweredCode && DB_BUSY_SYSCODES.has(loweredCode);
+    const busyByMsg = DB_BUSY_MSG_TOKENS.some((t) => loweredMsg.includes(t));
+    if (busyByState || busyByCode || busyByMsg) {
+      return { status: 503, code: "DB_BUSY", message: "Our database is currently under heavy load. Please try again in a few moments.", isExpected: true };
     }
-    const lowered = message.toLowerCase();
-    if (
-      lowered.includes("timeout exceeded when trying to connect") ||
-      (lowered.includes("pool") && lowered.includes("timeout")) ||
-      lowered.includes("connection terminated due to connection timeout") ||
-      lowered.includes("connection terminated unexpectedly") ||
-      lowered.includes("server closed the connection unexpectedly") ||
-      lowered.includes("too many connections") ||
-      lowered.includes("database is busy") ||
-      lowered.includes("db busy") ||
-      lowered.includes("資料庫繁忙")
-    ) {
-      return { status: 503, code: "DB_BUSY", message: "資料庫繁忙，請稍後重試", isExpected: true };
+
+    const unavailByState = sqlstate && DB_UNAVAILABLE_SQLSTATES.has(sqlstate);
+    const unavailByCode = loweredCode && DB_UNAVAILABLE_SYSCODES.has(loweredCode);
+    const unavailByMsg = DB_UNAVAILABLE_MSG_TOKENS.some((t) => loweredMsg.includes(t));
+    if (unavailByState || unavailByCode || unavailByMsg) {
+      return { status: 503, code: "DB_UNAVAILABLE", message: "Our database service is temporarily unavailable. Please try again shortly or contact support if the issue persists.", isExpected: true };
+    }
+
+    if (loweredMsg.includes("pool") && loweredMsg.includes("timeout")) {
+      return { status: 503, code: "DB_BUSY", message: "Our database is currently under heavy load. Please try again in a few moments.", isExpected: true };
     }
     const isKnownCode =
       code === "FEATURE_DISABLED" ||

@@ -120,6 +120,34 @@ export class StorageConfigurationError extends Error {
 
 const CONFIG_INVALID_SUPABASE_HTTP_URL = "CONFIG_INVALID_SUPABASE_HTTP_URL";
 
+const APPROVED_SUPABASE_HOST_SUFFIXES: ReadonlyArray<string> = [
+  ".supabase.co",
+  ".supabase.com",
+];
+
+function isApprovedSupabaseHost(rawHost: string): boolean {
+  const host = String(rawHost || "").trim().toLowerCase();
+  if (!host) return false;
+  if (APPROVED_SUPABASE_HOST_SUFFIXES.some((sfx) => host.endsWith(sfx))) return true;
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
+    return process.env.NODE_ENV === "test" || process.env.NODE_ENV === "development";
+  }
+  return false;
+}
+
+function extractHostnameFromBare(bareCandidate: string): string {
+  const stripped = bareCandidate.replace(/^\/+/, "");
+  const authEnd = stripped.indexOf("@");
+  const afterAuth = authEnd >= 0 ? stripped.slice(authEnd + 1) : stripped;
+  const endIdx = afterAuth.search(/[\/?:#]/);
+  const hostAndPort = endIdx >= 0 ? afterAuth.slice(0, endIdx) : afterAuth;
+  const colonIdx = hostAndPort.lastIndexOf(":");
+  if (colonIdx >= 0 && hostAndPort.indexOf("]:") < 0 && !/^\[[0-9a-fA-F:]+\]$/.test(hostAndPort)) {
+    return hostAndPort.slice(0, colonIdx);
+  }
+  return hostAndPort;
+}
+
 function pickFirstNonEmpty(...values: Array<string | undefined | null>): string | "" {
   for (const v of values) {
     if (typeof v === "string") {
@@ -135,7 +163,12 @@ function sanitizeSupabaseHttpUrl(rawValue: string): string {
   if (!trimmed) return trimmed;
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   if (/^postgres(ql)?:\/\//i.test(trimmed)) return trimmed;
-  return `https://${trimmed.replace(/^\/+/, "")}`;
+  const bare = trimmed.replace(/^\/+/, "");
+  const candidateHost = extractHostnameFromBare(bare);
+  if (isApprovedSupabaseHost(candidateHost)) {
+    return `https://${bare}`;
+  }
+  return trimmed;
 }
 
 function assertSupabaseHttpUrl(rawValue: string, variableName: string): string {
@@ -143,7 +176,26 @@ function assertSupabaseHttpUrl(rawValue: string, variableName: string): string {
   try {
     const parsed = new URL(sanitized);
     const protocol = parsed.protocol;
-    if (protocol === "https:") return sanitized;
+    if (protocol === "https:") {
+      const host = parsed.hostname;
+      if (isApprovedSupabaseHost(host)) return sanitized;
+      try {
+        console.error("[supabase_storage_config]", {
+          event: "storage_config_url_invalid_host",
+          variableName,
+          protocol,
+          configurationErrorCode: CONFIG_INVALID_SUPABASE_HTTP_URL,
+        });
+      } catch {
+        // ignore secondary logging failure
+      }
+      throw new StorageConfigurationError(
+        CONFIG_INVALID_SUPABASE_HTTP_URL,
+        variableName,
+        protocol,
+        `${variableName} does not resolve to an approved Supabase host for HTTP/Storage`,
+      );
+    }
     if (protocol === "postgres:" || protocol === "postgresql:") {
       try {
         console.error("[supabase_storage_config]", {

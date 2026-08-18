@@ -1014,8 +1014,16 @@ export default function CaseDetail() {
   const [assignedClerkIds, setAssignedClerkIds] = useState<string[]>([]);
   const assignmentsKey = `${currentLawyerIds.slice().sort((a, b) => a - b).join(",")}|${currentClerkIds.slice().sort((a, b) => a - b).join(",")}`;
   useEffect(() => {
-    setAssignedLawyerIds(currentLawyerIds.length > 0 ? currentLawyerIds.map(String) : [""]);
-    setAssignedClerkIds(currentClerkIds.length > 0 ? currentClerkIds.map(String) : [""]);
+    const nextLawyer = currentLawyerIds.length > 0 ? currentLawyerIds.map(String) : [""];
+    const nextClerk = currentClerkIds.length > 0 ? currentClerkIds.map(String) : [""];
+    setAssignedLawyerIds((prev) => {
+      if (prev.length === nextLawyer.length && prev.every((v, i) => v === nextLawyer[i])) return prev;
+      return nextLawyer;
+    });
+    setAssignedClerkIds((prev) => {
+      if (prev.length === nextClerk.length && prev.every((v, i) => v === nextClerk[i])) return prev;
+      return nextClerk;
+    });
   }, [assignmentsKey]);
 
   const {
@@ -1559,9 +1567,8 @@ export default function CaseDetail() {
       master_lu_exempted: Boolean((src as any).master_lu_exempted),
       encumbrance_free_exempted: Boolean((src as any).encumbrance_free_exempted),
     };
-    setKeyDatesBooleans((prev) => ({ ...prev, ...bools }));
 
-    return {
+    const dates: Record<string, string> = {
       spa_signed_date: normalizeDateOnlyFromApi((src as any).spa_signed_date),
       spa_forward_to_developer_execution_on: normalizeDateOnlyFromApi((src as any).spa_forward_to_developer_execution_on),
       spa_received_dev_return_spa_on: normalizeDateOnlyFromApi((src as any).spa_received_dev_return_spa_on),
@@ -1637,6 +1644,7 @@ export default function CaseDetail() {
 
       completion_date: normalizeDateOnlyFromApi((src as any).completion_date),
     };
+    return { dates, bools };
   };
 
   const scopeKeys = {
@@ -1741,10 +1749,13 @@ export default function CaseDetail() {
   }, [caseId]);
 
   useEffect(() => {
-    const parsed = parseKeyDates(keyDates);
-    const bools = {
-      master_lu_exempted: Boolean((keyDates as any).master_lu_exempted),
-      encumbrance_free_exempted: Boolean((keyDates as any).encumbrance_free_exempted),
+    const { dates: parsed, bools } = parseKeyDates(keyDates);
+    const shallowEq = (a: Record<string, unknown>, b: Record<string, unknown>) => {
+      const ka = Object.keys(a);
+      const kb = Object.keys(b);
+      if (ka.length !== kb.length) return false;
+      for (const k of ka) if (a[k] !== b[k]) return false;
+      return true;
     };
     if (!keyDatesInitialized) {
       setKeyDatesDraft(parsed);
@@ -1755,10 +1766,10 @@ export default function CaseDetail() {
       return;
     }
     if (!anyDirty) {
-      setKeyDatesDraft(parsed);
-      setKeyDatesBooleans(bools);
-      setKeyDatesBaseline(parsed);
-      setKeyDatesBooleanBaseline(bools);
+      setKeyDatesDraft((prev) => (shallowEq(prev, parsed) ? prev : parsed));
+      setKeyDatesBooleans((prev) => (shallowEq(prev, bools) ? prev : bools));
+      setKeyDatesBaseline((prev) => (shallowEq(prev, parsed) ? prev : parsed));
+      setKeyDatesBooleanBaseline((prev) => (shallowEq(prev, bools) ? prev : bools));
     }
   }, [keyDates, keyDatesInitialized, anyDirty]);
 
@@ -1811,7 +1822,7 @@ export default function CaseDetail() {
   useEffect(() => {
     if (stampingDirty) return;
     const rows = Array.isArray(loanStampingQuery.data) ? loanStampingQuery.data : [];
-    setStampingDraft(rows.map((x, idx) => ({
+    const next = rows.map((x, idx) => ({
       id: x.id,
       itemKey: x.itemKey,
       customName: x.customName ?? null,
@@ -1821,15 +1832,28 @@ export default function CaseDetail() {
       mimeType: x.mimeType ?? null,
       fileSize: x.fileSize ?? null,
       sortOrder: Number.isFinite(x.sortOrder) ? x.sortOrder : idx,
-    })));
+    }));
+    setStampingDraft((prev) => {
+      if (prev.length !== next.length) return next;
+      for (let i = 0; i < prev.length; i++) {
+        const a = prev[i];
+        const b = next[i];
+        if (
+          a.id !== b.id || a.itemKey !== b.itemKey || a.customName !== b.customName ||
+          a.datedOn !== b.datedOn || a.stampedOn !== b.stampedOn || a.fileName !== b.fileName ||
+          a.mimeType !== b.mimeType || a.fileSize !== b.fileSize || a.sortOrder !== b.sortOrder
+        ) return next;
+      }
+      return prev;
+    });
   }, [loanStampingQuery.data, stampingDirty]);
 
   useEffect(() => {
     if (initialActiveTab === "compliance" && !SHOW_COMPLIANCE_TAB) {
-      setActiveTab("overview");
+      setActiveTab((prev) => (prev === "overview" ? prev : "overview"));
       return;
     }
-    setActiveTab(initialActiveTab);
+    setActiveTab((prev) => (prev === initialActiveTab ? prev : initialActiveTab));
   }, [initialActiveTab]);
 
   const workflowDocsByKey = useMemo(() => {
@@ -2166,7 +2190,7 @@ export default function CaseDetail() {
   const propertyAddressBaseline = typeof (propertyDetailsObj as any).propertyAddress === "string" ? String((propertyDetailsObj as any).propertyAddress) : "";
   const [propertyAddressDraft, setPropertyAddressDraft] = useState("");
   useEffect(() => {
-    setPropertyAddressDraft(propertyAddressBaseline);
+    setPropertyAddressDraft((prev) => (prev === propertyAddressBaseline ? prev : propertyAddressBaseline));
   }, [propertyAddressBaseline, caseId]);
   const projectMeta: Record<string, unknown> =
     caseMeta.project && typeof caseMeta.project === "object"

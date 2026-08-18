@@ -3,6 +3,11 @@ import { useAuth } from "@/lib/auth-context";
 import { hasPermission, isAccountingRoleAllowed } from "@/lib/permissions";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetchJson } from "@/lib/api-client";
+import {
+  caseNotificationsUnreadCountQueryKey,
+  userNotificationSummaryQueryKey,
+  userUnreadCountQueryKey,
+} from "@/lib/query-keys";
 
 export type NotificationCounts = {
   workUnread: number;
@@ -14,9 +19,11 @@ export function useNotificationCounts(options?: { enabled?: boolean }): Notifica
   const { user } = useAuth();
   const enabled = options?.enabled ?? true;
   const firmUser = !!user && user.userType === "firm_user";
+  const fid = (user as any)?.firmId ?? null;
+  const uid = (user as any)?.id ?? null;
 
   const caseUnread = useQuery({
-    queryKey: ["case-notifications", "unread-counts", "mobile-counts"],
+    queryKey: caseNotificationsUnreadCountQueryKey(fid, uid, "mobile-counts"),
     queryFn: () => apiFetchJson<{ totalUnreadCount: number }>("/case-notifications/unread-counts").catch(() => ({ totalUnreadCount: 0 })),
     refetchInterval: 30_000,
     enabled: enabled && firmUser && hasPermission(user, "cases", "read"),
@@ -26,7 +33,7 @@ export function useNotificationCounts(options?: { enabled?: boolean }): Notifica
   }).data?.totalUnreadCount ?? 0;
 
   const commsUnread = useQuery({
-    queryKey: ["unread-count", "mobile-counts"],
+    queryKey: userUnreadCountQueryKey(fid, uid, "mobile-counts"),
     queryFn: () => apiFetchJson<{ count: number }>("/communications/unread-count").catch(() => ({ count: 0 })),
     refetchInterval: 30_000,
     enabled: enabled && firmUser && hasPermission(user, "communications", "read"),
@@ -36,7 +43,7 @@ export function useNotificationCounts(options?: { enabled?: boolean }): Notifica
   }).data?.count ?? 0;
 
   const notifSummary = useQuery({
-    queryKey: ["user-notifications", "summary", "mobile-counts"],
+    queryKey: userNotificationSummaryQueryKey(fid, uid, "mobile-counts"),
     queryFn: () =>
       apiFetchJson<{
         unread: number;

@@ -5,9 +5,13 @@ import type { AuthUser } from "@workspace/api-client-react";
 import { apiRequest } from "./api-client";
 import { clearStoredAuthToken } from "./auth-token";
 import { onAuthUnauthorized } from "./auth-events";
-import { ME_QUERY_KEY } from "./query-keys";
+import { ME_QUERY_KEY, clearIdentityScopedQueries, userPermissionsQueryKey } from "./query-keys";
 import { unwrapApiData } from "./api-contract";
 import { extractAuthUser } from "./auth-response";
+import {
+  classifyPermissionError,
+  isTransientErrorCategory,
+} from "./permissions";
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
@@ -15,6 +19,21 @@ type MeRefreshOutcome =
   | { kind: "success"; user: AuthUser | null }
   | { kind: "unauthorized" }
   | { kind: "preserve"; cause: "network" | "server" | "client" | "timeout"; status?: number; code?: string };
+
+export interface AuthTypedError extends Error {
+  status?: number;
+  code?: string;
+  requestId?: string;
+}
+
+function makeAuthTypedError(message: string, opts?: { status?: number; code?: string; requestId?: string }): AuthTypedError {
+  const e = new Error(message) as AuthTypedError;
+  if (opts?.status !== undefined) e.status = opts.status;
+  if (opts?.code !== undefined) e.code = opts.code;
+  if (opts?.requestId !== undefined) e.requestId = opts.requestId;
+  e.name = "AuthTypedError";
+  return e;
+}
 
 const classifyMeError = (err: unknown): { cause: "network" | "server" | "client" | "timeout"; status?: number; code?: string } => {
   if (!err || typeof err !== "object") return { cause: "server" };
@@ -76,6 +95,48 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
   const firstHydrationDone = useRef<boolean>(false);
   const lastSuccessfulUserRef = useRef<AuthUser | null>(null);
+  const previousIdentityRef = useRef<{ firmId: unknown; userId: unknown } | null>(null);
+
+  useEffect(() => {
+    if (!user) {
+      if (previousIdentityRef.current) {
+        try {
+          clearIdentityScopedQueries({
+            queryClient,
+            firmId: previousIdentityRef.current.firmId as any,
+            userId: previousIdentityRef.current.userId as any,
+          });
+        } catch {
+        }
+        previousIdentityRef.current = null;
+      }
+      return;
+    }
+    const currentFirm = (user as any).firmId ?? null;
+    const currentUserId = (user as any).id ?? null;
+    const prev = previousIdentityRef.current;
+    if (!prev) {
+      previousIdentityRef.current = { firmId: currentFirm, userId: currentUserId };
+      return;
+    }
+    const sameFirm =
+      (prev.firmId === null && currentFirm === null) ||
+      (prev.firmId !== null && currentFirm !== null && String(prev.firmId) === String(currentFirm));
+    const sameUser =
+      (prev.userId === null && currentUserId === null) ||
+      (prev.userId !== null && currentUserId !== null && String(prev.userId) === String(currentUserId));
+    if (!sameFirm || !sameUser) {
+      try {
+        clearIdentityScopedQueries({
+          queryClient,
+          firmId: prev.firmId as any,
+          userId: prev.userId as any,
+        });
+      } catch {
+      }
+      previousIdentityRef.current = { firmId: currentFirm, userId: currentUserId };
+    }
+  }, [user ? ((user as any).id ?? null) : null, user ? ((user as any).firmId ?? null) : null, queryClient]);
 
   const meQuery = useQuery<AuthUser | null>({
     queryKey: ME_QUERY_KEY,
@@ -84,17 +145,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     gcTime: 5 * 60_000,
     refetchOnWindowFocus: false,
     refetchOnMount: false,
-    placeholderData: (prev) => prev ?? undefined,
     queryFn: async ({ signal }): Promise<AuthUser | null> => {
       let res: Response;
+      let requestId: string | undefined;
       try {
         res = await apiRequest("/api/auth/me", {
           allowStatuses: [401, 403, 500, 503],
           signal,
           timeoutMs: 15000,
         });
+        const gotRid = res.headers.get("x-request-id") || res.headers.get("request-id");
+        if (gotRid) requestId = gotRid;
       } catch (err) {
-        const c = classifyMeError(err);
         if (lastSuccessfulUserRef.current) {
           return lastSuccessfulUserRef.current;
         }
@@ -102,26 +164,70 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       if (res.status === 401) {
         lastSuccessfulUserRef.current = null;
-        try { (globalThis as any).__lawcasproCachedEffectiveUser = null; } catch {}
+        if (typeof window !== "undefined") {
+          try {
+            const wrap = (window as any).__lawcasproCachedEffectiveUser as { firmId: unknown; userId: unknown; data: AuthUser } | undefined;
+            if (wrap && typeof wrap === "object" && "data" in wrap) {
+              (window as any).__lawcasproCachedEffectiveUser = null;
+            } else {
+              (window as any).__lawcasproCachedEffectiveUser = null;
+            }
+          } catch {
+          }
+        }
         return null;
       }
       if (res.status === 200 || res.status === 204) {
         if (res.status === 204) return lastSuccessfulUserRef.current;
         const body = (await res.json()) as unknown;
         const unwrapped = unwrapApiData<unknown>(body);
+        if (unwrapped === null || unwrapped === undefined) {
+          lastSuccessfulUserRef.current = null;
+          if (typeof window !== "undefined") {
+            try { (window as any).__lawcasproCachedEffectiveUser = null; } catch {}
+          }
+          return null;
+        }
         const extracted = extractAuthUser(unwrapped);
-        if (extracted) lastSuccessfulUserRef.current = extracted;
+        if (extracted) {
+          lastSuccessfulUserRef.current = extracted;
+          if (typeof window !== "undefined") {
+            try {
+              (window as any).__lawcasproCachedEffectiveUser = {
+                firmId: (extracted as any).firmId ?? null,
+                userId: (extracted as any).id ?? null,
+                fetchedAt: Date.now(),
+                data: extracted,
+              };
+            } catch {
+            }
+          }
+        }
         return extracted;
       }
       if (lastSuccessfulUserRef.current) {
         return lastSuccessfulUserRef.current;
       }
-      const err = await apiRequest("/api/auth/me", {
-        allowStatuses: [res.status],
-        signal: new AbortController().signal,
-        timeoutMs: 1,
-      }).catch((e) => e);
-      throw err instanceof Error ? err : new Error(`GET /api/auth/me failed with status ${res.status}`);
+      let bodyCode: string | undefined;
+      let bodyMessage: string | undefined;
+      try {
+        const ct = res.headers.get("content-type") || "";
+        if (ct.includes("application/json")) {
+          const b = (await res.clone().json()) as Record<string, unknown> | null;
+          if (b && typeof b === "object") {
+            bodyCode = typeof (b as any).code === "string" ? (b as any).code : undefined;
+            if (typeof (b as any).data?.code === "string") bodyCode = (b as any).data.code;
+            if (typeof (b as any).error?.code === "string") bodyCode = (b as any).error.code;
+            bodyMessage = typeof (b as any).message === "string" ? (b as any).message : undefined;
+            if (typeof (b as any).data?.message === "string") bodyMessage = (b as any).data.message;
+          }
+        }
+      } catch {
+      }
+      throw makeAuthTypedError(
+        bodyMessage || `GET /api/auth/me failed with status ${res.status}`,
+        { status: res.status, code: bodyCode, requestId }
+      );
     },
   });
   const { data: me, isLoading: isMeLoading, isError: isMeError, isRefetching: isMeRefetching, failureCount } = meQuery;
@@ -169,7 +275,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [isMeError, isMeLoading, isMeRefetching, me, user, failureCount]);
 
   const permissionsQuery = useQuery<{ permissions: Array<{ module: string; action: string }>; unavailable?: boolean }>({
-    queryKey: ["auth-permissions", user?.roleId ?? null],
+    queryKey: userPermissionsQueryKey((user as any)?.firmId ?? null, (user as any)?.id ?? null),
     enabled: Boolean(
       user &&
         user.userType === "firm_user" &&
@@ -181,9 +287,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     gcTime: 5 * 60_000,
     refetchOnWindowFocus: false,
     refetchOnMount: false,
-    placeholderData: (prev) => prev ?? undefined,
     queryFn: async ({ signal }) => {
       let res: Response;
+      let currentCached = (user as { permissions?: unknown } | null)?.permissions;
+      let transientCached: Array<{ module: string; action: string }> | undefined;
+      if (currentCached && Array.isArray(currentCached)) {
+        transientCached = parsePermissionsPayload(currentCached);
+      }
       try {
         res = await apiRequest("/api/auth/permissions", {
           allowStatuses: [401, 403, 404, 500, 503],
@@ -191,36 +301,39 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           timeoutMs: 8000,
         });
       } catch (err) {
-        const c = classifyMeError(err);
-        const currentCached = (user as { permissions?: unknown } | null)?.permissions;
-        if (currentCached && Array.isArray(currentCached)) {
-          return { permissions: parsePermissionsPayload(currentCached) };
+        const cat = classifyPermissionError(err);
+        if (isTransientErrorCategory(cat) && transientCached) {
+          return { permissions: transientCached };
         }
+        if (cat === "TRANSIENT_5XX") return { permissions: [], unavailable: true };
         throw err;
       }
       if (res.status === 401) return { permissions: [] };
+      if (res.status === 403) return { permissions: [], unavailable: false };
       if (res.status === 404) return { permissions: [], unavailable: true };
       if (res.status === 200 || res.status === 204) {
         if (res.status === 204) {
-          const currentCached = (user as { permissions?: unknown } | null)?.permissions;
-          return { permissions: Array.isArray(currentCached) ? parsePermissionsPayload(currentCached) : [] };
+          if (currentCached && Array.isArray(currentCached)) {
+            return { permissions: parsePermissionsPayload(currentCached) };
+          }
+          return { permissions: [] };
         }
         const body = (await res.json()) as unknown;
         const data = unwrapApiData<{ permissions: Array<{ module: string; action: string }> }>(body);
         return { permissions: parsePermissionsPayload(data) };
       }
-      const currentCached = (user as { permissions?: unknown } | null)?.permissions;
-      if (currentCached && Array.isArray(currentCached)) {
-        return { permissions: parsePermissionsPayload(currentCached) };
+      const cat = classifyPermissionError({ status: res.status });
+      if (isTransientErrorCategory(cat) && transientCached) {
+        return { permissions: transientCached };
       }
-      throw new Error(`GET /api/auth/permissions failed with status ${res.status}`);
+      return { permissions: [] };
     },
   });
 
   useEffect(() => {
     if (!user || user.userType !== "firm_user") return;
     if (!permissionsQuery.data) return;
-    if (permissionsQuery.data.unavailable) return;
+    if (permissionsQuery.isFetching) return;
     const next = permissionsQuery.data.permissions ?? [];
     const current = (user as { permissions?: unknown } | null)?.permissions;
     if (Array.isArray(current)) {
@@ -238,23 +351,40 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     lastSuccessfulUserRef.current = merged;
     setUser(merged);
     queryClient.setQueryData(ME_QUERY_KEY, merged);
-  }, [permissionsQuery.data, queryClient, user]);
+  }, [permissionsQuery.data, permissionsQuery.isFetching, queryClient, user]);
 
   useEffect(() => {
     return onAuthUnauthorized(() => {
+      const oldFirmId = user ? (user as any).firmId ?? null : null;
+      const oldUserId = user ? (user as any).id ?? null : null;
       lastSuccessfulUserRef.current = null;
       clearStoredAuthToken();
       setUser(null);
       setAuthStatus("unauthenticated");
       queryClient.setQueryData(ME_QUERY_KEY, null);
+      try {
+        clearIdentityScopedQueries({
+          queryClient,
+          firmId: oldFirmId,
+          userId: oldUserId,
+        });
+      } catch {
+      }
     });
-  }, [queryClient]);
+  }, [queryClient, user]);
 
   const login = (newUser: AuthUser) => {
     lastSuccessfulUserRef.current = newUser;
-    try {
-      (globalThis as any).__lawcasproCachedEffectiveUser = newUser;
-    } catch {
+    if (typeof window !== "undefined") {
+      try {
+        (window as any).__lawcasproCachedEffectiveUser = {
+          firmId: (newUser as any).firmId ?? null,
+          userId: (newUser as any).id ?? null,
+          fetchedAt: Date.now(),
+          data: newUser,
+        };
+      } catch {
+      }
     }
     setUser(newUser);
     setAuthStatus("authenticated");
@@ -263,28 +393,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const handleLogout = () => {
+    const oldFirmId = user ? (user as any).firmId ?? null : null;
+    const oldUserId = user ? (user as any).id ?? null : null;
     logoutMutation.mutate(undefined, {
       onSuccess: () => {
         lastSuccessfulUserRef.current = null;
-        try {
-          (globalThis as any).__lawcasproCachedEffectiveUser = null;
-        } catch {
+        if (typeof window !== "undefined") {
+          try { (window as any).__lawcasproCachedEffectiveUser = null; } catch {}
+          try { (window as any).__lawcasproCachedEffectiveFeatures = null; } catch {}
         }
         clearStoredAuthToken();
         setUser(null);
         queryClient.setQueryData(ME_QUERY_KEY, null);
+        try {
+          clearIdentityScopedQueries({
+            queryClient,
+            firmId: oldFirmId,
+            userId: oldUserId,
+          });
+        } catch {
+        }
       }
     });
   };
-
-  useEffect(() => {
-    if (user) {
-      try {
-        (globalThis as any).__lawcasproCachedEffectiveUser = user;
-      } catch {
-      }
-    }
-  }, [user]);
 
   return (
     <AuthContext.Provider

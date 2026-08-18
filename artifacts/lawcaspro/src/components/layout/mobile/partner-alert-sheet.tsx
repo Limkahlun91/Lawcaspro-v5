@@ -22,6 +22,7 @@ import {
 import { apiFetchJson } from "@/lib/api-client";
 import { useToast } from "@/hooks/use-toast";
 import type { NotifRow } from "./mobile-dock";
+import { userNotificationsQueryKey } from "@/lib/query-keys";
 
 function relativeTime(dateStr: string | Date | null | undefined): string {
   if (!dateStr) return "";
@@ -55,9 +56,11 @@ function severityBadgeVariant(sev: string): "default" | "secondary" | "destructi
   }
 }
 
-export function PartnerAlertSheet({ user }: { user: { roleName?: string } | null | undefined }) {
+export function PartnerAlertSheet({ user }: { user: { id?: string | number; firmId?: string | number; roleName?: string } | null | undefined }) {
   const qc = useQueryClient();
   const { toast } = useToast();
+  const fid = (user as any)?.firmId ?? null;
+  const uid = (user as any)?.id ?? null;
   const isPartner = useMemo(() => !!user?.roleName && String(user.roleName).trim().toLowerCase() === "partner", [user?.roleName]);
   const canResolve = isPartner || hasPermission(user as any, "case_monitor", "manage") || hasPermission(user as any, "accounting", "read");
   const [notifMobileFilter, setNotifMobileFilter] = useState<"escalated" | "overdue" | "urgent" | "all">("escalated");
@@ -65,7 +68,7 @@ export function PartnerAlertSheet({ user }: { user: { roleName?: string } | null
   const [resolveTarget, setResolveTarget] = useState<{ id: number; title: string; note: string } | null>(null);
 
   const notifListQuery = useQuery({
-    queryKey: ["user-notifications", "escalation-feed-mobile", notifMobileFilter],
+    queryKey: userNotificationsQueryKey(fid, uid, "escalation-feed-mobile", notifMobileFilter),
     queryFn: async () => {
       try {
         const p = new URLSearchParams();
@@ -88,12 +91,12 @@ export function PartnerAlertSheet({ user }: { user: { roleName?: string } | null
 
   const ackMut = useMutation({
     mutationFn: (id: number) => fetch(`/api/user-notifications/${id}/acknowledge`, { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include" }).then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); }),
-    onSuccess: async (_, id) => { toast({ title: "Acknowledged", description: `#${id}` }); setAckTarget(null); await qc.invalidateQueries({ queryKey: ["user-notifications"] }); },
+    onSuccess: async (_, id) => { toast({ title: "Acknowledged", description: `#${id}` }); setAckTarget(null); await qc.invalidateQueries({ queryKey: userNotificationsQueryKey(fid, uid) }); },
     onError: (e) => toast({ title: "Acknowledge failed", description: String(e), variant: "destructive" }),
   });
   const resolveMut = useMutation({
     mutationFn: ({ id, note }: { id: number; note: string }) => fetch(`/api/user-notifications/${id}/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, credentials: "include", body: JSON.stringify({ note }) }).then(async r => { if (!r.ok) throw new Error(await r.text()); return r.json(); }),
-    onSuccess: async (_, { id }) => { toast({ title: "Resolved", description: `#${id}` }); setResolveTarget(null); await qc.invalidateQueries({ queryKey: ["user-notifications"] }); },
+    onSuccess: async (_, { id }) => { toast({ title: "Resolved", description: `#${id}` }); setResolveTarget(null); await qc.invalidateQueries({ queryKey: userNotificationsQueryKey(fid, uid) }); },
     onError: (e) => toast({ title: "Resolve failed", description: String(e), variant: "destructive" }),
   });
 
@@ -109,7 +112,7 @@ export function PartnerAlertSheet({ user }: { user: { roleName?: string } | null
             Critical {notifListQuery.data?.stats.critical ?? "—"} · Overdue {notifListQuery.data?.stats.overdue ?? "—"} · Escalated {notifListQuery.data?.stats.escalated ?? "—"}
           </div>
         </div>
-        <Button size="sm" variant="ghost" onClick={() => void qc.invalidateQueries({ queryKey: ["user-notifications"] })} aria-label="Refresh alerts">Refresh</Button>
+        <Button size="sm" variant="ghost" onClick={() => void qc.invalidateQueries({ queryKey: userNotificationsQueryKey(fid, uid) })} aria-label="Refresh alerts">Refresh</Button>
       </div>
       <div role="tablist" aria-label="Alert filters" className="px-3 pb-2 flex flex-wrap gap-1.5">
         {(["escalated","overdue","urgent","all"] as const).map(k => {

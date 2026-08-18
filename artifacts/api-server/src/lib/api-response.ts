@@ -2,7 +2,15 @@ import type { RequestHandler } from "express";
 import crypto from "crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { logger } from "./logger.js";
-import { extractDbErrorInfo } from "./db-error.js";
+import {
+  extractDbErrorInfo,
+  classifyDatabaseError,
+  databaseErrorHttpStatus,
+  databaseErrorCode,
+  databaseErrorSafeMessage,
+  databaseErrorRetryable,
+  databaseErrorLogToken,
+} from "./db-error.js";
 
 type NextLike = (error?: unknown) => void;
 
@@ -39,6 +47,7 @@ export type ApiErrorBody = {
   retryable: boolean;
   stage?: string;
   suggestion?: string;
+  requestId?: string;
 };
 
 export type ApiSuccess<T> = {
@@ -108,69 +117,79 @@ export function getApiMeta(res: ResLike): ApiMeta {
   };
 }
 
-type DbBusyResponse = { status: 503; code: "DB_BUSY"; message: string };
+type CategorizedDatabaseResponse = {
+  status: number;
+  code: string;
+  message: string;
+  retryable: boolean;
+  logToken: string;
+  suggestion?: string;
+};
 
-function isDbBusyErrorCode(code: unknown): boolean {
-  if (typeof code !== "string") return false;
-  const lowered = code.toLowerCase();
-  return (
-    lowered === "etimedout" ||
-    lowered === "econnrefused" ||
-    lowered === "ehostunreach" ||
-    lowered === "econnreset" ||
-    lowered === "53300" ||
-    lowered === "53400" ||
-    lowered === "08000" ||
-    lowered === "08003" ||
-    lowered === "08006" ||
-    lowered === "57p01" ||
-    lowered === "57p02" ||
-    lowered === "57p03" ||
-    lowered === "too_many_connections" ||
-    lowered === "db_busy" ||
-    lowered === "connection_timeout" ||
-    lowered === "pool_timeout"
-  );
-}
-
-function detectDbBusyResponse(err: unknown): DbBusyResponse | null {
-  if (!err || typeof err !== "object") return null;
-  const rec = err as Record<string, unknown>;
-  const errCode = rec.code;
-  const errStatus = rec.status;
-  const dbErrCode =
-    ((rec as { sqlState?: unknown; sqlstate?: unknown }).sqlState ?? (rec as { sqlState?: unknown; sqlstate?: unknown }).sqlstate) as unknown;
-  if (isDbBusyErrorCode(errCode) || isDbBusyErrorCode(dbErrCode)) {
-    return { status: 503, code: "DB_BUSY", message: "資料庫繁忙，請稍後重試" };
-  }
-  const msg = err instanceof Error ? err.message : String(err ?? "");
-  const lowered = typeof msg === "string" ? msg.toLowerCase() : "";
-  if (
-    lowered.includes("timeout exceeded when trying to connect") ||
-    (lowered.includes("pool") && lowered.includes("timeout")) ||
-    lowered.includes("connection terminated due to connection timeout") ||
-    lowered.includes("connection terminated unexpectedly") ||
-    lowered.includes("server closed the connection unexpectedly") ||
-    lowered.includes("too many connections") ||
-    lowered.includes("database is busy") ||
-    lowered.includes("db busy") ||
-    lowered.includes("資料庫繁忙")
-  ) {
-    return { status: 503, code: "DB_BUSY", message: "資料庫繁忙，請稍後重試" };
-  }
-  if (
-    typeof errStatus === "number" &&
-    errStatus === 503 &&
-    typeof errCode === "string" &&
-    (errCode === "DB_BUSY" || errCode === "SERVICE_UNAVAILABLE")
-  ) {
-    return { status: 503, code: "DB_BUSY", message: "資料庫繁忙，請稍後重試" };
-  }
-  return null;
+function detectCategorizedDatabaseResponse(err: unknown): CategorizedDatabaseResponse | null {
+  const category = classifyDatabaseError(err);
+  if (category === "UNKNOWN") return null;
+  const status = databaseErrorHttpStatus(category);
+  const code = databaseErrorCode(category);
+  const message = databaseErrorSafeMessage(category);
+  const retryable = databaseErrorRetryable(category);
+  const logToken = databaseErrorLogToken(category);
+  const suggestion = category === "DB_BUSY"
+    ? "Please wait a few seconds and try again."
+    : category === "DB_UNAVAILABLE"
+    ? "Please try again in a minute or contact support if this persists."
+    : undefined;
+  return { status, code, message, retryable, logToken, suggestion };
 }
 
 export function resolveDbBusyResponse(err: unknown): { status: number; code: string; message: string } | null {
-  return detectDbBusyResponse(err);
+  const r = detectCategorizedDatabaseResponse(err);
+  if (!r) return null;
+  return { status: r.status, code: r.code, message: r.message };
+}
+
+const SENITIVE_VALUE_MARKERS = [
+  "eyJhbGci",
+  "sk_",
+  "service_role",
+  "postgres://",
+  "postgresql://",
+  "password",
+  "NRIC",
+  "nric",
+  "TIN",
+  "tin",
+  "bank account",
+  "account_number",
+  "accNo",
+  "iban",
+];
+
+function containsSensitivePayload(value: unknown): boolean {
+  if (value == null) return false;
+  if (typeof value === "string") {
+    const s = value;
+    for (const m of SENITIVE_VALUE_MARKERS) if (s.includes(m)) return true;
+    if (/^\d{6}-\d{2}-\d{4}$/.test(s)) return true;
+    if (/\d{12,}/.test(s) && /(tin|bank|account)/i.test(s)) return true;
+  }
+  if (typeof value === "object") {
+    for (const k of Object.keys(value as Record<string, unknown>)) {
+      const lower = String(k).toLowerCase();
+      if (
+        lower.includes("password") ||
+        lower.includes("secret") ||
+        lower.includes("token") ||
+        lower.includes("nric") ||
+        lower.includes("tin") ||
+        lower.includes("bank") ||
+        lower.includes("account") ||
+        lower.includes("iban")
+      )
+        return true;
+    }
+  }
+  return false;
 }
 
 export function sendOk<T>(res: ResLike, data: T, opts?: { status?: number; warnings?: ApiWarning[] }): void {
@@ -181,20 +200,22 @@ export function sendOk<T>(res: ResLike, data: T, opts?: { status?: number; warni
 
 export function sendError(res: ResLike, err: unknown, fallback?: { status?: number; code?: string; message?: string }): void {
   const meta = getApiMeta(res);
+  const requestId = meta.request_id;
 
-  const dbBusy = detectDbBusyResponse(err);
-  if (dbBusy) {
+  const categorized = detectCategorizedDatabaseResponse(err);
+  if (categorized) {
     const body: ApiFailure = {
       ok: false,
       error: {
-        code: dbBusy.code,
-        message: dbBusy.message,
-        retryable: true,
-        suggestion: "請等待數秒後重新整理頁面或重試操作",
+        code: categorized.code,
+        message: categorized.message,
+        retryable: categorized.retryable,
+        requestId,
+        ...(categorized.suggestion ? { suggestion: categorized.suggestion } : {}),
       },
       meta,
     };
-    res.status(dbBusy.status).json(body);
+    res.status(categorized.status).json(body);
     return;
   }
 
@@ -232,7 +253,8 @@ export function sendError(res: ResLike, err: unknown, fallback?: { status?: numb
         code: e.code,
         message: e.message,
         retryable: Boolean(e.retryable),
-        ...(e.details !== undefined ? { details: e.details } : {}),
+        requestId,
+        ...(e.details !== undefined ? { details: containsSensitivePayload(e.details) ? null : e.details } : {}),
         ...(e.stage ? { stage: e.stage } : {}),
         ...(e.suggestion ? { suggestion: e.suggestion } : {}),
       },
@@ -244,7 +266,10 @@ export function sendError(res: ResLike, err: unknown, fallback?: { status?: numb
 
   const status = fallback?.status ?? 500;
   const code = fallback?.code ?? "INTERNAL_SERVER_ERROR";
-  const message = fallback?.message ?? "Internal server error";
+  const rawFallbackMsg = fallback?.message ?? "Internal server error";
+  const message = containsSensitivePayload(rawFallbackMsg)
+    ? "An unexpected error occurred while processing your request."
+    : rawFallbackMsg;
   const allowDetails =
     process.env.API_ERROR_DETAILS === "1" ||
     process.env.NODE_ENV !== "production" ||
@@ -252,13 +277,20 @@ export function sendError(res: ResLike, err: unknown, fallback?: { status?: numb
   const allowStack =
     allowDetails &&
     (process.env.API_ERROR_STACK === "1" || Boolean((res.locals as { allowErrorDetails?: boolean }).allowErrorDetails));
-  const details =
-    allowDetails && err instanceof Error
-      ? {
-          message: err.message,
-          ...(allowStack && err.stack ? { stack: err.stack } : {}),
-        }
-      : undefined;
+
+  let details: unknown;
+  if (allowDetails && err instanceof Error) {
+    if (containsSensitivePayload(err.message) || containsSensitivePayload(err.stack)) {
+      details = undefined;
+    } else {
+      details = {
+        message: err.message,
+        ...(allowStack && err.stack ? { stack: err.stack } : {}),
+      };
+    }
+  } else {
+    details = undefined;
+  }
 
   const body: ApiFailure = {
     ok: false,
@@ -266,6 +298,7 @@ export function sendError(res: ResLike, err: unknown, fallback?: { status?: numb
       code,
       message,
       retryable: status >= 500,
+      requestId,
       ...(details ? { details } : {}),
     },
     meta,
@@ -276,10 +309,15 @@ export function sendError(res: ResLike, err: unknown, fallback?: { status?: numb
 
 type LogClassification = {
   level: "info" | "warn" | "error";
-  event: "api.denied" | "api.client_error" | "api.db_busy" | "api.unhandled";
+  event:
+    | "api.denied"
+    | "api.client_error"
+    | "api.db_busy"
+    | "api.db_unavailable"
+    | "api.unhandled";
 };
 
-export function classifyErrorForLog(err: unknown): LogClassification & { retrySuggestion?: "DB_BUSY" | null } {
+export function classifyErrorForLog(err: unknown): LogClassification & { retrySuggestion?: "DB_BUSY" | "DB_UNAVAILABLE" | null } {
   const getStatus = (e: unknown): number | null => {
     if (!e || typeof e !== "object") return null;
     const rec = e as Record<string, unknown>;
@@ -292,9 +330,20 @@ export function classifyErrorForLog(err: unknown): LogClassification & { retrySu
     const code = rec.code;
     return typeof code === "string" ? code : null;
   };
-  const dbBusy = detectDbBusyResponse(err);
-  if (dbBusy) {
-    return { level: "warn", event: "api.db_busy", retrySuggestion: "DB_BUSY" };
+  const categorized = detectCategorizedDatabaseResponse(err);
+  if (categorized) {
+    const ev = (categorized.logToken === "api.db_busy"
+      ? "api.db_busy"
+      : categorized.logToken === "api.db_unavailable"
+      ? "api.db_unavailable"
+      : "api.unhandled") as LogClassification["event"];
+    const level: LogClassification["level"] = categorized.logToken === "api.db_unavailable" || categorized.logToken === "api.db_busy" ? "warn" : "error";
+    const retrySuggestion: "DB_BUSY" | "DB_UNAVAILABLE" | null = categorized.code === "DB_BUSY"
+      ? "DB_BUSY"
+      : categorized.code === "DB_UNAVAILABLE"
+      ? "DB_UNAVAILABLE"
+      : null;
+    return { level, event: ev, retrySuggestion };
   }
   const status = err instanceof ApiError ? err.status : getStatus(err);
   if (status !== null && status >= 400 && status < 500) {
@@ -313,6 +362,57 @@ export function classifyErrorForLog(err: unknown): LogClassification & { retrySu
     return { level: "warn", event: "api.client_error" };
   }
   return { level: "error", event: "api.unhandled" };
+}
+
+const SENSITIVE_FIELDS = new Set([
+  "query",
+  "sql",
+  "sqlText",
+  "statement",
+  "params",
+  "bindings",
+  "values",
+  "host",
+  "hostname",
+  "user",
+  "username",
+  "password",
+  "database",
+  "connectionString",
+  "secret",
+  "token",
+  "serviceRoleKey",
+  "service_role_key",
+  "nric",
+  "NRIC",
+  "myKad",
+  "mykad",
+  "tin",
+  "TIN",
+  "bankAccount",
+  "bank_account",
+  "accountNo",
+  "account_number",
+  "iban",
+]);
+
+function redactSensitiveFields(obj: unknown, depth: number = 0): unknown {
+  if (depth > 4) return "[redacted-depth]";
+  if (obj == null) return obj;
+  if (Array.isArray(obj)) return obj.map((o) => redactSensitiveFields(o, depth + 1));
+  if (typeof obj === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      const key = k.toLowerCase();
+      if (SENSITIVE_FIELDS.has(k) || SENSITIVE_FIELDS.has(key)) {
+        out[k] = "[redacted]";
+        continue;
+      }
+      out[k] = redactSensitiveFields(v, depth + 1);
+    }
+    return out;
+  }
+  return obj;
 }
 
 export function wrap(handler: (req: ReqLike, res: ResLike) => Promise<void> | void): RequestHandler {
@@ -341,17 +441,15 @@ export function wrap(handler: (req: ReqLike, res: ResLike) => Promise<void> | vo
           column: safeDbErr.column,
           constraint: safeDbErr.constraint,
           schema: safeDbErr.schema,
-          detailClass:
-            safeDbErr.detail ? (typeof safeDbErr.detail === "string" ? "string" : typeof safeDbErr.detail) : undefined,
         };
       }
       if (classification.level === "error") {
-        context.err = err;
+        context.err = redactSensitiveFields(err);
       } else {
         if (err instanceof ApiError) {
           context.apiErr = { code: err.code, status: err.status, message: err.message, stage: err.stage };
         } else if (err instanceof Error) {
-          context.apiErr = { name: err.name, message: err.message };
+          context.apiErr = { name: err.name, message: containsSensitivePayload(err.message) ? "[redacted]" : err.message };
         } else {
           context.apiErr = { raw: typeof err };
         }

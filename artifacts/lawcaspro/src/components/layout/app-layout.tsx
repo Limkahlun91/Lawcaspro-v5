@@ -5,6 +5,12 @@ import { isEmailControlEnabled, isWhatsAppInboxEnabled } from "@/lib/feature-fla
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
 import {
+  caseNotificationsUnreadCountQueryKey,
+  userNotificationSummaryQueryKey,
+  userNotificationsQueryKey,
+  userUnreadCountQueryKey,
+} from "@/lib/query-keys";
+import {
   LayoutDashboard,
   ListTodo,
   Briefcase,
@@ -98,39 +104,38 @@ export function AppLayout({ children }: { children: ReactNode }) {
   }, [user && user.userType === "firm_user" ? (user as any).id : null, user && user.userType === "firm_user" ? (user as any).firmId : null]);
 
   const phase2CommsEnabled = isEmailControlEnabled() || isWhatsAppInboxEnabled();
+  const uid = (user as any)?.id ?? null;
+  const fid = (user as any)?.firmId ?? null;
   const { data: unreadData } = useQuery({
-    queryKey: ["unread-count"],
+    queryKey: userUnreadCountQueryKey(fid, uid),
     queryFn: () => apiFetchJson<{ count: number }>("/communications/unread-count").catch(() => ({ count: 0 })),
     refetchInterval: 30000,
     enabled: phase2CommsEnabled && unreadEnabled && !!user && user.userType === "firm_user" && hasPermission(user, "communications", "read"),
     retry: false,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
-    placeholderData: (prev) => prev ?? { count: 0 },
   });
   const unreadCount = unreadData?.count ?? 0;
 
   const { data: caseUnreadData } = useQuery({
-    queryKey: ["case-notifications", "unread-counts"],
+    queryKey: caseNotificationsUnreadCountQueryKey(fid, uid),
     queryFn: () => apiFetchJson<{ totalUnreadCount: number }>("/case-notifications/unread-counts").catch(() => ({ totalUnreadCount: 0 })),
     refetchInterval: 30000,
     enabled: unreadEnabled && !!user && user.userType === "firm_user" && hasPermission(user, "cases", "read"),
     retry: false,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
-    placeholderData: (prev) => prev ?? { totalUnreadCount: 0 },
   });
   const caseUnreadCount = caseUnreadData?.totalUnreadCount ?? 0;
 
   const { data: accountingUnreadData } = useQuery({
-    queryKey: ["user-notifications", "unread-count", "global"],
+    queryKey: userNotificationsQueryKey(fid, uid, "unread-count", "global"),
     queryFn: () => apiFetchJson<{ count: number }>("/user-notifications/unread-count").catch(() => ({ count: 0 })),
     refetchInterval: 30000,
     enabled: unreadEnabled && !!user && user.userType === "firm_user",
     retry: false,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
-    placeholderData: (prev) => prev ?? { count: 0 },
   });
   const accountingUnreadCount = accountingUnreadData?.count ?? 0;
 
@@ -160,7 +165,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
   };
 
   const notifSummaryQuery = useQuery({
-    queryKey: ["user-notifications", "summary"],
+    queryKey: userNotificationSummaryQueryKey(fid, uid),
     queryFn: () =>
       apiFetchJson<{ unread: number; urgent: number; escalated: number; overdue: number; monitorUniqueCount?: number; overlap?: { criticalOverdue?: number; criticalEscalated?: number; overdueEscalated?: number; allThree?: number } }>("/user-notifications/summary").catch(
         () => ({ unread: 0, urgent: 0, escalated: 0, overdue: 0, monitorUniqueCount: 0 })
@@ -170,12 +175,11 @@ export function AppLayout({ children }: { children: ReactNode }) {
     staleTime: 30_000,
     refetchOnWindowFocus: false,
     retry: false,
-    placeholderData: (prev) => prev ?? { unread: 0, urgent: 0, escalated: 0, overdue: 0, monitorUniqueCount: 0 },
   });
   const notifSummary = notifSummaryQuery.data ?? { unread: 0, urgent: 0, escalated: 0, overdue: 0, monitorUniqueCount: 0 };
 
   const notifListQuery = useQuery({
-    queryKey: ["user-notifications", "list", notifFilter],
+    queryKey: userNotificationsQueryKey(fid, uid, "list", notifFilter),
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("limit", "50");
@@ -201,9 +205,9 @@ export function AppLayout({ children }: { children: ReactNode }) {
         credentials: "include",
       }).then((r) => r.json()),
     onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["user-notifications"] });
-      await qc.invalidateQueries({ queryKey: ["case-notifications", "unread-counts"] });
-      await qc.invalidateQueries({ queryKey: ["unread-count"] });
+      await qc.invalidateQueries({ queryKey: userNotificationsQueryKey(fid, uid) });
+      await qc.invalidateQueries({ queryKey: caseNotificationsUnreadCountQueryKey(fid, uid) });
+      await qc.invalidateQueries({ queryKey: userUnreadCountQueryKey(fid, uid) });
     },
   });
 
@@ -220,7 +224,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
       }),
     onSuccess: async () => {
       setNotifAckId(null); setNotifAckNote("");
-      await qc.invalidateQueries({ queryKey: ["user-notifications"] });
+      await qc.invalidateQueries({ queryKey: userNotificationsQueryKey(fid, uid) });
     },
   });
 
@@ -235,7 +239,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
         if (!r.ok) { const text = await r.text(); throw new Error(text || "dismiss_failed"); }
         return r.json();
       }),
-    onSuccess: async () => { await qc.invalidateQueries({ queryKey: ["user-notifications"] }); },
+    onSuccess: async () => { await qc.invalidateQueries({ queryKey: userNotificationsQueryKey(fid, uid) }); },
   });
 
   const escMut = useMutation({
@@ -251,7 +255,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
       }),
     onSuccess: async () => {
       setNotifEscId(null); setNotifEscPartnerId(""); setNotifEscNote("");
-      await qc.invalidateQueries({ queryKey: ["user-notifications"] });
+      await qc.invalidateQueries({ queryKey: userNotificationsQueryKey(fid, uid) });
     },
   });
 
@@ -268,7 +272,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
       }),
     onSuccess: async () => {
       setNotifResolveId(null); setNotifResolveNote("");
-      await qc.invalidateQueries({ queryKey: ["user-notifications"] });
+      await qc.invalidateQueries({ queryKey: userNotificationsQueryKey(fid, uid) });
     },
   });
 
@@ -401,7 +405,7 @@ export function AppLayout({ children }: { children: ReactNode }) {
         </div>
         {canViewEscalationFeed ? (
           <button type="button" aria-label="Open notification center" className="relative inline-flex items-center justify-center w-9 h-9 rounded-md hover:bg-slate-800 shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"
-                  onClick={() => { setMobileView("alerts"); setNotifCenterOpen(true); void qc.invalidateQueries({ queryKey: ["user-notifications"] }); }}>
+                  onClick={() => { setMobileView("alerts"); setNotifCenterOpen(true); void qc.invalidateQueries({ queryKey: userNotificationsQueryKey(fid, uid) }); }}>
             <Bell className="w-5 h-5 text-slate-200" aria-hidden />
             {globalUnreadCount > 0 ? <span className="absolute -top-0.5 -right-0.5 inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 text-[10px] font-bold text-white bg-red-500 rounded-full shadow-sm" aria-label={`${globalUnreadCount} unread notifications`}>{globalUnreadCount > 99 ? "99+" : globalUnreadCount}</span> : null}
           </button>

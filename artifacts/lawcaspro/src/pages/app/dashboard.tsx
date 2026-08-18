@@ -47,6 +47,7 @@ export default function AppDashboard() {
   const [, setLocation] = useLocation();
   const { user } = useAuth();
   const firmId = user?.firmId ?? null;
+  const userId = (user as any)?.id ?? null;
   const roleName = String((user as any)?.roleName ?? "");
   const isManagement = (n: string) => (n || "").toLowerCase().includes("partner") || (n || "").toLowerCase().includes("manager");
   const isManagementRole = isManagement(roleName);
@@ -172,7 +173,7 @@ export default function AppDashboard() {
   };
 
   const { data: stats, isLoading, isError, error, refetch, isFetching, dataUpdatedAt } = useQuery({
-    queryKey: ["dashboard", firmId],
+    queryKey: ["dashboard", firmId, userId],
     queryFn: ({ signal }) =>
       apiFetchJson(refresh ? "/dashboard?refresh=1" : "/dashboard", { timeoutMs: refresh ? 15_000 : 12_000, signal }) as Promise<Record<string, any>>,
     enabled: !isFirmStaffBlocked && Number.isFinite(firmId) && Number(firmId) > 0,
@@ -192,7 +193,6 @@ export default function AppDashboard() {
     },
     refetchOnWindowFocus: true,
     refetchOnReconnect: true,
-    placeholderData: (prev) => prev,
   });
 
   if (isLoading) {

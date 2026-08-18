@@ -27,6 +27,7 @@ import { apiFetchJson } from "@/lib/api-client";
 import { useToast } from "@/hooks/use-toast";
 import { MeSheet } from "./me-sheet";
 import { PartnerAlertSheet } from "./partner-alert-sheet";
+import { userNotificationsQueryKey } from "@/lib/query-keys";
 
 export type MobileDockViewId = "home" | "work" | "monitor" | "alerts" | "me";
 
@@ -141,7 +142,7 @@ export function MobileDockView(props: {
                   if (it.href) { navigate(it.href); }
                   props.onChange(it.id);
                   if (it.id === "me") setMeOpen(true);
-                  if (it.id === "alerts") { void qc.invalidateQueries({ queryKey: ["user-notifications"] }); }
+                  if (it.id === "alerts") { const fid = (props.user as any)?.firmId ?? null; const uid = (props.user as any)?.id ?? null; void qc.invalidateQueries({ queryKey: userNotificationsQueryKey(fid, uid) }); }
                 }}
                 aria-label={`${it.label}${disabled ? " (unauthorized)" : ""}`}
                 aria-current={active ? "page" : undefined}

@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { clearTenantContext, clearTenantContextStrict, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContext, setTenantContextSession, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable, caseAssignmentsTable, casesTable, type PoolClient } from "@workspace/db";
+import { clearTenantContext, clearTenantContextStrict, db, makeRlsDb, permissionsTable, pool, RlsDb, rolesTable, sessionsTable, setTenantContext, setTenantContextSession, sql, usersTable, auditLogsTable, platformFounderRolePermissionsTable, platformFounderRolesTable, platformFounderUserRolesTable, caseAssignmentsTable, casesTable, type PoolClient, recordAuthLookup } from "@workspace/db";
 import { and, eq, inArray } from "drizzle-orm";
 import crypto from "crypto";
 import { logger } from "./logger";
@@ -692,7 +692,9 @@ export async function lookupSessionAndUserByTokenHash(
       if (isAuthAdminDbConfigured()) {
         const adminStart = Date.now();
         const admin = await lookupViaAuthAdminDb();
-        timing.primaryLookupMs += Date.now() - adminStart;
+        const adminMs = Date.now() - adminStart;
+        recordAuthLookup(adminMs);
+        timing.primaryLookupMs += adminMs;
         if (admin?.session) {
           timing.identityDbSource = authAdminSource;
           return admin?.user ? { ...(admin as any), timing } : { session: admin.session as any, user: undefined as any, timing };
@@ -706,7 +708,9 @@ export async function lookupSessionAndUserByTokenHash(
 
       const primaryStart = Date.now();
       const primary = await lookupViaDb();
-      timing.primaryLookupMs += Date.now() - primaryStart;
+      const primaryMs = Date.now() - primaryStart;
+      recordAuthLookup(primaryMs);
+      timing.primaryLookupMs += primaryMs;
       if (!primary?.session) {
         if (attempt < 2) {
           await sleep(30 * attempt);
@@ -720,7 +724,9 @@ export async function lookupSessionAndUserByTokenHash(
       try {
         const fallbackStart = Date.now();
         const fallback = await lookupViaAuthSafeDb();
-        timing.fallbackLookupMs += Date.now() - fallbackStart;
+        const fallbackMs = Date.now() - fallbackStart;
+        recordAuthLookup(fallbackMs);
+        timing.fallbackLookupMs += fallbackMs;
         if (fallback?.session) timing.identityDbSource = "DATABASE_URL";
         return fallback?.session ? { ...(fallback as any), timing } : { ...primary, timing };
       } catch (err) {

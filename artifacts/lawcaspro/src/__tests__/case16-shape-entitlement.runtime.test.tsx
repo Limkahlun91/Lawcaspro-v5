@@ -62,11 +62,18 @@ const M = vi.hoisted(() => {
 
 vi.mock("wouter", async () => {
   const actual: any = await vi.importActual("wouter");
+  const stableUseLocation = M.stableUseLocationFn as unknown as (
+    options?: { ssrPath?: string } | undefined,
+  ) => [string, (to: string | URL, opts?: { replace?: boolean; state?: any; transition?: boolean }) => void];
+  const stableUseSearch = M.stableUseSearchFn as unknown as (
+    options?: { ssrSearch?: string } | undefined,
+  ) => string;
+  const stableUseParams = M.stableUseParamsFn as unknown as <T = undefined>() => T;
   return {
     ...actual,
-    useLocation: (..._args: any[]) => M.stableUseLocationFn(..._args),
-    useSearch: (..._args: any[]) => M.stableUseSearchFn(..._args),
-    useParams: (..._args: any[]) => M.stableUseParamsFn(..._args),
+    useLocation: stableUseLocation,
+    useSearch: stableUseSearch,
+    useParams: stableUseParams,
     Link: ({ href, children }: any) => <a href={href}>{children}</a>,
     Router: ({ children }: any) => <>{children}</>,
     Switch: ({ children }: any) => <>{children}</>,
@@ -105,7 +112,10 @@ vi.mock("@/lib/feature-guards", () => ({
 }));
 
 vi.mock("@/lib/permissions", () => ({
-  hasPermission: (...a: any[]) => M.hasPermissionMock(...a),
+  hasPermission: M.hasPermissionMock as unknown as (
+    permission: { module: string; action: string } | string,
+    userPermissions?: Array<{ module: string; action: string }> | undefined,
+  ) => boolean,
   isAccountingRoleAllowed: () => true,
 }));
 
@@ -197,14 +207,14 @@ beforeEach(() => {
   M.useListUsersMock.mockReset();
   M.apiFetchJsonMock.mockReset();
   M.apiFetchBlobMock.mockReset();
-  M.hasPermissionMock.mockImplementation((p: any) => {
+  M.hasPermissionMock.mockImplementation(((p: any) => {
     if (p?.module === "cases" && p?.action === "read") return true;
     if (p?.module === "cases" && p?.action === "assign_any") return true;
     if (p?.module === "accounting" && p?.action === "read") return true;
     if (p?.module === "documents" && p?.action === "read") return true;
     if (p?.module === "communications" && p?.action === "read") return true;
     return true;
-  });
+  }) as unknown as () => boolean);
   M.getAuthMock.mockReturnValue({
     user: {
       id: 2,

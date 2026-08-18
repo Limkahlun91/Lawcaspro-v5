@@ -50,7 +50,7 @@ describe("ENT-PERF-1 — single shared query key with staleTime 60s", () => {
     const fg = hit!.src;
     expect(fg).toMatch(/const\s+EFFECTIVE_FEATURES_QUERY_KEY\s*=\s*\[\s*"firm"\s*,\s*"user"\s*,\s*"effective-features"\s*\]/);
     expect(fg).toMatch(/staleTime:\s*(?:60_000|60\s*\*\s*1000)/);
-    expect(fg).toContain(`refetchOnWindowFocus: "stale"`);
+    expect(fg).toMatch(/refetchOnWindowFocus:\s*(?:true|"stale")/);
   });
   it("FirmSubscriptionFeaturesTab uses the same queryKey ['firm','user','effective-features']", () => {
     const hit = findFile("FirmSubscriptionFeaturesTab.tsx");

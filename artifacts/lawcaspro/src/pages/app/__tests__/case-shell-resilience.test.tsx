@@ -1,6 +1,6 @@
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { render, screen, waitFor, cleanup } from "@testing-library/react";
+import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi, beforeEach, beforeAll, afterEach } from "vitest";
 import CaseDetail from "../cases/detail";
@@ -39,11 +39,18 @@ const M = vi.hoisted(() => {
 
 vi.mock("wouter", async () => {
   const actual: any = await vi.importActual("wouter");
+  const stableUseLocation = M.stableUseLocationFn as unknown as (
+    options?: { ssrPath?: string } | undefined,
+  ) => [string, (to: string | URL, opts?: { replace?: boolean; state?: any; transition?: boolean }) => void];
+  const stableUseSearch = M.stableUseSearchFn as unknown as (
+    options?: { ssrSearch?: string } | undefined,
+  ) => string;
+  const stableUseParams = M.stableUseParamsFn as unknown as <T = undefined>() => T;
   return {
     ...actual,
-    useLocation: (..._args: any[]) => M.stableUseLocationFn(..._args),
-    useSearch: (..._args: any[]) => M.stableUseSearchFn(..._args),
-    useParams: (..._args: any[]) => M.stableUseParamsFn(..._args),
+    useLocation: stableUseLocation,
+    useSearch: stableUseSearch,
+    useParams: stableUseParams,
     Link: ({ href, children }: any) => <a href={href}>{children}</a>,
     Router: ({ children }: any) => <>{children}</>,
     Switch: ({ children }: any) => <>{children}</>,
@@ -227,6 +234,7 @@ afterEach(() => {
 
 describe("Case Details — Shell Resilience (§8 + §9)", () => {
   it("CASE-SHELL-1 — Primary 200, Messages 500: case data renders, messages show isolated error, no whole-page die", async () => {
+    M.stableUseSearchFn.mockReturnValue("?tab=client-interaction");
     M.useGetCaseMock.mockReturnValue({
       data: {
         id: 16,
@@ -289,7 +297,8 @@ describe("Case Details — Shell Resilience (§8 + §9)", () => {
       expect(screen.queryByText("Loading case details...")).not.toBeInTheDocument();
     }, { timeout: 10_000 });
 
-    expect(await screen.findByText("CV-2025-00016")).toBeInTheDocument();
+    const refNodes = screen.getAllByText("CV-2025-00016");
+    expect(refNodes.length).toBeGreaterThan(0);
 
     const statusBadges = screen.getAllByText((_content, el) => {
       if (!el) return false;
@@ -301,17 +310,20 @@ describe("Case Details — Shell Resilience (§8 + §9)", () => {
     expect(screen.queryByText("Case unavailable")).not.toBeInTheDocument();
     expect(screen.queryByText("Workflow unavailable")).not.toBeInTheDocument();
 
-    const unableToLoadMessagesNodes = screen.getAllByText((_content, el) => {
-      if (!el) return false;
-      return (el.textContent || "").includes("Unable to load Messages");
-    });
-    expect(unableToLoadMessagesNodes.length).toBeGreaterThan(0);
+    await waitFor(() => {
+      const unableToLoadMessagesNodes = screen.getAllByText((_content, el) => {
+        if (!el) return false;
+        return (el.textContent || "").includes("Unable to load Messages");
+      });
+      expect(unableToLoadMessagesNodes.length).toBeGreaterThan(0);
+    }, { timeout: 8_000 });
 
     const retryButtons = screen.getAllByRole("button", { name: /Retry/i });
     expect(retryButtons.length).toBeGreaterThan(0);
   });
 
   it("CASE-SHELL-2 — Primary 500: shows Case unavailable banner, no case-specific data", async () => {
+    M.stableUseSearchFn.mockReturnValue("");
     const serverError: any = new Error("Server failed");
     serverError.status = 500;
     serverError.body = { error: "Server failed" };

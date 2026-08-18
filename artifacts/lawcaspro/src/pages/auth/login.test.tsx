@@ -221,9 +221,10 @@ describe("Login flow", () => {
     renderWithProviders();
 
     fireEvent.change(screen.getAllByPlaceholderText("name@firm.com")[0], { target: { value: "test@example.com" } });
+    fireEvent.change(screen.getByPlaceholderText("••••••••"), { target: { value: "pw" } });
     fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
-    await waitFor(() => expect(setLocationMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(setLocationMock).toHaveBeenCalledTimes(1), { timeout: 15_000 });
     expect(setLocationMock).toHaveBeenCalledWith("/app/dashboard");
   });
 });

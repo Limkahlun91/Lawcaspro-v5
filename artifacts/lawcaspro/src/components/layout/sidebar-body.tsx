@@ -1,9 +1,15 @@
 import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
-import { hasPermission } from "@/lib/permissions";
+import { hasPermission, getPermissionLoadState } from "@/lib/permissions";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AuthUser } from "@workspace/api-client-react";
 import { Link, useLocation } from "wouter";
+import {
+  caseNotificationsUnreadCountQueryKey,
+  userNotificationSummaryQueryKey,
+  userNotificationsQueryKey,
+  userUnreadCountQueryKey,
+} from "@/lib/query-keys";
 import {
   LayoutDashboard,
   ListTodo,
@@ -299,18 +305,19 @@ export function SidebarBody({
     return { userType, roleGroup, roleLower };
   }, [user, roleName]);
 
+  const sidebarFid = (user as any)?.firmId ?? null;
+  const sidebarUid = (user as any)?.id ?? null;
   const accountingUnreadCount = useQuery({
-    queryKey: ["user-notifications", "unread-count", "sidebar"],
+    queryKey: userNotificationsQueryKey(sidebarFid, sidebarUid, "unread-count", "sidebar"),
     queryFn: () => apiFetchJson<{ count: number }>("/user-notifications/unread-count").catch(() => ({ count: 0 })),
     refetchInterval: 60_000,
     staleTime: 45_000,
     retry: false,
     refetchOnWindowFocus: false,
     enabled: !!user && user.userType === "firm_user",
-    placeholderData: (prev) => prev ?? { count: 0 },
   }).data?.count ?? 0;
   const unreadCount = useQuery({
-    queryKey: ["unread-count", "sidebar"],
+    queryKey: userUnreadCountQueryKey(sidebarFid, sidebarUid, "sidebar"),
     queryFn: () => apiFetchJson<{ count: number }>("/communications/unread-count").catch(() => ({ count: 0 })),
     refetchInterval: 60_000,
     staleTime: 45_000,
@@ -321,10 +328,9 @@ export function SidebarBody({
       user.userType === "firm_user" &&
       !!userFeatures.enabled("communications.email") &&
       hasPermission(user, "communications", "read"),
-    placeholderData: (prev) => prev ?? { count: 0 },
   }).data?.count ?? 0;
   const notifSummary = useQuery({
-    queryKey: ["user-notifications", "summary", "sidebar"],
+    queryKey: userNotificationSummaryQueryKey(sidebarFid, sidebarUid, "sidebar"),
     queryFn: () =>
       apiFetchJson<{
         unread: number;
@@ -346,9 +352,6 @@ export function SidebarBody({
     retry: false,
     refetchOnWindowFocus: false,
     enabled: !!user && user.userType === "firm_user",
-    placeholderData: (prev) =>
-      prev ??
-      { unread: 0, urgent: 0, escalated: 0, overdue: 0, monitorUniqueCount: 0, activeDistinctCount: 0 },
   }).data ?? { unread: 0, urgent: 0, escalated: 0, overdue: 0, monitorUniqueCount: 0, activeDistinctCount: 0 };
   const globalUnreadCount = accountingUnreadCount + unreadCount;
   const badgeUrgent = Number(notifSummary.urgent ?? 0);
@@ -399,20 +402,58 @@ export function SidebarBody({
       key: g.key,
       label: g.label,
       items: g.items.filter((i) => {
+        type UserEffectiveFeatureBundleLike = { effective?: Record<string, { effectiveEnabled?: boolean } | undefined> };
         const permOk = hasPermission(user, i.perm[0], i.perm[1]);
-        if (!permOk && userFeatures.loadingOrRefetching && !userFeatures.loaded) {
-          const cachedUser = (globalThis as any).__lawcasproCachedEffectiveUser as AuthUser | undefined;
-          if (cachedUser) {
-            const fallback = hasPermission(cachedUser, i.perm[0], i.perm[1]);
-            if (fallback) return true;
+        const permLoadState = getPermissionLoadState(user);
+        const allowLkgPerm = !permOk && (permLoadState === "NOT_LOADED" || permLoadState === "TRANSIENT_ERROR");
+        if (allowLkgPerm) {
+          if (typeof window !== "undefined") {
+            try {
+              const cachedWrap = (window as any).__lawcasproCachedEffectiveUser as {
+                firmId: unknown; userId: unknown; fetchedAt: number; data: AuthUser;
+              } | AuthUser | undefined;
+              let cachedUser: AuthUser | undefined;
+              if (cachedWrap && typeof cachedWrap === "object") {
+                if ("data" in cachedWrap && (cachedWrap as any).data) {
+                  const sameFirm = (sidebarFid === null && (cachedWrap as any).firmId === null) ||
+                    (sidebarFid !== null && String((cachedWrap as any).firmId) === String(sidebarFid));
+                  const sameUser = (sidebarUid === null && (cachedWrap as any).userId === null) ||
+                    (sidebarUid !== null && String((cachedWrap as any).userId) === String(sidebarUid));
+                  if (sameFirm && sameUser) cachedUser = (cachedWrap as any).data;
+                } else {
+                  cachedUser = cachedWrap as AuthUser;
+                }
+              }
+              if (cachedUser) {
+                const fallback = hasPermission(cachedUser, i.perm[0], i.perm[1]);
+                if (fallback) return true;
+              }
+            } catch {
+            }
           }
         }
         if (!permOk) return false;
         if (i.featureKey) {
           const featureOk = userFeatures.enabled(i.featureKey);
-          if (!featureOk && userFeatures.loadingOrRefetching) {
-            const fallback = (globalThis as any).__lawcasproCachedEffectiveFeatures?.effective?.[i.featureKey] as { effectiveEnabled?: boolean } | undefined;
-            if (fallback?.effectiveEnabled) return true;
+          if (!featureOk && userFeatures.transientError) {
+            if (typeof window !== "undefined") {
+              try {
+                const cached = (window as any).__lawcasproCachedEffectiveFeatures as {
+                  firmId: unknown; userId: unknown; fetchedAt: number; data: UserEffectiveFeatureBundleLike | undefined;
+                } | undefined;
+                if (cached && typeof cached === "object" && cached.data) {
+                  const sameFirm = (sidebarFid === null && cached.firmId === null) ||
+                    (sidebarFid !== null && String(cached.firmId) === String(sidebarFid));
+                  const sameUser = (sidebarUid === null && cached.userId === null) ||
+                    (sidebarUid !== null && String(cached.userId) === String(sidebarUid));
+                  if (sameFirm && sameUser) {
+                    const fallback = cached.data.effective?.[i.featureKey];
+                    if (fallback?.effectiveEnabled) return true;
+                  }
+                }
+              } catch {
+              }
+            }
           }
           if (!featureOk) return false;
         }

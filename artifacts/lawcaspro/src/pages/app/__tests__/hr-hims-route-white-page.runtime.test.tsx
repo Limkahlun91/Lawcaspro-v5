@@ -1,4 +1,5 @@
 import React from "react";
+import type { ReactElement } from "react";
 import "@testing-library/jest-dom/vitest";
 import { render, screen, waitFor, cleanup, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -74,7 +75,10 @@ vi.mock("@/lib/auth-token", () => ({
 }));
 
 vi.mock("@/lib/permissions", () => ({
-  hasPermission: (...a: any[]) => M.hasPermissionMock(...a),
+  hasPermission: M.hasPermissionMock as unknown as (
+    permission: { module: string; action: string } | string,
+    userPermissions?: Array<{ module: string; action: string }> | undefined,
+  ) => boolean,
 }));
 
 vi.mock("@/components/permission-guard", async () => {
@@ -82,7 +86,9 @@ vi.mock("@/components/permission-guard", async () => {
   return {
     ...actual,
     PermissionGuard: ({ children, module, action, mode }: any) => {
-      const ok = M.hasPermissionMock({ module, action });
+      const ok = (M.hasPermissionMock as unknown as (
+        permission: { module: string; action: string },
+      ) => boolean)({ module, action });
       if (ok) return <>{children}</>;
       if (mode === "silent") return null;
       return (
@@ -118,11 +124,22 @@ function newQueryClient() {
   return client;
 }
 
-function wrap<Q extends object = {}>(Comp: React.FC<Q>, queryClient?: QueryClient) {
+function wrap<Q extends object = {}>(Comp: React.FC<Q> | (() => ReactElement), queryClient?: QueryClient) {
   const client = queryClient ?? newQueryClient();
-  return function Wrapped(props: Q) {
-    return <QueryClientProvider client={client}><Comp {...props} /></QueryClientProvider>;
-  };
+  const Fn = Comp as () => ReactElement;
+  const FC = Comp as React.FC<Q>;
+  function Wrapped(props: Q) {
+    return (
+      <QueryClientProvider client={client}>
+        {Fn.length === 0 ? <Fn /> : <FC {...(props as Q)} />}
+      </QueryClientProvider>
+    );
+  }
+  function Bare(): ReactElement {
+    return Wrapped({} as Q);
+  }
+  const out = Bare as unknown as { (props?: Q | undefined): ReactElement };
+  return out;
 }
 
 function makeBundle(overrides: {
@@ -139,12 +156,12 @@ function makeBundle(overrides: {
 beforeEach(() => {
   cleanup();
   vi.clearAllMocks();
-  M.hasPermissionMock.mockImplementation((p: any) => {
+  M.hasPermissionMock.mockImplementation(((p: any) => {
     if (p?.module === "hr" && p?.action === "read") return true;
     if (p?.module === "hr" && p?.action === "write") return true;
     if (p?.module === "cases" && p?.action === "read") return true;
     return true;
-  });
+  }) as unknown as () => boolean);
 });
 
 afterEach(() => {
@@ -191,7 +208,7 @@ describe("RouteFeatureAccessGuard — exact white page tests", () => {
       <RouteFeatureAccessGuard feature="hr.dashboard" permission={{ module: "hr", action: "read" }}>
         <DummyHr />
       </RouteFeatureAccessGuard>
-    ))());
+    ))() as unknown as React.ReactElement);
     await waitFor(() => expect(screen.getByText(/HR Dashboard/i)).toBeInTheDocument(), { timeout: 10_000 });
     expect((document.body.textContent ?? "").trim().length).toBeGreaterThan(0);
   });
@@ -215,7 +232,7 @@ describe("RouteFeatureAccessGuard — exact white page tests", () => {
       <RouteFeatureAccessGuard feature="hr.dashboard" permission={{ module: "hr", action: "read" }}>
         <DummyHr />
       </RouteFeatureAccessGuard>
-    ))());
+    ))() as unknown as React.ReactElement);
     await waitFor(() => {
       const body = document.body.textContent ?? "";
       expect(body).toMatch(/This feature is not available to you/i);
@@ -242,7 +259,7 @@ describe("RouteFeatureAccessGuard — exact white page tests", () => {
       <RouteFeatureAccessGuard feature="hr.dashboard" permission={{ module: "hr", action: "read" }}>
         <DummyHr />
       </RouteFeatureAccessGuard>
-    ))());
+    ))() as unknown as React.ReactElement);
     await waitFor(() => {
       const body = document.body.textContent ?? "";
       expect(body).toMatch(/This feature is not enabled for your firm/i);
@@ -307,7 +324,7 @@ describe("RouteFeatureAccessGuard — exact white page tests", () => {
       <RouteFeatureAccessGuard feature="hr.dashboard" permission={{ module: "hr", action: "read" }}>
         <DummyHr />
       </RouteFeatureAccessGuard>
-    ))());
+    ))() as unknown as React.ReactElement);
     await waitFor(() => {
       const body = document.body.textContent ?? "";
       expect(body).toMatch(/Loading access…/i);

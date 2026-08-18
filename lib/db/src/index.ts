@@ -8,7 +8,114 @@ declare const globalThis: {
   __lawcasproDbPool?: pg.Pool;
   __lawcasproDrizzleDb?: ReturnType<typeof drizzle>;
   __lawcasproDbPoolRegistry?: Map<string, pg.Pool>;
+  __lawcasproDbPoolInstrumentation?: DbPoolInstrumentationState;
 };
+
+export type DbPoolInstrumentationState = {
+  coldConnectCount: number;
+  coldConnectTotalMs: number;
+  warmConnectCount: number;
+  warmConnectTotalMs: number;
+  authLookupCount: number;
+  authLookupTotalMs: number;
+  firstConnectAtMs: number | null;
+  firstConnectWarmDetectedMs: number | null;
+};
+
+function newInstrumentationState(): DbPoolInstrumentationState {
+  return {
+    coldConnectCount: 0,
+    coldConnectTotalMs: 0,
+    warmConnectCount: 0,
+    warmConnectTotalMs: 0,
+    authLookupCount: 0,
+    authLookupTotalMs: 0,
+    firstConnectAtMs: null,
+    firstConnectWarmDetectedMs: null,
+  };
+}
+
+export const dbPoolInstrumentation: DbPoolInstrumentationState =
+  globalThis.__lawcasproDbPoolInstrumentation ?? newInstrumentationState();
+if (!globalThis.__lawcasproDbPoolInstrumentation) {
+  globalThis.__lawcasproDbPoolInstrumentation = dbPoolInstrumentation;
+}
+
+export type DbPoolSnapshot = {
+  max: number | null;
+  totalCount: number;
+  idleCount: number;
+  waitingCount: number;
+  instrumented: DbPoolInstrumentationState & {
+    coldConnectAvgMs: number | null;
+    warmConnectAvgMs: number | null;
+    authLookupAvgMs: number | null;
+  };
+};
+
+export function getPoolSnapshot(p: pg.Pool = pool): DbPoolSnapshot {
+  const max =
+    typeof (p as unknown as { options?: { max?: number } | null }).options?.max === "number"
+      ? (p as unknown as { options: { max: number } }).options.max
+      : null;
+  const totalCount = typeof (p as unknown as { totalCount?: number }).totalCount === "number"
+    ? (p as unknown as { totalCount: number }).totalCount
+    : 0;
+  const idleCount = typeof (p as unknown as { idleCount?: number }).idleCount === "number"
+    ? (p as unknown as { idleCount: number }).idleCount
+    : 0;
+  const waitingCount = typeof (p as unknown as { waitingCount?: number }).waitingCount === "number"
+    ? (p as unknown as { waitingCount: number }).waitingCount
+    : 0;
+  const inst = dbPoolInstrumentation;
+  return {
+    max,
+    totalCount,
+    idleCount,
+    waitingCount,
+    instrumented: {
+      ...inst,
+      coldConnectAvgMs: inst.coldConnectCount > 0 ? Math.round((inst.coldConnectTotalMs / inst.coldConnectCount) * 100) / 100 : null,
+      warmConnectAvgMs: inst.warmConnectCount > 0 ? Math.round((inst.warmConnectTotalMs / inst.warmConnectCount) * 100) / 100 : null,
+      authLookupAvgMs: inst.authLookupCount > 0 ? Math.round((inst.authLookupTotalMs / inst.authLookupCount) * 100) / 100 : null,
+    },
+  };
+}
+
+export function recordColdConnect(durationMs: number): void {
+  dbPoolInstrumentation.coldConnectCount += 1;
+  dbPoolInstrumentation.coldConnectTotalMs += Math.max(0, durationMs);
+  if (dbPoolInstrumentation.firstConnectAtMs === null) dbPoolInstrumentation.firstConnectAtMs = Date.now();
+}
+
+export function recordWarmConnect(durationMs: number): void {
+  dbPoolInstrumentation.warmConnectCount += 1;
+  dbPoolInstrumentation.warmConnectTotalMs += Math.max(0, durationMs);
+  if (dbPoolInstrumentation.firstConnectWarmDetectedMs === null)
+    dbPoolInstrumentation.firstConnectWarmDetectedMs = Date.now();
+}
+
+export function recordAuthLookup(durationMs: number): void {
+  dbPoolInstrumentation.authLookupCount += 1;
+  dbPoolInstrumentation.authLookupTotalMs += Math.max(0, durationMs);
+}
+
+function instrumentPool(p: pg.Pool): void {
+  try {
+    const originalConnect = p.connect.bind(p);
+    (p as unknown as { connect: typeof p.connect }).connect = async function instrumentedConnect(...args: any[]) {
+      const start = process.hrtime.bigint();
+      const snapshotBefore = getPoolSnapshot(p);
+      const result = await (originalConnect as any)(...args);
+      const durationMs = Math.max(0, Number(process.hrtime.bigint() - start) / 1_000_000);
+      const isWarm = snapshotBefore.idleCount > 0;
+      if (isWarm) recordWarmConnect(durationMs);
+      else recordColdConnect(durationMs);
+      return result;
+    };
+  } catch {
+  }
+}
 
 const allowMissingDatabaseUrl =
   process.env.NODE_ENV === "test" && process.env.VITEST_SKIP_DB === "1";
@@ -127,7 +234,9 @@ function normalizedKeyForPool(databaseUrlRaw: string): string {
 
 function instantiateDefaultPool(): pg.Pool {
   const opts = buildPoolOptions(stripped.url, isPooler, loweredDatabaseUrl, stripped.hadSslmode);
-  return new Pool(opts);
+  const p = new Pool(opts);
+  instrumentPool(p);
+  return p;
 }
 
 const cachedPool: pg.Pool | undefined = globalThis.__lawcasproDbPool;
@@ -155,8 +264,11 @@ export function createPoolFromDatabaseUrl(databaseUrlRaw: string) {
   const loweredDatabaseUrl = databaseUrl.toLowerCase();
   const stripped = stripSslmodeFromDatabaseUrl(databaseUrl);
   const opts = buildPoolOptions(stripped.url, isPooler, loweredDatabaseUrl, stripped.hadSslmode);
-  return new Pool(opts);
+  const p = new Pool(opts);
+  instrumentPool(p);
+  return p;
 }
+
 
 export function getOrCreateSharedPool(databaseUrlRaw: string): pg.Pool {
   const key = normalizedKeyForPool(databaseUrlRaw);

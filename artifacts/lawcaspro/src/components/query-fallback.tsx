@@ -23,7 +23,7 @@ export function QueryFallback({
   }
   const resourceLabel = title ?? "data";
   const t = error
-    ? getDiscriminatedErrorTitle(error, resourceLabel)
+    ? (title ? title : getDiscriminatedErrorTitle(error, resourceLabel))
     : title ?? "Unable to load";
   const d = error
     ? getDiscriminatedErrorDetail(error, resourceLabel)

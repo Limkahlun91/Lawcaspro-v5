@@ -19,6 +19,7 @@ import { useAuth } from "@/lib/auth-context";
 import { hasPermission } from "@/lib/permissions";
 import { getListCasesQueryKey } from "@workspace/api-client-react";
 import { formatRMAmount } from "@/lib/money";
+import { caseNotificationsUnreadCountQueryKey } from "@/lib/query-keys";
 
 type ApprovalStatus = "pending_approval" | "rejected" | "approved";
 
@@ -138,6 +139,8 @@ export default function AccountingFileListing() {
   const { toast } = useToast();
   const { user } = useAuth();
   const canAccountingCreate = hasPermission(user, "accounting", "create");
+  const fid = (user as any)?.firmId ?? null;
+  const uid = (user as any)?.id ?? null;
 
   const roleLower = String((user as any)?.roleName ?? "").trim().toLowerCase();
   const canApproveCases =
@@ -231,7 +234,7 @@ export default function AccountingFileListing() {
     amendUnreadCount: number;
     approvedUnreadCount: number;
   }>({
-    queryKey: ["case-notifications", "unread-counts"],
+    queryKey: caseNotificationsUnreadCountQueryKey(fid, uid),
     enabled: Boolean(user),
     queryFn: () => apiFetchJson<{ totalUnreadCount: number; pendingApprovalUnreadCount: number; amendUnreadCount: number; approvedUnreadCount: number }>("/case-notifications/unread-counts").catch(() => ({
       totalUnreadCount: 0,
@@ -254,7 +257,7 @@ export default function AccountingFileListing() {
       });
     },
     onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: ["case-notifications", "unread-counts"] });
+      await qc.invalidateQueries({ queryKey: caseNotificationsUnreadCountQueryKey(fid, uid) });
     },
   });
 
@@ -339,7 +342,7 @@ export default function AccountingFileListing() {
         qc.refetchQueries({ queryKey: ["dashboard"], type: "active" }),
         qc.refetchQueries({ queryKey: ["cases"], type: "active" }),
         qc.refetchQueries({ queryKey: ["case-files"], type: "active" }),
-        qc.refetchQueries({ queryKey: ["case-notifications", "unread-counts"], type: "active" }),
+        qc.refetchQueries({ queryKey: caseNotificationsUnreadCountQueryKey(fid, uid), type: "active" }),
       ]);
       toast({ title: "Approved" });
       setReviewOpen(false);
@@ -405,7 +408,7 @@ export default function AccountingFileListing() {
         qc.refetchQueries({ queryKey: ["dashboard"], type: "active" }),
         qc.refetchQueries({ queryKey: ["cases"], type: "active" }),
         qc.refetchQueries({ queryKey: ["case-files"], type: "active" }),
-        qc.refetchQueries({ queryKey: ["case-notifications", "unread-counts"], type: "active" }),
+        qc.refetchQueries({ queryKey: caseNotificationsUnreadCountQueryKey(fid, uid), type: "active" }),
       ]);
       toast({ title: "Returned for amendment" });
       setReviewOpen(false);

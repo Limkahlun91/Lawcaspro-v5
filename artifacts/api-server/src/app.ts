@@ -282,11 +282,20 @@ const errorHandler: ErrorMiddlewareLike = (err: unknown, req: ReqLike, res: ResL
   const requestId = typeof (res.locals as any)?.requestId === "string" ? String((res.locals as any).requestId) : "unknown";
   const classification = classifyErrorForLog(err);
   const dbBusy = resolveDbBusyResponse(err);
+  const dbCategory = classification.retrySuggestion ?? null;
   const rawMessage = err instanceof Error ? err.message : String(err);
   const safeMessage = String(rawMessage ?? "")
     .replace(/\binsert\s+into\s+"[^"]*"(\s*\([^)]*\))?\s*values[\s\S]*$/gi, "[REDACTED_SQL_VALUES]")
     .replace(/\bfailed\s+query:[\s\S]*$/gi, "[REDACTED_FAILED_QUERY]")
+    .replace(/\bselect\s+[\s\S]*?\bfrom\b[\s\S]*$/gi, "[REDACTED_SELECT_SQL]")
+    .replace(/\bupdate\s+"[^"]*"\s+set[\s\S]*$/gi, "[REDACTED_UPDATE_SQL]")
+    .replace(/\bdelete\s+from\s+"[^"]*"[\s\S]*$/gi, "[REDACTED_DELETE_SQL]")
     .replace(/\$\d+/g, "?")
+    .replace(/postgres(?:ql)?:\/\/[^\s"'`]+/gi, "[REDACTED_DB_URL]")
+    .replace(/\bhost(?:name)?\s*[=:]\s*[^\s,;]+/gi, "host=[REDACTED]")
+    .replace(/\b(?:user|username|password|passwd)\s*[=:]\s*[^\s,;]+/gi, "credentials=[REDACTED]")
+    .replace(/\b(?:eyJhbGci|sk_|service_role)[A-Za-z0-9_\-\.]+/g, "[REDACTED_TOKEN]")
+    .replace(/\b\d{6}-\d{2}-\d{4}\b/g, "[REDACTED_NRIC]")
     .slice(0, 300);
 
   const isApiError = err instanceof ApiError;
@@ -326,10 +335,12 @@ const errorHandler: ErrorMiddlewareLike = (err: unknown, req: ReqLike, res: ResL
   };
 
   if (dbBusy) {
-    console.warn("[api.db_busy]", context);
+    const dbLogToken = dbCategory === "DB_UNAVAILABLE" ? "[api.db_unavailable]" : "[api.db_busy]";
+    const dbEvent = dbCategory === "DB_UNAVAILABLE" ? "api.db_unavailable" : classification.event;
+    console.warn(dbLogToken, context);
     logger.warn(
-      { ...context, status: errStatus, retryable: true },
-      classification.event,
+      { ...context, status: errStatus, retryable: true, dbCategory: dbCategory ?? "DB_BUSY" },
+      dbEvent,
     );
     sendErrorUnsafe(res, err);
     return;

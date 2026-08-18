@@ -93,17 +93,19 @@ describe("PART 2.4 G1 — Test discovery guard + class manifest", () => {
     }
   });
 
-  it("the 5 mandatory P0 regression files ARE classified DB_INDEPENDENT (no DB needed → always run)", () => {
-    const mustBeInd: string[] = [
+  it("the 5 mandatory P0 regression files ARE classified DB_INDEPENDENT or PGLITE_IN_PROCESS (no external live DB → always run)", () => {
+    const mustBeAlwaysRunnable: string[] = [
       "p0-authz-classification.unit.test.ts",
       "p0-case-access-centralized.unit.test.ts",
       "p0-billing-lock-reversal.unit.test.ts",
       "p0-g13-staff-baseline-batch-mutation.unit.test.ts",
       "feature-registry-parity.unit.test.ts",
     ];
-    for (const f of mustBeInd) {
+    const alwaysRunnableClasses = new Set(["DB_INDEPENDENT", "PGLITE_IN_PROCESS"]);
+    for (const f of mustBeAlwaysRunnable) {
       expect(fs.existsSync(path.join(path.resolve(__dirname), f))).toBe(true);
-      expect(classify(f)).toBe("DB_INDEPENDENT");
+      const cls = classify(f);
+      expect(alwaysRunnableClasses.has(cls)).toBe(true);
     }
   });
 });

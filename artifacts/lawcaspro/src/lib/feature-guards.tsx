@@ -10,6 +10,12 @@ import {
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetchJson } from "@/lib/api-client";
 import { PermissionGuard } from "@/components/permission-guard";
+import { useAuth } from "@/lib/auth-context";
+import { effectiveFeaturesQueryKey } from "@/lib/query-keys";
+import {
+  classifyPermissionError,
+  isTransientErrorCategory,
+} from "@/lib/permissions";
 
 // Part 2 §9 §10: Per-user effective feature access (Firm entitlement + user explicit row OR role fallback)
 // Unified API so sidebar === route === button visibility share one computation.
@@ -54,22 +60,85 @@ export function fetchUserEffectiveFeatures(): Promise<UserEffectiveFeatureBundle
   );
 }
 
+function clearCachedEffectiveFeaturesForIdentity(fid: unknown, uid: unknown) {
+  if (typeof window === "undefined") return;
+  try {
+    const cachedWrap = (window as any).__lawcasproCachedEffectiveFeatures as {
+      firmId: unknown; userId: unknown; data: unknown;
+    } | undefined;
+    if (!cachedWrap || typeof cachedWrap !== "object") return;
+    const sameFirm =
+      (fid === null && cachedWrap.firmId === null) ||
+      (fid !== null && String(cachedWrap.firmId) === String(fid));
+    const sameUser =
+      (uid === null && cachedWrap.userId === null) ||
+      (uid !== null && String(cachedWrap.userId) === String(uid));
+    if (sameFirm && sameUser) {
+      (window as any).__lawcasproCachedEffectiveFeatures = null;
+    }
+  } catch {
+  }
+}
+
 export function useUserEffectiveFeatures(): {
   data?: UserEffectiveFeatureBundle;
   isLoading: boolean;
   error: unknown;
+  errorCategory: ReturnType<typeof classifyPermissionError> | null;
   refetch: () => Promise<unknown>;
   isRefetching: boolean;
   isFetching: boolean;
 } {
+  const { user } = useAuth();
+  const uid = (user as any)?.id ?? null;
+  const fid = (user as any)?.firmId ?? null;
+  const qKey = effectiveFeaturesQueryKey(fid, uid);
   const res = useQuery<UserEffectiveFeatureBundle, Error, UserEffectiveFeatureBundle>({
-    queryKey: USER_EFFECTIVE_QUERY_KEY,
+    queryKey: qKey,
     queryFn: async () => {
       try {
-        return await fetchUserEffectiveFeatures();
+        const result = await fetchUserEffectiveFeatures();
+        if (typeof window !== "undefined") {
+          try {
+            (window as any).__lawcasproCachedEffectiveFeatures = {
+              firmId: fid,
+              userId: uid,
+              fetchedAt: Date.now(),
+              data: result,
+            };
+          } catch {
+          }
+        }
+        return result;
       } catch (err) {
-        const cached = (globalThis as any).__lawcasproCachedEffectiveFeatures as UserEffectiveFeatureBundle | undefined;
-        if (cached && cached.userId && cached.effective) return cached;
+        const cat = classifyPermissionError(err);
+        if (cat === "EXPLICIT_DENY_403") {
+          clearCachedEffectiveFeaturesForIdentity(fid, uid);
+          throw err;
+        }
+        if (cat === "UNAUTHORIZED_401" || cat === "NOT_FOUND_404" || cat === "CLIENT_OTHER") {
+          clearCachedEffectiveFeaturesForIdentity(fid, uid);
+          throw err;
+        }
+        if (isTransientErrorCategory(cat)) {
+          if (typeof window !== "undefined") {
+            try {
+              const cached = (window as any).__lawcasproCachedEffectiveFeatures as {
+                firmId: unknown; userId: unknown; fetchedAt: number; data: UserEffectiveFeatureBundle;
+              } | undefined;
+              if (cached && cached.data && typeof cached === "object") {
+                const sameFirm = (fid === null && cached.firmId === null) ||
+                  (fid !== null && String(cached.firmId) === String(fid));
+                const sameUser = (uid === null && cached.userId === null) ||
+                  (uid !== null && String(cached.userId) === String(uid));
+                if (sameFirm && sameUser && cached.data.userId && cached.data.effective) return cached.data;
+              }
+            } catch {
+            }
+          }
+          throw err;
+        }
+        clearCachedEffectiveFeaturesForIdentity(fid, uid);
         throw err;
       }
     },
@@ -77,18 +146,14 @@ export function useUserEffectiveFeatures(): {
     gcTime: 10 * 60_000,
     refetchOnWindowFocus: true,
     retry: 0,
-    placeholderData: (prev) => prev as UserEffectiveFeatureBundle | undefined,
+    enabled: Boolean(user && user.userType === "firm_user"),
   });
-  if (res.data) {
-    try {
-      (globalThis as any).__lawcasproCachedEffectiveFeatures = res.data;
-    } catch {
-    }
-  }
+  const errorCategory = res.error ? classifyPermissionError(res.error) : null;
   return {
     data: res.data,
     isLoading: res.isLoading,
     error: res.error,
+    errorCategory,
     refetch: res.refetch,
     isRefetching: res.isRefetching,
     isFetching: res.isFetching,
@@ -97,9 +162,12 @@ export function useUserEffectiveFeatures(): {
 
 export function useInvalidateUserEffectiveFeatures(): () => Promise<void> {
   const qc = useQueryClient();
+  const { user } = useAuth();
+  const uid = (user as any)?.id ?? null;
+  const fid = (user as any)?.firmId ?? null;
   return useCallback(async () => {
-    await qc.invalidateQueries({ queryKey: USER_EFFECTIVE_QUERY_KEY });
-  }, [qc]);
+    await qc.invalidateQueries({ queryKey: effectiveFeaturesQueryKey(fid, uid) });
+  }, [qc, fid, uid]);
 }
 
 // ---------------------------------------------------------------------------
@@ -121,12 +189,14 @@ export interface EffectiveUseFeatureResult {
 export function useEffectiveUserFeature(
   featureKey: string | undefined | null,
 ): EffectiveUseFeatureResult {
-  const { data, isLoading } = useUserEffectiveFeatures();
+  const { data, isLoading, error, errorCategory } = useUserEffectiveFeatures();
+  const { user } = useAuth();
+  const uid = (user as any)?.id ?? null;
+  const fid = (user as any)?.firmId ?? null;
   const firm = useFeature(featureKey);
   return useMemo<EffectiveUseFeatureResult>(() => {
     if (!featureKey) return { isLoading: false, enabled: false, firmEnabled: false, userEnabled: false };
     const eff = data?.effective?.[featureKey];
-    const loadingOrPending = isLoading || !data;
     if (eff) {
       return {
         isLoading: false,
@@ -137,23 +207,64 @@ export function useEffectiveUserFeature(
         source: eff.source ?? null,
       };
     }
-    if (loadingOrPending && !eff) {
+    const transientError = Boolean(error) && Boolean(errorCategory) && isTransientErrorCategory(errorCategory!);
+    const loadingButKnown = data !== undefined;
+    if (isLoading || !loadingButKnown) {
+      if (transientError) {
+        let fallbackData: UserEffectiveFeatureBundle | undefined;
+        if (typeof window !== "undefined") {
+          try {
+            const cached = (window as any).__lawcasproCachedEffectiveFeatures as {
+              firmId: unknown; userId: unknown; fetchedAt: number; data: UserEffectiveFeatureBundle;
+            } | undefined;
+            if (cached && cached.data && typeof cached === "object") {
+              const sameFirm = (fid === null && cached.firmId === null) ||
+                (fid !== null && String(cached.firmId) === String(fid));
+              const sameUser = (uid === null && cached.userId === null) ||
+                (uid !== null && String(cached.userId) === String(uid));
+              if (sameFirm && sameUser) fallbackData = cached.data;
+            }
+          } catch {
+          }
+        }
+        const fallbackEff = fallbackData?.effective?.[featureKey];
+        if (fallbackEff) {
+          return {
+            isLoading: true,
+            enabled: !!fallbackEff.effectiveEnabled,
+            firmEnabled: !!fallbackEff.firmEnabled,
+            userEnabled: !!fallbackEff.userEnabled,
+            denialCode: fallbackEff.denialCode ?? null,
+            source: fallbackEff.source ?? null,
+          };
+        }
+      }
+      if (loadingButKnown) {
+        return {
+          isLoading: false,
+          enabled: false,
+          firmEnabled: !!firm.enabled,
+          userEnabled: false,
+          denialCode: "USER_FEATURE_MISSING",
+          source: null,
+        };
+      }
       return {
         isLoading: true,
-        enabled: !!firm.enabled,
+        enabled: false,
         firmEnabled: !!firm.enabled,
-        userEnabled: !!firm.enabled,
+        userEnabled: false,
       };
     }
     return {
       isLoading: false,
-      enabled: !!firm.enabled,
+      enabled: false,
       firmEnabled: !!firm.enabled,
-      userEnabled: !!firm.enabled,
-      denialCode: firm.denialCode ?? null,
-      source: (firm.source as any) ?? null,
+      userEnabled: false,
+      denialCode: "USER_FEATURE_MISSING",
+      source: null,
     };
-  }, [featureKey, data, isLoading, firm.enabled, firm.denialCode, firm.source]);
+  }, [featureKey, data, isLoading, error, errorCategory, uid, fid, firm.enabled, firm.denialCode, firm.source]);
 }
 
 // ---------------------------------------------------------------------------
@@ -449,9 +560,12 @@ export function useFeatureRegistry(): {
 
 export function useInvalidateFirmEntitlements(): () => Promise<void> {
   const qc = useQueryClient();
+  const { user } = useAuth();
+  const uid = (user as any)?.id ?? null;
+  const fid = (user as any)?.firmId ?? null;
   return useCallback(async () => {
-    await qc.invalidateQueries({ queryKey: USER_EFFECTIVE_QUERY_KEY });
-  }, [qc]);
+    await qc.invalidateQueries({ queryKey: effectiveFeaturesQueryKey(fid, uid) });
+  }, [qc, fid, uid]);
 }
 
 // ---------------------------------------------------------------------------
@@ -657,20 +771,42 @@ export function useEffectiveUserFeaturesMap(): {
   get: (featureKey: string) => UserEffectiveFeature | undefined;
   loaded: boolean;
   loadingOrRefetching: boolean;
+  transientError: boolean;
 } {
-  const { data, isLoading, isRefetching, isFetching } = useUserEffectiveFeatures();
+  const { data, isLoading, isRefetching, isFetching, error, errorCategory } = useUserEffectiveFeatures();
+  const { user } = useAuth();
+  const uid = (user as any)?.id ?? null;
+  const fid = (user as any)?.firmId ?? null;
   return useMemo(() => {
-    const eff = data?.effective ?? {};
-    const fallback = (globalThis as any).__lawcasproCachedEffectiveFeatures as UserEffectiveFeatureBundle | undefined;
+    let fallbackData: UserEffectiveFeatureBundle | undefined;
+    if (data === undefined && typeof window !== "undefined") {
+      try {
+        const cached = (window as any).__lawcasproCachedEffectiveFeatures as {
+          firmId: unknown; userId: unknown; fetchedAt: number; data: UserEffectiveFeatureBundle;
+        } | undefined;
+        if (cached && cached.data && typeof cached === "object") {
+          const sameFirm = (fid === null && cached.firmId === null) ||
+            (fid !== null && String(cached.firmId) === String(fid));
+          const sameUser = (uid === null && cached.userId === null) ||
+            (uid !== null && String(cached.userId) === String(uid));
+          if (sameFirm && sameUser) fallbackData = cached.data;
+        }
+      } catch {
+      }
+    }
     const resolvedEffective: Record<string, UserEffectiveFeature> =
-      Object.keys(eff).length > 0 ? eff : fallback?.effective ?? {};
+      data !== undefined ? (data.effective ?? {}) : (fallbackData?.effective ?? {});
     const enabled = (k: string) => Boolean(resolvedEffective[k]?.effectiveEnabled);
     const get = (k: string) => resolvedEffective[k];
-    const hasAny = Object.keys(resolvedEffective).length > 0 || Boolean(data);
-    const loaded = !isLoading && (hasAny || Boolean(fallback?.effective));
+    const hasAny =
+      data !== undefined
+        ? Object.keys(resolvedEffective).length > 0 || Object.keys(data?.effective ?? {}).length >= 0
+        : Object.keys(resolvedEffective).length > 0 || Boolean(fallbackData?.effective);
+    const loaded = !isLoading && (hasAny || (data === undefined && Boolean(fallbackData?.effective)));
     const loadingOrRefetching = isLoading || isRefetching || isFetching;
-    return { enabled, get, loaded, loadingOrRefetching };
-  }, [data, isLoading, isRefetching, isFetching]);
+    const transientError = Boolean(error) && Boolean(errorCategory) && isTransientErrorCategory(errorCategory!);
+    return { enabled, get, loaded, loadingOrRefetching, transientError };
+  }, [data, isLoading, isRefetching, isFetching, error, errorCategory, fid, uid]);
 }
 
 // ---------------------------------------------------------------------------

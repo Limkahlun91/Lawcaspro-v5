@@ -2,6 +2,12 @@ import type { AuthUser } from "@workspace/api-client-react";
 
 export type Permission = { module: string; action: string };
 
+export type PermissionLoadState =
+  | "NOT_LOADED"
+  | "READY"
+  | "TRANSIENT_ERROR"
+  | "DENIED";
+
 const ACCOUNTING_ACTIONS = new Set([
   "read",
   "write",
@@ -37,6 +43,68 @@ export function getPermissions(user: AuthUser | null): Permission[] {
     .map((p) => ({ module: String(p.module), action: String(p.action) }));
 }
 
+export function getPermissionLoadState(user: AuthUser | null): PermissionLoadState {
+  if (!user) return "NOT_LOADED";
+  const u = user as unknown as { permissions?: unknown };
+  if (u.permissions === undefined) return "NOT_LOADED";
+  if (!Array.isArray(u.permissions)) return "DENIED";
+  return "READY";
+}
+
+export type PermissionErrorCategory =
+  | "EXPLICIT_DENY_403"
+  | "NOT_FOUND_404"
+  | "UNAUTHORIZED_401"
+  | "TRANSIENT_5XX"
+  | "TRANSIENT_TIMEOUT"
+  | "TRANSIENT_NETWORK"
+  | "DB_BUSY"
+  | "DB_UNAVAILABLE"
+  | "CLIENT_OTHER"
+  | "UNKNOWN";
+
+export function classifyPermissionError(err: unknown): PermissionErrorCategory {
+  if (!err || typeof err !== "object") return "UNKNOWN";
+  const rec = err as Record<string, unknown>;
+  const status = typeof rec.status === "number" ? rec.status : undefined;
+  const code = typeof rec.code === "string" ? rec.code : undefined;
+  const name = typeof rec.name === "string" ? rec.name : undefined;
+  if (name === "RequestTimeoutError" || name === "TimeoutError" || name === "AbortError") {
+    return "TRANSIENT_TIMEOUT";
+  }
+  const msg = typeof (rec as { message?: unknown }).message === "string" ? String((rec as { message?: unknown }).message).toLowerCase() : "";
+  if (
+    msg.includes("networkerror") ||
+    msg.includes("failed to fetch") ||
+    msg.includes("network error") ||
+    msg.includes("load failed")
+  ) {
+    return "TRANSIENT_NETWORK";
+  }
+  if (typeof code === "string") {
+    if (code === "DB_BUSY") return "DB_BUSY";
+    if (code === "DB_UNAVAILABLE" || code === "SERVICE_UNAVAILABLE") return "DB_UNAVAILABLE";
+  }
+  if (typeof status === "number") {
+    if (status === 401) return "UNAUTHORIZED_401";
+    if (status === 403) return "EXPLICIT_DENY_403";
+    if (status === 404) return "NOT_FOUND_404";
+    if (status >= 500) return "TRANSIENT_5XX";
+    if (status >= 400) return "CLIENT_OTHER";
+  }
+  return "UNKNOWN";
+}
+
+export function isTransientErrorCategory(cat: PermissionErrorCategory): boolean {
+  return (
+    cat === "TRANSIENT_5XX" ||
+    cat === "TRANSIENT_TIMEOUT" ||
+    cat === "TRANSIENT_NETWORK" ||
+    cat === "DB_BUSY" ||
+    cat === "DB_UNAVAILABLE"
+  );
+}
+
 export function isHrRole(roleName: string | null | undefined): "manager" | "admin" | "employee" | null {
   const rn = String(roleName ?? "").trim().toLowerCase();
   if (rn === "hr manager") return "manager";
@@ -46,13 +114,24 @@ export function isHrRole(roleName: string | null | undefined): "manager" | "admi
 }
 
 export function hasPermission(user: AuthUser | null, module: string, action: string): boolean {
+  if (!user || user.userType !== "firm_user") return false;
   const perms = getPermissions(user);
+  const loadState = getPermissionLoadState(user);
   const key = `${module}:${action}`;
-  if (perms.length > 0) {
-    if (perms.some((p) => p.module === module && p.action === action)) return true;
+
+  if (loadState === "READY") {
+    if (perms.length > 0) {
+      const explicitAllow = perms.some((p) => p.module === module && p.action === action);
+      if (explicitAllow) return true;
+      return false;
+    }
+    return false;
   }
 
-  if (!user || user.userType !== "firm_user") return false;
+  if (loadState === "DENIED") {
+    return false;
+  }
+
   if (module === "accounting" && ACCOUNTING_ACTIONS.has(action)) {
     return false;
   }
@@ -101,8 +180,6 @@ export function hasPermission(user: AuthUser | null, module: string, action: str
   ]);
 
   if (isHREmployee && hrSelfServiceBypass.has(key)) return true;
-
-  if (perms.length > 0) return false;
 
   const partner = new Set<string>([
     "dashboard:read",

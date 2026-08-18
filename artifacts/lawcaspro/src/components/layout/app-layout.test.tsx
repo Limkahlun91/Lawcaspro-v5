@@ -54,6 +54,9 @@ vi.mock("@/lib/permissions", () => {
   return {
     hasPermission: () => true,
     isAccountingRoleAllowed: () => true,
+    getPermissionLoadState: () => "READY",
+    classifyPermissionError: () => "UNKNOWN",
+    isTransientErrorCategory: () => false,
   };
 });
 

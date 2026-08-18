@@ -1,4 +1,5 @@
 import React from "react";
+import type { ReactElement } from "react";
 import "@testing-library/jest-dom/vitest";
 import {
   render,
@@ -72,7 +73,10 @@ vi.mock("@/lib/auth-token", () => ({
 }));
 
 vi.mock("@/lib/permissions", () => ({
-  hasPermission: (...a: any[]) => M.hasPermissionMock(...a),
+  hasPermission: M.hasPermissionMock as unknown as (
+    permission: { module: string; action: string } | string,
+    userPermissions?: Array<{ module: string; action: string }> | undefined,
+  ) => boolean,
 }));
 
 vi.mock("@/components/permission-guard", async () => {
@@ -80,7 +84,9 @@ vi.mock("@/components/permission-guard", async () => {
   return {
     ...actual,
     PermissionGuard: ({ children, module, action, mode }: any) => {
-      const ok = M.hasPermissionMock({ module, action });
+      const ok = (M.hasPermissionMock as unknown as (
+        permission: { module: string; action: string },
+      ) => boolean)({ module, action });
       if (ok) return <>{children}</>;
       if (mode === "silent") return null;
       return (
@@ -115,15 +121,22 @@ function newQueryClient() {
   return client;
 }
 
-function wrap<Q extends object = {}>(Comp: React.FC<Q>, queryClient?: QueryClient) {
+function wrap<Q extends object = {}>(Comp: React.FC<Q> | (() => ReactElement), queryClient?: QueryClient) {
   const client = queryClient ?? newQueryClient();
-  return function Wrapped(props: Q) {
+  const Fn = Comp as () => ReactElement;
+  const FC = Comp as React.FC<Q>;
+  function Wrapped(props: Q) {
     return (
       <QueryClientProvider client={client}>
-        <Comp {...props} />
+        {Fn.length === 0 ? <Fn /> : <FC {...(props as Q)} />}
       </QueryClientProvider>
     );
-  };
+  }
+  function Bare(): ReactElement {
+    return Wrapped({} as Q);
+  }
+  const out = Bare as unknown as { (props?: Q | undefined): ReactElement };
+  return out;
 }
 
 const EFFECTIVE_ON = {
@@ -169,12 +182,12 @@ const EFFECTIVE_PAYROLL_OFF: typeof EFFECTIVE_ON = {
 beforeEach(() => {
   cleanup();
   vi.clearAllMocks();
-  M.hasPermissionMock.mockImplementation((p: any) => {
+  M.hasPermissionMock.mockImplementation(((p: any) => {
     if (p?.module === "hr" && p?.action === "read") return true;
     if (p?.module === "hr" && p?.action === "write") return true;
     if (p?.module === "cases" && p?.action === "read") return true;
     return true;
-  });
+  }) as unknown as () => boolean);
   M.getAuthMock.mockReturnValue({
     user: {
       id: 2,
@@ -225,7 +238,7 @@ describe("HR Dashboard fallback rules — §2 §3", () => {
     });
     const mod = await import("@/pages/app/hr/dashboard/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/HR Dashboard/i)).toBeInTheDocument();
@@ -268,7 +281,7 @@ describe("HR Dashboard fallback rules — §2 §3", () => {
     });
     const mod = await import("@/pages/app/hr/dashboard/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/Total Employees/i)).toBeInTheDocument();
@@ -316,7 +329,7 @@ describe("HR Dashboard fallback rules — §2 §3", () => {
     });
     const mod = await import("@/pages/app/hr/dashboard/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/Unable to load HR Dashboard/i)).toBeInTheDocument();
@@ -357,7 +370,7 @@ describe("HR Dashboard fallback rules — §2 §3", () => {
     });
     const mod = await import("@/pages/app/hr/dashboard/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/Unable to load HR Dashboard/i)).toBeInTheDocument();
@@ -386,7 +399,7 @@ describe("HR Dashboard fallback rules — §2 §3", () => {
     });
     const mod = await import("@/pages/app/hr/dashboard/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/No employees yet/i)).toBeInTheDocument();
@@ -425,7 +438,7 @@ describe("HR access-aware quick actions — §8", () => {
     });
     const mod = await import("@/pages/app/hr/dashboard/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/Quick Actions/i)).toBeInTheDocument();
@@ -456,7 +469,7 @@ describe("HR access-aware quick actions — §8", () => {
     });
     const mod = await import("@/pages/app/hr/dashboard/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/Quick Actions/i)).toBeInTheDocument();
@@ -524,7 +537,7 @@ describe("HIMS page states — §10 §13 §14 §15 §17 §18", () => {
     });
     const mod = await import("@/pages/app/hims/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/HIMS \/ eSPA Tracker/i)).toBeInTheDocument();
@@ -559,7 +572,7 @@ describe("HIMS page states — §10 §13 §14 §15 §17 §18", () => {
     });
     const mod = await import("@/pages/app/hims/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/HIMS not configured/i)).toBeInTheDocument();
@@ -586,7 +599,7 @@ describe("HIMS page states — §10 §13 §14 §15 §17 §18", () => {
     });
     const mod = await import("@/pages/app/hims/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/Projects are not mapped to HIMS yet/i)).toBeInTheDocument();
@@ -608,7 +621,7 @@ describe("HIMS page states — §10 §13 §14 §15 §17 §18", () => {
     });
     const mod = await import("@/pages/app/hims/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/No HIMS status checks yet/i)).toBeInTheDocument();
@@ -642,7 +655,7 @@ describe("HIMS page states — §10 §13 §14 §15 §17 §18", () => {
     });
     const mod = await import("@/pages/app/hims/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/Unable to load HIMS status/i)).toBeInTheDocument();
@@ -672,7 +685,7 @@ describe("HIMS page states — §10 §13 §14 §15 §17 §18", () => {
     });
     const mod = await import("@/pages/app/hims/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/HIMS not configured/i)).toBeInTheDocument();
@@ -705,7 +718,7 @@ describe("HIMS page states — §10 §13 §14 §15 §17 §18", () => {
     });
     const mod = await import("@/pages/app/hims/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await waitFor(
       () => {
         expect(screen.getByText(/HIMS not configured/i)).toBeInTheDocument();
@@ -731,7 +744,7 @@ describe("HIMS page states — §10 §13 §14 §15 §17 §18", () => {
     });
     const mod = await import("@/pages/app/hims/index");
     const Page: any = (mod as any).default ?? mod;
-    render(wrap(Page as React.FC)());
+    render(wrap(Page as React.FC)() as unknown as React.ReactElement);
     await act(async () => {
       await new Promise((r) => setTimeout(r, 300));
     });
