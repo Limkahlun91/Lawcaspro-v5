@@ -1,31 +1,32 @@
-import { and, eq, inArray, isNull, sql, asc, desc } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
-  db,
   type AppDb,
   type RlsDb,
-  usersTable,
-  rolesTable,
   caseAssignmentsTable,
-  FEATURE_REGISTRY_MAP,
-  getFeatureDefinition,
-  isFeatureRegistered,
 } from "@workspace/db";
+import {
+  hasCasesFirmwideScope,
+  getAllowedAssignmentRoles,
+  canAccessCase as canonicalCanAccessCase,
+  type CaseAccessPurpose,
+} from "../lib/auth.js";
 import { extractDbErrorInfo } from "../lib/db-error.js";
 
 // ---------------------------------------------------------------------------
-// Part 2 §12-14 / C1-B2 — ONE canonical case access engine.
+// R2A Gate 12-17 — Thin adapter to the CANONICAL case-access engine in auth.ts.
 //
-// Access evaluation order (early-return on ALLOW; DENY at end):
-//   A. validate ids                (DENY on missing)
-//   B. management role fast path  (Partner/Manager same-firm = ALLOW)
-//   C. canonical case_assignments table with unassigned_at IS NULL (ALLOW)
-//   D. optional legacy assigned_lawyer_id / assigned_clerk_id compatibility
-//      (ONLY undefined column / 42703 falls back — DB transient errors rethrow)
-//   E. DENY
+// OLD services/case-access.ts used to own its own role matrix.
+// That DUPLICATED TRUTH has been REMOVED.
 //
-// Cases schema TRUTH per @workspace/db + PGlite tests:
-//   - cases table DOES NOT require assigned_lawyer_id/assigned_clerk_id columns.
-//   - canonical truth is case_assignments table (role_in_case + unassigned_at).
+// Canonical source of truth now is:
+//   @workspace/db lib/auth.ts →
+//     - getAllowedAssignmentRoles(purpose)  (one role matrix)
+//     - hasCasesFirmwideScope()              (management role fast-path)
+//     - canAccessCase()                      (one authorization engine)
+//     - enforceCaseAccessGeneric()           (route-level enforcement)
+//
+// This adapter is PURELY for backward-compat with existing callers that
+// import from ../services/case-access.js (himself.ts, cases.ts legacy callers).
 // ---------------------------------------------------------------------------
 
 export type CanUserAccessCaseInput = {
@@ -35,7 +36,7 @@ export type CanUserAccessCaseInput = {
   caseId: number;
   roleId: number | null;
   roleName: string | null;
-  purpose?: "view_case" | "edit_case" | "view_documents" | "edit_documents";
+  purpose?: CaseAccessPurpose | "view_case" | "edit_case" | "view_documents" | "edit_documents";
   scope?: "default" | "wide" | "documents_only";
   preloaded?: {
     assignedLawyerId?: number | null;
@@ -62,24 +63,22 @@ export type CanUserAccessCaseResult = {
   reason?: string;
 };
 
-const MANAGEMENT_NAMES = new Set([
-  "partner",
-  "managing partner",
-  "senior partner",
-  "managing partner",
-  "practice manager",
-  "firm manager",
-  "manager",
-  "director",
-]);
-
-function isManagementRole(roleName: string | null): boolean {
-  if (!roleName) return false;
-  return MANAGEMENT_NAMES.has(roleName.trim().toLowerCase());
+// Gate 17: explicit hasOwnProperty-based preload detection.
+// Using `=== null` is ambiguous — an actual loaded value could be null
+// if user genuinely not-assigned in a legacy schema.  Presence of keys
+// in preloaded object → preload intent, regardless of their value.
+function hasLegacyPreload(preloaded: CanUserAccessCaseInput["preloaded"]): boolean {
+  if (!preloaded) return false;
+  return (
+    Object.prototype.hasOwnProperty.call(preloaded, "assignedLawyerId") ||
+    Object.prototype.hasOwnProperty.call(preloaded, "assignedClerkId")
+  );
 }
 
-// Step D helper: ONLY undefined-column (42703) returns {available:false}.
-// Everything else — DB transient, connection, auth, constraint, etc — RE-THROWS.
+// Gate 16/17: legacy compat helper.  ONLY 42703 (undefined column) may
+// return {available:false}.  42P01, 080xx, 57Pxx, authz, timeouts, conn,
+// unknown errors → RE-THROW exactly as caught.  Database outage MUST NOT
+// degrade to "no accessible cases".
 async function tryLoadLegacyCaseAssignees(
   r: AppDb | RlsDb,
   firmId: number,
@@ -118,98 +117,78 @@ async function tryLoadLegacyCaseAssignees(
   } catch (err) {
     const info = extractDbErrorInfo(err);
     const state = (info.sqlstate || info.code || "").toUpperCase();
-    // UNDEFINED COLUMN — legacy schema simply doesn't have these cols (42703).
     if (state === "42703") {
       return { available: false, assignedLawyerId: null, assignedClerkId: null };
     }
-    // Every other class of error propagates.
     throw err;
   }
 }
 
+/**
+ * Backward-compat adapter.  All new code should use auth.ts canAccessCase()
+ * directly.  This function translates CanUserAccessCaseInput → canonical
+ * auth.ts canAccessCase call, with preloaded optimizations preserved.
+ *
+ * If live schema HAS legacy assigned_* columns (older deployments), the
+ * fallback path still runs and short-circuits via via=assigned_lawyer/assigned_clerk.
+ */
 export async function canUserAccessCase(
   input: CanUserAccessCaseInput,
 ): Promise<CanUserAccessCaseResult> {
-  const {
-    r,
-    firmId,
-    userId,
-    caseId,
-    roleId,
-    roleName,
-    purpose = "view_case",
-    scope = "default",
-    preloaded,
-  } = input;
+  const { r, firmId, userId, caseId, roleId, roleName, purpose, preloaded } = input;
 
-  // A. validate ids
   if (!firmId || !userId || !caseId) {
     return { ok: false, code: "FIRM_MISMATCH", reason: "Missing ids" };
   }
 
-  // Preloaded firm match: authoritative if caller provided.
-  if (preloaded?.caseFirmId !== undefined && preloaded?.caseFirmId !== null) {
-    if (preloaded.caseFirmId !== firmId) return { ok: false, code: "FIRM_MISMATCH" };
+  // Preloaded case firm mismatch short-circuit (pure optimization).
+  if (
+    preloaded?.caseFirmId !== undefined &&
+    preloaded?.caseFirmId !== null &&
+    preloaded.caseFirmId !== firmId
+  ) {
+    return { ok: false, code: "FIRM_MISMATCH" };
   }
 
-  // B. management role fast path (same-firm access)
-  if (isManagementRole(roleName)) {
-    return { ok: true, code: "OK", via: "partner_manager" };
-  }
+  // Management fast-path: let canonical hasCasesFirmwideScope decide truth.
+  const elevated = await hasCasesFirmwideScope(r as any, firmId, roleId, roleName, null);
+  if (elevated) return { ok: true, code: "OK", via: "partner_manager" };
 
-  // Preloaded legacy shortcut: if caller already has them (optimization only).
-  if (preloaded?.assignedLawyerId === userId) {
-    return { ok: true, code: "OK", via: "assigned_lawyer" };
-  }
-  if (preloaded?.assignedClerkId === userId) {
-    return { ok: true, code: "OK", via: "assigned_clerk" };
-  }
-
-  // C. canonical case_assignments (Drizzle on @workspace/db table)
-  try {
-    const [assign] = await r
-      .select({
-        id: caseAssignmentsTable.id,
-        roleInCase: caseAssignmentsTable.roleInCase,
-      })
-      .from(caseAssignmentsTable)
-      .where(
-        and(
-          eq(caseAssignmentsTable.caseId, caseId),
-          eq(caseAssignmentsTable.userId, userId),
-          inArray(caseAssignmentsTable.roleInCase, [
-            "lawyer",
-            "clerk",
-            "case_team",
-            "support_staff",
-            "case_owner",
-            "billing",
-            "watching",
-            "paralegal",
-            "associate",
-            "partner",
-          ]),
-          isNull(caseAssignmentsTable.unassignedAt),
-        ),
-      )
-      .limit(1);
-    if (assign) {
-      return {
-        ok: true,
-        code: "OK",
-        via: assign.roleInCase === "case_team" ? "case_team" : "assignment_table",
-      };
+  // Preloaded legacy shortcut (only if caller explicitly opted in via the
+  // preloaded object having the relevant keys — Gate 17 explicit check).
+  if (hasLegacyPreload(preloaded)) {
+    if (preloaded?.assignedLawyerId === userId) {
+      return { ok: true, code: "OK", via: "assigned_lawyer" };
     }
-  } catch (err) {
-    // If case_assignments table genuinely missing (42P01 undefined_table),
-    // we gracefully skip this path and continue to D.  Otherwise RE-THROW.
-    const info = extractDbErrorInfo(err);
-    const state = (info.sqlstate || info.code || "").toUpperCase();
-    if (state !== "42P01") throw err;
+    if (preloaded?.assignedClerkId === userId) {
+      return { ok: true, code: "OK", via: "assigned_clerk" };
+    }
   }
 
-  // D. optional legacy compatibility (available:false → skip harmlessly on 42703)
-  if (preloaded?.assignedLawyerId === null && preloaded?.assignedClerkId === null) {
+  // Canonical single-case engine — ONE policy, ONE role matrix.
+  const purp = (purpose ?? "view_case") as CaseAccessPurpose;
+  const rCanonical = await canonicalCanAccessCase({
+    r: r as any,
+    firmId,
+    userId,
+    roleId,
+    roleName,
+    caseId,
+    purpose: purp,
+    caseAlreadyLoaded: preloaded?.caseFirmId !== undefined ? { id: caseId, firmId: preloaded.caseFirmId! } : null,
+  });
+
+  if (rCanonical.ok) {
+    return {
+      ok: true,
+      code: "OK",
+      via: rCanonical.reason === "firmwide" ? "partner_manager" : "assignment_table",
+    };
+  }
+
+  // Compatibility legacy path: ONLY when canonical denied AND caller has
+  // NOT preloaded legacy values (otherwise we'd have short-circuited above).
+  if (!hasLegacyPreload(preloaded)) {
     const legacy = await tryLoadLegacyCaseAssignees(r, firmId, caseId);
     if (legacy.available) {
       if (legacy.assignedLawyerId === userId) {
@@ -221,19 +200,20 @@ export async function canUserAccessCase(
     }
   }
 
-  // E. deny
-  if (purpose === "view_case" && scope !== "documents_only") {
-    return { ok: false, code: "NOT_CASE_ASSIGNED" };
-  }
   return { ok: false, code: "NOT_CASE_ASSIGNED" };
 }
 
 // ---------------------------------------------------------------------------
-// List-scoped — return Set<number> of accessible caseIds for given purpose
-// Avoids N+1 per-case check.  Used by GET /cases, MyWork, DocAuto search,
-// HIMS tracker list, PV case search, Quotation case search.
+// List-scoped access.  Uses canonical getAllowedAssignmentRoles +
+// hasCasesFirmwideScope (NOT locally duplicated arrays).
+//
+// Error classification (Gate 16 fix):
+//   - 42P01 (case_assignments missing)   → skip case_assignments path
+//   - 42703 (legacy assigned_* missing)  → skip legacy columns path
+//   - everything else (080xx, 57Pxx,
+//     53300, authz, constraint, unknown) → RE-THROW.
+// Never silently show 0 cases on a DB outage.
 // ---------------------------------------------------------------------------
-
 export async function listAccessibleCaseIds(
   params: {
     r: AppDb | RlsDb;
@@ -243,6 +223,7 @@ export async function listAccessibleCaseIds(
     roleName: string | null;
     limit?: number;
     caseIdsHint?: ReadonlyArray<number>;
+    purpose?: CaseAccessPurpose;
   },
 ): Promise<{ caseIds: Set<number>; mode: "all_firm" | "explicit_list" }> {
   const {
@@ -253,12 +234,21 @@ export async function listAccessibleCaseIds(
     roleName,
     limit = 5000,
     caseIdsHint,
+    purpose = "view_case",
   } = params;
-  if (isManagementRole(roleName)) {
+
+  const elevated = await hasCasesFirmwideScope(r as any, firmId, roleId, roleName, null);
+  if (elevated) {
     return { caseIds: new Set<number>(), mode: "all_firm" };
   }
+
   const caseIds = new Set<number>();
-  // assigned lawyer / clerk
+
+  // Canonical allowed roles per purpose — the same array used by
+  // canAccessCase() in auth.ts.
+  const allowedRoles: ReadonlyArray<string> = getAllowedAssignmentRoles(purpose);
+
+  // A) legacy assigned_* compatibility (Gate 16 + 17 strict)
   try {
     const raw1 = await r.execute(sql`
       SELECT id
@@ -276,41 +266,37 @@ export async function listAccessibleCaseIds(
     for (const r1 of rows1) {
       if (typeof (r1 as any)?.id === "number") caseIds.add((r1 as any).id);
     }
-  } catch {
-    // assigned* columns may not exist; skip
-  }
-  // case_assignments table
-  try {
-    const rows2 = await r
-      .select({ caseId: caseAssignmentsTable.caseId })
-      .from(caseAssignmentsTable)
-      .where(
-        and(
-          inArray(caseAssignmentsTable.roleInCase, [
-            "lawyer",
-            "clerk",
-            "case_team",
-            "support_staff",
-            "case_owner",
-            "billing",
-            "watching",
-            "paralegal",
-            "associate",
-            "partner",
-          ]),
-          eq(caseAssignmentsTable.userId, userId),
-          isNull(caseAssignmentsTable.unassignedAt),
-        ),
-      )
-      .limit(limit);
-    for (const r2 of rows2) {
-      if (typeof r2.caseId === "number") caseIds.add(r2.caseId);
-    }
-  } catch {
-    // case_assignments may not exist; ignore
+  } catch (err) {
+    const info = extractDbErrorInfo(err);
+    const state = (info.sqlstate || info.code || "").toUpperCase();
+    if (state !== "42703") throw err;
   }
 
-  // Hint filter
+  // B) canonical case_assignments table (Gate 2 fix — REQUIRED, NO swallow)
+  // case_assignments was confirmed to exist in live Supabase schema probe.
+  // 42P01/42501/080xx/57Pxx/timeouts/unknown -> all propagate; never silently 0.
+  const predicate =
+    allowedRoles.length > 0
+      ? inArray(caseAssignmentsTable.roleInCase, allowedRoles as unknown as string[])
+      : sql`FALSE`;
+  const clauses = [
+    predicate,
+    eq(caseAssignmentsTable.userId, userId),
+    isNull(caseAssignmentsTable.unassignedAt),
+  ] as any[];
+  if (caseIdsHint && caseIdsHint.length > 0) {
+    clauses.push(inArray(caseAssignmentsTable.caseId, caseIdsHint));
+  }
+  const rows2 = await r
+    .select({ caseId: caseAssignmentsTable.caseId })
+    .from(caseAssignmentsTable)
+    .where(and(...clauses))
+    .limit(limit);
+  for (const r2 of rows2) {
+    if (typeof r2.caseId === "number") caseIds.add(r2.caseId);
+  }
+
+  // Hint filter (for legacy assigned_* cases not in case_assignments)
   if (caseIdsHint && caseIdsHint.length > 0) {
     const hintSet = new Set(caseIdsHint);
     for (const k of Array.from(caseIds)) {

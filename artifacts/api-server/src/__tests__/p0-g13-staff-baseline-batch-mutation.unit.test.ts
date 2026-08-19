@@ -381,4 +381,71 @@ describe("P0 G13 — Faithful Staff baseline permissions (real PGlite persistenc
     expect(r2.insertedBaseline).toBe(false);
     expect(r1.permissionsCount).toBe(r2.permissionsCount);
   });
+
+  it("R2A HR Partner baseline — missing hr:read / hr:manage inserted on first init", async () => {
+    const firmId = 1101;
+    const roleId = await createSystemRole(firmId, "Partner");
+    // Sanity precondition: rows 0
+    const preRows = await rlsDb
+      .select({ count: sql<number>`COUNT(*)::int`.mapWith(Number) })
+      .from(permissionsTable)
+      .where(eq(permissionsTable.roleId, roleId));
+    expect(Number(preRows[0]?.count ?? 0)).toBe(0);
+    const r1 = await ensureRolePermissionsInitialized(rlsDb as any, firmId, roleId);
+    expect(r1.insertedBaseline).toBe(true);
+    const all = await rlsDb
+      .select({ module: permissionsTable.module, action: permissionsTable.action, allowed: permissionsTable.allowed })
+      .from(permissionsTable)
+      .where(eq(permissionsTable.roleId, roleId));
+    // hr:read allowed=true present
+    const hrRead = all.find((p) => p.module === "hr" && p.action === "read");
+    const hrManage = all.find((p) => p.module === "hr" && p.action === "manage");
+    expect(hrRead).toBeDefined();
+    expect(hrManage).toBeDefined();
+    expect(hrRead!.allowed).toBe(true);
+    expect(hrManage!.allowed).toBe(true);
+  });
+
+  it("R2A HR Partner baseline — existing hr:read allowed=false NOT overwritten by initializer", async () => {
+    const firmId = 1102;
+    const roleId = await createSystemRole(firmId, "Partner");
+    // Pre-seed explicit deny: hr:read allowed=false
+    await rlsDb
+      .insert(permissionsTable)
+      .values({ roleId, module: "hr", action: "read", allowed: false });
+    const r1 = await ensureRolePermissionsInitialized(rlsDb as any, firmId, roleId);
+    const rows = await rlsDb
+      .select({ allowed: permissionsTable.allowed })
+      .from(permissionsTable)
+      .where(and(eq(permissionsTable.roleId, roleId), eq(permissionsTable.module, "hr"), eq(permissionsTable.action, "read")));
+    expect(rows).toHaveLength(1);
+    expect(rows[0].allowed).toBe(false);
+    // hr:manage (not pre-seeded) inserted as allowed=true via initializer
+    const manageRow = await rlsDb
+      .select({ allowed: permissionsTable.allowed })
+      .from(permissionsTable)
+      .where(and(eq(permissionsTable.roleId, roleId), eq(permissionsTable.module, "hr"), eq(permissionsTable.action, "manage")));
+    expect(manageRow).toHaveLength(1);
+    expect(manageRow[0].allowed).toBe(true);
+    expect(r1.insertedBaseline).toBe(true);
+  });
+
+  it("R2A HR Partner baseline — idempotent re-run does not create duplicates", async () => {
+    const firmId = 1103;
+    const roleId = await createSystemRole(firmId, "Partner");
+    const r1 = await ensureRolePermissionsInitialized(rlsDb as any, firmId, roleId);
+    const r2 = await ensureRolePermissionsInitialized(rlsDb as any, firmId, roleId);
+    const r3 = await ensureRolePermissionsInitialized(rlsDb as any, firmId, roleId);
+    expect(r1.insertedBaseline).toBe(true);
+    expect(r2.insertedBaseline).toBe(false);
+    expect(r3.insertedBaseline).toBe(false);
+    expect(r1.permissionsCount).toBe(r2.permissionsCount);
+    expect(r2.permissionsCount).toBe(r3.permissionsCount);
+    // No hr:read duplicates
+    const hrReadRows = await rlsDb
+      .select({ id: permissionsTable.id })
+      .from(permissionsTable)
+      .where(and(eq(permissionsTable.roleId, roleId), eq(permissionsTable.module, "hr"), eq(permissionsTable.action, "read")));
+    expect(hrReadRows).toHaveLength(1);
+  });
 });

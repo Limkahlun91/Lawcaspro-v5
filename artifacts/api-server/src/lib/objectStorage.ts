@@ -100,10 +100,28 @@ export class StorageRequestTimeoutError extends Error {
 
 type SupabaseStorageConfig = {
   supabaseUrl: string;
-  serviceRoleKey: string;
+  serverKey: string;
   bucketPrivate: string;
   storageUrl: string;
 };
+
+export function isNewSupabaseSecretKey(key: unknown): boolean {
+  return typeof key === "string" && key.startsWith("sb_secret_");
+}
+
+export function isNewSupabasePublishableKey(key: unknown): boolean {
+  return typeof key === "string" && key.startsWith("sb_publishable_");
+}
+
+function buildSupabaseAuthHeaders(serverKey: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    apikey: serverKey,
+  };
+  if (!isNewSupabaseSecretKey(serverKey)) {
+    headers.Authorization = `Bearer ${serverKey}`;
+  }
+  return headers;
+}
 
 export class StorageConfigurationError extends Error {
   override name = "StorageConfigurationError";
@@ -266,7 +284,8 @@ function getSupabaseStorageConfig(): SupabaseStorageConfig {
           ? "NEXT_PUBLIC_SUPABASE_URL"
           : "SUPABASE_URL";
 
-  const serviceRoleKey = pickFirstNonEmpty(
+  const serverKey = pickFirstNonEmpty(
+    process.env.SUPABASE_SECRET_KEY,
     process.env.SUPABASE_SERVICE_ROLE_KEY,
     process.env.SUPABASE_SERVICE_KEY,
     process.env.SUPABASE_SERVICE_ROLE,
@@ -283,7 +302,7 @@ function getSupabaseStorageConfig(): SupabaseStorageConfig {
 
   const missing: string[] = [];
   if (!supabaseUrlRaw) missing.push("SUPABASE_URL");
-  if (!serviceRoleKey) missing.push("SUPABASE_SERVICE_ROLE_KEY");
+  if (!serverKey) missing.push("SUPABASE_SECRET_KEY");
   if (missing.length) {
     throw new Error(`Supabase storage not configured: missing ${missing.join(", ")}`);
   }
@@ -294,7 +313,7 @@ function getSupabaseStorageConfig(): SupabaseStorageConfig {
   const normalized = validatedUrl.replace(/\/+$/, "");
   const storageUrl = `${normalized}/storage/v1`;
 
-  return { supabaseUrl: normalized, serviceRoleKey, bucketPrivate: effectiveBucketPrivate, storageUrl };
+  return { supabaseUrl: normalized, serverKey, bucketPrivate: effectiveBucketPrivate, storageUrl };
 }
 
 export function getSupabaseStorageConfigError(
@@ -337,7 +356,7 @@ export function getSupabaseStorageConfigError(
       const vars = missingFromMessage();
       return vars?.length ? vars : undefined;
     })();
-    if (missing?.includes("SUPABASE_URL") || missing?.includes("SUPABASE_SERVICE_ROLE_KEY")) {
+    if (missing?.includes("SUPABASE_URL") || missing?.includes("SUPABASE_SECRET_KEY") || missing?.includes("SUPABASE_SERVICE_ROLE_KEY")) {
       return { statusCode: 503, code: "STORAGE_SERVICE_NOT_CONFIGURED", error: "Storage service not configured", missing };
     }
     const code = missing?.includes("SUPABASE_STORAGE_BUCKET_PRIVATE") ? "STORAGE_BUCKET_MISSING" : "STORAGE_CONFIG_MISSING";
@@ -359,16 +378,14 @@ function normalizeObjectKeyFromPath(objectPath: string): string {
 
 function createSupabaseStorageClient(): StorageClient {
   const cfg = getSupabaseStorageConfig();
-  return new StorageClient(cfg.storageUrl, {
-    apikey: cfg.serviceRoleKey,
-    Authorization: `Bearer ${cfg.serviceRoleKey}`,
-  });
+  return new StorageClient(cfg.storageUrl, buildSupabaseAuthHeaders(cfg.serverKey));
 }
 
 export class SupabaseStorageService {
   private cached:
-    | { cacheKey: string; client: StorageClient; bucketPrivate: string }
+    | { client: StorageClient; bucketPrivate: string }
     | undefined;
+  private readonly cacheKeys: { key: string | undefined } = { key: undefined };
 
   assertConfigured(): void {
     this.getClient();
@@ -376,10 +393,11 @@ export class SupabaseStorageService {
 
   private getClient(): { client: StorageClient; bucketPrivate: string } {
     const cfg = getSupabaseStorageConfig();
-    const cacheKey = `${cfg.storageUrl}|${cfg.serviceRoleKey}|${cfg.bucketPrivate}`;
-    if (this.cached?.cacheKey === cacheKey) return this.cached;
+    const cacheKey = `${cfg.storageUrl}|${cfg.serverKey}|${cfg.bucketPrivate}`;
+    if (this.cached && this.cacheKeys.key === cacheKey) return this.cached;
     const client = createSupabaseStorageClient();
-    this.cached = { cacheKey, client, bucketPrivate: cfg.bucketPrivate };
+    this.cached = { client, bucketPrivate: cfg.bucketPrivate };
+    this.cacheKeys.key = cacheKey;
     return this.cached;
   }
 
@@ -447,10 +465,7 @@ export class SupabaseStorageService {
     try {
       response = await fetch(url, {
         method: "GET",
-        headers: {
-          Authorization: `Bearer ${cfg.serviceRoleKey}`,
-          apikey: cfg.serviceRoleKey,
-        },
+        headers: buildSupabaseAuthHeaders(cfg.serverKey),
         signal: controller.signal,
       });
     } catch (err) {
@@ -479,10 +494,7 @@ export class SupabaseStorageService {
     try {
       response = await fetch(url, {
         method: "HEAD",
-        headers: {
-          Authorization: `Bearer ${cfg.serviceRoleKey}`,
-          apikey: cfg.serviceRoleKey,
-        },
+        headers: buildSupabaseAuthHeaders(cfg.serverKey),
         signal: controller.signal,
       });
     } catch (err) {

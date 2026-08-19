@@ -381,6 +381,18 @@ function makeFixture(firmId: number, userId: number, overrides: Partial<UserFixt
   };
 }
 
+function nowTimestampIso(): string {
+  return new Date().toISOString();
+}
+
+function envelopeSuccess<T>(data: T): { ok: true; data: T; meta: { request_id: string; timestamp: string; duration_ms: number } } {
+  return {
+    ok: true,
+    data,
+    meta: { request_id: "test-rq", timestamp: nowTimestampIso(), duration_ms: 1 },
+  };
+}
+
 // Install a resolver that serves UserFixture immediately for the matching user identity.
 // For auth-context meQuery (uses apiRequest("/api/auth/me")) — we seed ME_QUERY_KEY directly.
 // For effective features (uses apiFetchJson("/users/_self/effective-features"))
@@ -393,7 +405,7 @@ function installUserResolvers(fx: UserFixture) {
   // Permissions: /api/auth/permissions via apiRequest
   M.setApiRequestOverride(async (call) => {
     if (call.path === "/api/auth/permissions") {
-      return makeJsonResponse(200, { permissions: fx.permissions });
+      return makeJsonResponse(200, envelopeSuccess({ permissions: fx.permissions }));
     }
     if (call.path === "/api/auth/me") {
       return makeJsonResponse(200, fx.user);
@@ -565,7 +577,7 @@ describe("RT-1 A(firm=1,user=10) → login(B(1,11)), B pending → no A leakage"
       featuresB.resolve({
         userId: 11, firmId: 1, effective: fx_B.features, explicitOverrides: [],
       });
-      permsB.resolve(makeJsonResponse(200, { permissions: fx_B.permissions }));
+      permsB.resolve(makeJsonResponse(200, envelopeSuccess({ permissions: fx_B.permissions })));
       caseCountB.resolve({ totalUnreadCount: 0 });
       commCountB.resolve({ count: fx_B.notifWorkCount });
       notifSummaryB.resolve({
@@ -705,18 +717,21 @@ describe("RT-3 Cross-firm Firm1/User10 → Firm2/User55 no cross-leak", () => {
       expect(probeLatest?.userId).toBe(55);
     });
 
-    // A's Firm1/U10 keys cleared
-    expect(qc.getQueryData(effectiveFeaturesQueryKey(1, 10) as unknown as readonly unknown[])).toBeUndefined();
-    expect(qc.getQueryData(userPermissionsQueryKey(1, 10) as unknown as readonly unknown[])).toBeUndefined();
-    expect(qc.getQueryData(userUnreadCountQueryKey(1, 10) as unknown as readonly unknown[])).toBeUndefined();
-
-    // B state correct
-    expect(probeLatest?.documentsReadPermission).toBe(false);
-    expect(probeLatest?.hrManagePermission).toBe(true);
+    await waitFor(() => {
+      expect(probeLatest?.documentsReadPermission).toBe(false);
+      expect(probeLatest?.hrManagePermission).toBe(true);
+    });
     await waitFor(() => {
       expect(probeLatest?.documentsVariablesFeature).toBe(false);
       expect(probeLatest?.hrPayrollFeature).toBe(true);
       expect(probeLatest?.notificationNotifUnread).toBe(4);
+    });
+
+    // A's Firm1/U10 keys cleared (verify after B settles)
+    await waitFor(() => {
+      expect(qc.getQueryData(effectiveFeaturesQueryKey(1, 10) as unknown as readonly unknown[])).toBeUndefined();
+      expect(qc.getQueryData(userPermissionsQueryKey(1, 10) as unknown as readonly unknown[])).toBeUndefined();
+      expect(qc.getQueryData(userUnreadCountQueryKey(1, 10) as unknown as readonly unknown[])).toBeUndefined();
     });
   });
 });
@@ -886,9 +901,9 @@ describe("RT-7 login verify — exactly one post-login GET /api/auth/me", () => 
     M.setApiRequestOverride(async (call) => {
       if (call.path === "/api/auth/me") return makeJsonResponse(200, userB);
       if (call.path === "/api/auth/permissions") {
-        return makeJsonResponse(200, {
+        return makeJsonResponse(200, envelopeSuccess({
           permissions: [{ module: "documents", action: "read" }],
-        });
+        }));
       }
       return undefined;
     });
