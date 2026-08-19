@@ -61,6 +61,7 @@ vi.mock("@/components/ui/button", () => ({
 }));
 
 type FeaturesSpec = {
+  moduleHr?: boolean;
   hrEnabled?: boolean;
   hrDashboard?: boolean;
   hrEmployees?: boolean;
@@ -77,13 +78,16 @@ type FeaturesSpec = {
 
 function buildFeatures(spec: FeaturesSpec): EffectiveUserFeaturesMap {
   const entries: Array<[string, boolean]> = [
+    ["module.hr", spec.moduleHr ?? true],
     ["documents.hub", spec.docsHub ?? false],
     ["documents.variables", spec.docsVars ?? false],
     ["accounting.dashboard", spec.accountingDashboard ?? false],
     ["communications.email", spec.communicationsEmail ?? false],
     ["hr.self_service", spec.hrSelfService ?? true],
   ];
-  if (spec.hrEnabled !== false) {
+  const parentModuleHrOn = (spec.moduleHr ?? true) !== false;
+  const hrChildrenOn = spec.hrEnabled !== false && parentModuleHrOn;
+  if (hrChildrenOn) {
     entries.push(["hr.dashboard", spec.hrDashboard ?? true]);
     entries.push(["hr.employees", spec.hrEmployees ?? true]);
     entries.push(["hr.attendance", spec.hrAttendance ?? true]);
@@ -206,32 +210,31 @@ function renderAuth(user: MinimalAuthUser | null) {
 }
 
 describe("R2A HR SIDEBAR PERMISSION RENDER PROOF (SidebarBody production component)", () => {
-  it("HRUI-1 Partner READY hr:read=true module.hr=true hr.dashboard=true hr.employees=true → HR Dashboard + Employees visible", async () => {
-    setFeatures({ hrEnabled: true, hrDashboard: true, hrEmployees: true });
+  it("HR-1 Partner READY hr:read=true module.hr=true hr.dashboard=true hr.employees=true → HR Dashboard + Employees visible", async () => {
+    setFeatures({ moduleHr: true, hrEnabled: true, hrDashboard: true, hrEmployees: true });
     renderAuth(makeUser("Partner", [{ module: "hr", action: "read" }, { module: "dashboard", action: "read" }, { module: "cases", action: "read" }]));
     expect(linkExists(HR_DASHBOARD_LINK, "HR Dashboard")).toBe(true);
     expect(linkExists(HR_EMPLOYEES_LINK, "Employees")).toBe(true);
   });
 
-  it("HRUI-2 Partner explicit hr:read=false → HR admin hidden/denied; no Partner fallback", async () => {
-    setFeatures({ hrEnabled: true, hrDashboard: true, hrEmployees: true, hrSelfService: false });
-    // READY with empty array → hasPermission returns false → no role name partner bypass when load state READY.
+  it("HR-2 same Partner explicit hr:read=false → HR admin hidden/denied; READY deny defeats Partner fallback", async () => {
+    setFeatures({ moduleHr: true, hrEnabled: true, hrDashboard: true, hrEmployees: true, hrSelfService: false });
     renderAuth(makeUser("Partner", [], { id: 7702 }));
     expect(linkExists(HR_DASHBOARD_LINK, "HR Dashboard")).toBe(false);
     expect(linkExists(HR_EMPLOYEES_LINK, "Employees")).toBe(false);
     expect(linkExists(MY_HR_LINK, "My HR")).toBe(false);
   });
 
-  it("HRUI-3 module.hr=false → HR group hidden entirely", async () => {
-    setFeatures({ hrEnabled: false, hrSelfService: false });
+  it("HR-3 module.hr=false children=true → entire HR admin group hidden", async () => {
+    setFeatures({ moduleHr: false, hrEnabled: true, hrDashboard: true, hrEmployees: true, hrSelfService: true });
     renderAuth(makeUser("Partner", [{ module: "hr", action: "read" }, { module: "dashboard", action: "read" }], { id: 7703 }));
     expect(linkExists(HR_DASHBOARD_LINK, "HR Dashboard")).toBe(false);
     expect(linkExists(HR_EMPLOYEES_LINK, "Employees")).toBe(false);
     expect(linkExists(MY_HR_LINK, "My HR")).toBe(false);
   });
 
-  it("HRUI-4 normal Staff HR admin absent, hr.self_service=true → admin HR hidden; My HR visible", async () => {
-    setFeatures({ hrEnabled: true, hrDashboard: true, hrEmployees: true, hrSelfService: true });
+  it("HR-4 normal Clerk/Staff HR admin absent, hr.self_service=true → HR admin hidden; My HR visible", async () => {
+    setFeatures({ moduleHr: true, hrEnabled: true, hrDashboard: true, hrEmployees: true, hrSelfService: true });
     renderAuth(makeUser("Clerk", [{ module: "cases", action: "read" }, { module: "hr", action: "read" }], { id: 7704, roleName: "Clerk" }));
     expect(linkExists(HR_DASHBOARD_LINK, "HR Dashboard")).toBe(false);
     expect(linkExists(HR_EMPLOYEES_LINK, "Employees")).toBe(false);

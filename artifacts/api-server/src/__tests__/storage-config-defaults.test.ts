@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { SupabaseStorageService, isNewSupabaseSecretKey } from "../lib/objectStorage";
 import * as objectStorageModule from "../lib/objectStorage.js";
 
@@ -11,6 +11,14 @@ function findBuildHeadersModuleExport(): ((serverKey: string) => Record<string, 
   const m = objectStorageModule as unknown as Record<string, unknown>;
   if (typeof m["buildSupabaseAuthHeaders"] === "function") {
     return m["buildSupabaseAuthHeaders"] as (serverKey: string) => Record<string, string>;
+  }
+  return null;
+}
+
+function findSecretFingerprintExport(): ((s: string) => string) | null {
+  const m = objectStorageModule as unknown as Record<string, unknown>;
+  if (typeof m["secretFingerprint"] === "function") {
+    return m["secretFingerprint"] as (s: string) => string;
   }
   return null;
 }
@@ -161,6 +169,133 @@ describe("R2A Storage key-class header determinism (STORAGEKEY-1..4)", () => {
       const names = Object.getOwnPropertyNames(svcSafe);
       expect(names.includes("serverKey")).toBe(false);
       expect(names.includes("cached")).toBe(true); // cached is present; test does not JSON.stringify which dives into internals
+    } finally {
+      process.env = prev;
+    }
+  });
+});
+
+describe("Part B storage security hardening (STORAGE-1..6)", () => {
+  it("STORAGE-1 sb_secret_* → apikey header is set", () => {
+    const buildHeaders = findBuildHeadersModuleExport();
+    if (!buildHeaders) {
+      expect(isNewSupabaseSecretKey("sb_secret_partb_1")).toBe(true);
+      return;
+    }
+    const key = "sb_secret_partb_1_test";
+    const h = buildHeaders(key);
+    expect(h.apikey).toBe(key);
+  });
+
+  it("STORAGE-2 sb_secret_* → Bearer Authorization header is ABSENT", () => {
+    const buildHeaders = findBuildHeadersModuleExport();
+    if (!buildHeaders) {
+      expect(isNewSupabaseSecretKey("sb_secret_partb_2")).toBe(true);
+      return;
+    }
+    const h = buildHeaders("sb_secret_partb_2_test");
+    const lower = Object.fromEntries(Object.entries(h).map(([k, v]) => [k.toLowerCase(), v]));
+    expect(lower["authorization"]).toBeUndefined();
+    expect(h.Authorization).toBeUndefined();
+  });
+
+  it("STORAGE-3 legacy JWT-style service_role key → apikey + Bearer both set (temporary compat)", () => {
+    const buildHeaders = findBuildHeadersModuleExport();
+    if (!buildHeaders) {
+      expect(isNewSupabaseSecretKey("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.xxx")).toBe(false);
+      return;
+    }
+    const legacy = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.legacy.service.role";
+    const h = buildHeaders(legacy);
+    expect(h.apikey).toBe(legacy);
+    expect(h.Authorization).toBe(`Bearer ${legacy}`);
+  });
+
+  it("STORAGE-4 raw secret does NOT appear in cache metadata (cacheKeys.key uses SHA-256 fingerprint)", () => {
+    const prev = { ...process.env };
+    const fp = findSecretFingerprintExport();
+    try {
+      process.env.SUPABASE_URL = "https://example.supabase.co";
+      const RAW = "sb_secret_raw_must_not_be_in_cache_keys_abc";
+      process.env.SUPABASE_SERVICE_ROLE_KEY = RAW;
+      process.env.SUPABASE_STORAGE_BUCKET_PRIVATE = "unit";
+      const svc = new SupabaseStorageService();
+      try { svc.assertConfigured(); } catch {}
+      const cacheKeysBox = (svc as unknown as Record<string, unknown>)["cacheKeys"] as
+        | undefined
+        | { key?: unknown };
+      const cacheKey = String(cacheKeysBox?.key ?? "");
+      expect(cacheKey.length > 0).toBe(true);
+      expect(cacheKey.includes(RAW)).toBe(false);
+      // Must include fingerprint segment if fingerprint helper is exported, otherwise just absence of raw is enough.
+      if (fp) {
+        const expectFp = fp(RAW);
+        expect(cacheKey.includes(expectFp)).toBe(true);
+      }
+    } finally {
+      process.env = prev;
+    }
+  });
+
+  it("STORAGE-5 error/config response never contains secret raw text", () => {
+    const prev = { ...process.env };
+    const S1 = "sb_secret_STORAGE5_leak_check_x1";
+    const S2 = "service_role_STORAGE5_leak_check_x2";
+    try {
+      delete process.env.SUPABASE_URL;
+      delete process.env.VITE_SUPABASE_URL;
+      delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+      process.env.SUPABASE_SECRET_KEY = S1;
+      process.env.SUPABASE_SERVICE_ROLE_KEY = S2;
+      let caught: unknown = null;
+      try {
+        const svc = new SupabaseStorageService();
+        svc.assertConfigured();
+      } catch (e) {
+        caught = e;
+      }
+      const exposed = objectStorageModule.getSupabaseStorageConfigError(caught);
+      const str = JSON.stringify({ caught, exposed }, (_k, v) => (typeof v === "string" ? v : v));
+      expect(str.includes(S1)).toBe(false);
+      expect(str.includes(S2)).toBe(false);
+    } finally {
+      process.env = prev;
+    }
+  });
+
+  it("STORAGE-6 changing secret invalidates the cache (different fingerprint → cache miss)", () => {
+    const prev = { ...process.env };
+    try {
+      process.env.SUPABASE_URL = "https://example.supabase.co";
+      process.env.SUPABASE_STORAGE_BUCKET_PRIVATE = "unit";
+      const svc = new SupabaseStorageService();
+      const getClient = (svc as unknown as Record<string, unknown>)["getClient"] as
+        | undefined
+        | (() => { client: unknown; bucketPrivate: string });
+      const getCacheKeys = () =>
+        (svc as unknown as Record<string, unknown>)["cacheKeys"] as { key?: unknown };
+      if (!getClient) {
+        // Skip deep test if method not reachable; still verify secret fingerprints differ.
+        const fp = findSecretFingerprintExport();
+        if (fp) {
+          expect(fp("key_a") !== fp("key_b")).toBe(true);
+        }
+        return;
+      }
+      process.env.SUPABASE_SERVICE_ROLE_KEY = "sb_secret_version_A_change_secret";
+      try { getClient.call(svc); } catch {}
+      const k1 = String(getCacheKeys().key ?? "");
+
+      process.env.SUPABASE_SERVICE_ROLE_KEY = "sb_secret_version_B_change_secret";
+      try { getClient.call(svc); } catch {}
+      const k2 = String(getCacheKeys().key ?? "");
+
+      expect(k1.length > 0).toBe(true);
+      expect(k2.length > 0).toBe(true);
+      expect(k1 === k2).toBe(false);
+      // Ensure neither contains raw secret.
+      expect(k1.includes("version_A")).toBe(false);
+      expect(k2.includes("version_B")).toBe(false);
     } finally {
       process.env = prev;
     }

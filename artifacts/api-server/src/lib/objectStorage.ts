@@ -1,7 +1,7 @@
 import { Storage, File } from "@google-cloud/storage";
 import { StorageClient } from "@supabase/storage-js";
 import { Readable } from "stream";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import {
   ObjectAclPolicy,
   ObjectPermission,
@@ -111,6 +111,12 @@ export function isNewSupabaseSecretKey(key: unknown): boolean {
 
 export function isNewSupabasePublishableKey(key: unknown): boolean {
   return typeof key === "string" && key.startsWith("sb_publishable_");
+}
+
+function secretFingerprint(secret: string): string {
+  return createHash("sha256")
+    .update(secret)
+    .digest("hex");
 }
 
 function buildSupabaseAuthHeaders(serverKey: string): Record<string, string> {
@@ -393,7 +399,11 @@ export class SupabaseStorageService {
 
   private getClient(): { client: StorageClient; bucketPrivate: string } {
     const cfg = getSupabaseStorageConfig();
-    const cacheKey = `${cfg.storageUrl}|${cfg.serverKey}|${cfg.bucketPrivate}`;
+    const cacheKey = [
+      cfg.storageUrl,
+      secretFingerprint(cfg.serverKey),
+      cfg.bucketPrivate,
+    ].join("|");
     if (this.cached && this.cacheKeys.key === cacheKey) return this.cached;
     const client = createSupabaseStorageClient();
     this.cached = { client, bucketPrivate: cfg.bucketPrivate };

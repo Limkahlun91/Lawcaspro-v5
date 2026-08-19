@@ -1,10 +1,11 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   canAccessCase,
   getAccessibleCasesSqlScope,
   getAllowedAssignmentRoles,
   type CaseAccessPurpose,
 } from "../lib/auth.js";
+import { listAccessibleCaseIds } from "../services/case-access.js";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import {
@@ -546,6 +547,164 @@ describe("P0 G4 — One Case Access Engine (faithful PGlite rows)", () => {
         hasFirmwideScope: true, firmId: 1, userId: 1,
       });
       expect(scope).not.toBeUndefined();
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // CA-DB: case_assignments DB error behaviour.
+  //
+  // Canonical rule (case_assignments is REQUIRED canonical schema):
+  //   - valid query + zero rows → empty/not-assigned (deny)
+  //   - any query failure → PROPAGATE (never silently degrade to 0 cases)
+  //
+  // Error codes tested:
+  //   CA-DB-1 empty rows (control)     → NOT_ASSIGNED
+  //   CA-DB-2 42P01 undefined_table    → propagates
+  //   CA-DB-3 42501 insufficient_priv  → propagates
+  //   CA-DB-4 08006 connection_failure → propagates (transient path)
+  //   CA-DB-5 57P01 admin_shutdown     → propagates (DB unavailable)
+  //   CA-DB-6 53300 too_many_conns     → propagates (DB_BUSY)
+  // -----------------------------------------------------------------------
+  describe("CA-DB — case_assignments DB errors MUST propagate, empty → deny", () => {
+    // Users/firm established once.  Note these IDs must not collide with
+    // other describe blocks since all share the same PGlite instance.
+    const CA_FIRM = 8500;
+    const CA_ROLE_CLERK = 8501;
+    const CA_USER = 8502;
+    const CA_CASE = 8503; // intentionally NOT in case_assignments
+
+    beforeAll(async () => {
+      await seedFirm(CA_FIRM, "f-ca-db");
+      await seedRole(CA_ROLE_CLERK, CA_FIRM, "Clerk");
+      await seedUser(CA_USER, CA_FIRM, CA_ROLE_CLERK);
+      await seedCase(CA_CASE, CA_FIRM);
+    });
+
+    // CA-DB-1 — control: empty case_assignments + valid query → NOT_ASSIGNED
+    it("CA-DB-1 case_assignments returns [] → NOT_ASSIGNED (not 500)", async () => {
+      const res = await canAccessCase({
+        purpose: "view_case",
+        r: r as any,
+        firmId: CA_FIRM,
+        userId: CA_USER,
+        roleId: CA_ROLE_CLERK,
+        roleName: "Clerk",
+        caseId: CA_CASE,
+      });
+      expect(res.ok).toBe(false);
+      if (res.ok === false) expect(res.code).toBe("NOT_ASSIGNED");
+    });
+
+    // Helper: build a drizzle-style fake error
+    function fakePgError(sqlstate: string, msg: string) {
+      const err = new Error(msg) as Error & { code: string; sqlstate?: string };
+      err.code = sqlstate;
+      err.sqlstate = sqlstate;
+      return err;
+    }
+
+    // CA-DB-2 — 42P01 undefined_table propagates
+    it("CA-DB-2 42P01 undefined_table → error propagates (not silently empty)", async () => {
+      const spy = vi
+        .spyOn(r, "select" as any)
+        .mockImplementationOnce(() => {
+          throw fakePgError("42P01", "relation \"case_assignments\" does not exist");
+        });
+      try {
+        await expect(
+          canAccessCase({
+            purpose: "view_case",
+            r: r as any,
+            firmId: CA_FIRM, userId: CA_USER,
+            roleId: CA_ROLE_CLERK, roleName: "Clerk", caseId: CA_CASE,
+          }),
+        ).rejects.toBeDefined();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    // CA-DB-3 — 42501 insufficient_privilege propagates
+    it("CA-DB-3 42501 insufficient_privilege → error propagates", async () => {
+      const spy = vi
+        .spyOn(r, "select" as any)
+        .mockImplementationOnce(() => {
+          throw fakePgError("42501", "permission denied for relation case_assignments");
+        });
+      try {
+        await expect(
+          canAccessCase({
+            purpose: "view_case",
+            r: r as any,
+            firmId: CA_FIRM, userId: CA_USER,
+            roleId: CA_ROLE_CLERK, roleName: "Clerk", caseId: CA_CASE,
+          }),
+        ).rejects.toBeDefined();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    // CA-DB-4 — 08006 connection_failure (transient) propagates
+    it("CA-DB-4 08006 connection_exception transient → error propagates, NOT empty list", async () => {
+      const spy = vi
+        .spyOn(r, "select" as any)
+        .mockImplementationOnce(() => {
+          throw fakePgError("08006", "connection failure (transient)");
+        });
+      try {
+        await expect(
+          listAccessibleCaseIds({
+            r: r as any,
+            firmId: CA_FIRM, userId: CA_USER,
+            roleId: CA_ROLE_CLERK, roleName: "Clerk",
+            purpose: "view_case",
+          }),
+        ).rejects.toBeDefined();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    // CA-DB-5 — 57P01 admin_shutdown propagates
+    it("CA-DB-5 57P01 admin_shutdown DB unavailable → error propagates", async () => {
+      const spy = vi
+        .spyOn(r, "select" as any)
+        .mockImplementationOnce(() => {
+          throw fakePgError("57P01", "terminating connection due to administrator command");
+        });
+      try {
+        await expect(
+          listAccessibleCaseIds({
+            r: r as any,
+            firmId: CA_FIRM, userId: CA_USER,
+            roleId: CA_ROLE_CLERK, roleName: "Clerk",
+            purpose: "view_case",
+          }),
+        ).rejects.toBeDefined();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    // CA-DB-6 — 53300 too_many_connections propagates (DB_BUSY)
+    it("CA-DB-6 53300 too_many_connections (DB_BUSY) → error propagates NOT []", async () => {
+      const spy = vi
+        .spyOn(r, "select" as any)
+        .mockImplementationOnce(() => {
+          throw fakePgError("53300", "sorry, too many clients already");
+        });
+      try {
+        const p = listAccessibleCaseIds({
+          r: r as any,
+          firmId: CA_FIRM, userId: CA_USER,
+          roleId: CA_ROLE_CLERK, roleName: "Clerk",
+          purpose: "view_case",
+        });
+        await expect(p).rejects.toBeDefined();
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 });

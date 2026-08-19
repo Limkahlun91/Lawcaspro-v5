@@ -397,6 +397,18 @@ export function SidebarBody({
 
   const navGroups = navGroupsForUser();
 
+  const requireParentModuleGate = (
+    featureKey: string | undefined,
+    enabled: (k: string) => boolean,
+  ): boolean => {
+    if (!featureKey) return true;
+    // module.hr kill-switch: every hr.* child requires parent module.hr
+    if (featureKey.startsWith("hr.") && featureKey !== "module.hr") {
+      if (!enabled("module.hr")) return false;
+    }
+    return true;
+  };
+
   const visibleNavGroups = navGroups
     .map((g) => ({
       key: g.key,
@@ -433,6 +445,7 @@ export function SidebarBody({
           }
         }
         if (!permOk) return false;
+        if (!requireParentModuleGate(i.featureKey, userFeatures.enabled)) return false;
         if (i.featureKey) {
           const featureOk = userFeatures.enabled(i.featureKey);
           if (!featureOk && userFeatures.transientError) {
