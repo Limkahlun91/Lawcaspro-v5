@@ -95,32 +95,24 @@ export interface ClearIdentityScopedQueriesOptions {
   userId: number | string | null | undefined;
 }
 
-export function clearIdentityScopedQueries(opts: ClearIdentityScopedQueriesOptions): { canceled: number; removed: number } {
+export async function clearIdentityScopedQueries(
+  opts: ClearIdentityScopedQueriesOptions,
+): Promise<void> {
   const { queryClient, firmId, userId } = opts;
   const f = str(firmId);
   const u = str(userId);
-  const prefix = ["firm", f, "user", u];
-  let canceled = 0;
-  try {
-    queryClient.cancelQueries({
-      queryKey: prefix,
-      exact: false,
-    } as any).then?.(() => {
-    }).catch?.(() => {
-    });
-    canceled += 1;
-  } catch {
-    canceled = 0;
-  }
-  let removed = 0;
-  try {
-    removed = queryClient.removeQueries({
-      queryKey: prefix,
-      exact: false,
-    } as any) ?? 0;
-  } catch {
-    removed = 0;
-  }
+  const prefix = ["firm", f, "user", u] as const;
+
+  await queryClient.cancelQueries({
+    queryKey: prefix,
+    exact: false,
+  });
+
+  queryClient.removeQueries({
+    queryKey: prefix,
+    exact: false,
+  });
+
   if (typeof window !== "undefined") {
     try {
       const gw = window as any;
@@ -149,5 +141,4 @@ export function clearIdentityScopedQueries(opts: ClearIdentityScopedQueriesOptio
     } catch {
     }
   }
-  return { canceled, removed };
 }

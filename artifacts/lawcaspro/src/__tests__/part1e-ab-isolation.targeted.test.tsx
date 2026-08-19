@@ -163,12 +163,12 @@ describe("§1 ME_QUERY_KEY — clearIdentityScopedQueries never removes ME_QUERY
     }
   });
 
-  it("ME-1: clearIdentityScopedQueries(firm=1,user=10) preserves ME_QUERY_KEY (critical invariant)", () => {
+  it("ME-1: clearIdentityScopedQueries(firm=1,user=10) preserves ME_QUERY_KEY (critical invariant)", async () => {
     const qc = seededQueryClient();
     seedUserA(qc);
     expect(qc.getQueryData(ME_QUERY_KEY as unknown as readonly unknown[])).toMatchObject({ id: 10, firmId: 1 });
 
-    clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
+    await clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
 
     // A's identity-scoped queries removed:
     expect(qc.getQueryData(effectiveFeaturesQueryKey(1, 10) as unknown as readonly unknown[])).toBeUndefined();
@@ -182,14 +182,14 @@ describe("§1 ME_QUERY_KEY — clearIdentityScopedQueries never removes ME_QUERY
     expect(qc.getQueryData(ME_QUERY_KEY as unknown as readonly unknown[])).toMatchObject({ id: 10, firmId: 1 });
   });
 
-  it("ME-2: only prefix ['firm',f,'user',u,...] removed; cross-user (firm=1,user=11) keys left intact", () => {
+  it("ME-2: only prefix ['firm',f,'user',u,...] removed; cross-user (firm=1,user=11) keys left intact", async () => {
     const qc = seededQueryClient();
     seedUserA(qc);
     // seed B's keys as if they were already loaded somehow
     qc.setQueryData(effectiveFeaturesQueryKey(1, 11) as unknown as readonly unknown[], { "hr.payroll": true });
     qc.setQueryData(userUnreadCountQueryKey(1, 11) as unknown as readonly unknown[], { count: 2 });
 
-    clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
+    await clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
 
     // A's data removed
     expect(qc.getQueryData(effectiveFeaturesQueryKey(1, 10) as unknown as readonly unknown[])).toBeUndefined();
@@ -202,26 +202,26 @@ describe("§1 ME_QUERY_KEY — clearIdentityScopedQueries never removes ME_QUERY
     expect(qc.getQueryData(ME_QUERY_KEY as unknown as readonly unknown[])).not.toBeUndefined();
   });
 
-  it("ME-3: old-user window globals cleared only when identity matches", () => {
+  it("ME-3: old-user window globals cleared only when identity matches", async () => {
     const qc = seededQueryClient();
     seedUserA(qc);
     const gw = window as any;
     expect(gw.__lawcasproCachedEffectiveFeatures?.userId).toBe(10);
     expect(gw.__lawcasproCachedEffectiveUser?.userId).toBe(10);
 
-    clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
+    await clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
 
     expect(gw.__lawcasproCachedEffectiveFeatures).toBeNull();
     expect(gw.__lawcasproCachedEffectiveUser).toBeNull();
   });
 
-  it("ME-4: window globals NOT cleared for mismatched identity", () => {
+  it("ME-4: window globals NOT cleared for mismatched identity", async () => {
     const qc = seededQueryClient();
     seedUserA(qc);
     const gw = window as any;
 
     // Clear for firm=99,user=999 → no match → globals retained
-    clearIdentityScopedQueries({ queryClient: qc, firmId: 99, userId: 999 });
+    await clearIdentityScopedQueries({ queryClient: qc, firmId: 99, userId: 999 });
 
     expect(gw.__lawcasproCachedEffectiveFeatures?.userId).toBe(10);
     expect(gw.__lawcasproCachedEffectiveUser?.userId).toBe(10);
@@ -241,7 +241,7 @@ describe("§2 A→B same-firm runtime isolation (Firm1/User10→Firm1/User11)", 
     }
   });
 
-  it("AB-1: Clear A identity before B load → A features/perms absent; B placeholder in ME", () => {
+  it("AB-1: Clear A identity before B load → A features/perms absent; B placeholder in ME", async () => {
     const qc = seededQueryClient();
     // Step 1: UserA fully populated
     seedUserA(qc);
@@ -250,7 +250,7 @@ describe("§2 A→B same-firm runtime isolation (Firm1/User10→Firm1/User11)", 
     });
 
     // Step 2: logout → clear A's identity-scoped queries
-    clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
+    await clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
     // (logout also clears ME explicitly — emulated here:)
     qc.setQueryData(ME_QUERY_KEY as unknown as readonly unknown[], null);
 
@@ -272,11 +272,11 @@ describe("§2 A→B same-firm runtime isolation (Firm1/User10→Firm1/User11)", 
     expect(qc.getQueryData(ME_QUERY_KEY as unknown as readonly unknown[])).toMatchObject({ id: 11, firmId: 1 });
   });
 
-  it("AB-2: notification count 7 (A) not present under B's prefix; after B resolves count=2 exact", () => {
+  it("AB-2: notification count 7 (A) not present under B's prefix; after B resolves count=2 exact", async () => {
     const qc = seededQueryClient();
     seedUserA(qc);
     // Clear A (logout behavior)
-    clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
+    await clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
     qc.setQueryData(ME_QUERY_KEY as unknown as readonly unknown[], null);
     seedUserBPlaceholder(qc);
 
@@ -313,12 +313,12 @@ describe("§2 Cross-firm Firm1/User10 → Firm2/User55 isolation", () => {
     }
   });
 
-  it("CF-1: Firm1 keys removed on Firm2 login; Firm2 state correct", () => {
+  it("CF-1: Firm1 keys removed on Firm2 login; Firm2 state correct", async () => {
     const qc = seededQueryClient();
     seedUserA(qc);
 
     // Simulate: logout → clear Firm1/User10 identity scope
-    clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
+    await clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
     qc.setQueryData(ME_QUERY_KEY as unknown as readonly unknown[], null);
 
     // Then Firm2/User55 login → seed ME and Firm2 data
@@ -338,18 +338,18 @@ describe("§2 Cross-firm Firm1/User10 → Firm2/User55 isolation", () => {
     expect(qc.getQueryData(ME_QUERY_KEY as unknown as readonly unknown[])).toMatchObject({ id: 55, firmId: 2 });
   });
 
-  it("CF-2: Firm2 notification prefix never contains Firm1 notification data 7", () => {
+  it("CF-2: Firm2 notification prefix never contains Firm1 notification data 7", async () => {
     const qc = seededQueryClient();
     seedUserA(qc);
     // Pre-set a bogus count=7 under Firm2 accidentally (emulating a prior bug scenario)
     qc.setQueryData(userUnreadCountQueryKey(2, 55) as unknown as readonly unknown[], { count: 7 });
 
     // Clear Firm1/User10 (does NOT touch Firm2 keys by design — that's OK)
-    clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
+    await clearIdentityScopedQueries({ queryClient: qc, firmId: 1, userId: 10 });
 
     // The correct flow would ALSO clear Firm2 if switching FROM Firm1→Firm2 via identity-diff effect
     // Let's emulate identity-diff detection: previous={firm1,user10}, current={firm2,user55}
-    clearIdentityScopedQueries({ queryClient: qc, firmId: 2, userId: 55 });
+    await clearIdentityScopedQueries({ queryClient: qc, firmId: 2, userId: 55 });
 
     // After clearing Firm2 stale 7 (fresh start), B sets its own 2:
     qc.setQueryData(userUnreadCountQueryKey(2, 55) as unknown as readonly unknown[], { count: 2 });

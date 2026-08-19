@@ -15,6 +15,24 @@ import {
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
+type PermissionItem = { module: string; action: string };
+
+function normalizePermissions(input: unknown): PermissionItem[] {
+  const raw =
+    Array.isArray(input)
+      ? input
+      : isRecord(input) && Array.isArray(input.permissions)
+        ? input.permissions
+        : [];
+  return raw
+    .filter((p): p is Record<string, unknown> => isRecord(p))
+    .map((p) => ({
+      module: typeof p.module === "string" ? p.module : "",
+      action: typeof p.action === "string" ? p.action : "",
+    }))
+    .filter((p) => Boolean(p.module) && Boolean(p.action));
+}
+
 type MeRefreshOutcome =
   | { kind: "success"; user: AuthUser | null }
   | { kind: "unauthorized" }
@@ -63,19 +81,6 @@ const classifyMeError = (err: unknown): { cause: "network" | "server" | "client"
   return { cause: "server", status, code };
 };
 
-const parsePermissionsPayload = (body: unknown): Array<{ module: string; action: string }> => {
-  if (!isRecord(body)) return [];
-  const perms = body.permissions;
-  if (!Array.isArray(perms)) return [];
-  return perms
-    .filter((p): p is Record<string, unknown> => isRecord(p))
-    .map((p) => ({
-      module: typeof p.module === "string" ? p.module : "",
-      action: typeof p.action === "string" ? p.action : "",
-    }))
-    .filter((p) => p.module && p.action);
-};
-
 interface AuthContextType {
   user: AuthUser | null;
   isLoading: boolean;
@@ -83,7 +88,7 @@ interface AuthContextType {
   permissionsStatus?: "idle" | "loading" | "ready" | "unavailable" | "error";
   retryPermissions?: () => void;
   retryMe?: () => void;
-  login: (user: AuthUser) => void;
+  login: (user: AuthUser) => Promise<void>;
   logout: () => void;
 }
 
@@ -100,15 +105,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!user) {
       if (previousIdentityRef.current) {
-        try {
-          clearIdentityScopedQueries({
-            queryClient,
-            firmId: previousIdentityRef.current.firmId as any,
-            userId: previousIdentityRef.current.userId as any,
-          });
-        } catch {
-        }
+        const id = previousIdentityRef.current;
         previousIdentityRef.current = null;
+        void clearIdentityScopedQueries({
+          queryClient,
+          firmId: id.firmId as any,
+          userId: id.userId as any,
+        }).catch(() => {
+        });
       }
       return;
     }
@@ -126,15 +130,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       (prev.userId === null && currentUserId === null) ||
       (prev.userId !== null && currentUserId !== null && String(prev.userId) === String(currentUserId));
     if (!sameFirm || !sameUser) {
-      try {
-        clearIdentityScopedQueries({
-          queryClient,
-          firmId: prev.firmId as any,
-          userId: prev.userId as any,
-        });
-      } catch {
-      }
+      const oldId = prev;
       previousIdentityRef.current = { firmId: currentFirm, userId: currentUserId };
+      void clearIdentityScopedQueries({
+        queryClient,
+        firmId: oldId.firmId as any,
+        userId: oldId.userId as any,
+      }).catch(() => {
+      });
     }
   }, [user ? ((user as any).id ?? null) : null, user ? ((user as any).firmId ?? null) : null, queryClient]);
 
@@ -274,7 +277,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [isMeError, isMeLoading, isMeRefetching, me, user, failureCount]);
 
-  const permissionsQuery = useQuery<{ permissions: Array<{ module: string; action: string }>; unavailable?: boolean }>({
+  const permissionsQuery = useQuery<{ permissions: PermissionItem[]; unavailable?: boolean }>({
     queryKey: userPermissionsQueryKey((user as any)?.firmId ?? null, (user as any)?.id ?? null),
     enabled: Boolean(
       user &&
@@ -288,45 +291,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     refetchOnWindowFocus: false,
     refetchOnMount: false,
     queryFn: async ({ signal }) => {
-      let res: Response;
-      let currentCached = (user as { permissions?: unknown } | null)?.permissions;
-      let transientCached: Array<{ module: string; action: string }> | undefined;
-      if (currentCached && Array.isArray(currentCached)) {
-        transientCached = parsePermissionsPayload(currentCached);
-      }
+      const currentCached = (user as { permissions?: unknown } | null)?.permissions;
+      const transientLkg: PermissionItem[] | undefined =
+        currentCached && Array.isArray(currentCached) ? normalizePermissions(currentCached) : undefined;
+
       try {
-        res = await apiRequest("/api/auth/permissions", {
+        const res = await apiRequest("/api/auth/permissions", {
           allowStatuses: [401, 403, 404, 500, 503],
           signal,
           timeoutMs: 8000,
         });
-      } catch (err) {
-        const cat = classifyPermissionError(err);
-        if (isTransientErrorCategory(cat) && transientCached) {
-          return { permissions: transientCached };
+        if (res.status === 401) return { permissions: [] };
+        if (res.status === 403) return { permissions: [], unavailable: false };
+        if (res.status === 404) {
+          if (transientLkg && transientLkg.length > 0) {
+            return { permissions: transientLkg, unavailable: true };
+          }
+          return { permissions: [], unavailable: true };
         }
-        if (cat === "TRANSIENT_5XX") return { permissions: [], unavailable: true };
-        throw err;
-      }
-      if (res.status === 401) return { permissions: [] };
-      if (res.status === 403) return { permissions: [], unavailable: false };
-      if (res.status === 404) return { permissions: [], unavailable: true };
-      if (res.status === 200 || res.status === 204) {
         if (res.status === 204) {
-          if (currentCached && Array.isArray(currentCached)) {
-            return { permissions: parsePermissionsPayload(currentCached) };
+          if (transientLkg && transientLkg.length > 0) {
+            return { permissions: transientLkg };
           }
           return { permissions: [] };
         }
-        const body = (await res.json()) as unknown;
-        const data = unwrapApiData<{ permissions: Array<{ module: string; action: string }> }>(body);
-        return { permissions: parsePermissionsPayload(data) };
+        if (res.status === 200) {
+          const body = (await res.json()) as unknown;
+          const data = unwrapApiData<unknown>(body);
+          const perms = normalizePermissions(data);
+          return { permissions: perms };
+        }
+        const cat = classifyPermissionError({ status: res.status });
+        if (isTransientErrorCategory(cat)) {
+          if (transientLkg && transientLkg.length > 0) {
+            return { permissions: transientLkg, unavailable: true };
+          }
+          return { permissions: [], unavailable: true };
+        }
+        return { permissions: [] };
+      } catch (err) {
+        const cat = classifyPermissionError(err);
+        if (isTransientErrorCategory(cat)) {
+          if (transientLkg && transientLkg.length > 0) {
+            return { permissions: transientLkg, unavailable: true };
+          }
+          return { permissions: [], unavailable: true };
+        }
+        throw err;
       }
-      const cat = classifyPermissionError({ status: res.status });
-      if (isTransientErrorCategory(cat) && transientCached) {
-        return { permissions: transientCached };
-      }
-      return { permissions: [] };
     },
   });
 
@@ -358,38 +370,69 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const oldFirmId = user ? (user as any).firmId ?? null : null;
       const oldUserId = user ? (user as any).id ?? null : null;
       lastSuccessfulUserRef.current = null;
+      previousIdentityRef.current = null;
       clearStoredAuthToken();
       setUser(null);
       setAuthStatus("unauthenticated");
       queryClient.setQueryData(ME_QUERY_KEY, null);
-      try {
-        clearIdentityScopedQueries({
-          queryClient,
-          firmId: oldFirmId,
-          userId: oldUserId,
-        });
-      } catch {
-      }
+      void clearIdentityScopedQueries({
+        queryClient,
+        firmId: oldFirmId,
+        userId: oldUserId,
+      }).catch(() => {
+      });
     });
   }, [queryClient, user]);
 
-  const login = (newUser: AuthUser) => {
+  const login = async (newUser: AuthUser): Promise<void> => {
+    const previous =
+      previousIdentityRef.current ??
+      (user
+        ? {
+            firmId: (user as any).firmId ?? null,
+            userId: (user as any).id ?? null,
+          }
+        : null);
+
+    const next = {
+      firmId: (newUser as any).firmId ?? null,
+      userId: (newUser as any).id ?? null,
+    };
+
+    const changed =
+      previous &&
+      (
+        String(previous.firmId ?? "") !== String(next.firmId ?? "")
+        ||
+        String(previous.userId ?? "") !== String(next.userId ?? "")
+      );
+
+    if (changed) {
+      await clearIdentityScopedQueries({
+        queryClient,
+        firmId: previous.firmId,
+        userId: previous.userId,
+      });
+    }
+
+    previousIdentityRef.current = next;
     lastSuccessfulUserRef.current = newUser;
+
     if (typeof window !== "undefined") {
       try {
         (window as any).__lawcasproCachedEffectiveUser = {
-          firmId: (newUser as any).firmId ?? null,
-          userId: (newUser as any).id ?? null,
+          firmId: next.firmId,
+          userId: next.userId,
           fetchedAt: Date.now(),
           data: newUser,
         };
       } catch {
       }
     }
+
+    queryClient.setQueryData(ME_QUERY_KEY, newUser);
     setUser(newUser);
     setAuthStatus("authenticated");
-    queryClient.setQueryData(ME_QUERY_KEY, newUser);
-    void permissionsQuery.refetch();
   };
 
   const handleLogout = () => {
@@ -398,6 +441,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     logoutMutation.mutate(undefined, {
       onSuccess: () => {
         lastSuccessfulUserRef.current = null;
+        previousIdentityRef.current = null;
         if (typeof window !== "undefined") {
           try { (window as any).__lawcasproCachedEffectiveUser = null; } catch {}
           try { (window as any).__lawcasproCachedEffectiveFeatures = null; } catch {}
@@ -405,15 +449,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         clearStoredAuthToken();
         setUser(null);
         queryClient.setQueryData(ME_QUERY_KEY, null);
-        try {
-          clearIdentityScopedQueries({
-            queryClient,
-            firmId: oldFirmId,
-            userId: oldUserId,
-          });
-        } catch {
-        }
-      }
+        void clearIdentityScopedQueries({
+          queryClient,
+          firmId: oldFirmId,
+          userId: oldUserId,
+        }).catch(() => {
+        });
+      },
     });
   };
 

@@ -51,9 +51,6 @@ export type UserEffectiveFeatureBundle = {
   explicitOverrides: Array<{ featureKey: string; isEnabled: boolean }>;
 };
 
-export const EFFECTIVE_FEATURES_QUERY_KEY = ["firm", "user", "effective-features"];
-const USER_EFFECTIVE_QUERY_KEY = EFFECTIVE_FEATURES_QUERY_KEY;
-
 export function fetchUserEffectiveFeatures(): Promise<UserEffectiveFeatureBundle> {
   return apiFetchJson<any>("/users/_self/effective-features").then(
     (r) => (r?.data ?? r) as UserEffectiveFeatureBundle,
@@ -483,8 +480,8 @@ function mapOverrideMode(isEnabled: boolean): FirmOverrideLike["overrideMode"] {
 // ---------------------------------------------------------------------------
 // React hooks: fetch entitlements + registry once per user session
 // useFirmEntitlements() is a DERIVED projection from the single canonical
-// UserEffectiveFeatureBundle cached under USER_EFFECTIVE_QUERY_KEY.
-// One HTTP request, one query cache shape — no cache collision.
+// UserEffectiveFeatureBundle cached under effectiveFeaturesQueryKey(firmId, userId).
+// One HTTP request, one identity-scoped query cache — no cross-user collision.
 // ---------------------------------------------------------------------------
 
 export function useFirmEntitlements<TFirmOverride = FirmOverrideLike>(): {

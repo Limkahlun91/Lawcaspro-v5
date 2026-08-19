@@ -10,6 +10,7 @@ import { Search } from "lucide-react";
 import { useState } from "react";
 import { apiFetchJson } from "@/lib/api-client";
 import { unwrapApiData } from "@/lib/api-contract";
+import { useAuth } from "@/lib/auth-context";
 
 type FeatureDefLike = {
   key: string;
@@ -34,6 +35,8 @@ type EntitlementLike = {
 
 export function FirmSubscriptionFeaturesTab({ firmId }: { firmId: number }) {
   const [search, setSearch] = useState("");
+  const { user } = useAuth();
+  const userId = (user as any)?.id ?? null;
   const registry = useQuery({
     queryKey: ["platform-feature-registry"],
     queryFn: async () =>
@@ -45,7 +48,7 @@ export function FirmSubscriptionFeaturesTab({ firmId }: { firmId: number }) {
   });
 
   const entitlements = useQuery({
-    queryKey: ["firm", "user", "effective-features"],
+    queryKey: ["firm", String(firmId), "user", String(userId), "firm-subscription-features"],
     queryFn: async () => {
       const raw = unwrapApiData<any>(
         await apiFetchJson(`/users/_self/effective-features`)

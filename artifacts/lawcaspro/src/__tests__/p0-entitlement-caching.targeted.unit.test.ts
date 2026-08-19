@@ -36,7 +36,7 @@ function readSafe(p: string): string {
 const FILES = listFiles(FE_ROOT);
 const SRC_AGG = Object.fromEntries(FILES.map((p) => [relative(FE_ROOT, p), readSafe(p)]));
 
-describe("ENT-PERF-1 — single shared query key with staleTime 60s", () => {
+describe("ENT-PERF-1 — identity-scoped query cache with staleTime 60s", () => {
   function findFile(basenameEnd: string): { rel: string; src: string } | null {
     for (const [rel, src] of Object.entries(SRC_AGG)) {
       const normalized = rel.replace(/\\/g, "/");
@@ -44,19 +44,19 @@ describe("ENT-PERF-1 — single shared query key with staleTime 60s", () => {
     }
     return null;
   }
-  it("feature-guards.tsx exports EFFECTIVE_FEATURES_QUERY_KEY exactly ['firm','user','effective-features']", () => {
+  it("feature-guards.tsx uses identity-scoped effectiveFeaturesQueryKey(firmId,userId) with staleTime 60s", () => {
     const hit = findFile("lib/feature-guards.tsx");
     expect(hit).not.toBeNull();
     const fg = hit!.src;
-    expect(fg).toMatch(/const\s+EFFECTIVE_FEATURES_QUERY_KEY\s*=\s*\[\s*"firm"\s*,\s*"user"\s*,\s*"effective-features"\s*\]/);
+    expect(fg).toMatch(/effectiveFeaturesQueryKey\s*\(/);
     expect(fg).toMatch(/staleTime:\s*(?:60_000|60\s*\*\s*1000)/);
     expect(fg).toMatch(/refetchOnWindowFocus:\s*(?:true|"stale")/);
   });
-  it("FirmSubscriptionFeaturesTab uses the same queryKey ['firm','user','effective-features']", () => {
+  it("FirmSubscriptionFeaturesTab uses identity-scoped query key [firm,firmId,user,userId,...] with staleTime 60s", () => {
     const hit = findFile("FirmSubscriptionFeaturesTab.tsx");
     expect(hit).not.toBeNull();
     const tab = hit!.src;
-    expect(tab).toContain(`"firm", "user", "effective-features"`);
+    expect(tab).toContain(`"firm", String(firmId), "user", String(userId)`);
     expect(tab).toMatch(/staleTime:\s*(?:60\s*\*\s*1000|60_000)/);
   });
 });

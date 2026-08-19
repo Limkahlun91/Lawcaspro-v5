@@ -107,7 +107,7 @@ export default function Login() {
         return;
       }
 
-      setAuthUser(verified);
+      await setAuthUser(verified);
 
       const nextPath = (() => {
         const raw = unwrapped as unknown as Record<string, unknown>;
