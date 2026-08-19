@@ -10,13 +10,22 @@ import {
   getFeatureDefinition,
   isFeatureRegistered,
 } from "@workspace/db";
+import { extractDbErrorInfo } from "../lib/db-error.js";
 
 // ---------------------------------------------------------------------------
-// Part 2 §12-14 — ONE canonical case access helper
+// Part 2 §12-14 / C1-B2 — ONE canonical case access engine.
 //
-// FIXES impossible-state bug: Clerk No.2 assigned to CON/001 → list shows it
-// (direct WHERE assignedClerkId = userId OR in assignments) but /cases/:id
-// used a different check → 403.  Now everything calls one helper.
+// Access evaluation order (early-return on ALLOW; DENY at end):
+//   A. validate ids                (DENY on missing)
+//   B. management role fast path  (Partner/Manager same-firm = ALLOW)
+//   C. canonical case_assignments table with unassigned_at IS NULL (ALLOW)
+//   D. optional legacy assigned_lawyer_id / assigned_clerk_id compatibility
+//      (ONLY undefined column / 42703 falls back — DB transient errors rethrow)
+//   E. DENY
+//
+// Cases schema TRUTH per @workspace/db + PGlite tests:
+//   - cases table DOES NOT require assigned_lawyer_id/assigned_clerk_id columns.
+//   - canonical truth is case_assignments table (role_in_case + unassigned_at).
 // ---------------------------------------------------------------------------
 
 export type CanUserAccessCaseInput = {
@@ -27,15 +36,7 @@ export type CanUserAccessCaseInput = {
   roleId: number | null;
   roleName: string | null;
   purpose?: "view_case" | "edit_case" | "view_documents" | "edit_documents";
-  /**
-   * Allow additional access classes:
-   *   "wide" = Partner/Manager + assignedLawyer + assignedClerk + assignments table + team membership
-   */
   scope?: "default" | "wide" | "documents_only";
-  /**
-   * If caller already knows assignedLawyerId/assignedClerkId (e.g. from a row)
-   * it can pass them in to avoid a SELECT.
-   */
   preloaded?: {
     assignedLawyerId?: number | null;
     assignedClerkId?: number | null;
@@ -77,6 +78,55 @@ function isManagementRole(roleName: string | null): boolean {
   return MANAGEMENT_NAMES.has(roleName.trim().toLowerCase());
 }
 
+// Step D helper: ONLY undefined-column (42703) returns {available:false}.
+// Everything else — DB transient, connection, auth, constraint, etc — RE-THROWS.
+async function tryLoadLegacyCaseAssignees(
+  r: AppDb | RlsDb,
+  firmId: number,
+  caseId: number,
+): Promise<{
+  available: boolean;
+  assignedLawyerId: number | null;
+  assignedClerkId: number | null;
+}> {
+  try {
+    const rawRows = await r.execute(sql`
+      SELECT
+        assigned_lawyer_id AS "assignedLawyerId",
+        assigned_clerk_id AS "assignedClerkId"
+      FROM cases
+      WHERE id=${caseId}
+        AND firm_id=${firmId}
+      LIMIT 1
+    `);
+    const rowsArr: unknown[] =
+      rawRows && typeof rawRows === "object" && Array.isArray((rawRows as any).rows)
+        ? (rawRows as any).rows
+        : Array.isArray(rawRows)
+        ? rawRows
+        : [];
+    const row = rowsArr[0] as
+      | { assignedLawyerId?: unknown; assignedClerkId?: unknown }
+      | undefined;
+    const l = row?.assignedLawyerId;
+    const cl = row?.assignedClerkId;
+    return {
+      available: true,
+      assignedLawyerId: typeof l === "number" ? l : null,
+      assignedClerkId: typeof cl === "number" ? cl : null,
+    };
+  } catch (err) {
+    const info = extractDbErrorInfo(err);
+    const state = (info.sqlstate || info.code || "").toUpperCase();
+    // UNDEFINED COLUMN — legacy schema simply doesn't have these cols (42703).
+    if (state === "42703") {
+      return { available: false, assignedLawyerId: null, assignedClerkId: null };
+    }
+    // Every other class of error propagates.
+    throw err;
+  }
+}
+
 export async function canUserAccessCase(
   input: CanUserAccessCaseInput,
 ): Promise<CanUserAccessCaseResult> {
@@ -91,22 +141,23 @@ export async function canUserAccessCase(
     scope = "default",
     preloaded,
   } = input;
+
+  // A. validate ids
   if (!firmId || !userId || !caseId) {
     return { ok: false, code: "FIRM_MISMATCH", reason: "Missing ids" };
   }
 
-  // Fast path: preloaded assignees + management
+  // Preloaded firm match: authoritative if caller provided.
+  if (preloaded?.caseFirmId !== undefined && preloaded?.caseFirmId !== null) {
+    if (preloaded.caseFirmId !== firmId) return { ok: false, code: "FIRM_MISMATCH" };
+  }
+
+  // B. management role fast path (same-firm access)
   if (isManagementRole(roleName)) {
-    // Still need firm match + purpose read permission
-    if (preloaded?.caseFirmId && preloaded.caseFirmId !== firmId) {
-      return { ok: false, code: "FIRM_MISMATCH" };
-    }
     return { ok: true, code: "OK", via: "partner_manager" };
   }
 
-  if (preloaded?.caseFirmId !== undefined && preloaded.caseFirmId !== null) {
-    if (preloaded.caseFirmId !== firmId) return { ok: false, code: "FIRM_MISMATCH" };
-  }
+  // Preloaded legacy shortcut: if caller already has them (optimization only).
   if (preloaded?.assignedLawyerId === userId) {
     return { ok: true, code: "OK", via: "assigned_lawyer" };
   }
@@ -114,53 +165,7 @@ export async function canUserAccessCase(
     return { ok: true, code: "OK", via: "assigned_clerk" };
   }
 
-  // DB path: load case row + assignments table + case team (if any)
-  // casesTable.assign* columns (not drizzle schema; fallback via SQL because
-  // cases table schema may not expose assignedLawyerId/assignedClerkId as drizzle cols.)
-  let caseFirmId = preloaded?.caseFirmId ?? null;
-  let assignedLawyerId = preloaded?.assignedLawyerId ?? null;
-  let assignedClerkId = preloaded?.assignedClerkId ?? null;
-  if (
-    caseFirmId === null ||
-    assignedLawyerId === null ||
-    assignedClerkId === null
-  ) {
-    const rawRows = await r.execute(sql`
-      SELECT firm_id AS "firmId",
-             assigned_lawyer_id AS "assignedLawyerId",
-             assigned_clerk_id AS "assignedClerkId"
-      FROM cases
-      WHERE id = ${caseId}
-      LIMIT 1
-    `);
-    const rowsArr: unknown[] =
-      rawRows && typeof rawRows === "object" && Array.isArray((rawRows as any).rows)
-        ? (rawRows as any).rows
-        : Array.isArray(rawRows)
-        ? rawRows
-        : [];
-    const actualRow = rowsArr[0] as
-      | { firmId?: unknown; assignedLawyerId?: unknown; assignedClerkId?: unknown }
-      | undefined;
-    const f = actualRow?.firmId;
-    const l = actualRow?.assignedLawyerId;
-    const cl = actualRow?.assignedClerkId;
-    if (typeof f === "number") caseFirmId = f;
-    if (typeof l === "number") assignedLawyerId = l;
-    if (typeof cl === "number") assignedClerkId = cl;
-  }
-
-  if (caseFirmId !== null && caseFirmId !== firmId) {
-    return { ok: false, code: "FIRM_MISMATCH" };
-  }
-  if (assignedLawyerId === userId) {
-    return { ok: true, code: "OK", via: "assigned_lawyer" };
-  }
-  if (assignedClerkId === userId) {
-    return { ok: true, code: "OK", via: "assigned_clerk" };
-  }
-
-  // Canonical case_assignment table (lawyer, clerk, case_team_member)
+  // C. canonical case_assignments (Drizzle on @workspace/db table)
   try {
     const [assign] = await r
       .select({
@@ -196,17 +201,27 @@ export async function canUserAccessCase(
       };
     }
   } catch (err) {
-    // case_assignments table may be missing; skip.
-    if (
-      err &&
-      typeof err === "object" &&
-      (err as { code?: unknown }).code !== "42P01"
-    ) {
-      throw err;
+    // If case_assignments table genuinely missing (42P01 undefined_table),
+    // we gracefully skip this path and continue to D.  Otherwise RE-THROW.
+    const info = extractDbErrorInfo(err);
+    const state = (info.sqlstate || info.code || "").toUpperCase();
+    if (state !== "42P01") throw err;
+  }
+
+  // D. optional legacy compatibility (available:false → skip harmlessly on 42703)
+  if (preloaded?.assignedLawyerId === null && preloaded?.assignedClerkId === null) {
+    const legacy = await tryLoadLegacyCaseAssignees(r, firmId, caseId);
+    if (legacy.available) {
+      if (legacy.assignedLawyerId === userId) {
+        return { ok: true, code: "OK", via: "assigned_lawyer" };
+      }
+      if (legacy.assignedClerkId === userId) {
+        return { ok: true, code: "OK", via: "assigned_clerk" };
+      }
     }
   }
 
-  // Purpose-specific permission fallback (e.g., read:cases on list)
+  // E. deny
   if (purpose === "view_case" && scope !== "documents_only") {
     return { ok: false, code: "NOT_CASE_ASSIGNED" };
   }

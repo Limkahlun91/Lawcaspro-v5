@@ -525,11 +525,15 @@ routerInternal.delete("/users/:userId", requireAuth, requireFirmUser, requirePer
 // ---------------------------------------------------------------------------
 
 routerInternal.get("/users/_self/effective-features", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike): Promise<void> => {
+  const startedAt = Date.now();
+  const tAuthMs = (req as any).timing?.sections?.authSessionMs ?? (req as any)._authMs ?? null;
+  const authMs = typeof tAuthMs === "number" ? tAuthMs : (req as any).timing?.startAt ? (startedAt - (req as any).timing.startAt) : null;
   const r = rdb(req);
   if (!req.firmId || !req.userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
+  const tenantContextStartedAt = Date.now();
   let roleName: string | null = null;
   let roleId: number | null = req.roleId ?? null;
   const cached = (req as any)._roleCache as
@@ -545,10 +549,12 @@ routerInternal.get("/users/_self/effective-features", requireAuth, requireFirmUs
       .limit(1);
     roleName = row?.name ?? null;
   }
+  const tenantContextMs = Date.now() - tenantContextStartedAt;
 
   // Load every registered feature key to get full coverage.
   const allKeys = Array.from(FEATURE_REGISTRY_MAP.keys()).slice().sort();
 
+  const entitlementStartedAt = Date.now();
   // Permission checker fallback to roles table.
   const permCache = new Map<string, boolean>();
   let permRows: { module: unknown; action: unknown; allowed: unknown }[] = [];
@@ -571,7 +577,9 @@ routerInternal.get("/users/_self/effective-features", requireAuth, requireFirmUs
       permCache.set(`${pr.module}:${pr.action}`, true);
     }
   }
+  const permissionMs = Date.now() - entitlementStartedAt;
 
+  const userFeatureRowsStartedAt = Date.now();
   const effective = await resolveUserFeatureAccessBulk({
     r,
     firmId: req.firmId,
@@ -582,6 +590,8 @@ routerInternal.get("/users/_self/effective-features", requireAuth, requireFirmUs
     permissionChecker: (mod: string, act: string) =>
       Promise.resolve(Boolean(permCache.get(`${mod}:${act}`))),
   });
+  const userFeatureRowsMs = Date.now() - userFeatureRowsStartedAt;
+  const resolveMs = permissionMs + userFeatureRowsMs;
 
   const explicitRows = await r
     .select({
@@ -596,7 +606,8 @@ routerInternal.get("/users/_self/effective-features", requireAuth, requireFirmUs
       ),
     );
 
-  res.json({
+  const serializeStartedAt = Date.now();
+  const payload = {
     userId: req.userId,
     firmId: req.firmId,
     effective,
@@ -604,6 +615,39 @@ routerInternal.get("/users/_self/effective-features", requireAuth, requireFirmUs
       featureKey: r2.featureKey,
       isEnabled: r2.isEnabled,
     })),
+  };
+  const serializeMs = Date.now() - serializeStartedAt;
+  const totalMs = Date.now() - startedAt;
+  const timings = {
+    authMs,
+    tenantContextMs,
+    entitlementMs: resolveMs,
+    userFeatureRowsMs,
+    permissionMs,
+    serializeMs,
+    totalMs,
+  };
+  try {
+    const log: any = (globalThis as any).__lawcasproRuntimeLogger ?? (req as any).logger ?? console;
+    if (log && typeof log.info === "function") {
+      log.info(
+        {
+          event: "effective_features_latency",
+          firmId: req.firmId,
+          userId: req.userId,
+          featureKeys: allKeys.length,
+          ...timings,
+        },
+        "effective_features_latency",
+      );
+    }
+  } catch {
+    /* logging never fails the request */
+  }
+
+  res.json({
+    ...payload,
+    timings,
   });
 });
 

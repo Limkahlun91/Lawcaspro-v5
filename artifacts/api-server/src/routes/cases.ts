@@ -285,11 +285,19 @@ async function canBypassCaseAssignment(r: DbConn, firmId: number, roleId: number
 
 async function enforceCaseAccess(r: DbConn, req: AuthRequest, res: ExpressResponse, caseId: number): Promise<boolean> {
   const firmId = req.firmId;
-  if (!firmId || !req.userId) {
-    res.status(403).json({ error: "Forbidden" });
+  const userId = req.userId;
+
+  // A. Firm/user context required
+  if (!firmId || !userId) {
+    res.status(403).json({
+      error: "Forbidden",
+      code: "FIRM_CONTEXT_REQUIRED",
+    });
     return false;
   }
 
+  // B. Firm + case must exist AND be in the same firm (also handles 404 correctly
+  //    We only need case existence here: canonical source-of-truth case_assignments runs inside.
   const [caseRow] = await r
     .select({ id: casesTable.id })
     .from(casesTable)
@@ -300,53 +308,50 @@ async function enforceCaseAccess(r: DbConn, req: AuthRequest, res: ExpressRespon
     return false;
   }
 
-  // Preload assigned* columns via SQL (cases schema drizzle may not expose them)
-  const preRows = await r.execute(sql`
-    SELECT assigned_lawyer_id AS "assignedLawyerId",
-           assigned_clerk_id  AS "assignedClerkId"
-    FROM cases
-    WHERE id = ${caseId} AND firm_id = ${firmId}
-    LIMIT 1
-  `);
-  const preArr = Array.isArray(preRows)
-    ? (preRows as unknown as { assignedLawyerId?: unknown; assignedClerkId?: unknown }[])
-    : ("rows" in (preRows as any)
-      ? ((preRows as any).rows as { assignedLawyerId?: unknown; assignedClerkId?: unknown }[])
-      : []);
-  const pre = preArr[0];
+  // C. Role name lookup
   const roleName = await getRoleName(r, firmId, req.roleId);
+
+  // D. ONE canonical access engine (management fast path + case_assignments table, legacy compat)
+  //    NOTE: we deliberately do NOT preload assigned_lawyer_id / assigned_clerk_id here.
+  //    Legacy columns are OPTIONAL — only tryLoadLegacyCaseAssignees() inside
+  //    canUserAccessCase handles ONLY when 42703 (undefined column) safely degrades
+  //    to compatibility mode.  All other errors propagate to 5xx.
   const access = await canUserAccessCase({
     r: r as any,
     firmId,
-    userId: req.userId,
+    userId,
     caseId,
     roleId: req.roleId ?? null,
     roleName,
     purpose: "view_case",
     preloaded: {
-      assignedLawyerId:
-        typeof pre?.assignedLawyerId === "number" ? pre.assignedLawyerId : null,
-      assignedClerkId:
-        typeof pre?.assignedClerkId === "number" ? pre.assignedClerkId : null,
       caseFirmId: firmId,
     },
   });
   if (access.ok) return true;
 
-  await writeAuditLog({
-    firmId,
-    actorId: req.userId,
-    actorType: req.userType ?? "firm_user",
-    action: "auth.forbidden.case_access_denied",
-    entityType: "case",
-    entityId: caseId,
-    detail:
-      (access.code ?? "unknown") +
-      (access.reason ? `: ${access.reason}` : "") +
-      (access.via ? ` via=${access.via}` : ""),
-    ipAddress: req.ip,
-    userAgent: req.headers["user-agent"],
-  }, { db: req.rlsDb });
+  // Keep safe audit
+  try {
+    await writeAuditLog(
+      {
+        firmId,
+        actorId: userId,
+        actorType: req.userType ?? "firm_user",
+        action: "auth.forbidden.case_access_denied",
+        entityType: "case",
+        entityId: caseId,
+        detail:
+          (access.code ?? "unknown") +
+          (access.reason ? `: ${access.reason}` : "") +
+          (access.via ? ` via=${access.via}` : ""),
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      },
+      { db: req.rlsDb },
+    );
+  } catch {
+    /* never throw audit failure never masks underlying access decision */
+  }
 
   res.status(403).json({
     error: "Forbidden",

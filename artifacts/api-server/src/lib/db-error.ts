@@ -270,3 +270,79 @@ export function databaseErrorLogToken(category: DatabaseAvailabilityCategory): s
   if (category === "DB_UNAVAILABLE") return "api.db_unavailable";
   return "api.db_error";
 }
+
+// ---------------------------------------------------------------------------
+// C1-B2 Gate 11: Safe structured case-route DB error observability.
+//
+// Emits a structured log line with classification + metadata ONLY.
+// NEVER includes: SQL statement, SQL params, DATABASE_URL, tokens, passwords,
+// NRIC, TIN, bank details, or any client confidential data.
+// ---------------------------------------------------------------------------
+
+export type SafeCaseRouteErrContext = {
+  requestId?: string | null;
+  method?: string | null;
+  route?: string | null;
+  queryName?: string | null;
+  firmId?: number | null;
+  caseId?: number | null;
+  userId?: number | null;
+};
+
+const redacted = "REDACTED_CASE_DB_ERROR";
+
+export function buildSafeCaseRouteErrorMeta(
+  ctx: SafeCaseRouteErrContext,
+  err: unknown,
+): {
+  errorCategory: DatabaseAvailabilityCategory;
+  requestId: string | null;
+  method: string | null;
+  route: string | null;
+  queryName: string | null;
+  firmId: number | null;
+  caseId: number | null;
+  userId: number | null;
+  sqlstate: string | null;
+  code: string | null;
+  table: string | null;
+  column: string | null;
+  constraint: string | null;
+  redacted: true;
+} {
+  const info = extractDbErrorInfo(err);
+  return {
+    errorCategory: classifyDatabaseError(err),
+    requestId: ctx.requestId ?? null,
+    method: ctx.method ?? null,
+    route: ctx.route ?? null,
+    queryName: ctx.queryName ?? redacted,
+    firmId: typeof ctx.firmId === "number" ? ctx.firmId : null,
+    caseId: typeof ctx.caseId === "number" ? ctx.caseId : null,
+    userId: typeof ctx.userId === "number" ? ctx.userId : null,
+    sqlstate: info.sqlstate ?? info.sqlState ?? null,
+    code: info.code ?? null,
+    table: info.table ?? null,
+    column: info.column ?? null,
+    constraint: info.constraint ?? null,
+    redacted: true,
+  };
+}
+
+export function emitSafeCaseRouteDbError(
+  logger: { warn?: (meta: Record<string, unknown>, msg?: string) => void; error?: (meta: Record<string, unknown>, msg?: string) => void } | null | undefined,
+  ctx: SafeCaseRouteErrContext,
+  err: unknown,
+): void {
+  const meta = buildSafeCaseRouteErrorMeta(ctx, err);
+  const token = databaseErrorLogToken(meta.errorCategory);
+  try {
+    if (meta.errorCategory === "AUTHZ_ERROR" || meta.errorCategory === "DATA_ERROR" || meta.errorCategory === "INTEGRITY_ERROR") {
+      logger?.warn?.(meta, token);
+    } else {
+      logger?.error?.(meta, token);
+    }
+  } catch {
+    /* logging never fails the request */
+  }
+}

@@ -21,7 +21,7 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { Plus, Search, Save, Trash2, Building2, ShieldCheck, ShieldOff, Monitor, LogOut, Pencil, X } from "lucide-react";
+import { Plus, Search, Save, Trash2, Building2, ShieldCheck, ShieldOff, Monitor, LogOut, Pencil, X, ArrowUpRight } from "lucide-react";
 import { Link, useSearch } from "wouter";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
@@ -75,6 +75,33 @@ const PERMISSION_CATALOG: Array<{ module: string; actions: string[] }> = [
   { module: "users", actions: ["read", "create", "update", "delete"] },
   { module: "roles", actions: ["read", "create", "update", "delete"] },
   { module: "developer_portal", actions: ["read", "export", "message"] },
+  { module: "hr", actions: ["read", "manage"] },
+  { module: "hr_enabled", actions: ["view"] },
+  { module: "hr_dashboard", actions: ["read", "export"] },
+  { module: "hr_settings", actions: ["view", "manage_organisation", "manage_approval_flow", "manage_feature_flags"] },
+  { module: "hr_employee", actions: ["list", "view", "create", "edit", "status_change", "terminate", "reactivate", "view_salary", "edit_salary", "view_bank", "edit_bank"] },
+  { module: "hr_identity_records", actions: ["view", "edit"] },
+  { module: "hr_medical_records", actions: ["view", "edit"] },
+  { module: "hr_disciplinary", actions: ["view", "create", "close"] },
+  { module: "hr_attendance", actions: ["clock", "view_own", "view_all", "manage", "adjust", "approve_exception", "create", "read", "update"] },
+  { module: "hr_leave_balance", actions: ["view_all", "adjust"] },
+  { module: "hr_leave", actions: ["apply", "view_own", "cancel_own", "view_all", "approve", "approve_final", "manage_balance", "create", "read", "update"] },
+  { module: "hr_claim", actions: ["submit", "view_own", "cancel_own", "view_all", "approve", "approve_final", "send_to_payroll", "send_to_accounting", "mark_paid", "create", "read", "update"] },
+  { module: "hr_payroll", actions: ["view", "calculate", "submit", "approve", "lock", "request_payment", "reverse", "adjust", "supplementary_create", "manage_settings", "read", "create", "update"] },
+  { module: "hr_assets", actions: ["view", "manage", "assign", "receive_return"] },
+  { module: "hr_recruitment", actions: ["view", "manage", "hire"] },
+  { module: "hr_performance", actions: ["view", "view_all", "manage"] },
+  { module: "hr_training", actions: ["view", "manage"] },
+  { module: "hr_documents", actions: ["view", "upload", "manage", "view_confidential", "view_sensitive"] },
+  { module: "hr_onboarding", actions: ["manage"] },
+  { module: "hr_offboarding", actions: ["initiate", "manage", "final_approve"] },
+  { module: "hr_approval", actions: ["delegate", "reassign", "override"] },
+  { module: "hr_reports", actions: ["view_headcount", "view_turnover", "view_leave_summary", "view_payroll_summary", "view_cost_analysis"] },
+  { module: "hr_notifications", actions: ["view_overdue"] },
+  { module: "hr_self_service", actions: ["read", "create", "view_profile", "edit_profile"] },
+  { module: "hr_payslip", actions: ["view_own"] },
+  { module: "hr_document", actions: ["view_own"] },
+  { module: "hr_notification", actions: ["view_own"] },
 ];
 
 type AuthSession = {
@@ -2788,44 +2815,16 @@ function IntegrationsTab() {
             </div>
           ) : (
             <div className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <Label className="text-xs text-slate-500">HIMS Base URL</Label>
-                  <Input
-                    placeholder="https://hims.example.com/api"
-                    value={himsBaseUrl}
-                    onChange={(e) => setHimsBaseUrl(e.target.value)}
-                  />
+              <div className="text-sm text-slate-700 bg-blue-50/60 border border-blue-200/70 rounded-lg p-4">
+                <div className="font-medium text-slate-900 mb-1">HIMS / eSPA Credentials</div>
+                <div className="text-xs text-slate-600 mb-2">
+                  Credential and connection management has moved to the HIMS / eSPA workspace to avoid duplicate configuration paths.
                 </div>
-                <div>
-                  <Label className="text-xs text-slate-500">API Key ID</Label>
-                  <Input
-                    placeholder="AK-..."
-                    value={himsApiKeyId}
-                    onChange={(e) => setHimsApiKeyId(e.target.value)}
-                  />
-                </div>
-                <div className="md:col-span-2">
-                  <Label className="text-xs text-slate-500">API Secret / Credential Key (encrypted backend only — never shown in plaintext)</Label>
-                  <div className="flex gap-2">
-                    <Input
-                      readOnly
-                      value={himsApiKeyMasked}
-                      className="font-mono tracking-widest text-slate-500 select-none"
-                    />
-                    <Button
-                      variant="outline"
-                      onClick={() => {
-                        setHimsApiKeyMasked("•••••••••••• (rotate requested)");
-                        toast({ title: "Regenerate requested — backend will rotate the stored credential when saved." });
-                      }}
-                    >
-                      Rotate
-                    </Button>
-                  </div>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Credentials are encrypted at rest and never exposed to the client. The masked placeholder shown here only indicates whether a record exists.
-                  </p>
+                <Link href="/app/hims" className="text-xs font-medium text-blue-700 hover:text-blue-900 underline-offset-2 hover:underline inline-flex items-center gap-1">
+                  Open HIMS / eSPA workspace <ArrowUpRight className="w-3 h-3" />
+                </Link>
+                <div className="mt-2 text-[11px] text-slate-500">
+                  Project/phase mappings and status-check settings below continue to be configured here.
                 </div>
               </div>
             </div>
@@ -2905,11 +2904,11 @@ function IntegrationsTab() {
             )}
           </div>
 
-          {canConfigureHimsCredentials.enabled && (
+          {canConfigureHimsMapping.enabled && (
             <div className="flex justify-end">
               <Button onClick={() => saveHimsSettings.mutate()} disabled={savingHims}>
                 <Save className="w-4 h-4 mr-2" />
-                {savingHims ? "Saving..." : "Save HIMS Settings"}
+                {savingHims ? "Saving..." : "Save HIMS Mapping Settings"}
               </Button>
             </div>
           )}

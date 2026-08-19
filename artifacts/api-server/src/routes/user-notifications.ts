@@ -145,12 +145,17 @@ router.get("/user-notifications/unread-count", requireAuth, requireFirmUser, asy
 });
 
 router.get("/user-notifications/summary", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const startedAt = Date.now();
+  const tAuthMs = (req as any).timing?.sections?.authSessionMs ?? (req as any)._authMs ?? null;
+  const authMs = typeof tAuthMs === "number" ? tAuthMs : (req as any).timing?.startAt ? (startedAt - (req as any).timing.startAt) : null;
+  const tenantContextMs = 0;
   try {
     const now = new Date();
     const firmId = req.firmId!;
     const userId = req.userId!;
     const baseWhere = and(eq(userNotificationsTable.firmId, firmId), eq(userNotificationsTable.userId, userId));
     const activeWhere = and(baseWhere, inArray(userNotificationsTable.status, ACTIVE_STATUSES as unknown as string[]));
+    const queryStartedAt = Date.now();
     const total = await rdb(req).$count(userNotificationsTable, baseWhere);
     const unread = await rdb(req).$count(userNotificationsTable, and(baseWhere, eq(userNotificationsTable.status, "unread")));
     const activeDistinctCount = await rdb(req).$count(userNotificationsTable, activeWhere);
@@ -178,21 +183,44 @@ router.get("/user-notifications/summary", requireAuth, requireFirmUser, async (r
     const byStatusRows = await rdb(req).select({ status: userNotificationsTable.status, count: count() }).from(userNotificationsTable).where(baseWhere).groupBy(userNotificationsTable.status);
     const bySeverityRows = await rdb(req).select({ severity: userNotificationsTable.severity, count: count() }).from(userNotificationsTable).where(activeWhere).groupBy(userNotificationsTable.severity);
     const byScopeRows = await rdb(req).select({ targetScope: userNotificationsTable.targetScope, count: count() }).from(userNotificationsTable).where(activeWhere).groupBy(userNotificationsTable.targetScope);
+    const queryMs = Date.now() - queryStartedAt;
+    const totalMs = Date.now() - startedAt;
+    const timings = { authMs, tenantContextMs, queryMs, totalMs };
+    try {
+      const log: any = (globalThis as any).__lawcasproRuntimeLogger ?? (req as any).logger ?? console;
+      if (log && typeof log.info === "function") {
+        log.info(
+          {
+            event: "notification_summary_latency",
+            firmId,
+            userId,
+            total,
+            ...timings,
+          },
+          "notification_summary_latency",
+        );
+      }
+    } catch {
+      /* logging never fails the request */
+    }
     res.json({
       total, unread, urgent, escalated, overdue, activeDistinctCount, monitorUniqueCount,
       overlap: { criticalOverdue, criticalEscalated, overdueEscalated, allThree },
       byStatus: Object.fromEntries(byStatusRows.map(r => [r.status ?? "unknown", Number(r.count)])),
       bySeverity: Object.fromEntries(bySeverityRows.map(r => [r.severity ?? "unknown", Number(r.count)])),
       byTargetScope: Object.fromEntries(byScopeRows.map(r => [r.targetScope ?? "user", Number(r.count)])),
+      timings,
     });
   } catch (e) {
     const diag = emitNotifQueryErrorLog(req, "/user-notifications/summary", e);
+    const totalMs = Date.now() - startedAt;
     res.status(diag.errorCode === "NOTIFICATION_SCHEMA_MISMATCH" ? 503 : 500).json({
       error: diag.errorCode,
       errorClass: diag.errorCode === "NOTIFICATION_SCHEMA_MISMATCH" ? "schema" : "query",
       sqlState: diag.sqlState ?? undefined,
       schemaObject: diag.schemaObject.table || diag.schemaObject.column || diag.schemaObject.constraint ? diag.schemaObject : undefined,
       message: "summary_unavailable",
+      timings: { authMs, tenantContextMs, queryMs: null, totalMs },
     });
   }
 });
