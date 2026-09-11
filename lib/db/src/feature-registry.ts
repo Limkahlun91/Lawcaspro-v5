@@ -282,7 +282,7 @@ const EINVOICE: FeatureDefinition[] = asFeat("einvoice", null, {}, [
 
 const COMMUNICATIONS: FeatureDefinition[] = asFeat("communications", null, { routeHint: "/app/communication/email" }, [
   { featureKey: "module.communications", name: "Communications", valueType: "boolean" },
-  { featureKey: "communications.email", name: "Email Control", parentFeatureKey: "module.communications", routeHint: "/app/communication/email", jobGuards: ["email_sync"] },
+  { featureKey: "communications.email", name: "Email Control", parentFeatureKey: "module.communications", routeHint: "/app/communication/email", jobGuards: ["email_sync"], defaultValue: false, status: "inactive", firmControlledOverride: false, description: "Future phase feature. Temporarily disabled until Email Control is production ready." },
   { featureKey: "communications.email.settings", name: "Email Settings", parentFeatureKey: "communications.email" },
   { featureKey: "communications.email.m365", name: "Microsoft 365", parentFeatureKey: "communications.email.settings" },
   { featureKey: "communications.email.imap", name: "IMAP", parentFeatureKey: "communications.email.settings" },
@@ -299,7 +299,7 @@ const COMMUNICATIONS: FeatureDefinition[] = asFeat("communications", null, { rou
   { featureKey: "communications.email.task", name: "Email → Task", parentFeatureKey: "communications.email", dependencies: ["cases.tasks"] },
   { featureKey: "communications.email.sync", name: "Sync", parentFeatureKey: "communications.email", jobGuards: ["email_sync"] },
   { featureKey: "communications.email.logs", name: "Logs", parentFeatureKey: "communications.email" },
-  { featureKey: "communications.whatsapp", name: "WhatsApp Inbox", parentFeatureKey: "module.communications", routeHint: "/app/communication/whatsapp" },
+  { featureKey: "communications.whatsapp", name: "WhatsApp Inbox", parentFeatureKey: "module.communications", routeHint: "/app/communication/whatsapp", defaultValue: false, status: "inactive", firmControlledOverride: false, description: "Future phase feature. Temporarily disabled until WhatsApp integration is production ready." },
   { featureKey: "communications.hub", name: "Hub Unified", parentFeatureKey: "module.communications", routeHint: "/app/hub" },
 ]);
 

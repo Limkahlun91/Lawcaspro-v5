@@ -397,78 +397,89 @@ export function SidebarBody({
 
   const navGroups = navGroupsForUser();
 
-  const requireParentModuleGate = (
-    featureKey: string | undefined,
-    enabled: (k: string) => boolean,
-  ): boolean => {
-    if (!featureKey) return true;
-    // module.hr kill-switch: every hr.* child requires parent module.hr
-    if (featureKey.startsWith("hr.") && featureKey !== "module.hr") {
-      if (!enabled("module.hr")) return false;
-    }
-    return true;
-  };
+  type EffectiveUserFeaturesMap = ReturnType<typeof useEffectiveUserFeaturesMap>;
+
+  const resolvePermissionForSidebar = useCallback(
+    (permModule: string, permAction: string): boolean => {
+      const permOk = hasPermission(user, permModule, permAction);
+      if (permOk) return true;
+      const permLoadState = getPermissionLoadState(user);
+      const allowLkg = permLoadState === "NOT_LOADED" || permLoadState === "TRANSIENT_ERROR";
+      if (!allowLkg) return false;
+      if (typeof window === "undefined") return false;
+      try {
+        const cachedWrap = (window as any).__lawcasproCachedEffectiveUser as
+          | { firmId: unknown; userId: unknown; fetchedAt: number; data: AuthUser }
+          | undefined;
+        if (
+          !cachedWrap ||
+          typeof cachedWrap !== "object" ||
+          !("data" in cachedWrap) ||
+          !(cachedWrap as any).data
+        ) {
+          return false;
+        }
+        const sameFirm =
+          (sidebarFid === null && (cachedWrap as any).firmId === null) ||
+          (sidebarFid !== null && String((cachedWrap as any).firmId) === String(sidebarFid));
+        const sameUser =
+          (sidebarUid === null && (cachedWrap as any).userId === null) ||
+          (sidebarUid !== null && String((cachedWrap as any).userId) === String(sidebarUid));
+        if (!sameFirm || !sameUser) return false;
+        return hasPermission((cachedWrap as any).data, permModule, permAction);
+      } catch {
+        return false;
+      }
+    },
+    [user, sidebarFid, sidebarUid],
+  );
+
+  const resolveFeatureForSidebar = useCallback(
+    (featureKey: string): boolean => {
+      const freshEnabled = userFeatures.enabled(featureKey);
+      if (!userFeatures.transientError) {
+        return !!freshEnabled;
+      }
+      if (typeof window === "undefined") return false;
+      try {
+        type CachedFeatures = {
+          firmId: unknown;
+          userId: unknown;
+          fetchedAt: number;
+          data: { effective?: Record<string, { effectiveEnabled?: boolean } | undefined> } | undefined;
+        };
+        const cached = (window as any).__lawcasproCachedEffectiveFeatures as
+          | CachedFeatures
+          | undefined;
+        if (!cached || !cached.data || typeof cached !== "object") return false;
+        const sameFirm =
+          (sidebarFid === null && cached.firmId === null) ||
+          (sidebarFid !== null && String(cached.firmId) === String(sidebarFid));
+        const sameUser =
+          (sidebarUid === null && cached.userId === null) ||
+          (sidebarUid !== null && String(cached.userId) === String(sidebarUid));
+        if (!sameFirm || !sameUser) return false;
+        const fallback = cached.data.effective?.[featureKey];
+        return !!fallback?.effectiveEnabled;
+      } catch {
+        return false;
+      }
+    },
+    [userFeatures, sidebarFid, sidebarUid],
+  );
 
   const visibleNavGroups = navGroups
     .map((g) => ({
       key: g.key,
       label: g.label,
       items: g.items.filter((i) => {
-        type UserEffectiveFeatureBundleLike = { effective?: Record<string, { effectiveEnabled?: boolean } | undefined> };
-        const permOk = hasPermission(user, i.perm[0], i.perm[1]);
-        const permLoadState = getPermissionLoadState(user);
-        const allowLkgPerm = !permOk && (permLoadState === "NOT_LOADED" || permLoadState === "TRANSIENT_ERROR");
-        if (allowLkgPerm) {
-          if (typeof window !== "undefined") {
-            try {
-              const cachedWrap = (window as any).__lawcasproCachedEffectiveUser as {
-                firmId: unknown; userId: unknown; fetchedAt: number; data: AuthUser;
-              } | AuthUser | undefined;
-              let cachedUser: AuthUser | undefined;
-              if (cachedWrap && typeof cachedWrap === "object") {
-                if ("data" in cachedWrap && (cachedWrap as any).data) {
-                  const sameFirm = (sidebarFid === null && (cachedWrap as any).firmId === null) ||
-                    (sidebarFid !== null && String((cachedWrap as any).firmId) === String(sidebarFid));
-                  const sameUser = (sidebarUid === null && (cachedWrap as any).userId === null) ||
-                    (sidebarUid !== null && String((cachedWrap as any).userId) === String(sidebarUid));
-                  if (sameFirm && sameUser) cachedUser = (cachedWrap as any).data;
-                } else {
-                  cachedUser = cachedWrap as AuthUser;
-                }
-              }
-              if (cachedUser) {
-                const fallback = hasPermission(cachedUser, i.perm[0], i.perm[1]);
-                if (fallback) return true;
-              }
-            } catch {
-            }
-          }
+        const permissionAllowed = resolvePermissionForSidebar(i.perm[0], i.perm[1]);
+        if (!permissionAllowed) return false;
+        if (i.featureKey?.startsWith("hr.")) {
+          if (!resolveFeatureForSidebar("module.hr")) return false;
         }
-        if (!permOk) return false;
-        if (!requireParentModuleGate(i.featureKey, userFeatures.enabled)) return false;
         if (i.featureKey) {
-          const featureOk = userFeatures.enabled(i.featureKey);
-          if (!featureOk && userFeatures.transientError) {
-            if (typeof window !== "undefined") {
-              try {
-                const cached = (window as any).__lawcasproCachedEffectiveFeatures as {
-                  firmId: unknown; userId: unknown; fetchedAt: number; data: UserEffectiveFeatureBundleLike | undefined;
-                } | undefined;
-                if (cached && typeof cached === "object" && cached.data) {
-                  const sameFirm = (sidebarFid === null && cached.firmId === null) ||
-                    (sidebarFid !== null && String(cached.firmId) === String(sidebarFid));
-                  const sameUser = (sidebarUid === null && cached.userId === null) ||
-                    (sidebarUid !== null && String(cached.userId) === String(sidebarUid));
-                  if (sameFirm && sameUser) {
-                    const fallback = cached.data.effective?.[i.featureKey];
-                    if (fallback?.effectiveEnabled) return true;
-                  }
-                }
-              } catch {
-              }
-            }
-          }
-          if (!featureOk) return false;
+          if (!resolveFeatureForSidebar(i.featureKey)) return false;
         }
         if (typeof i.roleCheck === "function" && !i.roleCheck(ctx)) return false;
         return true;

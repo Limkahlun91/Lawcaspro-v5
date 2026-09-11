@@ -57,6 +57,94 @@ import { logger } from "../lib/logger.js";
 const DEFAULT_TTL_MS = 60_000; // 1 min
 const MAX_CACHE_ENTRY_BYTES = 2_000_000; // ~2MB per firm entry guard; soft.
 
+/**
+ * CANONICAL SAFETY CEILING (Part 2 §2 Hard Kill-Switch)
+ *
+ * The TypeScript FEATURE_REGISTRY is the developer-managed SOURCE OF TRUTH
+ * for hard safety states. The platform_features DB table is only a MIRROR /
+ * seeded cache. A stale DB row must never weaken a kill-switch declared in
+ * the canonical registry.
+ *
+ * For every feature key we apply the following policy:
+ *   - canonical.status === "inactive" → ALWAYS inactive (DB cannot re-activate)
+ *   - canonical.status === "emergency_disabled" → ALWAYS emergency_disabled
+ *   - canonical.founderOnly === true → ALWAYS founderOnly
+ *   - canonical.firmControlledOverride === false → ALWAYS NOT firm-overridable
+ *     (enforced separately at write-path endpoints via assertFirmOverrideAllowed)
+ *
+ * This function is deterministic, pure, and side-effect free.
+ */
+function applyCanonicalSafetyCeiling<T extends {
+  featureKey: string;
+  status: string | null;
+  founderOnly: boolean;
+}>(row: T, canonical?: FeatureDefinition): T {
+  if (!canonical) return row;
+  const out = { ...row };
+  // Hard ceiling: inactive/emergency_disabled in canonical registry CANNOT be
+  // overridden by a stale DB mirror saying "active". The other direction is
+  // allowed: DB emergency_disabled can still trigger via the route handler
+  // when canonical says active (founder emergency toggle path).
+  if (canonical.status === "inactive") {
+    out.status = "inactive";
+  } else if (canonical.status === "emergency_disabled") {
+    out.status = "emergency_disabled";
+  }
+  // Hard ceiling: founderOnly restrictions can never be removed by DB mirror
+  if (canonical.founderOnly === true) {
+    out.founderOnly = true;
+  }
+  return out;
+}
+
+/**
+ * Override-write validation — centralized gate for ALL paths that create or
+ * edit firm_entitlement_overrides rows (including permanent, temporary,
+ * emergency, single, alias, bulk).
+ *
+ * Policy:
+ *   - mode === "inherit" / "plan_default" / reset/expire: ALWAYS ALLOWED
+ *     (this only clears historical overrides and never strengthens entitlement).
+ *   - mode === "enabled" | "disabled": block when canonical registry says
+ *     firmControlledOverride === false (developer-declared hard ceiling).
+ *
+ * Throws ApiError 409 FEATURE_OVERRIDE_NOT_ALLOWED with actionable message.
+ */
+export type OverrideWriteMode = "enabled" | "disabled" | "inherit" | "plan_default" | "reset";
+
+export function assertFirmOverrideAllowed(
+  featureKey: string,
+  mode: Exclude<OverrideWriteMode, "reset"> | OverrideWriteMode,
+): void {
+  // reset/inherit/plan_default → allowed (clears historical rows, no harm)
+  if (mode === "inherit" || mode === "plan_default" || mode === "reset") return;
+
+  const def = getFeatureDefinition(featureKey);
+  if (!def) {
+    // Unknown feature → let downstream isFeatureRegistered throw 400/404
+    return;
+  }
+  if (def.firmControlledOverride === false) {
+    throw new ApiError({
+      status: 409,
+      code: "FEATURE_OVERRIDE_NOT_ALLOWED",
+      message:
+        `Feature "${def.featureKey}" (${def.name}) is declared as non-overridable in the canonical registry. ` +
+        `firmControlledOverride=false prevents creating or editing an enabled/disabled firm override. ` +
+        `Use mode=inherit / plan_default to clear any existing historical override.`,
+      retryable: false,
+      details: {
+        featureKey: def.featureKey,
+        firmControlledOverride: def.firmControlledOverride,
+        canonicalStatus: def.status ?? "active",
+        allowedWriteModes: ["inherit", "plan_default", "reset"],
+        rejectedMode: mode,
+      },
+      suggestion: `Either clear the override using inherit/plan_default, or contact platform engineering to update the canonical feature registry (FEATURE_REGISTRY in lib/db/src/feature-registry.ts).`,
+    });
+  }
+}
+
 interface CacheEntry {
   firmId: number;
   actingAsFounder: boolean;
@@ -352,7 +440,12 @@ export async function resolveEntitlementsBulk(
       .from(platformFeaturesTable)
       .where(inArray(platformFeaturesTable.featureKey, Array.from(need)));
     const rows = await q;
-    for (const r of rows) featuresById.set(r.featureKey, r);
+    for (const r of rows) {
+      // DB mirror must NEVER weaken canonical kill-switch.
+      // Apply canonical safety ceiling to every real DB row before trusting it.
+      const safe = applyCanonicalSafetyCeiling(r, getFeatureDefinition(r.featureKey));
+      featuresById.set(r.featureKey, safe);
+    }
     // ── If a row is missing in DB (registry has it, DB not seeded yet), fabricate from registry so resolver works.
     for (const k of need) {
       if (!featuresById.has(k)) {
@@ -701,6 +794,23 @@ function resolveOne(ctx: ResolveOneCtx): EntitlementResult {
   const stackNext = [...stack, key];
 
   const feature = ctx.featuresById.get(key);
+
+  // --- Layer 0 (CANONICAL SAFETY CEILING — APPLIED BEFORE TRUSTING DB MIRROR) ---
+  // Belt-and-suspenders: Even if applyCanonicalSafetyCeiling was already applied
+  // during DB row ingestion, also re-check the canonical definition here so no
+  // future code path that bypasses ingestion can weaken kill-switches.
+  const canonicalDef = getFeatureDefinition(key);
+  if (canonicalDef) {
+    if (canonicalDef.status === "inactive") {
+      return deny(key, "feature_inactive", "Feature globally inactive (canonical registry)");
+    }
+    if (canonicalDef.status === "emergency_disabled") {
+      return deny(key, "global_emergency_disabled", "Feature disabled by platform emergency (canonical registry)");
+    }
+    if (canonicalDef.founderOnly === true && !ctx.actingAsFounder) {
+      return deny(key, "founder_only_denied", "Feature is founder-only (canonical registry)");
+    }
+  }
 
   // --- Layer 1: feature exists and is globally active ---
   if (!feature) return deny(key, "feature_not_found", "Feature not registered in platform_features");

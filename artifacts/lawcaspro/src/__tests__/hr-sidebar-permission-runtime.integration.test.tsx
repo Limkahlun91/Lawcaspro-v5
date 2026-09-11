@@ -160,6 +160,10 @@ beforeAll(() => {
 afterEach(() => {
   cleanup();
   (globalThis as any).__lawcaspro_hr_test_features = null;
+  if (typeof window !== "undefined") {
+    (window as any).__lawcasproCachedEffectiveUser = null;
+    (window as any).__lawcasproCachedEffectiveFeatures = null;
+  }
 });
 
 type MinimalAuthUser = {
@@ -239,5 +243,135 @@ describe("R2A HR SIDEBAR PERMISSION RENDER PROOF (SidebarBody production compone
     expect(linkExists(HR_DASHBOARD_LINK, "HR Dashboard")).toBe(false);
     expect(linkExists(HR_EMPLOYEES_LINK, "Employees")).toBe(false);
     expect(linkExists(MY_HR_LINK, "My HR")).toBe(true);
+  });
+});
+
+function buildFeaturesTransient(spec: FeaturesSpec, transient = true): EffectiveUserFeaturesMap {
+  const base = buildFeatures(spec);
+  return {
+    ...base,
+    enabled: transient ? (() => false) : base.enabled,
+    transientError: transient,
+  } as unknown as EffectiveUserFeaturesMap;
+}
+
+function setCachedSameIdentityPermissionUser(firmId: number, userId: number, userData: MinimalAuthUser) {
+  if (typeof window === "undefined") return;
+  (window as any).__lawcasproCachedEffectiveUser = {
+    firmId,
+    userId,
+    fetchedAt: Date.now(),
+    data: userData,
+  };
+}
+
+function setCachedSameIdentityFeatures(firmId: number, userId: number, entries: Array<[string, boolean]>) {
+  if (typeof window === "undefined") return;
+  const effective: Record<string, { effectiveEnabled: boolean }> = {};
+  for (const [k, v] of entries) effective[k] = { effectiveEnabled: v };
+  (window as any).__lawcasproCachedEffectiveFeatures = {
+    firmId,
+    userId,
+    fetchedAt: Date.now(),
+    data: { effective },
+  };
+}
+
+describe("PART A CLOSURE — HR SIDEBAR LKG DECISION ORDER (fresh false wins, identity gates)", () => {
+  it("HR-LKG-1 permission LKG allowed same-user cached hr:read=true BUT fresh authoritative module.hr=false → HR admin HIDDEN", async () => {
+    const fid = 301;
+    const uid = 9001;
+    setFeatures({ moduleHr: false, hrEnabled: true, hrDashboard: true, hrEmployees: true, hrSelfService: true });
+    setCachedSameIdentityPermissionUser(fid, uid, makeUser(
+      "Partner",
+      [{ module: "hr", action: "read" }, { module: "dashboard", action: "read" }],
+      { firmId: fid, id: uid },
+    ));
+    renderAuth(makeUser("Partner", undefined as any, { firmId: fid, id: uid }));
+    expect(linkExists(HR_DASHBOARD_LINK, "HR Dashboard")).toBe(false);
+    expect(linkExists(HR_EMPLOYEES_LINK, "Employees")).toBe(false);
+  });
+
+  it("HR-LKG-2 feature transient + same identity cached module.hr=true hr.dashboard=true AND valid permission=true → HR Dashboard VISIBLE", async () => {
+    const fid = 302;
+    const uid = 9002;
+    (globalThis as any).__lawcaspro_hr_test_features = buildFeaturesTransient(
+      { moduleHr: false, hrEnabled: false, hrDashboard: false, hrEmployees: false, hrSelfService: false },
+      true,
+    );
+    setCachedSameIdentityFeatures(fid, uid, [
+      ["module.hr", true],
+      ["hr.dashboard", true],
+      ["hr.employees", true],
+      ["hr.self_service", false],
+    ]);
+    renderAuth(makeUser("Partner", [{ module: "hr", action: "read" }, { module: "dashboard", action: "read" }, { module: "cases", action: "read" }], { firmId: fid, id: uid }));
+    expect(linkExists(HR_DASHBOARD_LINK, "HR Dashboard")).toBe(true);
+    expect(linkExists(HR_EMPLOYEES_LINK, "Employees")).toBe(true);
+  });
+
+  it("HR-LKG-3 feature transient + cached feature belongs to OTHER USER → cache IGNORED → HR HIDDEN", async () => {
+    const fid = 303;
+    const uidCurrent = 9003;
+    const uidOther = 9999;
+    (globalThis as any).__lawcaspro_hr_test_features = buildFeaturesTransient(
+      { moduleHr: false, hrEnabled: false, hrDashboard: false, hrEmployees: false, hrSelfService: false },
+      true,
+    );
+    setCachedSameIdentityFeatures(fid, uidOther, [
+      ["module.hr", true],
+      ["hr.dashboard", true],
+      ["hr.employees", true],
+    ]);
+    renderAuth(makeUser("Partner", [{ module: "hr", action: "read" }, { module: "dashboard", action: "read" }, { module: "cases", action: "read" }], { firmId: fid, id: uidCurrent }));
+    expect(linkExists(HR_DASHBOARD_LINK, "HR Dashboard")).toBe(false);
+    expect(linkExists(HR_EMPLOYEES_LINK, "Employees")).toBe(false);
+  });
+
+  it("HR-LKG-4 feature transient + cached feature belongs to OTHER FIRM → cache IGNORED → HR HIDDEN", async () => {
+    const fidCurrent = 304;
+    const fidOther = 9999;
+    const uid = 9004;
+    (globalThis as any).__lawcaspro_hr_test_features = buildFeaturesTransient(
+      { moduleHr: false, hrEnabled: false, hrDashboard: false, hrEmployees: false, hrSelfService: false },
+      true,
+    );
+    setCachedSameIdentityFeatures(fidOther, uid, [
+      ["module.hr", true],
+      ["hr.dashboard", true],
+      ["hr.employees", true],
+    ]);
+    renderAuth(makeUser("Partner", [{ module: "hr", action: "read" }, { module: "dashboard", action: "read" }, { module: "cases", action: "read" }], { firmId: fidCurrent, id: uid }));
+    expect(linkExists(HR_DASHBOARD_LINK, "HR Dashboard")).toBe(false);
+    expect(linkExists(HR_EMPLOYEES_LINK, "Employees")).toBe(false);
+  });
+
+  it("HR-LKG-5 fresh authoritative module.hr=false + old cached module.hr=true → fresh FALSE wins → HR HIDDEN", async () => {
+    const fid = 305;
+    const uid = 9005;
+    setFeatures({ moduleHr: false, hrEnabled: true, hrDashboard: true, hrEmployees: true, hrSelfService: true });
+    setCachedSameIdentityFeatures(fid, uid, [
+      ["module.hr", true],
+      ["hr.dashboard", true],
+      ["hr.employees", true],
+    ]);
+    renderAuth(makeUser("Partner", [{ module: "hr", action: "read" }, { module: "dashboard", action: "read" }], { firmId: fid, id: uid }));
+    expect(linkExists(HR_DASHBOARD_LINK, "HR Dashboard")).toBe(false);
+    expect(linkExists(HR_EMPLOYEES_LINK, "Employees")).toBe(false);
+    expect(linkExists(MY_HR_LINK, "My HR")).toBe(false);
+  });
+
+  it("HR-LKG-6 fresh module.hr=true + hr.dashboard=false + old cached hr.dashboard=true → child fresh FALSE wins → Dashboard HIDDEN", async () => {
+    const fid = 306;
+    const uid = 9006;
+    setFeatures({ moduleHr: true, hrEnabled: true, hrDashboard: false, hrEmployees: true, hrSelfService: true });
+    setCachedSameIdentityFeatures(fid, uid, [
+      ["module.hr", true],
+      ["hr.dashboard", true],
+      ["hr.employees", true],
+    ]);
+    renderAuth(makeUser("Partner", [{ module: "hr", action: "read" }, { module: "dashboard", action: "read" }, { module: "cases", action: "read" }], { firmId: fid, id: uid }));
+    expect(linkExists(HR_DASHBOARD_LINK, "HR Dashboard")).toBe(false);
+    expect(linkExists(HR_EMPLOYEES_LINK, "Employees")).toBe(true);
   });
 });

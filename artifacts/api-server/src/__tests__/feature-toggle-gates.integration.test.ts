@@ -394,13 +394,18 @@ describe("PART3 3L — Feature Toggle Integration Gates (PGlite real tables)", (
       _resetEntitlementCacheForTests();
     });
 
-    it("GATE3 — Before: communications.email enabled", async () => {
+    it("GATE3 — Before: communications.email ALWAYS disabled (registry status=inactive overrides plan+default)", async () => {
       if (isFeatureRegistered("communications.email")) {
-        expect(await canUseFeature(FIRM_ID, "communications.email", { conn: r as any })).toBe(true);
+        const def = getFeatureDefinition("communications.email");
+        expect(def?.status).toBe("inactive");
+        const ent = await getEffectiveEntitlement(FIRM_ID, "communications.email", { conn: r as any });
+        expect(ent.enabled).toBe(false);
+        expect(ent.denied).toBe("feature_inactive");
+        expect(await canUseFeature(FIRM_ID, "communications.email", { conn: r as any })).toBe(false);
       }
     });
 
-    it("GATE3 — After disable module.hims → communications.email denied via explicit founder override (alt parent chain fallback)", async () => {
+    it("GATE3 — After disable module.hims → module.hims denied. Also communications.email denied via inactive (NOT override)", async () => {
       await setFounderOverride("module.hims", "disabled");
       await setFounderOverride("communications.email", "disabled");
       if (isFeatureRegistered("module.hims")) {
@@ -411,6 +416,8 @@ describe("PART3 3L — Feature Toggle Integration Gates (PGlite real tables)", (
       if (isFeatureRegistered("communications.email")) {
         const email = await getEffectiveEntitlement(FIRM_ID, "communications.email", { conn: r as any });
         expect(email.enabled).toBe(false);
+        // Inactive wins over any override: denial reason MUST be feature_inactive not override
+        expect(email.denied).toBe("feature_inactive");
       }
       let thrown: ApiError | null = null;
       try {
@@ -421,20 +428,29 @@ describe("PART3 3L — Feature Toggle Integration Gates (PGlite real tables)", (
       if (isFeatureRegistered("module.hims")) {
         expect(thrown).not.toBeNull();
         expect(thrown?.code).toBe("FEATURE_DISABLED");
-      } else {
-        thrown = null;
+      }
+      // communications.email → assertFirmFeatureEnabled ALWAYS throws (inactive), regardless of overrides
+      if (isFeatureRegistered("communications.email")) {
+        let tEmail: ApiError | null = null;
         try { await assertFirmFeatureEnabled(r as any, FIRM_ID, "communications.email"); }
-        catch (e: any) { thrown = e as ApiError; }
-        expect(thrown).not.toBeNull();
-        expect(thrown?.code).toBe("FEATURE_DISABLED");
+        catch (e: any) { tEmail = e as ApiError; }
+        expect(tEmail).not.toBeNull();
+        expect(tEmail?.code).toBe("FEATURE_DISABLED");
       }
     });
 
-    it("GATE3 — Restore → communications.email enabled again", async () => {
+    it("GATE3 — Restore → module.hims enabled. communications.email REMAINS disabled (inactive, cannot be overridden)", async () => {
       await setFounderOverride("module.hims", "enabled");
       await setFounderOverride("communications.email", "enabled");
+      if (isFeatureRegistered("module.hims")) {
+        expect(await canUseFeature(FIRM_ID, "module.hims", { conn: r as any })).toBe(true);
+      }
       if (isFeatureRegistered("communications.email")) {
-        expect(await canUseFeature(FIRM_ID, "communications.email", { conn: r as any })).toBe(true);
+        // Even with explicit "enabled" override, status=inactive → cannot be enabled
+        const ent = await getEffectiveEntitlement(FIRM_ID, "communications.email", { conn: r as any });
+        expect(ent.enabled).toBe(false);
+        expect(ent.denied).toBe("feature_inactive");
+        expect(await canUseFeature(FIRM_ID, "communications.email", { conn: r as any })).toBe(false);
       }
     });
   });
@@ -651,6 +667,296 @@ describe("PART3 3L — Feature Toggle Integration Gates (PGlite real tables)", (
         const exists = isFeatureRegistered(nk);
         if (nk === "documents.ai_read") continue;
         expect(exists).toBe(true);
+      }
+    });
+  });
+
+  describe("GATE 8 of 9 — communications.email status=inactive: plan+override enabled still DENIED", () => {
+    beforeAll(async () => {
+      await setPlanEntitlement("module.communications", true);
+      await setPlanEntitlement("communications.email", true);
+      await setFounderOverride("module.communications", "enabled");
+      await setFounderOverride("communications.email", "enabled");
+      _resetEntitlementCacheForTests();
+    });
+
+    it("GATE8a — Registry: communications.email.status === 'inactive' === firmControlledOverride === false", () => {
+      const def = getFeatureDefinition("communications.email");
+      expect(def?.status).toBe("inactive");
+      expect(def?.firmControlledOverride).toBe(false);
+      expect(def?.defaultValue).toBe(false);
+    });
+
+    it("GATE8b — Even with plan=enabled AND founder override=enabled → canUseFeature=false (Layer 1 inactive wins)", async () => {
+      const can = await canUseFeature(FIRM_ID, "communications.email", { conn: r as any });
+      expect(can).toBe(false);
+    });
+
+    it("GATE8c — Entitlement resolution returns denied='feature_inactive' when status=inactive, NOT plan or override reason", async () => {
+      const ent = await getEffectiveEntitlement(FIRM_ID, "communications.email", { conn: r as any });
+      expect(ent.enabled).toBe(false);
+      expect(ent.denied).toBe("feature_inactive");
+      expect(ent.source).toBe("denial");
+    });
+
+    it("GATE8d — Route hint for /app/communication/email → isRouteHintBlocked=true via inactive", async () => {
+      const allKeys = Array.from(FEATURE_REGISTRY_MAP.keys());
+      const ents = await resolveEntitlementsBulk(FIRM_ID, allKeys, { conn: r as any });
+      const blocked = isRouteHintBlocked(ents, ["/app/communication/email"]);
+      expect(blocked).toBe(true);
+    });
+
+    it("GATE8e — assertFirmFeatureEnabled throws 403 FEATURE_DISABLED even with enabled overrides", async () => {
+      let thrown: ApiError | null = null;
+      try {
+        await assertFirmFeatureEnabled(r as any, FIRM_ID, "communications.email");
+      } catch (e: any) {
+        thrown = e as ApiError;
+      }
+      expect(thrown).not.toBeNull();
+      expect(thrown?.status).toBe(403);
+      expect(thrown?.code).toBe("FEATURE_DISABLED");
+    });
+
+    it("GATE8f — module.communications parent is NOT disabled by the email child inactive", async () => {
+      const modEnt = await getEffectiveEntitlement(FIRM_ID, "module.communications", { conn: r as any });
+      expect(modEnt.enabled).toBe(true);
+      expect(modEnt.denied).toBeUndefined();
+    });
+  });
+
+  describe("GATE 9 of 9 — communications.whatsapp inactive, HR/HIMS active, file_custody preserved", () => {
+    beforeAll(async () => {
+      await setPlanEntitlement("communications.whatsapp", true);
+      await setFounderOverride("communications.whatsapp", "enabled");
+      await setPlanEntitlement("module.hr", true);
+      await setFounderOverride("module.hr", "enabled");
+      await setPlanEntitlement("module.hims", true);
+      await setPlanEntitlement("hims.tracker", true);
+      await setFounderOverride("module.hims", "enabled");
+      await setFounderOverride("hims.tracker", "enabled");
+      _resetEntitlementCacheForTests();
+    });
+
+    it("GATE9a — communications.whatsapp: inactive → feature_inactive denial even with enabled override", async () => {
+      const def = getFeatureDefinition("communications.whatsapp");
+      expect(def?.status).toBe("inactive");
+      expect(def?.firmControlledOverride).toBe(false);
+      const ent = await getEffectiveEntitlement(FIRM_ID, "communications.whatsapp", { conn: r as any });
+      expect(ent.enabled).toBe(false);
+      expect(ent.denied).toBe("feature_inactive");
+    });
+
+    it("GATE9b — HR module: module.hr=true → HR children enabled", async () => {
+      const hrMod = await getEffectiveEntitlement(FIRM_ID, "module.hr", { conn: r as any });
+      expect(hrMod.enabled).toBe(true);
+      const hrChildren = ["hr.dashboard", "hr.employees", "hr.attendance", "hr.leave", "hr.claims", "hr.payroll"];
+      for (const k of hrChildren) {
+        if (!isFeatureRegistered(k)) continue;
+        const ent = await getEffectiveEntitlement(FIRM_ID, k, { conn: r as any });
+        expect(ent.enabled).toBe(true);
+      }
+      expect(await canUseFeature(FIRM_ID, "hr.employees", { conn: r as any })).toBe(true);
+      await expect(assertFirmFeatureEnabled(r as any, FIRM_ID, "hr.employees")).resolves.not.toThrow();
+    });
+
+    it("GATE9c — HIMS/eSPA: module.hims + hims.tracker=true → route/API allowed", async () => {
+      const himsMod = await getEffectiveEntitlement(FIRM_ID, "module.hims", { conn: r as any });
+      expect(himsMod.enabled).toBe(true);
+      expect(await canUseFeature(FIRM_ID, "hims.tracker", { conn: r as any })).toBe(true);
+      const allKeys = Array.from(FEATURE_REGISTRY_MAP.keys());
+      const ents = await resolveEntitlementsBulk(FIRM_ID, allKeys, { conn: r as any });
+      const himsDef = getFeatureDefinition("hims.tracker");
+      if (himsDef?.routeHint) {
+        expect(ents["hims.tracker"]?.enabled).toBe(true);
+      }
+      await expect(assertFirmFeatureEnabled(r as any, FIRM_ID, "hims.tracker")).resolves.not.toThrow();
+    });
+
+    it("GATE9d — storage.file_custody: preserved as inactive/default false (Phase 2/3)", async () => {
+      const def = getFeatureDefinition("storage.file_custody");
+      expect(def?.status).toBe("inactive");
+      expect(def?.defaultValue).toBe(false);
+      expect(def?.firmControlledOverride).toBe(false);
+      const ent = await getEffectiveEntitlement(FIRM_ID, "storage.file_custody", { conn: r as any });
+      expect(ent.enabled).toBe(false);
+      const deniedOk = ent.denied === "feature_inactive" || ent.denied === "parent_disabled" || ent.denied === "plan_entitlement_denied";
+      expect(deniedOk).toBe(true);
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // GATE 10 — STALE DB MIRROR CANNOT BYPASS CANONICAL INACTIVE (Part A)
+  // Simulates: DB platform_features row deliberately corrupted to say
+  // status=active/default=true, plan entitlement=true, founder override=enabled.
+  // Canonical registry still says communications.email / whatsapp inactive.
+  // Expected: entitlement STILL denied with feature_inactive.
+  // ──────────────────────────────────────────────────────────────────────
+  describe("GATE 10 of 9 — Canonical registry safety ceiling beats stale DB mirror", () => {
+    beforeAll(async () => {
+      // DELIBERATELY override platform_features DB row to simulate stale mirror
+      // with status=active, default_value = true (the exact gap scenario described).
+      // Also seed plan + founder override with ENABLED.
+      await q(`
+        UPDATE platform_features
+           SET status = 'active',
+               default_value = '{"v":true}'::jsonb,
+               updated_at = now()
+         WHERE feature_key IN ('communications.email', 'communications.whatsapp')
+      `);
+      await setPlanEntitlement("communications.email", true);
+      await setPlanEntitlement("communications.whatsapp", true);
+      await setFounderOverride("communications.email", "enabled");
+      await setFounderOverride("communications.whatsapp", "enabled");
+      _resetEntitlementCacheForTests();
+    });
+
+    it("GATE10a — DB mirror verification: rows REALLY say status=active defaultValue=true (stale)", async () => {
+      const rows = await q<{ feature_key: string; status: string; default_value: any }>(
+        "SELECT feature_key, status, default_value FROM platform_features WHERE feature_key IN ('communications.email','communications.whatsapp') ORDER BY feature_key"
+      );
+      expect(rows.length).toBe(2);
+      for (const row of rows) {
+        expect(row.status).toBe("active");
+        const dv = typeof row.default_value === "string" ? JSON.parse(row.default_value) : row.default_value;
+        expect(dv?.v ?? dv).toBe(true);
+      }
+      // Sanity: canonical STILL says inactive
+      expect(getFeatureDefinition("communications.email")?.status).toBe("inactive");
+      expect(getFeatureDefinition("communications.whatsapp")?.status).toBe("inactive");
+    });
+
+    it("GATE10b — communications.email enabled=false even with stale DB + plan enabled + override enabled", async () => {
+      const ent = await getEffectiveEntitlement(FIRM_ID, "communications.email", { conn: r as any });
+      expect(ent.enabled).toBe(false);
+      expect(ent.denied).toBe("feature_inactive");
+      expect(await canUseFeature(FIRM_ID, "communications.email", { conn: r as any })).toBe(false);
+    });
+
+    it("GATE10c — communications.whatsapp enabled=false even with stale DB + plan enabled + override enabled", async () => {
+      const ent = await getEffectiveEntitlement(FIRM_ID, "communications.whatsapp", { conn: r as any });
+      expect(ent.enabled).toBe(false);
+      expect(ent.denied).toBe("feature_inactive");
+      expect(await canUseFeature(FIRM_ID, "communications.whatsapp", { conn: r as any })).toBe(false);
+    });
+
+    it("GATE10d — assertFirmFeatureEnabled STILL throws 403 FEATURE_DISABLED for stale DB", async () => {
+      for (const key of ["communications.email", "communications.whatsapp"] as const) {
+        let thrown: ApiError | null = null;
+        try { await assertFirmFeatureEnabled(r as any, FIRM_ID, key); }
+        catch (e: any) { thrown = e as ApiError; }
+        expect(thrown).not.toBeNull();
+        expect(thrown?.code).toBe("FEATURE_DISABLED");
+      }
+    });
+
+    it("GATE10e — bulk resolve still denies; module.communications parent not poisoned", async () => {
+      const keys = ["module.communications", "communications.email", "communications.whatsapp", "communications.hub"];
+      const ents = await resolveEntitlementsBulk(FIRM_ID, keys, { conn: r as any });
+      expect(ents["communications.email"]?.enabled).toBe(false);
+      expect(ents["communications.whatsapp"]?.enabled).toBe(false);
+      // Parent not poisoned by inactive children (only the reverse via layer 7)
+      if (isFeatureRegistered("module.communications")) {
+        expect(ents["module.communications"]?.enabled).not.toBe(false);
+      }
+    });
+  });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // GATE 11 — firmControlledOverride=false ENFORCED SERVER-SIDE via
+  // assertFirmOverrideAllowed (Part B helper).
+  // We cannot HTTP-call here, but we exercise the canonical helper directly
+  // so that the 6 route endpoints that call it inherit enforcement.
+  // ──────────────────────────────────────────────────────────────────────
+  describe("GATE 11 of 9 — firmControlledOverride=false enforced server-side via helper", () => {
+    beforeAll(async () => {
+      // Inherit setup; no DB changes needed since helper only reads canonical.
+      _resetEntitlementCacheForTests();
+    });
+
+    async function importHelperDirectly() {
+      // Dynamically import the helper exported by entitlement-resolver.
+      const mod = await import("../services/entitlement-resolver.js");
+      return { assertFirmOverrideAllowed: mod.assertFirmOverrideAllowed };
+    }
+
+    it("GATE11a — communications.email cannot accept enabled/disabled override", async () => {
+      const { assertFirmOverrideAllowed } = await importHelperDirectly();
+      for (const mode of ["enabled", "disabled"] as const) {
+        let caught: any = null;
+        try { assertFirmOverrideAllowed("communications.email", mode); }
+        catch (e) { caught = e; }
+        expect(caught).not.toBeNull();
+        expect(caught?.code).toBe("FEATURE_OVERRIDE_NOT_ALLOWED");
+        expect(caught?.status).toBe(409);
+      }
+    });
+
+    it("GATE11b — communications.whatsapp cannot accept enabled/disabled override", async () => {
+      const { assertFirmOverrideAllowed } = await importHelperDirectly();
+      for (const mode of ["enabled", "disabled"] as const) {
+        let caught: any = null;
+        try { assertFirmOverrideAllowed("communications.whatsapp", mode); }
+        catch (e) { caught = e; }
+        expect(caught).not.toBeNull();
+        expect(caught?.code).toBe("FEATURE_OVERRIDE_NOT_ALLOWED");
+        expect(caught?.status).toBe(409);
+      }
+    });
+
+    it("GATE11c — storage.file_custody cannot accept enabled/disabled override", async () => {
+      const { assertFirmOverrideAllowed } = await importHelperDirectly();
+      for (const mode of ["enabled", "disabled"] as const) {
+        let caught: any = null;
+        try { assertFirmOverrideAllowed("storage.file_custody", mode); }
+        catch (e) { caught = e; }
+        expect(caught).not.toBeNull();
+        expect(caught?.code).toBe("FEATURE_OVERRIDE_NOT_ALLOWED");
+        expect(caught?.status).toBe(409);
+      }
+    });
+
+    it("GATE11d — communications.email/whatsapp/file_custody STILL allow inherit/plan_default (clear historical)", async () => {
+      const { assertFirmOverrideAllowed } = await importHelperDirectly();
+      for (const k of ["communications.email", "communications.whatsapp", "storage.file_custody"] as const) {
+        expect(() => assertFirmOverrideAllowed(k, "inherit")).not.toThrow();
+        expect(() => assertFirmOverrideAllowed(k, "plan_default")).not.toThrow();
+        expect(() => assertFirmOverrideAllowed(k, "reset")).not.toThrow();
+      }
+    });
+
+    it("GATE11e — Normal firm-controllable feature (hr.employees, module.cases, module.communications, hims.tracker) CAN still accept enabled/disabled", async () => {
+      const { assertFirmOverrideAllowed } = await importHelperDirectly();
+      const safeList: string[] = [];
+      if (isFeatureRegistered("hr.employees")) safeList.push("hr.employees");
+      if (isFeatureRegistered("module.cases")) safeList.push("module.cases");
+      if (isFeatureRegistered("module.communications")) safeList.push("module.communications");
+      if (isFeatureRegistered("hims.tracker")) safeList.push("hims.tracker");
+      if (isFeatureRegistered("module.hims")) safeList.push("module.hims");
+      expect(safeList.length).toBeGreaterThanOrEqual(3);
+      for (const k of safeList) {
+        const def = getFeatureDefinition(k);
+        if (def?.firmControlledOverride === false) continue;
+        expect(() => assertFirmOverrideAllowed(k, "enabled")).not.toThrow();
+        expect(() => assertFirmOverrideAllowed(k, "disabled")).not.toThrow();
+      }
+    });
+
+    it("GATE11f — thrown error has correct 409 status and code shape", async () => {
+      const { assertFirmOverrideAllowed } = await importHelperDirectly();
+      try {
+        assertFirmOverrideAllowed("communications.email", "enabled");
+        throw new Error("Expected to throw");
+      } catch (e: any) {
+        expect(e?.status).toBe(409);
+        expect(e?.code).toBe("FEATURE_OVERRIDE_NOT_ALLOWED");
+        expect(typeof e?.message).toBe("string");
+        expect(e.retryable).toBe(false);
+        // Details payload includes actionable fields
+        expect(e?.details?.featureKey).toBe("communications.email");
+        expect(e?.details?.firmControlledOverride).toBe(false);
+        expect(e?.details?.allowedWriteModes).toContain("inherit");
+        expect(e?.details?.rejectedMode).toBe("enabled");
       }
     });
   });

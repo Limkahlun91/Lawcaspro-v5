@@ -99,6 +99,60 @@ describe("Platform Feature Control (Part 1A)", () => {
       expect(f?.firmControlledOverride).toBe(false);
     });
 
+    it("Communications Email: status=inactive, defaultValue=false, firmControlledOverride=false, preserves parent/route/jobGuards", () => {
+      const f = FEATURE_REGISTRY_MAP.get("communications.email");
+      expect(f).toBeDefined();
+      expect(f?.status).toBe("inactive");
+      expect(f?.defaultValue).toBe(false);
+      expect(f?.firmControlledOverride).toBe(false);
+      expect(f?.parentFeatureKey).toBe("module.communications");
+      expect(f?.routeHint).toBe("/app/communication/email");
+      expect(f?.jobGuards).toEqual(expect.arrayContaining(["email_sync"]));
+      expect(f?.description).toMatch(/Future phase feature.*Email Control.*production ready/);
+    });
+
+    it("Communications WhatsApp: status=inactive, defaultValue=false, firmControlledOverride=false, preserves routeHint", () => {
+      const f = FEATURE_REGISTRY_MAP.get("communications.whatsapp");
+      expect(f).toBeDefined();
+      expect(f?.status).toBe("inactive");
+      expect(f?.defaultValue).toBe(false);
+      expect(f?.firmControlledOverride).toBe(false);
+      expect(f?.parentFeatureKey).toBe("module.communications");
+      expect(f?.routeHint).toBe("/app/communication/whatsapp");
+      expect(f?.description).toMatch(/Future phase feature.*WhatsApp integration.*production ready/);
+    });
+
+    it("module.communications remains ACTIVE (module-level NOT disabled)", () => {
+      const f = FEATURE_REGISTRY_MAP.get("module.communications");
+      expect(f).toBeDefined();
+      expect(f?.status).toBe("active");
+      expect(f?.module).toBe("communications");
+    });
+
+    it("module.hr remains ACTIVE with HRMS child features registered", () => {
+      const hrMod = FEATURE_REGISTRY_MAP.get("module.hr");
+      expect(hrMod).toBeDefined();
+      expect(hrMod?.status).toBe("active");
+      const hrChildren = FEATURE_REGISTRY.filter(
+        (x) => x.parentFeatureKey === "module.hr" && x.module === "hr"
+      );
+      // Dashboard, Employees, Departments, Positions, Attendance, Leave, Claims, Payroll, etc.
+      expect(hrChildren.length).toBeGreaterThanOrEqual(10);
+      for (const child of hrChildren) {
+        expect(child.status).toBe("active");
+      }
+    });
+
+    it("module.hims + hims.tracker remain ACTIVE for HIMS / eSPA sidebar route", () => {
+      const himsMod = FEATURE_REGISTRY_MAP.get("module.hims");
+      const himsTracker = FEATURE_REGISTRY_MAP.get("hims.tracker");
+      expect(himsMod).toBeDefined();
+      expect(himsMod?.status).toBe("active");
+      expect(himsTracker).toBeDefined();
+      expect(himsTracker?.status).toBe("active");
+      expect(himsTracker?.parentFeatureKey).toBe("module.hims");
+    });
+
     it("HR module: isFeatureRegistered('hr') -> false (fuzzy role rule 14). Use exact key 'module.hr'.", () => {
       // Part 1A + Master Rule 14: No fuzzy role/feature matching.
       expect(isFeatureRegistered("hr")).toBe(false);          // fuzzy, FAIL

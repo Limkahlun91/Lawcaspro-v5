@@ -25,6 +25,7 @@ import {
   canUseFeature,
   canFirmRunJobsFor,
   filterFirmsForJob,
+  assertFirmOverrideAllowed,
 } from "../services/entitlement-resolver.js";
 import { FEATURE_REGISTRY, FEATURE_REGISTRY_MAP, isFeatureRegistered, platformFeaturesTable, collectJobGuardToFeatureMap } from "@workspace/db";
 import {
@@ -268,6 +269,8 @@ router.post("/founder/firms/:firmId/entitlements/override", requireAuth, require
     const parsed = overrideInsertSchema.safeParse(req.body);
     if (!parsed.success) throw new ApiError({ status: 400, code: "VALIDATION_ERROR", message: parsed.error.message, retryable: false });
     const b = parsed.data;
+    // CANONICAL OVERRIDE-GATE: reject enabled/disabled for firmControlledOverride=false
+    assertFirmOverrideAllowed(b.featureKey, b.overrideMode === "custom" ? "enabled" : b.overrideMode);
     const kind = b.overrideKind ?? "temporary";
     const [row] = await db
       .insert(firmEntitlementOverridesTable)
@@ -298,6 +301,12 @@ router.patch("/founder/firms/:firmId/entitlements/override/:overrideId", require
     const parsed = overrideInsertSchema.partial().safeParse(req.body);
     if (!parsed.success) throw new ApiError({ status: 400, code: "VALIDATION_ERROR", message: parsed.error.message, retryable: false });
     const b = parsed.data;
+    // CANONICAL OVERRIDE-GATE: load existing row to know featureKey; if overrideMode is being set to enabled/disabled/custom → gate.
+    const [existing] = await db.select({ featureKey: firmEntitlementOverridesTable.featureKey }).from(firmEntitlementOverridesTable).where(and(eq(firmEntitlementOverridesTable.id, overrideId), eq(firmEntitlementOverridesTable.firmId, firmId))).limit(1);
+    if (!existing) throw new ApiError({ status: 404, code: "NOT_FOUND", message: "Override not found", retryable: false });
+    if (b.overrideMode !== undefined) {
+      assertFirmOverrideAllowed(existing.featureKey, b.overrideMode === "custom" ? "enabled" : b.overrideMode);
+    }
     const updates: any = { updatedAt: new Date() };
     if (b.overrideKind !== undefined) updates.overrideKind = b.overrideKind;
     if (b.overrideMode !== undefined) updates.overrideMode = b.overrideMode;
@@ -538,6 +547,8 @@ router.post("/founder/firms/:firmId/entitlements/emergency", requireAuth, requir
     if (!isFeatureRegistered(parsed.data.featureKey)) {
       throw new ApiError({ status: 404, code: "FEATURE_NOT_FOUND", message: `Feature not registered: ${parsed.data.featureKey}`, retryable: false });
     }
+    // CANONICAL OVERRIDE-GATE: emergency creates enabled/disabled temp override → must respect firmControlledOverride=false
+    assertFirmOverrideAllowed(parsed.data.featureKey, parsed.data.enabled ? "enabled" : "disabled");
     // Emergency disable = TEMPORARY override (always temporary because emergency implies a bounded event;
     // if expiresAt not provided we keep effectiveFrom=now WITHOUT expiresAt = "until manually lifted via new override").
     // Explicit override_kind='temporary' + effective_from=now() to satisfy the 0148 SQL CHECK
@@ -584,6 +595,13 @@ router.post("/founder/firms/:firmId/entitlements/bulk-override", requireAuth, re
     if (!parsed.success) throw new ApiError({ status: 400, code: "VALIDATION_ERROR", message: parsed.error.message, retryable: false });
     for (const k of parsed.data.featureKeys) {
       if (!isFeatureRegistered(k)) throw new ApiError({ status: 400, code: "VALIDATION_ERROR", message: `Unknown feature: ${k}`, retryable: false });
+    }
+    // CANONICAL OVERRIDE-GATE: enabled/disabled mode must be allowed for ALL listed features (bulk).
+    // plan_default = inherit (clears rows) → always allowed.
+    if (parsed.data.mode !== "plan_default") {
+      for (const k of parsed.data.featureKeys) {
+        assertFirmOverrideAllowed(k, parsed.data.mode as "enabled" | "disabled");
+      }
     }
     if (parsed.data.mode === "plan_default") {
       // Remove active overrides for these keys (reset to plan default) – we soft-delete by setting expiresAt to NOW
@@ -654,6 +672,8 @@ router.patch("/founder/firms/:firmId/features/:featureKey", requireAuth, require
       sendError(res, new ApiError({ status: 400, code: "VALIDATION_ERROR", message: `mode must be one of: enabled, disabled, inherit (got: ${modeRaw})`, retryable: false }));
       return;
     }
+    // CANONICAL OVERRIDE-GATE: enabled/disabled only when allowed; inherit → inherit/plan_default/reset always allowed
+    assertFirmOverrideAllowed(featureKey, modeRaw);
     const reason = String((req.body as any)?.reason ?? "single_feature_set").slice(0, 500);
 
     if (modeRaw === "inherit") {
@@ -728,6 +748,8 @@ router.patch("/platform/firms/:firmId/features/:featureKey", requireAuth, requir
       sendError(res, new ApiError({ status: 400, code: "VALIDATION_ERROR", message: `mode must be one of: enabled, disabled, inherit`, retryable: false }));
       return;
     }
+    // CANONICAL OVERRIDE-GATE: alias route — same gate as Lb above
+    assertFirmOverrideAllowed(featureKey, modeRaw);
     const reason = String((req.body as any)?.reason ?? "single_feature_set").slice(0, 500);
     if (modeRaw === "inherit") {
       const now = new Date();

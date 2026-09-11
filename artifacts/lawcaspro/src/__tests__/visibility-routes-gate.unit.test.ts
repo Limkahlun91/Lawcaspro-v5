@@ -203,3 +203,72 @@ describe("VIS-10: Legacy Import enabled → Import Old Cases button visible (str
     expect(win.includes('mode="silent"')).toBe(true);
   });
 });
+
+describe("VIS-11: communications.email inactive → sidebar hidden + route blocked (structural gate)", () => {
+  it("sidebar Communication group Email entry has featureKey=communications.email for inactive gating", () => {
+    const win = windowAround(SIDEBAR, 'label: "Email"', 200, 200);
+    expect(win).toContain('featureKey: "communications.email"');
+    expect(win.includes('perm: ["communications", "read"]') || win.includes('perm: ["communications","read"]')).toBe(true);
+    expect(win).toContain("/app/communication/email");
+  });
+
+  it("App.tsx /app/communication/email wrapped with FeatureGuard module.communications + communications.email", () => {
+    const win = windowAround(APP_TSX, 'path="/app/communication/email"', 600, 400);
+    expect(win.includes('feature="module.communications"')).toBe(true);
+    expect(
+      win.includes('"communications.email"') ||
+      win.includes("communications.email"),
+    ).toBe(true);
+  });
+
+  it("sidebar Communication group: NO WhatsApp sidebar item exists (already absent / not added)", () => {
+    // WhatsApp was never added to sidebar nav items; ensure it stays out.
+    const navStart = SIDEBAR.indexOf('key: "communication"');
+    const navEnd = SIDEBAR.indexOf('key: "administration"', navStart);
+    const commBlock = navStart >= 0 ? SIDEBAR.slice(navStart, navEnd >= 0 ? navEnd : navStart + 3000) : "";
+    expect(commBlock.toLowerCase().includes("whatsapp")).toBe(false);
+  });
+
+  it("App.tsx /app/communication/whatsapp route gated with Phase2RedirectGuard + PermissionGuard comms read", () => {
+    const win = windowAround(APP_TSX, 'path="/app/communication/whatsapp"', 600, 400);
+    expect(win.includes("Phase2RedirectGuard")).toBe(true);
+    expect(win.includes("PermissionGuard") || win.includes('module="communications"')).toBe(true);
+  });
+});
+
+describe("VIS-12: HR/HIMS active → sidebar entries remain visible (structural guard)", () => {
+  it("sidebar HR group entries use perm [hr, read] and featureKey hr.xxx", () => {
+    const win = windowAround(SIDEBAR, 'key: "hr"', 200, 1500);
+    expect(win.includes('perm: ["hr", "read"]') || win.includes('perm: ["hr","read"]')).toBe(true);
+    const hrFeatures = countInSrc(win, 'featureKey: "hr.');
+    expect(hrFeatures).toBeGreaterThanOrEqual(5);
+    expect(win).toContain('label: "HR Dashboard"');
+    expect(win).toContain('label: "Employees"');
+    expect(win).toContain('label: "Leave"');
+    expect(win).toContain('label: "Claims"');
+    expect(win).toContain('label: "Payroll"');
+  });
+
+  it("sidebar HIMS / eSPA: cases group entry hims.tracker featureKey + cases:read perm intact", () => {
+    const win = windowAround(SIDEBAR, "HIMS / eSPA", 200, 400);
+    expect(win).toContain("/app/hims");
+    expect(win).toContain('featureKey: "hims.tracker"');
+    expect(win.includes('perm: ["cases", "read"]') || win.includes('perm: ["cases","read"]')).toBe(true);
+  });
+
+  it("App.tsx HR routes still wrapped with FeatureGuard module.hr", () => {
+    const win = windowAround(APP_TSX, 'path="/app/hr/dashboard"', 1000, 800);
+    expect(win.includes('feature="module.hr"') || win.includes("FeatureGuard")).toBe(true);
+    expect(win.includes('module="hr"')).toBe(true);
+    expect(win.includes('action="read"')).toBe(true);
+  });
+});
+
+describe("VIS-13: storage.file_custody remains inactive Phase 2/3, not touched", () => {
+  it("App.tsx /app/file-custody route wrapped with guard, NO sidebar nav entry present", () => {
+    const sidebarNav = SIDEBAR;
+    expect(sidebarNav.toLowerCase().includes("file-custody") || sidebarNav.toLowerCase().includes("file custody")).toBe(false);
+    // File Custody route component IS imported but gated (as per Phase 2/3 design)
+    expect(APP_TSX.includes("FileCustodyPage") || APP_TSX.includes("file-custody")).toBe(true);
+  });
+});
