@@ -593,22 +593,53 @@ routerInternal.post("/platform/firms/:firmId/users/:userId/reset-password", requ
 
 // ─── Platform Stats ───────────────────────────────────────────────────────────
 
+export type PlatformStats = {
+  totalFirms: number;
+  activeFirms: number;
+  totalUsers: number;
+  totalCases: number;
+  totalDocuments: number;
+};
+
+/**
+ * Load platform-wide stats inside one shared withAuthSafeDb scope.
+ * All 4 count queries + the case_documents raw count all run within the
+ * same RLS/auth context from the safeDb callback.
+ *
+ * The real route (GET /platform/stats) calls this helper directly so the
+ * production helper can be imported into tests WITHOUT mirroring logic.
+ * Never uses allowUnsafe:true — permission errors must propagate as failures
+ * until underlying DB grants are correct.
+ */
+export async function loadPlatformStats(): Promise<PlatformStats> {
+  return await withAuthSafeDb(async (authDb) => {
+    const [totalFirmsRes] = await authDb.select({ c: count() }).from(firmsTable);
+    const [activeFirmsRes] = await authDb.select({ c: count() }).from(firmsTable).where(eq(firmsTable.status, "active"));
+    const [totalUsersRes] = await authDb.select({ c: count() }).from(usersTable).where(eq(usersTable.userType, "firm_user"));
+    const [totalCasesRes] = await authDb.select({ c: count() }).from(casesTable);
+    const docsRes = await (async () => {
+      try {
+        return await authDb.execute(sql`SELECT COUNT(*) as c FROM case_documents`);
+      } catch (err) {
+        if (isUndefinedTableError(err)) return [];
+        throw err;
+      }
+    })();
+    const docsC = firstRow(docsRes)?.c;
+    const totalDocuments = typeof docsC === "string" || typeof docsC === "number" ? Number(docsC) : 0;
+    return {
+      totalFirms: Number(totalFirmsRes?.c ?? 0),
+      activeFirms: Number(activeFirmsRes?.c ?? 0),
+      totalUsers: Number(totalUsersRes?.c ?? 0),
+      totalCases: Number(totalCasesRes?.c ?? 0),
+      totalDocuments,
+    };
+  }, { retry: true, maxRetries: 1, ctx: { stage: "platform_stats" } });
+}
+
 routerInternal.get("/platform/stats", requireAuth, requireFounder, async (_req: AuthRequestLike, res: RouteResLike): Promise<void> => {
-  const [totalFirmsRes] = await db.select({ c: count() }).from(firmsTable);
-  const [activeFirmsRes] = await db.select({ c: count() }).from(firmsTable).where(eq(firmsTable.status, "active"));
-  const [totalUsersRes] = await db.select({ c: count() }).from(usersTable).where(eq(usersTable.userType, "firm_user"));
-  const [totalCasesRes] = await db.select({ c: count() }).from(casesTable);
-  const docsRes = await (async () => {
-    try {
-      return await db.execute(sql`SELECT COUNT(*) as c FROM case_documents`);
-    } catch (err) {
-      if (isUndefinedTableError(err)) return [];
-      throw err;
-    }
-  })();
-  const docsC = firstRow(docsRes)?.c;
-  const totalDocuments = typeof docsC === "string" || typeof docsC === "number" ? Number(docsC) : 0;
-  res.json({ totalFirms: Number(totalFirmsRes?.c ?? 0), activeFirms: Number(activeFirmsRes?.c ?? 0), totalUsers: Number(totalUsersRes?.c ?? 0), totalCases: Number(totalCasesRes?.c ?? 0), totalDocuments });
+  const stats = await loadPlatformStats();
+  res.json(stats);
 });
 
 // ─── System Folders ───────────────────────────────────────────────────────────

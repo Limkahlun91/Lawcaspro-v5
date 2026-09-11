@@ -467,7 +467,9 @@ export class SupabaseStorageService {
     const cfg = getSupabaseStorageConfig();
     const key = normalizeObjectKeyFromPath(objectPath);
     const encodedKey = key.split("/").map(encodeURIComponent).join("/");
-    const url = `${cfg.storageUrl}/object/${encodeURIComponent(cfg.bucketPrivate)}/${encodedKey}`;
+    // Use /storage/v1/object/authenticated/<bucket>/<key> so private GET runs
+    // through authenticated storage endpoint instead of generic/object path.
+    const url = `${cfg.storageUrl}/object/authenticated/${encodeURIComponent(cfg.bucketPrivate)}/${encodedKey}`;
     const timeoutMs = typeof opts?.timeoutMs === "number" && opts.timeoutMs > 0 ? opts.timeoutMs : 15_000;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -487,38 +489,76 @@ export class SupabaseStorageService {
     }
     if (response.status === 404) throw new ObjectNotFoundError();
     if (!response.ok) {
+      let parsed:
+        | { code?: unknown; error?: unknown; message?: unknown; statusCode?: unknown }
+        | null = null;
+      let text = "";
+
+      try {
+        text = await response.clone().text();
+        try {
+          parsed = text ? JSON.parse(text) : null;
+        } catch {
+          parsed = null;
+        }
+      } catch {
+        // leave text/parsed empty
+      }
+
+      const code =
+        typeof parsed?.code === "string" ? parsed.code : "";
+
+      const statusCode =
+        typeof parsed?.statusCode === "number"
+          ? parsed.statusCode
+          : Number(parsed?.statusCode);
+
+      const message = [
+        parsed?.error,
+        parsed?.message,
+        text
+      ]
+        .filter((x) => typeof x === "string")
+        .join(" ")
+        .toLowerCase();
+
+      const isNotFound =
+        response.status === 404 ||
+        statusCode === 404 ||
+        code === "NoSuchKey" ||
+        /\bnot_found\b/.test(message) ||
+        /object-not-found/.test(message) ||
+        (message.includes("not found") && message.includes("object"));
+
+      if (isNotFound) throw new ObjectNotFoundError();
+
       throw new Error(`Supabase storage download failed (${response.status})`);
     }
     return response;
   }
 
   async privateObjectExists(objectPath: string, opts?: { timeoutMs?: number }): Promise<boolean> {
-    const cfg = getSupabaseStorageConfig();
-    const key = normalizeObjectKeyFromPath(objectPath);
-    const encodedKey = key.split("/").map(encodeURIComponent).join("/");
-    const url = `${cfg.storageUrl}/object/${encodeURIComponent(cfg.bucketPrivate)}/${encodedKey}`;
-    const timeoutMs = typeof opts?.timeoutMs === "number" && opts.timeoutMs > 0 ? opts.timeoutMs : 2_000;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let response: globalThis.Response;
+    // Reuse fetchPrivateObjectResponse (authenticated GET) — NOT a separate HEAD.
+    // HEAD often requires different bucket/RLS permissions; authenticated GET is
+    // already the validated access pattern with Supabase Storage.
     try {
-      response = await fetch(url, {
-        method: "HEAD",
-        headers: buildSupabaseAuthHeaders(cfg.serverKey),
-        signal: controller.signal,
-      });
+      const response = await this.fetchPrivateObjectResponse(objectPath, opts);
+      try {
+        // Close/cancel body safely without buffering it, since we only care about
+        // existence. If body is already consumed or null, cancel is a no-op.
+        if (response.body && typeof (response.body as Partial<ReadableStream>).cancel === "function") {
+          void Promise.resolve((response.body as ReadableStream).cancel()).catch(() => undefined);
+        } else if (typeof (response as any).destroy === "function") {
+          try { (response as any).destroy(); } catch { /* swallow */ }
+        }
+      } catch {
+        // ignore cleanup failures; existence decision already made by response.ok
+      }
+      return true;
     } catch (err) {
-      const name = err && typeof err === "object" && "name" in err ? String((err as any).name) : "";
-      if (name === "AbortError") throw new StorageRequestTimeoutError();
+      if (err instanceof ObjectNotFoundError) return false;
       throw err;
-    } finally {
-      clearTimeout(timer);
     }
-    if (response.status === 404) return false;
-    if (!response.ok) {
-      throw new Error(`Supabase storage HEAD failed (${response.status})`);
-    }
-    return true;
   }
 }
 

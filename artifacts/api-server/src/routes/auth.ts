@@ -4,7 +4,7 @@ import crypto from "crypto";
 import { and, eq } from "drizzle-orm";
 import { auditLogsTable, clearTenantContext, db, firmsTable, makeRlsDb, permissionsTable, pool, rolesTable, sessionsTable, setTenantContextSession, sql, usersTable } from "@workspace/db";
 import { LoginBody } from "@workspace/api-zod";
-import { ensureRolePermissionsInitialized, invalidateVerifiedSessionCacheByTokenHash, invalidateVerifiedSessionCacheByUserId, loadFounderPermissions, lookupSessionAndUserByTokenHash, requireAuth, requireReAuth, issueReauthToken, resolveFirmAccessScopeFromInputs, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { ensureRolePermissionsInitialized, invalidateVerifiedSessionCacheByTokenHash, invalidateVerifiedSessionCacheByUserId, loadFounderPermissions, lookupSessionAndUserByTokenHash, requireAuth, requireReAuth, issueReauthToken, resolveFirmAccessScopeFromInputs, type AuthRequest, writeAuditLog, deleteSessionByTokenHash, deleteSessionById } from "../lib/auth.js";
 import { ApiError, sendError, sendOk } from "../lib/api-response.js";
 import { authRateLimiter, sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { logger } from "../lib/logger.js";
@@ -709,7 +709,11 @@ routerInternal.post(
   }
   if (token) {
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
-    await db.delete(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
+    // Real production helper — runs withAuthSafeDb internally with the
+    // retry/maxRetries/ctx expected. Call it directly here so regression
+    // tests that exercise deleteSessionByTokenHash() automatically cover
+    // the same code path the route uses.
+    await deleteSessionByTokenHash(tokenHash);
     invalidateVerifiedSessionCacheByTokenHash(tokenHash);
   }
   await writeAuditLog({
@@ -1086,7 +1090,9 @@ routerInternal.delete(
   const id = getParam(req, "id");
   if (!id) { res.status(400).json({ error: "Missing id" }); return; }
   const sessionId = Number(id);
-  await db.delete(sessionsTable).where(eq(sessionsTable.id, sessionId));
+  // Real production helper: all safeDb scoping / retry / ctx values are
+  // the ones exercised by tests.
+  await deleteSessionById(sessionId);
   invalidateVerifiedSessionCacheByUserId(req.userId!);
   await writeAuditLog({
     firmId: req.firmId,

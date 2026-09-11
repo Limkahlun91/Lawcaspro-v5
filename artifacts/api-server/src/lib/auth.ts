@@ -369,6 +369,29 @@ export function __clearAuthCachesForTests(): void {
   inflightSessionLookups.clear();
 }
 
+/**
+ * Delete a session by token hash, scoped through withAuthSafeDb + explicit retry/ctx.
+ * Production routes (POST /auth/logout) call this helper directly so tests can run the
+ * real production logic without mirroring it inline inside the test.
+ * If safe DB delete still fails after wrapper retries the error propagates unchanged.
+ */
+export async function deleteSessionByTokenHash(tokenHash: string): Promise<void> {
+  await withAuthSafeDb(async (authDb) => {
+    await authDb.delete(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
+  }, { retry: true, maxRetries: 1, ctx: { stage: "auth_logout_delete_session" } });
+}
+
+/**
+ * Delete a session by numeric id, scoped through withAuthSafeDb + explicit retry/ctx.
+ * Production routes (DELETE /auth/sessions/:id) call this helper.
+ * Propagates failures unchanged if retries exhaust.
+ */
+export async function deleteSessionById(sessionId: number): Promise<void> {
+  await withAuthSafeDb(async (authDb) => {
+    await authDb.delete(sessionsTable).where(eq(sessionsTable.id, sessionId));
+  }, { retry: true, maxRetries: 1, ctx: { stage: "auth_session_revoked_delete_session" } });
+}
+
 function getVerifiedSessionFromCache(tokenHash: string): SessionUserLookupResult {
   const hit = verifiedSessionCache.get(tokenHash);
   if (!hit) return null;
@@ -456,29 +479,13 @@ export async function lookupSessionAndUserByTokenHash(
     return "UNKNOWN";
   })();
 
-  const lookupViaDb = async (): Promise<SessionUserLookupResult> => {
-    if (process.env.NODE_ENV === "test") {
-      const [s] = await db.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
-      if (!s) return null;
-      const [u] = await db
-        .select({
-          id: usersTable.id,
-          email: usersTable.email,
-          name: usersTable.name,
-          userType: usersTable.userType,
-          firmId: usersTable.firmId,
-          roleId: usersTable.roleId,
-          roleName: rolesTable.name,
-          developerId: usersTable.developerId,
-          status: usersTable.status,
-        })
-        .from(usersTable)
-        .leftJoin(rolesTable, and(eq(rolesTable.id, usersTable.roleId), eq(rolesTable.firmId, usersTable.firmId)))
-        .where(eq(usersTable.id, s.userId))
-        .catch(async (err) => {
-          const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-          if (code !== "42703") throw err;
-          const [u2] = await db
+  const lookupViaAuthSafeDbPrimary = async (): Promise<SessionUserLookupResult> => {
+    return await withAuthSafeDb(
+      async (authDb) => {
+        if (process.env.NODE_ENV === "test") {
+          const [s] = await authDb.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
+          if (!s) return null;
+          const [u] = await authDb
             .select({
               id: usersTable.id,
               email: usersTable.email,
@@ -486,28 +493,110 @@ export async function lookupSessionAndUserByTokenHash(
               userType: usersTable.userType,
               firmId: usersTable.firmId,
               roleId: usersTable.roleId,
+              roleName: rolesTable.name,
+              developerId: usersTable.developerId,
               status: usersTable.status,
             })
             .from(usersTable)
-            .where(eq(usersTable.id, s.userId));
-          return [u2 ? ({ ...u2, developerId: null, roleName: null }) : undefined] as any;
-        });
-      return { session: s, user: u as any };
-    }
+            .leftJoin(rolesTable, and(eq(rolesTable.id, usersTable.roleId), eq(rolesTable.firmId, usersTable.firmId)))
+            .where(eq(usersTable.id, s.userId))
+            .catch(async (err) => {
+              const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+              if (code !== "42703") throw err;
+              const [u2] = await authDb
+                .select({
+                  id: usersTable.id,
+                  email: usersTable.email,
+                  name: usersTable.name,
+                  userType: usersTable.userType,
+                  firmId: usersTable.firmId,
+                  roleId: usersTable.roleId,
+                  status: usersTable.status,
+                })
+                .from(usersTable)
+                .where(eq(usersTable.id, s.userId));
+              return [u2 ? ({ ...u2, developerId: null, roleName: null }) : undefined] as any;
+            });
+          return { session: s, user: u as any };
+        }
+        try {
+          const [row] = await authDb
+            .select({
+              session: {
+                id: sessionsTable.id,
+                userId: sessionsTable.userId,
+                tokenHash: sessionsTable.tokenHash,
+                expiresAt: sessionsTable.expiresAt,
+                createdAt: sessionsTable.createdAt,
+                userAgent: sessionsTable.userAgent,
+                ipAddress: sessionsTable.ipAddress,
+              },
+              user: {
+                id: usersTable.id,
+                email: usersTable.email,
+                name: usersTable.name,
+                userType: usersTable.userType,
+                firmId: usersTable.firmId,
+                roleId: usersTable.roleId,
+                roleName: rolesTable.name,
+                developerId: usersTable.developerId,
+                status: usersTable.status,
+              },
+            })
+            .from(sessionsTable)
+            .innerJoin(usersTable, eq(usersTable.id, sessionsTable.userId))
+            .leftJoin(rolesTable, and(eq(rolesTable.id, usersTable.roleId), eq(rolesTable.firmId, usersTable.firmId)))
+            .where(eq(sessionsTable.tokenHash, tokenHash))
+            .limit(1);
+          if (!row) return null;
+          return { session: row.session as any, user: row.user as any };
+        } catch (err) {
+          const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+          if (code !== "42703") throw err;
+          const [row2] = await authDb
+            .select({
+              session: {
+                id: sessionsTable.id,
+                userId: sessionsTable.userId,
+                tokenHash: sessionsTable.tokenHash,
+                expiresAt: sessionsTable.expiresAt,
+                createdAt: sessionsTable.createdAt,
+                userAgent: sessionsTable.userAgent,
+                ipAddress: sessionsTable.ipAddress,
+              },
+              user: {
+                id: usersTable.id,
+                email: usersTable.email,
+                name: usersTable.name,
+                userType: usersTable.userType,
+                firmId: usersTable.firmId,
+                roleId: usersTable.roleId,
+                status: usersTable.status,
+              },
+            })
+            .from(sessionsTable)
+            .innerJoin(usersTable, eq(usersTable.id, sessionsTable.userId))
+            .where(eq(sessionsTable.tokenHash, tokenHash))
+            .limit(1);
+          if (!row2) return null;
+          return { session: row2.session as any, user: ({ ...(row2.user as any), developerId: null, roleName: null } as any) };
+        }
+      },
+      { retry: true, maxRetries: 1, ctx: { stage: "primary_lookup_session_user" }, allowUnsafe: true },
+    );
+  };
 
-    try {
-      const [row] = await db
-        .select({
-          session: {
-            id: sessionsTable.id,
-            userId: sessionsTable.userId,
-            tokenHash: sessionsTable.tokenHash,
-            expiresAt: sessionsTable.expiresAt,
-            createdAt: sessionsTable.createdAt,
-            userAgent: sessionsTable.userAgent,
-            ipAddress: sessionsTable.ipAddress,
-          },
-          user: {
+  // Explicit primary lookup name — always safeDb scoped.
+  // Alias `lookupViaDb` intentionally removed to avoid misleading direct-db implication.
+  // (Previously `const lookupViaDb = lookupViaAuthSafeDbPrimary;`.)
+
+  const lookupViaAuthSafeDbFallback = async (): Promise<SessionUserLookupResult> => {
+    return await withAuthSafeDb(
+      async (authDb) => {
+        const [s] = await authDb.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
+        if (!s) return null;
+        const [u] = await authDb
+          .select({
             id: usersTable.id,
             email: usersTable.email,
             name: usersTable.name,
@@ -517,67 +606,34 @@ export async function lookupSessionAndUserByTokenHash(
             roleName: rolesTable.name,
             developerId: usersTable.developerId,
             status: usersTable.status,
-          },
-        })
-        .from(sessionsTable)
-        .innerJoin(usersTable, eq(usersTable.id, sessionsTable.userId))
-        .leftJoin(rolesTable, and(eq(rolesTable.id, usersTable.roleId), eq(rolesTable.firmId, usersTable.firmId)))
-        .where(eq(sessionsTable.tokenHash, tokenHash))
-        .limit(1);
-      if (!row) return null;
-      return { session: row.session as any, user: row.user as any };
-    } catch (err) {
-      const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-      if (code !== "42703") throw err;
-      const [row2] = await db
-        .select({
-          session: {
-            id: sessionsTable.id,
-            userId: sessionsTable.userId,
-            tokenHash: sessionsTable.tokenHash,
-            expiresAt: sessionsTable.expiresAt,
-            createdAt: sessionsTable.createdAt,
-            userAgent: sessionsTable.userAgent,
-            ipAddress: sessionsTable.ipAddress,
-          },
-          user: {
-            id: usersTable.id,
-            email: usersTable.email,
-            name: usersTable.name,
-            userType: usersTable.userType,
-            firmId: usersTable.firmId,
-            roleId: usersTable.roleId,
-            status: usersTable.status,
-          },
-        })
-        .from(sessionsTable)
-        .innerJoin(usersTable, eq(usersTable.id, sessionsTable.userId))
-        .where(eq(sessionsTable.tokenHash, tokenHash))
-        .limit(1);
-      if (!row2) return null;
-      return { session: row2.session as any, user: ({ ...(row2.user as any), developerId: null, roleName: null } as any) };
-    }
+          })
+          .from(usersTable)
+          .leftJoin(rolesTable, and(eq(rolesTable.id, usersTable.roleId), eq(rolesTable.firmId, usersTable.firmId)))
+          .where(eq(usersTable.id, s.userId))
+          .catch(async (err) => {
+            const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
+            if (code !== "42703") throw err;
+            const [u2] = await authDb
+              .select({
+                id: usersTable.id,
+                email: usersTable.email,
+                name: usersTable.name,
+                userType: usersTable.userType,
+                firmId: usersTable.firmId,
+                roleId: usersTable.roleId,
+                status: usersTable.status,
+              })
+              .from(usersTable)
+              .where(eq(usersTable.id, s.userId));
+            return [u2 ? ({ ...u2, developerId: null, roleName: null }) : undefined] as any;
+          });
+        return { session: s, user: u as any };
+      },
+      { retry: true, maxRetries: 1, ctx: { stage: "fallback_lookup_session_user" }, allowUnsafe: true },
+    );
   };
 
-  const lookupViaAuthAdminDb = async (): Promise<
-    | {
-        session: typeof sessionsTable.$inferSelect;
-        user:
-          | {
-              id: number;
-              email: string;
-              name: string;
-              userType: string;
-              firmId: number | null;
-              roleId: number | null;
-              roleName: string | null;
-              developerId: number | null;
-              status: string;
-            }
-          | undefined;
-      }
-    | null
-  > => {
+  const lookupViaAuthAdminDb = async (): Promise<SessionUserLookupResult> => {
     if (!isAuthAdminDbConfigured()) return null;
     return await withAuthAdminDb(async (authDb) => {
       const [s] = await authDb.select().from(sessionsTable).where(eq(sessionsTable.tokenHash, tokenHash));
@@ -618,72 +674,6 @@ export async function lookupSessionAndUserByTokenHash(
     });
   };
 
-  const lookupViaAuthSafeDb = async (): Promise<
-    | {
-        session: typeof sessionsTable.$inferSelect;
-        user:
-          | {
-              id: number;
-              email: string;
-              name: string;
-              userType: string;
-              firmId: number | null;
-              roleId: number | null;
-              roleName: string | null;
-              developerId: number | null;
-              status: string;
-            }
-          | undefined;
-      }
-    | null
-  > => {
-    return await withAuthSafeDb(
-      async (authDb) => {
-        const [s] = await authDb
-          .select()
-          .from(sessionsTable)
-          .where(eq(sessionsTable.tokenHash, tokenHash))
-          ;
-        if (!s) return null;
-        const [u] = await authDb
-          .select({
-            id: usersTable.id,
-            email: usersTable.email,
-            name: usersTable.name,
-            userType: usersTable.userType,
-            firmId: usersTable.firmId,
-            roleId: usersTable.roleId,
-            roleName: rolesTable.name,
-            developerId: usersTable.developerId,
-            status: usersTable.status,
-          })
-          .from(usersTable)
-          .leftJoin(rolesTable, and(eq(rolesTable.id, usersTable.roleId), eq(rolesTable.firmId, usersTable.firmId)))
-          .where(eq(usersTable.id, s.userId))
-          .catch(async (err) => {
-            const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
-            if (code !== "42703") throw err;
-            const [u2] = await authDb
-              .select({
-                id: usersTable.id,
-                email: usersTable.email,
-                name: usersTable.name,
-                userType: usersTable.userType,
-                firmId: usersTable.firmId,
-                roleId: usersTable.roleId,
-                status: usersTable.status,
-              })
-              .from(usersTable)
-              .where(eq(usersTable.id, s.userId))
-              ;
-            return [u2 ? ({ ...u2, developerId: null, roleName: null }) : undefined] as any;
-          });
-        return { session: s, user: u as any };
-      },
-      { retry: true, maxRetries: 1, ctx: { stage: "lookup_session_user" }, allowUnsafe: true },
-    );
-  };
-
   const timing: SessionUserLookupTiming = { attempts: 0, inflightShared: false, primaryLookupMs: 0, fallbackLookupMs: 0, identityDbSource: "UNKNOWN" };
 
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -707,7 +697,7 @@ export async function lookupSessionAndUserByTokenHash(
       }
 
       const primaryStart = Date.now();
-      const primary = await lookupViaDb();
+      const primary = await lookupViaAuthSafeDbPrimary();
       const primaryMs = Date.now() - primaryStart;
       recordAuthLookup(primaryMs);
       timing.primaryLookupMs += primaryMs;
@@ -719,11 +709,13 @@ export async function lookupSessionAndUserByTokenHash(
         return null;
       }
       timing.identityDbSource = "DATABASE_URL";
+      // If primary already returned session WITH user (normal innerJoin production path,
+      // or separate-select test path both populated), skip duplicate fallback DB call.
       if (primary.user) return { ...primary, timing };
 
       try {
         const fallbackStart = Date.now();
-        const fallback = await lookupViaAuthSafeDb();
+        const fallback = await lookupViaAuthSafeDbFallback();
         const fallbackMs = Date.now() - fallbackStart;
         recordAuthLookup(fallbackMs);
         timing.fallbackLookupMs += fallbackMs;
@@ -790,15 +782,17 @@ export async function loadFounderPermissions(req: AuthRequest): Promise<{ permis
   if (!req.userId || req.userType !== "founder") return { permissions: [], highestLevel: null };
   let rows: Array<{ perm: string; level: string | null }> = [];
   try {
-    rows = await db
-      .select({
-        perm: platformFounderRolePermissionsTable.permissionCode,
-        level: platformFounderRolesTable.level,
-      })
-      .from(platformFounderUserRolesTable)
-      .innerJoin(platformFounderRolesTable, eq(platformFounderUserRolesTable.roleId, platformFounderRolesTable.id))
-      .innerJoin(platformFounderRolePermissionsTable, eq(platformFounderRolesTable.id, platformFounderRolePermissionsTable.roleId))
-      .where(eq(platformFounderUserRolesTable.userId, req.userId));
+    rows = await withAuthSafeDb(async (authDb) => {
+      return await authDb
+        .select({
+          perm: platformFounderRolePermissionsTable.permissionCode,
+          level: platformFounderRolesTable.level,
+        })
+        .from(platformFounderUserRolesTable)
+        .innerJoin(platformFounderRolesTable, eq(platformFounderUserRolesTable.roleId, platformFounderRolesTable.id))
+        .innerJoin(platformFounderRolePermissionsTable, eq(platformFounderRolesTable.id, platformFounderRolePermissionsTable.roleId))
+        .where(eq(platformFounderUserRolesTable.userId, req.userId!));
+    }, { retry: true, maxRetries: 1, ctx: { stage: "load_founder_permissions", userId: req.userId ?? null } });
   } catch (err) {
     const code = err && typeof err === "object" ? (err as { code?: unknown }).code : undefined;
     logger.error({ err, userId: req.userId ?? null, code: typeof code === "string" ? code : null }, "auth.founder_permissions.degraded");
