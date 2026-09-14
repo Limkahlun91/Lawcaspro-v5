@@ -1,4 +1,4 @@
-import { getOrCreateSharedPool, makeRlsDb, type Pool, clearTenantContext } from "@workspace/db";
+import { getOrCreateSharedPool, makeRlsDb, type Pool, clearTenantContext, setFounderContext } from "@workspace/db";
 import { logger } from "./logger.js";
 import { extractDbErrorInfo } from "./db-error.js";
 
@@ -49,10 +49,7 @@ export async function withAuthAdminDb<T>(
   let destroyClient = false;
   try {
     await client.query("BEGIN");
-    await client.query("SET LOCAL app.is_founder = 'true'");
-    await client.query("SET LOCAL app.current_firm_id = '0'");
-    await client.query("SET LOCAL app.firm_id = '0'");
-    await client.query("SET LOCAL app.current_user_id = '0'");
+    await setFounderContext(client);
     const adminDb = makeRlsDb(client);
     const result = await fn(adminDb);
     await client.query("COMMIT");
