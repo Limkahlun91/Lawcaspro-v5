@@ -641,7 +641,7 @@ async function validateQuotationAndBuildWarning(
     .where(and(
       eq(paymentVouchersTable.firmId, firmId),
       eq(paymentVouchersTable.quotationId, quotationId),
-      ne(paymentVouchersTable.status, "rejected"),
+      ne(paymentVouchersTable.approvalStatus, "rejected"),
     ))
     .limit(1);
   if (existingLink) {

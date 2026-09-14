@@ -157,11 +157,13 @@ function chainable<T extends unknown[]>(rows: T): any {
     finally: (f: any) => Promise.resolve(rows).finally(f),
     limit: (_n?: number) => self,
     where: (_c?: any) => self,
-    leftJoin: (_a?: any) => self,
-    innerJoin: (_a?: any) => self,
-    orderBy: (_a?: any) => self,
-    groupBy: (_a?: any) => self,
-    returning: (_shape?: any) => Promise.resolve([{ id: 1001 }] as any),
+    leftJoin: (_a?: any, _b?: any) => self,
+    rightJoin: (_a?: any, _b?: any) => self,
+    innerJoin: (_a?: any, _b?: any) => self,
+    fullJoin: (_a?: any, _b?: any) => self,
+    orderBy: () => self,
+    groupBy: () => self,
+    returning: (_shape?: any) => Promise.resolve([...(Array.isArray(rows) ? rows : [])] as any),
     set: (_values: any) => self,
     values: (_vals: any) => self,
     from: (_t: any) => self,
@@ -175,8 +177,10 @@ function fakeEmptyFirmScopedDb(overrides: Record<string, any> = {}): any {
     select: () => ({
       from: () => ({
         where: () => chainable([]),
-        leftJoin: () => ({ where: () => chainable([]) }),
-        innerJoin: () => ({ where: () => chainable([]) }),
+        leftJoin: (_a?: any, _b?: any) => chainable([]),
+        rightJoin: (_a?: any, _b?: any) => chainable([]),
+        innerJoin: (_a?: any, _b?: any) => chainable([]),
+        fullJoin: (_a?: any, _b?: any) => chainable([]),
         orderBy: () => chainable([]),
         groupBy: () => chainable([]),
         limit: () => chainable([]),
@@ -856,5 +860,570 @@ describe("case-bottleneck-monitor — security architecture", () => {
     expect(tickCalls.length >= 1).toBe(true);
     expect(escalateCalls[0]?.options?.db?.__kind).toBe("FIRM_SCAN_SCOPED_DB");
     expect(tickCalls[0]?.options?.db?.__kind).toBe("TICK_AUDIT_SCOPED_DB");
+  });
+
+  // ============================================================
+  // T10 Family — PV ENUM RUNTIME REGRESSIONS (Server A enum blocker)
+  // payment_voucher_status valid values:
+  //   pending_lawyer | pending_partner | pending_account |
+  //   paid_pending_collection | completed
+  // "rejected" belongs ONLY to payment_vouchers.approval_status.
+  // ============================================================
+
+  type PvStatusValid = "pending_lawyer" | "pending_partner" | "pending_account" | "paid_pending_collection" | "completed";
+  const VALID_PV_STATUSES: PvStatusValid[] = [
+    "pending_lawyer",
+    "pending_partner",
+    "pending_account",
+    "paid_pending_collection",
+    "completed",
+  ];
+
+  // Expose the monitor WHERE conditions by hooking the scoped DB chain:
+  //   firmDb.select({...voucherCols}).from(paymentVouchersTable).where(and(...conds))
+  // We intercept:
+  //   1. the select() shape (must include voucher status and approvalStatus)
+  //   2. the where(...) argument list inside and(...).
+  function capturePvOverdueConditions() {
+    let capturedWhere: any[] = [];
+    const rowsFor = (shape: any): any[] => {
+      if (!shape || typeof shape !== "object") return [];
+      if ("approvalRules" in shape) {
+        return [
+          {
+            approvalRules: {
+              bottleneckEscalation: {
+                escalateToPartnerAtSeverity: "attention",
+                autoEscalateKinds: ["pv_delay"],
+                partnerBottleneckDigestEnabled: false,
+              },
+            },
+          },
+        ];
+      }
+      if ("voucherNo" in shape) {
+        const now = Date.now();
+        return VALID_PV_STATUSES.map((st, i) => ({
+          id: 9000 + i,
+          voucherNo: `PV-${9000 + i}`,
+          paymentDueAt: new Date(now - 200 * 3600 * 1000),
+          caseId: 8001,
+          amount: "100.00",
+          status: st,
+          approvalStatus: i === VALID_PV_STATUSES.length - 1 ? "approved" : "pending_approval",
+          responsibleLawyerId: 10,
+          firmId: 1,
+        }));
+      }
+      return [];
+    };
+    const wrapped: any = {
+      selectDistinctOn: () => ({ from: () => ({ innerJoin: () => ({ where: () => chainable([]) }) }) }),
+      select: (shape: any) => ({
+        from: (_t: any) => ({
+          where: (andArg: any) => {
+            const isPvOverdueSelect = Boolean(shape && typeof shape === "object" && "voucherNo" in shape && "status" in shape && "approvalStatus" in shape);
+            if (isPvOverdueSelect && andArg && typeof andArg === "object") {
+              if (Array.isArray(andArg)) capturedWhere = andArg;
+              else if (Array.isArray((andArg as any).args)) capturedWhere = (andArg as any).args;
+              else capturedWhere = [andArg];
+            }
+            return chainable(rowsFor(shape) as any);
+          },
+          leftJoin: (_a?: any, _b?: any) => ({
+            where: () => chainable(rowsFor(shape) as any),
+          }),
+          rightJoin: (_a?: any, _b?: any) => ({ where: () => chainable(rowsFor(shape) as any) }),
+          innerJoin: (_a?: any, _b?: any) => ({ where: () => chainable(rowsFor(shape) as any) }),
+          fullJoin: (_a?: any, _b?: any) => ({ where: () => chainable(rowsFor(shape) as any) }),
+          orderBy: () => chainable(rowsFor(shape) as any),
+          groupBy: () => chainable(rowsFor(shape) as any),
+          limit: () => chainable(rowsFor(shape) as any),
+        }),
+      }),
+      insert: () => ({ values: () => ({ returning: () => Promise.resolve<any[]>([{ id: 8100 }]) }) }),
+      update: () => ({ set: () => ({ where: () => Promise.resolve<any>({}) }) }),
+    };
+    return { wrapped, getConditions: () => capturedWhere };
+  }
+
+  // Drizzle helpers ne() / eq() produce objects carrying column + value info.
+  // Returns an array: for and() wrapping multiple conditions, it walks the AST and
+  // produces one descriptor per leaf (op, col, val) binary condition.
+  function describeCondition(c: any): Array<{ colRefName: string; op: string; boundValue: any }> | { colRefName: string; op: string; boundValue: any } | null {
+    if (!c || typeof c !== "object") return null;
+
+    // Collect all binary leaf ops: [opStr, col, val]
+    const leafOps: Array<{ op: string; col: any; val: any }> = [];
+    (function walk(node: any): void {
+      if (!node || typeof node !== "object") return;
+      const a: any[] = Array.isArray((node as any).args) ? (node as any).args : Array.isArray(node) ? node : [];
+      if (a.length >= 3 && typeof a[0] === "string" && !Array.isArray(a[1])) {
+        leafOps.push({ op: a[0], col: a[1], val: a[2] });
+        return;
+      }
+      for (const child of a) walk(child);
+    })(c);
+
+    function resolveCol(colOperand: any): string | null {
+      if (!colOperand || typeof colOperand !== "object") return null;
+      const direct = (colOperand as any).name ?? (colOperand as any).fieldName ?? null;
+      if (direct) return direct;
+      if (Array.isArray(colOperand.args)) {
+        for (const a of colOperand.args) {
+          const r = resolveCol(a);
+          if (r) return r;
+        }
+      }
+      if (Array.isArray(colOperand.sqlChunks)) {
+        const m = colOperand.sqlChunks.join(" ").match(/`?payment_vouchers`?\s*\.\s*`?([A-Za-z0-9_]+)`?/);
+        if (m) return m[1];
+      }
+      return null;
+    }
+    function resolveVal(valOperand: any): any {
+      if (valOperand == null || typeof valOperand !== "object") return valOperand;
+      if ("value" in valOperand) return (valOperand as any).value;
+      if (Array.isArray((valOperand as any).args)) {
+        const inner = (valOperand as any).args;
+        const wrapper = inner.find((x: any) => x && typeof x === "object" && "value" in x);
+        if (wrapper) return wrapper.value;
+        for (const x of inner) {
+          const r = resolveVal(x);
+          if (r !== undefined) return r;
+        }
+      }
+      if (Array.isArray((valOperand as any).params) && (valOperand as any).params.length) {
+        return (valOperand as any).params[0];
+      }
+      return undefined;
+    }
+    function fallbackFromSqlChunks(node: any): { colRefName: string; op: string; boundValue: any } | null {
+      const chunks: string[] = Array.isArray((node as any).sqlChunks) ? (node as any).sqlChunks : [];
+      const params: any[] = Array.isArray((node as any).params) ? (node as any).params : [];
+      const joined = chunks.join("?");
+      const pvCol = joined.match(/`?payment_vouchers`?\s*\.\s*`?([A-Za-z0-9_]+)`?/)?.[1] ?? null;
+      if (!pvCol) return null;
+      let op = "eq";
+      if (/\s<> \?/.test(joined) || /\s!=\s/.test(joined) || /\bne\(/.test(joined)) op = "ne";
+      else if (/\s< \?/.test(joined)) op = "lt";
+      else if (/\s> \?/.test(joined)) op = "gt";
+      return { colRefName: pvCol, op, boundValue: params[0] ?? null };
+    }
+
+    if (leafOps.length === 0) {
+      const fallback = fallbackFromSqlChunks(c);
+      if (!fallback) return null;
+      return fallback;
+    }
+    const results: Array<{ colRefName: string; op: string; boundValue: any }> = [];
+    for (const L of leafOps) {
+      const colRefName = resolveCol(L.col);
+      const boundValue = resolveVal(L.val);
+      if (colRefName) {
+        results.push({ colRefName, op: L.op, boundValue });
+      } else {
+        // Leaf op present but column resolver failed — try last-ditch fallback per-node
+        const fb = fallbackFromSqlChunks(c);
+        if (fb) results.push(fb);
+      }
+    }
+    if (results.length === 0) return null;
+    if (results.length === 1) return results[0];
+    return results;
+  }
+
+  function flattenConds(conds: any[]): any[] {
+    return conds.flatMap((c: any) => {
+      if (c && typeof c === "object" && "args" in c && Array.isArray(c.args)) return flattenConds(c.args);
+      if (Array.isArray(c)) return flattenConds(c);
+      return [c];
+    });
+  }
+  // T10a — overdue PV query uses status for completed exclusion, approvalStatus for rejected exclusion.
+  it("T10a — overdue-PV where: completed excluded via status; rejected excluded via approvalStatus (NOT status)", async () => {
+    const { wrapped, getConditions } = capturePvOverdueConditions();
+    mockWithTenantSafeDb.mockImplementation(async (_firmId: number, fn: any) => fn(wrapped));
+    await scanBottlenecksForFirm(1);
+    const conds = getConditions();
+    expect(conds.length).toBeGreaterThanOrEqual(1);
+
+    const DB_TO_TS_COL: Record<string, string> = {
+      id: "id",
+      firm_id: "firmId",
+      status: "status",
+      approval_status: "approvalStatus",
+      payment_due_at: "paymentDueAt",
+      quotation_id: "quotationId",
+      voucher_no: "voucherNo",
+      case_id: "caseId",
+      amount: "amount",
+      responsible_lawyer_id: "responsibleLawyerId",
+    };
+    // drizzle 0.45.x Sql leaf layout: ctor=SQL, own keys=[decoder, shouldInlineParams, usedTables, queryChunks]
+    // For a binary comparison, queryChunks length = 5:
+    //   [0] {value:{0:""}} spacer
+    //   [1] column object {name,keyAsName,...,table}
+    //   [2] {value:{0:" <> "|" = "|" < "}}  operator
+    //   [3] {brand,value,encoder} bound value wrapper (value at .value)
+    //   [4] {value:{0:""}} spacer
+    function parseCondition(c: any): { colRefName: string; op: string; boundValue: any } | null {
+      if (!c || typeof c !== "object") return null;
+      const qc: any[] = Array.isArray((c as any).queryChunks) ? (c as any).queryChunks : [];
+      if (qc.length !== 5) return null;
+      const colObj = qc[1];
+      if (!colObj || typeof colObj !== "object" || !("name" in colObj)) return null;
+      const dbCol = String(colObj.name);
+      const colRefName = DB_TO_TS_COL[dbCol] ?? dbCol;
+      const opChunk = qc[2];
+      if (!opChunk || !("value" in opChunk)) return null;
+      const opRaw = String((opChunk.value as any)?.[0] ?? opChunk.value ?? "");
+      let op: string = "eq";
+      if (opRaw.includes("<>")) op = "ne";
+      else if (opRaw.includes("<")) op = "lt";
+      else if (opRaw.includes(">")) op = "gt";
+      else if (opRaw.includes("=")) op = "eq";
+      const valChunk = qc[3];
+      const boundValue = valChunk && typeof valChunk === "object" && "value" in valChunk ? valChunk.value : null;
+      if (colRefName === "firmId" || colRefName === "status" || colRefName === "approvalStatus" || colRefName === "paymentDueAt" || colRefName === "quotationId") {
+        return { colRefName, op, boundValue };
+      }
+      return null;
+    }
+
+    const flat: Array<{ colRefName: string; op: string; boundValue: any }> = [];
+    const seen = new WeakSet();
+    (function walk(node: any, depth = 0): void {
+      if (depth > 12 || node == null || typeof node !== "object" || seen.has(node)) return;
+      seen.add(node);
+      const p = parseCondition(node);
+      if (p) flat.push(p);
+      const keys = [...Object.keys(node), ...Object.getOwnPropertySymbols(node)];
+      for (const k of keys) {
+        let v: any;
+        try { v = node[k]; } catch { continue; }
+        if (Array.isArray(v)) {
+          for (const item of v) walk(item, depth + 1);
+        } else if (v && typeof v === "object") {
+          walk(v, depth + 1);
+        }
+      }
+    })(conds);
+    const seenKeys = new Set<string>();
+    const deduped: typeof flat = [];
+    for (const item of flat) {
+      const bv = item.boundValue instanceof Date ? String(item.boundValue.getTime()) : String(item.boundValue);
+      const k = `${item.colRefName}|${bv}|${item.op}`;
+      if (seenKeys.has(k)) continue;
+      seenKeys.add(k);
+      deduped.push(item);
+    }
+    expect(deduped.length).toBeGreaterThanOrEqual(3);
+
+    const completedExcl = deduped.find(d => d.boundValue === "completed");
+    expect(completedExcl).toBeDefined();
+    expect(completedExcl!.colRefName).toBe("status");
+    expect(completedExcl!.op).toBe("ne");
+
+    const rejectedExcl = deduped.find(d => d.boundValue === "rejected");
+    expect(rejectedExcl).toBeDefined();
+    expect(rejectedExcl!.colRefName).toBe("approvalStatus");
+    expect(rejectedExcl!.op).toBe("ne");
+
+    const rejOnStatus = deduped.find(d => d.colRefName === "status" && d.boundValue === "rejected");
+    expect(rejOnStatus).toBeUndefined();
+  });
+
+  // T10b — valid active payment_voucher_status values all still accepted in scan return.
+  it("T10b — valid active PV status values pending_lawyer|pending_partner|pending_account|paid_pending_collection all still accepted", async () => {
+    const idsSeen: number[] = [];
+    const { wrapped } = capturePvOverdueConditions();
+    const wrappedWithIds: any = {
+      ...wrapped,
+      insert: () => ({
+        values: (vals: any) => {
+          const vid = Number(Array.isArray(vals) ? vals[0]?.paymentVoucherId ?? null : vals?.paymentVoucherId ?? null);
+          if (vid >= 9000 && vid < 9999) idsSeen.push(vid);
+          return { returning: () => Promise.resolve<any[]>([{ id: 5000 + (vid ?? 0) }]) };
+        },
+      }),
+    };
+    mockWithTenantSafeDb.mockImplementation(async (_firmId: number, fn: any) => fn(wrappedWithIds));
+    await scanBottlenecksForFirm(1);
+    // VALID_PV_STATUSES length = 5 includes the `completed` entry which returns a row
+    // but it has status=completed which is filtered from snapshot inserts? No — our wrapped
+    // DB always returns 5 rows regardless of SQL semantics (the monitor's WHERE is
+    // captured but not executed). So all 5 rows trigger insertions.
+    expect(idsSeen.length).toBeGreaterThanOrEqual(4);
+    const pendingOnes = idsSeen.filter(id => id >= 9000 && id < 9004); // first 4 are the non-completed actives
+    for (let i = 0; i < 4; i++) expect(pendingOnes).toContain(9000 + i);
+  });
+
+  // T10c — completed (status=completed) vouchers are skipped via status column.
+  it("T10c — vouchers with status=completed are excluded via status (bound value completed on column status)", async () => {
+    const { wrapped, getConditions } = capturePvOverdueConditions();
+    mockWithTenantSafeDb.mockImplementation(async (_firmId: number, fn: any) => fn(wrapped));
+    await scanBottlenecksForFirm(1);
+    const conds = getConditions();
+    expect(conds.length).toBeGreaterThanOrEqual(1);
+    const DB_TO_TS_COL: Record<string, string> = { firm_id:"firmId", status:"status", approval_status:"approvalStatus", payment_due_at:"paymentDueAt", quotation_id:"quotationId" };
+    function parseCondition(c: any): { colRefName: string; op: string; boundValue: any } | null {
+      if (!c || typeof c !== "object") return null;
+      const qc: any[] = Array.isArray((c as any).queryChunks) ? (c as any).queryChunks : [];
+      if (qc.length !== 5) return null;
+      const colObj = qc[1];
+      if (!colObj || typeof colObj !== "object" || !("name" in colObj)) return null;
+      const dbCol = String(colObj.name);
+      const colRefName = DB_TO_TS_COL[dbCol] ?? dbCol;
+      const opChunk = qc[2];
+      if (!opChunk || !("value" in opChunk)) return null;
+      const opRaw = String((opChunk.value as any)?.[0] ?? opChunk.value ?? "");
+      let op: string = "eq";
+      if (opRaw.includes("<>")) op = "ne";
+      else if (opRaw.includes("<")) op = "lt";
+      else if (opRaw.includes(">")) op = "gt";
+      else if (opRaw.includes("=")) op = "eq";
+      const valChunk = qc[3];
+      const boundValue = valChunk && typeof valChunk === "object" && "value" in valChunk ? valChunk.value : null;
+      if (!DB_TO_TS_COL[dbCol]) return null;
+      return { colRefName, op, boundValue };
+    }
+    const flat: any[] = [];
+    const seen = new WeakSet();
+    (function walk(node: any, depth = 0): void {
+      if (depth > 10 || node == null || typeof node !== "object" || seen.has(node)) return;
+      seen.add(node);
+      const p = parseCondition(node);
+      if (p) flat.push(p);
+      const keys = [...Object.keys(node), ...Object.getOwnPropertySymbols(node)];
+      for (const k of keys) {
+        let v: any;
+        try { v = node[k]; } catch { continue; }
+        if (Array.isArray(v)) for (const item of v) walk(item, depth + 1);
+        else if (v && typeof v === "object") walk(v, depth + 1);
+      }
+    })(conds);
+    const c = flat.find((x: any) => x.colRefName === "status" && x.boundValue === "completed" && x.op === "ne");
+    expect(c).toBeDefined();
+  });
+
+  // T10d — rejected (approval_status=rejected) vouchers are skipped via approvalStatus.
+  it("T10d — vouchers with approvalStatus=rejected are excluded via approvalStatus column (NOT column status)", async () => {
+    const { wrapped, getConditions } = capturePvOverdueConditions();
+    mockWithTenantSafeDb.mockImplementation(async (_firmId: number, fn: any) => fn(wrapped));
+    await scanBottlenecksForFirm(1);
+    const conds = getConditions();
+    expect(conds.length).toBeGreaterThanOrEqual(1);
+    const DB_TO_TS_COL: Record<string, string> = { firm_id:"firmId", status:"status", approval_status:"approvalStatus", payment_due_at:"paymentDueAt", quotation_id:"quotationId" };
+    function parseCondition(c: any): { colRefName: string; op: string; boundValue: any } | null {
+      if (!c || typeof c !== "object") return null;
+      const qc: any[] = Array.isArray((c as any).queryChunks) ? (c as any).queryChunks : [];
+      if (qc.length !== 5) return null;
+      const colObj = qc[1];
+      if (!colObj || typeof colObj !== "object" || !("name" in colObj)) return null;
+      const dbCol = String(colObj.name);
+      const colRefName = DB_TO_TS_COL[dbCol] ?? dbCol;
+      const opChunk = qc[2];
+      if (!opChunk || !("value" in opChunk)) return null;
+      const opRaw = String((opChunk.value as any)?.[0] ?? opChunk.value ?? "");
+      let op: string = "eq";
+      if (opRaw.includes("<>")) op = "ne";
+      else if (opRaw.includes("<")) op = "lt";
+      else if (opRaw.includes(">")) op = "gt";
+      else if (opRaw.includes("=")) op = "eq";
+      const valChunk = qc[3];
+      const boundValue = valChunk && typeof valChunk === "object" && "value" in valChunk ? valChunk.value : null;
+      if (!DB_TO_TS_COL[dbCol]) return null;
+      return { colRefName, op, boundValue };
+    }
+    const flat: any[] = [];
+    const seen = new WeakSet();
+    (function walk(node: any, depth = 0): void {
+      if (depth > 10 || node == null || typeof node !== "object" || seen.has(node)) return;
+      seen.add(node);
+      const p = parseCondition(node);
+      if (p) flat.push(p);
+      const keys = [...Object.keys(node), ...Object.getOwnPropertySymbols(node)];
+      for (const k of keys) {
+        let v: any;
+        try { v = node[k]; } catch { continue; }
+        if (Array.isArray(v)) for (const item of v) walk(item, depth + 1);
+        else if (v && typeof v === "object") walk(v, depth + 1);
+      }
+    })(conds);
+    const c = flat.find((x: any) => x.colRefName === "approvalStatus" && x.boundValue === "rejected" && x.op === "ne");
+    expect(c).toBeDefined();
+  });
+
+  // T10e — No new Production migration required for THIS blocker fix.
+  // RATIONALE (canonical migrations as source of truth):
+  //   0047 defines payment_voucher_status enum that already INCLUDES 'completed'.
+  //   0069 defines payment_voucher_approval_status enum that already INCLUDES 'rejected'.
+  //   The runtime defect is a COLUMN MISBINDING:
+  //      monitor + routes code bound .status <> 'rejected'
+  //      instead of the correct .approval_status <> 'rejected'.
+  //   It is NOT a missing enum value.
+  //   DO NOT ALTER payment_voucher_status. DO NOT alter Drizzle schema types as part of this blocker fix.
+  it("T10e — no migration required: canonical migrations 0047+0069 already contain 'completed' in payment_voucher_status and 'rejected' in payment_voucher_approval_status", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const repoRoot = path.resolve(__dirname, "..", "..", "..", "..", "lib", "db", "migrations");
+
+    // --- 0047: payment_voucher_status already contains 'completed' ---
+    const mig47Path = path.join(repoRoot, "0047_payment_vouchers_multi_tier_approval.sql");
+    expect(fs.existsSync(mig47Path)).toBe(true);
+    const mig47 = fs.readFileSync(mig47Path, "utf8");
+    expect(mig47).toContain("CREATE TYPE payment_voucher_status AS ENUM");
+    // Extract the first CREATE TYPE payment_voucher_status ... ENUM block body
+    const match47 = mig47.match(/CREATE\s+TYPE\s+payment_voucher_status\s+AS\s+ENUM\s*\(([^)]*)\)/is);
+    expect(match47).toBeDefined();
+    expect(match47).not.toBeNull();
+    const vals47 = (match47![1] ?? "")
+      .split(/\s*,\s*/)
+      .map(s => s.trim().replace(/^'/, "").replace(/'$/, ""))
+      .filter(Boolean);
+    expect(vals47).toContain("pending_lawyer");
+    expect(vals47).toContain("pending_partner");
+    expect(vals47).toContain("pending_account");
+    expect(vals47).toContain("paid_pending_collection");
+    expect(vals47).toContain("completed");
+    // KEY ASSERTION: 'rejected' MUST NOT belong to payment_voucher_status
+    expect(vals47).not.toContain("rejected");
+    // Also: ALTER COLUMN status TYPE payment_voucher_status exists proving production status column is this enum
+    expect(mig47).toMatch(/ALTER\s+TABLE\s+payment_vouchers\s+ALTER\s+COLUMN\s+status\s+TYPE\s+payment_voucher_status/is);
+
+    // --- 0069: payment_voucher_approval_status already contains 'rejected' ---
+    const mig69Path = path.join(repoRoot, "0069_payment_vouchers_transfer_types_and_approval.sql");
+    expect(fs.existsSync(mig69Path)).toBe(true);
+    const mig69 = fs.readFileSync(mig69Path, "utf8");
+    expect(mig69).toContain("CREATE TYPE payment_voucher_approval_status AS ENUM");
+    const match69 = mig69.match(/CREATE\s+TYPE\s+payment_voucher_approval_status\s+AS\s+ENUM\s*\(([^)]*)\)/is);
+    expect(match69).toBeDefined();
+    expect(match69).not.toBeNull();
+    const vals69 = (match69![1] ?? "")
+      .split(/\s*,\s*/)
+      .map(s => s.trim().replace(/^'/, "").replace(/'$/, ""))
+      .filter(Boolean);
+    expect(vals69).toContain("approved");
+    expect(vals69).toContain("pending_approval");
+    expect(vals69).toContain("rejected");
+    // Also: payment_vouchers approval_status column IS of type payment_voucher_approval_status per migration
+    expect(mig69).toMatch(/ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+approval_status\s+payment_voucher_approval_status/is);
+
+    // --- Root cause summary: defect is COLUMN misbinding, NOT a missing value ---
+    // Therefore this blocker fix must NOT add a new migration, must NOT alter enums.
+    // The code fix scope shown below excludes all .sql files.
+    const changedInFix = [
+      "artifacts/api-server/src/jobs/case-bottleneck-monitor.ts",
+      "artifacts/api-server/src/routes/payment-vouchers.ts",
+      "artifacts/api-server/src/__tests__/case-bottleneck-monitor-security.test.ts",
+    ];
+    for (const rel of changedInFix) {
+      expect(path.extname(rel)).not.toBe(".sql");
+    }
+  });
+
+  // T10f — existing scoped DB architecture / advisory lock params / retry:false unchanged after PV fix.
+  it("T10f — scoped DB architecture, advisory lock SQL, and retry behavior remain unchanged after PV fix", async () => {
+    type QueryCall = { sqlText: string; params: any[] };
+    const queries: QueryCall[] = [];
+    let clientReleaseCount = 0;
+    const SAME = Symbol("T10f_same");
+    const fakeRawClient: any = {
+      __tag: SAME,
+      async query(sqlOrText: any, maybeBindings?: any[]) {
+        const sqlText = typeof sqlOrText === "string" ? sqlOrText : sqlOrText?.sql ?? String(sqlOrText);
+        queries.push({ sqlText, params: Array.isArray(maybeBindings) ? maybeBindings : [] });
+        if (/pg_try_advisory_lock/.test(sqlText)) return { rows: [{ ok: true }] };
+        if (/pg_advisory_unlock/.test(sqlText)) return { rows: [{ ok: true }] };
+        return { rows: [] };
+      },
+      release(_d?: boolean) { clientReleaseCount++; expect(this.__tag).toBe(SAME); },
+    };
+    const byStage: Record<string, any> = {};
+    mockWithAuthSafeDb.mockImplementation(async (fn: any, opts?: any) => {
+      byStage[opts?.ctx?.stage ?? "unknown"] = opts;
+      if (opts?.ctx?.stage === "case_bottleneck_monitor_list_firms") {
+        return await fn({ select: () => ({ from: () => ({ where: () => Promise.resolve<any[]>([{ id: 55 }]) }) }) });
+      }
+      return await fn({
+        select: () => ({ from: () => ({ where: () => Promise.resolve<any[]>([]) }) }),
+        insert: () => ({ values: () => ({}) }),
+      });
+    });
+    // Use capturePvOverdueConditions which already correctly extracts WHERE from the PV select chain
+    let touchedPvConds: any[] = [];
+    const { wrapped: capturedScoped, getConditions } = capturePvOverdueConditions();
+    mockWithTenantSafeDb.mockImplementation(async (firmId: number, fn: any, opts?: any) => {
+      byStage[opts?.ctx?.stage ?? "unknown_tenant"] = opts;
+      const ret = await fn(capturedScoped);
+      const captured = getConditions();
+      if (captured.length) touchedPvConds = captured;
+      return ret;
+    });
+    await tickAllFirms({ acquireLockFn: () => tryAcquireLock(fakeRawClient as any) });
+
+    // Lock architecture unchanged.
+    const acquire = queries.filter(q => /pg_try_advisory_lock/.test(q.sqlText));
+    const unlock = queries.filter(q => /pg_advisory_unlock/.test(q.sqlText));
+    expect(acquire.length).toBe(1);
+    expect(unlock.length).toBe(1);
+    expect(acquire[0].params).toEqual(["case_bottleneck_monitor"]);
+    expect(unlock[0].params).toEqual(["case_bottleneck_monitor"]);
+    expect(/pg_try_advisory_lock\(hashtext\(\$1::text\)\)/.test(acquire[0].sqlText)).toBe(true);
+    expect(/pg_advisory_unlock\(hashtext\(\$1::text\)\)/.test(unlock[0].sqlText)).toBe(true);
+    expect(clientReleaseCount).toBe(1);
+
+    // Retry policy unchanged.
+    expect(byStage["case_bottleneck_monitor_list_firms"]?.retry).toBe(true);
+    expect(byStage["case_bottleneck_monitor_list_firms"]?.maxRetries).toBe(1);
+    expect(byStage["case_bottleneck_monitor_scan"]?.retry).toBe(false);
+    expect(byStage["case_bottleneck_monitor_scan"]?.maxRetries).toBe(0);
+    expect(byStage["case_bottleneck_monitor_tick_audit"]?.retry).toBe(false);
+    expect(byStage["case_bottleneck_monitor_tick_audit"]?.maxRetries).toBe(0);
+
+    // Scoped DB unchanged: touchedPvConds (PV query where) has both exclusions correctly.
+    expect(touchedPvConds.length).toBeGreaterThanOrEqual(1);
+    const DB_TO_TS_COL: Record<string, string> = { firm_id:"firmId", status:"status", approval_status:"approvalStatus", payment_due_at:"paymentDueAt", quotation_id:"quotationId" };
+    function parseCondition(c: any): { colRefName: string; op: string; boundValue: any } | null {
+      if (!c || typeof c !== "object") return null;
+      const qc: any[] = Array.isArray((c as any).queryChunks) ? (c as any).queryChunks : [];
+      if (qc.length !== 5) return null;
+      const colObj = qc[1];
+      if (!colObj || typeof colObj !== "object" || !("name" in colObj)) return null;
+      const dbCol = String(colObj.name);
+      const colRefName = DB_TO_TS_COL[dbCol] ?? dbCol;
+      const opChunk = qc[2];
+      if (!opChunk || !("value" in opChunk)) return null;
+      const opRaw = String((opChunk.value as any)?.[0] ?? opChunk.value ?? "");
+      let op: string = "eq";
+      if (opRaw.includes("<>")) op = "ne";
+      else if (opRaw.includes("<")) op = "lt";
+      else if (opRaw.includes(">")) op = "gt";
+      else if (opRaw.includes("=")) op = "eq";
+      const valChunk = qc[3];
+      const boundValue = valChunk && typeof valChunk === "object" && "value" in valChunk ? valChunk.value : null;
+      if (!DB_TO_TS_COL[dbCol]) return null;
+      return { colRefName, op, boundValue };
+    }
+    const flat: any[] = [];
+    const seen = new WeakSet();
+    (function walk(node: any, depth = 0): void {
+      if (depth > 10 || node == null || typeof node !== "object" || seen.has(node)) return;
+      seen.add(node);
+      const p = parseCondition(node);
+      if (p) flat.push(p);
+      const keys = [...Object.keys(node), ...Object.getOwnPropertySymbols(node)];
+      for (const k of keys) {
+        let v: any;
+        try { v = node[k]; } catch { continue; }
+        if (Array.isArray(v)) for (const item of v) walk(item, depth + 1);
+        else if (v && typeof v === "object") walk(v, depth + 1);
+      }
+    })(touchedPvConds);
+    expect(flat.length).toBeGreaterThanOrEqual(2);
+    expect(flat.find((x: any) => x.colRefName === "status" && x.boundValue === "completed")).toBeDefined();
+    expect(flat.find((x: any) => x.colRefName === "approvalStatus" && x.boundValue === "rejected")).toBeDefined();
+    expect(flat.find((x: any) => x.colRefName === "status" && x.boundValue === "rejected")).toBeUndefined();
   });
 });

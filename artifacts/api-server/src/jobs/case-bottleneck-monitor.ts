@@ -311,6 +311,7 @@ async function scanBottlenecksForFirmWithDb(
       caseId: paymentVouchersTable.caseId,
       amount: paymentVouchersTable.amount,
       status: paymentVouchersTable.status,
+      approvalStatus: paymentVouchersTable.approvalStatus,
       responsibleLawyerId: paymentVouchersTable.responsibleLawyerId,
       firmId: paymentVouchersTable.firmId,
     })
@@ -318,7 +319,7 @@ async function scanBottlenecksForFirmWithDb(
     .where(and(
       eq(paymentVouchersTable.firmId, firmId),
       ne(paymentVouchersTable.status, "completed"),
-      ne(paymentVouchersTable.status, "rejected"),
+      ne(paymentVouchersTable.approvalStatus, "rejected"),
       lt(paymentVouchersTable.paymentDueAt, pvDueCutoff),
     ));
 
