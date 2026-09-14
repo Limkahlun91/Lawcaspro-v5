@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql, lt, inArray, or, gte, ne, gt } from "drizzle-orm";
+import { and, eq, isNull, sql, lt, inArray, or, gte, ne, gt, count } from "drizzle-orm";
 import {
   firmsTable,
   casesTable,
@@ -8,10 +8,13 @@ import {
   caseMonitorLogsTable,
   paymentVouchersTable,
   accountingSettingsTable,
-  db,
+  pool,
+  type PoolClient,
 } from "@workspace/db";
 import { logger } from "../lib/logger.js";
 import { writeAuditLog } from "../lib/auth.js";
+import { withAuthSafeDb, withTenantSafeDb, type AuthSafeDbContext, isTransientDbConnectionError } from "../lib/auth-safe-db.js";
+import type { RlsDb } from "@workspace/db";
 
 const CASE_NO_MOVEMENT_DAYS = 3;
 const SCAN_INTERVAL_MS = 60 * 60 * 1000;
@@ -19,6 +22,7 @@ const PV_DELAY_HOURS = 48;
 const CASE_APPROVAL_STALE_HOURS = 24;
 const CASE_WAITING_KEYWORDS = ["awaiting", "waiting", "pending", "to be", "hold on", "stand by"];
 const CASE_ON_HOLD_KEYWORDS = ["on hold", "suspended", "paused", "halted", "freeze"];
+const ADVISORY_LOCK_KEY = "case_bottleneck_monitor";
 
 let running = false;
 let timer: NodeJS.Timeout | null = null;
@@ -35,6 +39,14 @@ const DEFAULT_ESCALATION_CONFIG: EscalationConfigShape = {
   partnerBottleneckDigestEnabled: false,
 };
 
+export type BottleneckScanResult = {
+  createdSnapshots: number[];
+  resolvedSnapshots: number[];
+  escalatedSnapshots: number[];
+  scannedAt: Date;
+  escalationConfig: EscalationConfigShape;
+};
+
 function severityRank(s: string | undefined | null): number {
   if (s === "critical") return 3;
   if (s === "urgent") return 2;
@@ -49,9 +61,9 @@ function meetsEscalationThreshold(config: EscalationConfigShape, severity: strin
   return severityRank(severity) >= severityRank(config.escalateToPartnerAtSeverity);
 }
 
-async function loadEscalationConfig(firmId: number): Promise<EscalationConfigShape> {
+async function loadEscalationConfig(firmDb: RlsDb, firmId: number): Promise<EscalationConfigShape> {
   try {
-    const rows = await db
+    const rows = await firmDb
       .select({ approvalRules: accountingSettingsTable.approvalRules })
       .from(accountingSettingsTable)
       .where(eq(accountingSettingsTable.firmId, firmId))
@@ -78,18 +90,98 @@ async function loadEscalationConfig(firmId: number): Promise<EscalationConfigSha
   }
 }
 
-async function tryAcquireLock(): Promise<boolean> {
-  const r = await db.execute(sql`SELECT pg_try_advisory_lock(hashtext('case_bottleneck_monitor')) as ok`);
-  const rows = Array.isArray(r) ? r : ("rows" in (r as any) ? (r as any).rows : []);
-  const ok = rows?.[0]?.ok;
-  return ok === true || ok === "t" || ok === 1;
+export type AdvisoryLockHandle = {
+  acquired: boolean;
+  release: () => Promise<void>;
+};
+
+export async function tryAcquireLock(rawClient?: PoolClient): Promise<AdvisoryLockHandle> {
+  const client: PoolClient = rawClient ?? await pool.connect();
+  let released = false;
+  let acquired = false;
+
+  const destroyIfUnlockFails = { value: false };
+
+  const doRelease = async () => {
+    if (released) return;
+    released = true;
+    let destroy = destroyIfUnlockFails.value;
+    if (acquired) {
+      try {
+        await client.query(
+          `SELECT pg_advisory_unlock(hashtext($1::text)) as ok`,
+          [ADVISORY_LOCK_KEY],
+        );
+      } catch {
+        destroy = true;
+      }
+    }
+    try {
+      client.release(destroy);
+    } catch {
+      /* pool release best effort */
+    }
+  };
+
+  try {
+    const r = await client.query(
+      `SELECT pg_try_advisory_lock(hashtext($1::text)) as ok`,
+      [ADVISORY_LOCK_KEY],
+    );
+    const rows = Array.isArray(r) ? r : ("rows" in (r as any) ? (r as any).rows : []);
+    const ok = rows?.[0]?.ok;
+    acquired = ok === true || ok === "t" || ok === 1;
+    if (!acquired) {
+      await doRelease();
+    }
+    return { acquired, release: doRelease };
+  } catch (err) {
+    destroyIfUnlockFails.value = isTransientDbConnectionError(err);
+    await doRelease();
+    throw err;
+  }
 }
 
-async function releaseLock(): Promise<void> {
-  try { await db.execute(sql`SELECT pg_advisory_unlock(hashtext('case_bottleneck_monitor'))`); } catch { /* ignore */ }
+async function escalateSnapshot(
+  firmDb: RlsDb,
+  firmId: number,
+  snapshotId: number,
+  targetPartnerUserId: number | null,
+  reason: string,
+): Promise<void> {
+  try {
+    await firmDb.update(caseBottleneckSnapshotsTable)
+      .set({ escalatedToPartner: true, escalatedAt: new Date(), updatedAt: new Date() })
+      .where(eq(caseBottleneckSnapshotsTable.id, snapshotId));
+    await firmDb.insert(caseMonitorLogsTable).values({
+      firmId,
+      snapshotId,
+      actorUserId: null,
+      action: "escalate",
+      notes: reason ?? "Auto-escalated by job",
+      metadata: { auto: true, targetPartnerUserId: targetPartnerUserId ?? null },
+    });
+    try {
+      await writeAuditLog({
+        firmId: firmId > 0 ? firmId : 0,
+        actorId: 0,
+        actorType: "system",
+        entityType: "case_bottleneck_snapshot",
+        entityId: snapshotId,
+        action: "escalate",
+        detail: reason ?? "Auto-escalated by job",
+      }, { db: firmDb });
+    } catch { /* audit non-fatal */ }
+  } catch (err) {
+    logger.error({ err, firmId, snapshotId }, "case-bottleneck-monitor: escalateSnapshot failed");
+  }
 }
 
-export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: boolean } = {}) {
+async function scanBottlenecksForFirmWithDb(
+  firmDb: RlsDb,
+  firmId: number,
+  opts: { dryRun?: boolean } = {},
+): Promise<BottleneckScanResult> {
   const now = new Date();
   const movementCutoff = new Date(now.getTime() - CASE_NO_MOVEMENT_DAYS * 24 * 60 * 60 * 1000);
   const pvDueCutoff = new Date(now.getTime() - PV_DELAY_HOURS * 60 * 60 * 1000);
@@ -97,9 +189,9 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
   const createdSnapshots: number[] = [];
   const resolvedSnapshots: number[] = [];
   const escalatedSnapshots: number[] = [];
-  const escalationConfig = await loadEscalationConfig(firmId);
+  const escalationConfig = await loadEscalationConfig(firmDb, firmId);
 
-  const activeCaseIds = await db
+  const activeCaseIds = await firmDb
     .selectDistinctOn([casesTable.id], { id: casesTable.id })
     .from(casesTable)
     .innerJoin(caseAssignmentsTable, eq(caseAssignmentsTable.caseId, casesTable.id))
@@ -112,7 +204,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
 
   const lawyerIdByCase = new Map<number, number>();
   const managerIdByCase = new Map<number, number>();
-  const caseAssignmentsRows = await db
+  const caseAssignmentsRows = await firmDb
     .select({
       caseId: caseAssignmentsTable.caseId,
       userId: caseAssignmentsTable.userId,
@@ -134,7 +226,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
 
   if (activeCaseIds.length > 0) {
     const lastMovementByCase = new Map<number, Date>();
-    const rows = await db
+    const rows = await firmDb
       .select({
         caseId: caseWorkflowStepsTable.caseId,
         lastUpdated: sql<Date>`MAX(COALESCE(${caseWorkflowStepsTable.completedAt}, ${caseWorkflowStepsTable.updatedAt}, ${caseWorkflowStepsTable.createdAt}))`,
@@ -149,7 +241,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
     for (const { id } of activeCaseIds) {
       const last = lastMovementByCase.get(id);
       if (!last || last <= movementCutoff) {
-        const existsOpen = await db
+        const existsOpen = await firmDb
           .select({ id: caseBottleneckSnapshotsTable.id })
           .from(caseBottleneckSnapshotsTable)
           .where(and(
@@ -160,7 +252,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
           ))
           .limit(1);
         if (existsOpen[0]) continue;
-        const caseRows = await db
+        const caseRows = await firmDb
           .select({
             id: casesTable.id,
             referenceNo: casesTable.referenceNo,
@@ -170,7 +262,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
           .from(casesTable)
           .where(eq(casesTable.id, id))
           .limit(1);
-        const firstCreated = await db
+        const firstCreated = await firmDb
           .select({ createdAt: caseWorkflowStepsTable.createdAt })
           .from(caseWorkflowStepsTable)
           .where(eq(caseWorkflowStepsTable.caseId, id))
@@ -187,7 +279,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
         if (opts.dryRun) continue;
         const title = c.referenceNo ? `Case ${c.referenceNo}` : `Case #${c.id}`;
         const detail = `No workflow step movement for ${daysStuck} days. Status=${c.status ?? "n/a"}; Type=${c.caseType ?? "n/a"}.`;
-        const ins = await db.insert(caseBottleneckSnapshotsTable).values({
+        const ins = await firmDb.insert(caseBottleneckSnapshotsTable).values({
           firmId,
           caseId: id,
           monitorKind: "case_no_movement",
@@ -203,7 +295,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
           const sid = ins[0].id;
           createdSnapshots.push(sid);
           if (meetsEscalationThreshold(escalationConfig, severity, "case_no_movement")) {
-            await escalateSnapshot(firmId, sid, null, `Auto-escalated (threshold=${escalationConfig.escalateToPartnerAtSeverity}): ${detail}`);
+            await escalateSnapshot(firmDb, firmId, sid, null, `Auto-escalated (threshold=${escalationConfig.escalateToPartnerAtSeverity}): ${detail}`);
             escalatedSnapshots.push(sid);
           }
         }
@@ -211,7 +303,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
     }
   }
 
-  const overduePvs = await db
+  const overduePvs = await firmDb
     .select({
       id: paymentVouchersTable.id,
       voucherNo: paymentVouchersTable.voucherNo,
@@ -231,7 +323,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
     ));
 
   for (const pv of overduePvs) {
-    const existsOpen = await db
+    const existsOpen = await firmDb
       .select({ id: caseBottleneckSnapshotsTable.id })
       .from(caseBottleneckSnapshotsTable)
       .where(and(
@@ -248,7 +340,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
     const severity: "attention" | "urgent" | "critical" = hours >= 96 ? "critical" : hours >= 72 ? "urgent" : "attention";
     const responsibleManagerUserId = pv.caseId ? managerIdByCase.get(Number(pv.caseId)) ?? null : null;
     if (opts.dryRun) continue;
-    const ins = await db.insert(caseBottleneckSnapshotsTable).values({
+    const ins = await firmDb.insert(caseBottleneckSnapshotsTable).values({
       firmId,
       caseId: pv.caseId ?? null,
       paymentVoucherId: pv.id,
@@ -265,7 +357,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
       const sid = ins[0].id;
       createdSnapshots.push(sid);
       if (meetsEscalationThreshold(escalationConfig, severity, "pv_delay")) {
-        await escalateSnapshot(firmId, sid, null, `Auto-escalated (threshold=${escalationConfig.escalateToPartnerAtSeverity}): PV overdue ${hours}h.`);
+        await escalateSnapshot(firmDb, firmId, sid, null, `Auto-escalated (threshold=${escalationConfig.escalateToPartnerAtSeverity}): PV overdue ${hours}h.`);
         escalatedSnapshots.push(sid);
       }
     }
@@ -273,7 +365,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
 
   if (activeCaseIds.length > 0) {
     const ids = activeCaseIds.map((c) => c.id);
-    const waitingAndHoldRows = await db
+    const waitingAndHoldRows = await firmDb
       .select({
         id: casesTable.id,
         referenceNo: casesTable.referenceNo,
@@ -306,7 +398,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
       if (isOnHold && daysStuck >= 3) kindsToInsert.push("case_on_hold");
 
       for (const kind of kindsToInsert) {
-        const existsOpen = await db
+        const existsOpen = await firmDb
           .select({ id: caseBottleneckSnapshotsTable.id })
           .from(caseBottleneckSnapshotsTable)
           .where(and(
@@ -325,7 +417,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
         const detail = kind === "case_waiting"
           ? `Case Waiting status (lawyer=${c.lawyerStatus ?? "—"} / developer=${c.developerStatus ?? "—"}): ${daysStuck}d.`
           : `Case On Hold status (lawyer=${c.lawyerStatus ?? "—"} / developer=${c.developerStatus ?? "—"}): ${daysStuck}d.`;
-        const ins = await db.insert(caseBottleneckSnapshotsTable).values({
+        const ins = await firmDb.insert(caseBottleneckSnapshotsTable).values({
           firmId,
           caseId,
           monitorKind: kind,
@@ -345,14 +437,14 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
           const sid = ins[0].id;
           createdSnapshots.push(sid);
           if (meetsEscalationThreshold(escalationConfig, severity, kind)) {
-            await escalateSnapshot(firmId, sid, null, `Auto-escalated (threshold=${escalationConfig.escalateToPartnerAtSeverity}): ${detail}`);
+            await escalateSnapshot(firmDb, firmId, sid, null, `Auto-escalated (threshold=${escalationConfig.escalateToPartnerAtSeverity}): ${detail}`);
             escalatedSnapshots.push(sid);
           }
         }
       }
     }
 
-    const approvalWaitingRows = await db
+    const approvalWaitingRows = await firmDb
       .select({
         id: casesTable.id,
         referenceNo: casesTable.referenceNo,
@@ -376,7 +468,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
       ));
     for (const c of approvalWaitingRows) {
       const caseId = Number(c.id);
-      const existsOpen = await db
+      const existsOpen = await firmDb
         .select({ id: caseBottleneckSnapshotsTable.id })
         .from(caseBottleneckSnapshotsTable)
         .where(and(
@@ -396,7 +488,7 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
       if (opts.dryRun) continue;
       const title = c.referenceNo ? `Case ${c.referenceNo}` : `Case #${caseId}`;
       const detail = `Approval waiting status=${c.approvalStatus ?? "pending_approval"} for ${hours}h.`;
-      const ins = await db.insert(caseBottleneckSnapshotsTable).values({
+      const ins = await firmDb.insert(caseBottleneckSnapshotsTable).values({
         firmId,
         caseId,
         monitorKind: "approval_waiting",
@@ -412,14 +504,14 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
         const sid = ins[0].id;
         createdSnapshots.push(sid);
         if (meetsEscalationThreshold(escalationConfig, severity, "approval_waiting")) {
-          await escalateSnapshot(firmId, sid, null, `Auto-escalated (threshold=${escalationConfig.escalateToPartnerAtSeverity}): ${detail}`);
+          await escalateSnapshot(firmDb, firmId, sid, null, `Auto-escalated (threshold=${escalationConfig.escalateToPartnerAtSeverity}): ${detail}`);
           escalatedSnapshots.push(sid);
         }
       }
     }
-    }
+  }
 
-  const staleNoMovement = await db
+  const staleNoMovement = await firmDb
     .select({ id: caseBottleneckSnapshotsTable.id, caseId: caseBottleneckSnapshotsTable.caseId })
     .from(caseBottleneckSnapshotsTable)
     .leftJoin(caseWorkflowStepsTable, and(
@@ -434,16 +526,16 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
     ));
   for (const s of staleNoMovement) {
     if (opts.dryRun) continue;
-    await db.update(caseBottleneckSnapshotsTable)
+    await firmDb.update(caseBottleneckSnapshotsTable)
       .set({ resolvedAt: now, resolvedNote: "Auto-resolved: new workflow progress detected", updatedAt: now })
       .where(eq(caseBottleneckSnapshotsTable.id, s.id));
-    await db.insert(caseMonitorLogsTable).values({
+    await firmDb.insert(caseMonitorLogsTable).values({
       firmId, snapshotId: s.id, caseId: s.caseId ?? null, action: "resolve", notes: "Auto-resolved: new workflow progress detected", metadata: { auto: true },
     });
     resolvedSnapshots.push(s.id);
   }
 
-  const stalePvDelay = await db
+  const stalePvDelay = await firmDb
     .select({ id: caseBottleneckSnapshotsTable.id, paymentVoucherId: caseBottleneckSnapshotsTable.paymentVoucherId })
     .from(caseBottleneckSnapshotsTable)
     .leftJoin(paymentVouchersTable, eq(paymentVouchersTable.id, caseBottleneckSnapshotsTable.paymentVoucherId))
@@ -458,16 +550,16 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
     ));
   for (const s of stalePvDelay) {
     if (opts.dryRun) continue;
-    await db.update(caseBottleneckSnapshotsTable)
+    await firmDb.update(caseBottleneckSnapshotsTable)
       .set({ resolvedAt: now, resolvedNote: "Auto-resolved: PV no longer overdue or completed", updatedAt: now })
       .where(eq(caseBottleneckSnapshotsTable.id, s.id));
-    await db.insert(caseMonitorLogsTable).values({
+    await firmDb.insert(caseMonitorLogsTable).values({
       firmId, snapshotId: s.id, caseId: null, action: "resolve", notes: "Auto-resolved: PV no longer overdue or completed", metadata: { auto: true },
     });
     resolvedSnapshots.push(s.id);
   }
 
-  const staleWaitingOnHold = await db
+  const staleWaitingOnHold = await firmDb
     .select({
       id: caseBottleneckSnapshotsTable.id,
       caseId: caseBottleneckSnapshotsTable.caseId,
@@ -492,16 +584,16 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
     ));
   for (const s of staleWaitingOnHold) {
     if (opts.dryRun) continue;
-    await db.update(caseBottleneckSnapshotsTable)
+    await firmDb.update(caseBottleneckSnapshotsTable)
       .set({ resolvedAt: now, resolvedNote: `Auto-resolved: ${s.monitorKind} status progressed`, updatedAt: now })
       .where(eq(caseBottleneckSnapshotsTable.id, s.id));
-    await db.insert(caseMonitorLogsTable).values({
+    await firmDb.insert(caseMonitorLogsTable).values({
       firmId, snapshotId: s.id, caseId: s.caseId ?? null, action: "resolve", notes: `Auto-resolved: ${s.monitorKind} status progressed`, metadata: { auto: true },
     });
     resolvedSnapshots.push(s.id);
   }
 
-  const staleApprovalWaiting = await db
+  const staleApprovalWaiting = await firmDb
     .select({
       id: caseBottleneckSnapshotsTable.id,
       caseId: caseBottleneckSnapshotsTable.caseId,
@@ -520,10 +612,10 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
     ));
   for (const s of staleApprovalWaiting) {
     if (opts.dryRun) continue;
-    await db.update(caseBottleneckSnapshotsTable)
+    await firmDb.update(caseBottleneckSnapshotsTable)
       .set({ resolvedAt: now, resolvedNote: "Auto-resolved: case approval status resolved", updatedAt: now })
       .where(eq(caseBottleneckSnapshotsTable.id, s.id));
-    await db.insert(caseMonitorLogsTable).values({
+    await firmDb.insert(caseMonitorLogsTable).values({
       firmId, snapshotId: s.id, caseId: s.caseId ?? null, action: "resolve", notes: "Auto-resolved: case approval status resolved", metadata: { auto: true },
     });
     resolvedSnapshots.push(s.id);
@@ -532,47 +624,40 @@ export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: bo
   return { createdSnapshots, resolvedSnapshots, escalatedSnapshots, scannedAt: now, escalationConfig };
 }
 
-async function escalateSnapshot(
-  firmId: number,
-  snapshotId: number,
-  targetPartnerUserId: number | null,
-  reason: string,
-): Promise<void> {
-  try {
-    await db.update(caseBottleneckSnapshotsTable)
-      .set({ escalatedToPartner: true, escalatedAt: new Date(), updatedAt: new Date() })
-      .where(eq(caseBottleneckSnapshotsTable.id, snapshotId));
-    await db.insert(caseMonitorLogsTable).values({
-      firmId,
-      snapshotId,
-      actorUserId: null,
-      action: "escalate",
-      notes: reason ?? "Auto-escalated by job",
-      metadata: { auto: true, targetPartnerUserId: targetPartnerUserId ?? null },
-    });
-    try {
-      await writeAuditLog({
-        firmId: firmId > 0 ? firmId : 0,
-        actorId: 0,
-        entityType: "case_bottleneck_snapshot",
-        entityId: snapshotId,
-        action: "escalate",
-        detail: reason ?? "Auto-escalated by job",
-      });
-    } catch { /* audit non-fatal */ }
-  } catch (err) {
-    logger.error({ err, firmId, snapshotId }, "case-bottleneck-monitor: escalateSnapshot failed");
-  }
+export async function scanBottlenecksForFirm(firmId: number, opts: { dryRun?: boolean } = {}): Promise<BottleneckScanResult> {
+  return await withTenantSafeDb(
+    firmId,
+    async (firmDb) => scanBottlenecksForFirmWithDb(firmDb, firmId, opts),
+    { retry: false, maxRetries: 0, ctx: { stage: "case_bottleneck_monitor_scan", firmId }, userId: 0 },
+  );
 }
 
-export async function tickAllFirms() {
-  const gotLock = await tryAcquireLock();
-  if (!gotLock) return { skipped: true };
+export async function enumerateActiveFirmIds(): Promise<Array<{ id: number }>> {
+  const ctx: AuthSafeDbContext = { stage: "case_bottleneck_monitor_list_firms" };
+  return await withAuthSafeDb(async (authDb) => {
+    const rows = await authDb
+      .select({ id: firmsTable.id, status: firmsTable.status })
+      .from(firmsTable)
+      .where(eq(firmsTable.status, "active"));
+    return rows.map((r) => ({ id: Number(r.id) }));
+  }, { retry: true, maxRetries: 1, ctx });
+}
+
+export async function tickAllFirms(opts?: { lockHandle?: AdvisoryLockHandle | null; acquireLockFn?: () => Promise<AdvisoryLockHandle> }) {
   let created = 0;
   let resolved = 0;
   let escalated = 0;
+  let lockHandle: AdvisoryLockHandle | null = opts?.lockHandle ?? null;
+  const weOwnLock = !opts?.lockHandle;
+  const acquireLockFn: () => Promise<AdvisoryLockHandle> = opts?.acquireLockFn ?? tryAcquireLock;
   try {
-    const firms = await db.select({ id: firmsTable.id }).from(firmsTable).where(eq(firmsTable.status, "active"));
+    if (!lockHandle) {
+      lockHandle = await acquireLockFn();
+    }
+    if (!lockHandle.acquired) {
+      return { skipped: true, created: 0, resolved: 0, escalated: 0 };
+    }
+    const firms = await enumerateActiveFirmIds();
     for (const f of firms) {
       try {
         const result = await scanBottlenecksForFirm(f.id);
@@ -585,20 +670,25 @@ export async function tickAllFirms() {
     }
     if (created || resolved || escalated) {
       try {
-        await writeAuditLog({
-          firmId: 0,
-          actorId: 0,
-          entityType: "case_monitor", entityId: 0,
-          action: "tick",
-          detail: `Created ${created}, resolved ${resolved}, escalated ${escalated} snapshots.`,
-        });
+        await withAuthSafeDb(async (authDb) => {
+          await writeAuditLog({
+            firmId: 0,
+            actorId: 0,
+            actorType: "system",
+            entityType: "case_monitor", entityId: 0,
+            action: "tick",
+            detail: `Created ${created}, resolved ${resolved}, escalated ${escalated} snapshots.`,
+          }, { db: authDb });
+        }, { retry: false, maxRetries: 0, ctx: { stage: "case_bottleneck_monitor_tick_audit" } });
       } catch { /* ignore audit failure */ }
       logger.info({ created, resolved, escalated }, "case-bottleneck-monitor tick complete");
     }
   } finally {
-    await releaseLock();
+    if (lockHandle && weOwnLock) {
+      try { await lockHandle.release(); } catch { /* final best effort */ }
+    }
   }
-  return { created, resolved, skipped: false };
+  return { created, resolved, escalated, skipped: false };
 }
 
 export function startCaseBottleneckMonitor() {

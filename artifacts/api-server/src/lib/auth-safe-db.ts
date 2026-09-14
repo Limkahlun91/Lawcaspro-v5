@@ -1,4 +1,4 @@
-import { clearTenantContext, makeRlsDb, pool, setFounderContext } from "@workspace/db";
+import { clearTenantContext, makeRlsDb, pool, setFounderContext, setTenantContext } from "@workspace/db";
 import { logger } from "./logger";
 
 export type AuthSafeDbContext = {
@@ -234,5 +234,69 @@ export async function withAuthSafeDb<T>(
     }
   }
 
+  throw lastErr;
+}
+
+export type TenantSafeDbContext = {
+  stage?: string;
+  firmId?: number;
+  userId?: number;
+};
+
+export async function withTenantSafeDb<T>(
+  firmId: number,
+  fn: (db: ReturnType<typeof makeRlsDb>) => Promise<T>,
+  opts?: { retry?: boolean; maxRetries?: number; ctx?: TenantSafeDbContext; userId?: number },
+): Promise<T> {
+  const maxRetries = opts?.maxRetries ?? (opts?.retry ? 1 : 0);
+  let lastErr: unknown;
+  const userId = opts?.userId ?? 0;
+
+  for (let attempt = 1; attempt <= 1 + maxRetries; attempt++) {
+    const startedAt = Date.now();
+    const connectStartedAt = Date.now();
+    const client = await pool.connect();
+    const connectMs = Date.now() - connectStartedAt;
+    if (connectMs > 250) {
+      logger.warn(
+        {
+          ...opts?.ctx,
+          connectMs,
+          poolTotal: typeof (pool as any)?.totalCount === "number" ? (pool as any).totalCount : null,
+          poolIdle: typeof (pool as any)?.idleCount === "number" ? (pool as any).idleCount : null,
+          poolWaiting: typeof (pool as any)?.waitingCount === "number" ? (pool as any).waitingCount : null,
+        },
+        "tenant-safe-db.pool_connect_slow",
+      );
+    }
+    let destroyClient = false;
+    try {
+      await client.query("BEGIN");
+      await setTenantContext(client, firmId, userId);
+      const tenantDb = makeRlsDb(client);
+      const result = await fn(tenantDb);
+      await client.query("COMMIT");
+      return result;
+    } catch (err) {
+      destroyClient = isTransientDbConnectionError(err);
+      try {
+        await client.query("ROLLBACK");
+      } catch {
+        destroyClient = true;
+      }
+      lastErr = err;
+      const kind = classifyTransientDbConnectionError(err) ?? "unknown";
+      const shouldRetry = isTransientDbConnectionError(err) && attempt <= maxRetries;
+      if (!shouldRetry) throw err;
+      logger.warn({ ...opts?.ctx, firmId, err, kind, attempt, ms: Date.now() - startedAt }, "tenant-safe-db.attempt_failed");
+    } finally {
+      try {
+        await clearTenantContext(client);
+      } catch {
+        destroyClient = true;
+      }
+      client.release(destroyClient);
+    }
+  }
   throw lastErr;
 }
