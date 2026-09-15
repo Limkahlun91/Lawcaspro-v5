@@ -18054,7 +18054,6 @@ async function processAutomationGenerationJobStep(
           sql`error_message = NULL`,
           sql`object_path = ${existingDocObjectPath}`,
           sql`file_name = ${outputFileName}`,
-          sql`case_document_id = ${Number(existingDoc.id)}`,
           sql`finished_at = COALESCE(finished_at, now())`,
         ];
         if (caps.items.phase) setParts2.push(sql`phase = 'completed'`);

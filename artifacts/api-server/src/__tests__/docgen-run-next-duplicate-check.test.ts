@@ -338,4 +338,136 @@ describe("docgen run-next — duplicate existing output check (Server A 25P02 ro
       expect(catchBody.trim().length).toBeGreaterThan(30);
     });
   });
+
+  describe("Part 3 — duplicate-existing-output UPDATE to document_generation_job_items", () => {
+    it("Schema: documentGenerationJobItemsTable DOES NOT declare case_document_id column (42703 would fire if used)", () => {
+      expect(fs.existsSync(SCHEMA_DOCS_PATH)).toBe(true);
+      const schema = fs.readFileSync(SCHEMA_DOCS_PATH, "utf8");
+      // Locate document_generation_job_items declaration
+      const startIdx = schema.indexOf(
+        'documentGenerationJobItemsTable = pgTable("document_generation_job_items",',
+      );
+      expect(startIdx).toBeGreaterThanOrEqual(0);
+      // Extract the column object body up to the index-tuple start (2nd arg):
+      // scan for matching outer braces.
+      const objStart = schema.indexOf("{", startIdx);
+      expect(objStart).toBeGreaterThan(startIdx);
+      let d = 0;
+      let c = objStart;
+      while (c < schema.length) {
+        const ch = schema[c];
+        if (ch === "{") d++;
+        else if (ch === "}") {
+          d--;
+          if (d === 0) break;
+        }
+        c++;
+      }
+      const body = schema.slice(objStart, c + 1);
+      // Pull all quoted snake_case identifiers (these are the SQL column names).
+      const allQuoted = [...body.matchAll(/"([a-z][a-z0-9_]*)"/g)].map(
+        ([, n]) => n as string,
+      );
+      const sqlColNames = Array.from(new Set(allQuoted));
+      expect(sqlColNames).toContain("job_id");
+      expect(sqlColNames).toContain("object_path");
+      expect(sqlColNames).toContain("file_name");
+      expect(sqlColNames).toContain("status");
+      expect(sqlColNames).toContain("finished_at");
+      expect(sqlColNames).toContain("diagnostic");
+      expect(sqlColNames).toContain("error_code");
+      expect(sqlColNames).toContain("error_message");
+      expect(sqlColNames).toContain("started_at");
+      expect(sqlColNames).toContain("phase");
+      expect(sqlColNames).toContain("template_version_id");
+      expect(sqlColNames).not.toContain("case_document_id");
+    });
+
+    it("Firm duplicate-success UPDATE to document_generation_job_items does NOT write case_document_id", () => {
+      const src = fs.readFileSync(ROUTES_DOCS_PATH, "utf8");
+      // Locate the skip-existing-output UPDATE to document_generation_job_items
+      // anchored on the UNIQUE `existingDocObjectPath.startsWith("/objects/")` gate
+      // ONLY present in the case_documents duplicate branch.
+      const unique = 'existingDocObjectPath.startsWith("/objects/")';
+      const anchor = src.indexOf(unique);
+      expect(anchor).toBeGreaterThan(0);
+      const check = src.slice(anchor, anchor + 3500);
+      const spIdx = check.indexOf("const setParts2:");
+      expect(spIdx).toBeGreaterThan(0);
+      const setStart = check.indexOf("[", spIdx);
+      const setStop = (() => {
+        let d = 0;
+        let c = setStart;
+        while (c < check.length) {
+          const ch = check[c];
+          if (ch === "[") d++;
+          else if (ch === "]") {
+            d--;
+            if (d === 0) return c;
+          }
+          c++;
+        }
+        return -1;
+      })();
+      expect(setStop).toBeGreaterThan(setStart);
+      const setBody = check.slice(setStart, setStop + 1);
+      expect(setBody).not.toMatch(/case_document_id\s*=/);
+    });
+
+    it("Duplicate-success UPDATE still writes object_path, file_name, status success, finished_at", () => {
+      const src = fs.readFileSync(ROUTES_DOCS_PATH, "utf8");
+      const unique = 'existingDocObjectPath.startsWith("/objects/")';
+      const anchor = src.indexOf(unique);
+      expect(anchor).toBeGreaterThan(0);
+      const check = src.slice(anchor, anchor + 3500);
+      const spIdx = check.indexOf("const setParts2:");
+      expect(spIdx).toBeGreaterThan(0);
+      const setStart = check.indexOf("[", spIdx);
+      const setStop = (() => {
+        let d = 0;
+        let c = setStart;
+        while (c < check.length) {
+          const ch = check[c];
+          if (ch === "[") d++;
+          else if (ch === "]") {
+            d--;
+            if (d === 0) return c;
+          }
+          c++;
+        }
+        return -1;
+      })();
+      expect(setStop).toBeGreaterThan(setStart);
+      const setBody = check.slice(setStart, setStop + 1);
+      expect(setBody).toContain("status = 'success'");
+      expect(setBody).toContain("object_path =");
+      expect(setBody).toContain("file_name =");
+      expect(setBody).toContain("finished_at =");
+      expect(setBody).toContain("error_code = NULL");
+      expect(setBody).toContain("error_message = NULL");
+    });
+
+    it("Duplicate-success diagnostic JSON still contains existingCaseDocumentId key (identity preserved via JSONB, not via FK column)", () => {
+      const src = fs.readFileSync(ROUTES_DOCS_PATH, "utf8");
+      const unique = 'existingDocObjectPath.startsWith("/objects/")';
+      const anchor = src.indexOf(unique);
+      expect(anchor).toBeGreaterThan(0);
+      const check = src.slice(anchor, anchor + 4500);
+      const di = check.indexOf("'existingCaseDocumentId'");
+      expect(di).toBeGreaterThan(0);
+      // Walk BACK to find `diagnostic =` so we capture the entire assignment
+      const diagnosticAssignIdx = check.lastIndexOf("diagnostic =", di);
+      expect(diagnosticAssignIdx).toBeGreaterThan(0);
+      const around = check.slice(
+        diagnosticAssignIdx,
+        diagnosticAssignIdx + 500,
+      );
+      expect(around).toMatch(/'existingCaseDocumentId',\s*\$\{Number\(existingDoc\.id\)\}/);
+      expect(around).toMatch(/'skippedExisting',\s*true/);
+      expect(around).toMatch(/'skipReason',\s*'case_document_generated_row_exists'/);
+      expect(around).toMatch(/'existingObjectPath',\s*\$\{existingDocObjectPath\}/);
+      expect(around).toContain("diagnostic =");
+      expect(around).toContain("COALESCE(diagnostic, '{}'::jsonb)");
+    });
+  });
 });
