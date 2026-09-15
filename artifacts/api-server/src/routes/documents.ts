@@ -18019,7 +18019,7 @@ async function processAutomationGenerationJobStep(
       const templateIdWhere =
         templateSource === "master"
           ? sql`platform_document_id = ${platformDocumentId}`
-          : sql`document_template_id = ${templateId}`;
+          : sql`template_id = ${templateId}`;
       const existingDocRows = await queryRows(
         r,
         sql`
@@ -18095,7 +18095,30 @@ async function processAutomationGenerationJobStep(
         );
       } catch {}
       }
-    } catch (skipErr) {}
+    } catch (skipErr) {
+      const dbInfo = extractDbErrorInfo(skipErr as Error);
+      const rawMsg = String(skipErr instanceof Error ? skipErr.message : String(skipErr));
+      const errMessageShort = dbInfo.message && String(dbInfo.message).trim()
+        ? String(dbInfo.message)
+        : rawMsg;
+      logger.error(
+        {
+          stage: "duplicate_existing_output_check",
+          jobId: args.jobId,
+          jobItemId,
+          firmId: args.firmId,
+          caseId,
+          templateSource,
+          templateId: Number.isFinite(templateId) ? templateId : null,
+          platformDocumentId: Number.isFinite(platformDocumentId) ? platformDocumentId : null,
+          sqlState: dbInfo.sqlState ?? dbInfo.sqlstate ?? null,
+          code: dbInfo.code ?? null,
+          errMessageShort: errMessageShort.slice(0, 240),
+        },
+        "docgen.run_next.duplicate_check_failed",
+      );
+      throw skipErr;
+    }
   }
 
   const deadlineAt =
