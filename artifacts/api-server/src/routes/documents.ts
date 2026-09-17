@@ -17748,7 +17748,7 @@ async function processAutomationGenerationJobStep(
               sql`diagnostic = jsonb_build_object(
                     'templateId', template_id,
                     'caseId', case_id,
-                    'expectedOutputFormat', ${expectedOutputFormat},
+                    'expectedOutputFormat', ${expectedOutputFormat}::text,
                     'generatedFileName', file_name,
                     'storageTarget', 'case_documents'
                   )`,
@@ -17981,7 +17981,7 @@ async function processAutomationGenerationJobStep(
           sql`diagnostic = COALESCE(diagnostic, '{}'::jsonb) || jsonb_build_object(
                 'skippedExisting', true,
                 'skipReason', 'object_path_already_exists',
-                'existingObjectPath', ${existingObjectPath}
+                'existingObjectPath', ${existingObjectPath}::text
               )`,
         );
       }
@@ -18062,8 +18062,8 @@ async function processAutomationGenerationJobStep(
             sql`diagnostic = COALESCE(diagnostic, '{}'::jsonb) || jsonb_build_object(
                   'skippedExisting', true,
                   'skipReason', 'case_document_generated_row_exists',
-                  'existingCaseDocumentId', ${Number(existingDoc.id)},
-                  'existingObjectPath', ${existingDocObjectPath}
+                  'existingCaseDocumentId', ${Number(existingDoc.id)}::int,
+                  'existingObjectPath', ${existingDocObjectPath}::text
                 )`,
           );
         }
@@ -18448,7 +18448,7 @@ async function processAutomationGenerationJobStep(
           setParts.push(
             sql`diagnostic = jsonb_build_object(
                   'timing', ${JSON.stringify(timing)}::jsonb,
-                  'stepTotalMs', ${Date.now() - stepStartedAt}
+                  'stepTotalMs', ${Date.now() - stepStartedAt}::int
                 )`,
           );
         await queryRows(

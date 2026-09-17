@@ -462,12 +462,67 @@ describe("docgen run-next — duplicate existing output check (Server A 25P02 ro
         diagnosticAssignIdx,
         diagnosticAssignIdx + 500,
       );
-      expect(around).toMatch(/'existingCaseDocumentId',\s*\$\{Number\(existingDoc\.id\)\}/);
-      expect(around).toMatch(/'skippedExisting',\s*true/);
-      expect(around).toMatch(/'skipReason',\s*'case_document_generated_row_exists'/);
-      expect(around).toMatch(/'existingObjectPath',\s*\$\{existingDocObjectPath\}/);
+      // Keys still present
       expect(around).toContain("diagnostic =");
       expect(around).toContain("COALESCE(diagnostic, '{}'::jsonb)");
+      expect(around).toMatch(/'skippedExisting',\s*true/);
+      expect(around).toMatch(/'skipReason',\s*'case_document_generated_row_exists'/);
+      // Mandated explicit casts for polymorphic jsonb_build_object(any,any) args
+      expect(around).toMatch(
+        /'existingCaseDocumentId',\s*\$\{Number\(existingDoc\.id\)\}::int\b/,
+      );
+      expect(around).toMatch(
+        /'existingObjectPath',\s*\$\{existingDocObjectPath\}::text\b/,
+      );
+      // Casts are on correct VALUE positions, not KEY positions:
+      // Existing keys still present (without being merged with value casts)
+      expect(around).toContain("'existingCaseDocumentId'");
+      expect(around).toContain("'existingObjectPath'");
+    });
+
+    it("JSONB polymorphic unsafe audit: 3 other same-path jsonb_build_object sites also use explicit casts for DYNAMIC PREPARED BINDS only (SQL column refs do NOT need ::cast, they have known types already)", () => {
+      // (same document-generation UPDATE paths with prepared any-arg jsonb_build_object
+      //  that previously lacked casts — covering now; SQL COLUMN REFERENCES are NOT
+      //  are left untouched per postgres because they have known catalog types already.)
+      const src = fs.readFileSync(ROUTES_DOCS_PATH, "utf8");
+
+      // Site 1 — missing-output failure diagnostic
+      // template_id / case_id / file_name here are SQL COLUMN REFERENCES
+      // (bulk UPDATE: single diagnostic shape applied WHERE id IN (many items))
+      // → postgres already knows their types via catalog.
+      // Only expectedOutputFormat is a JS prepared bind ${…}, so it needs ::text.
+      const missingIdx = src.indexOf("'storageTarget', 'case_documents'");
+      expect(missingIdx).toBeGreaterThan(0);
+      const missingBlock = src.slice(Math.max(0, missingIdx - 420), missingIdx + 50);
+      expect(missingBlock).toMatch(/'templateId',\s*template_id\b/);
+      expect(missingBlock).toMatch(/'caseId',\s*case_id\b/);
+      expect(missingBlock).toMatch(
+        /'expectedOutputFormat',\s*\$\{expectedOutputFormat\}::text\b/,
+      );
+      expect(missingBlock).toMatch(/'generatedFileName',\s*file_name\b/);
+      // Positive: SQL columns should NOT have erroneous :: cast appended (avoid unnecessary for known types)
+      expect(missingBlock).not.toMatch(/'templateId',\s*template_id::/);
+      expect(missingBlock).not.toMatch(/'caseId',\s*case_id::/);
+      expect(missingBlock).not.toMatch(/'generatedFileName',\s*file_name::/);
+
+      // Site 2 — object_path_already_exists skip diagnostic
+      // existingObjectPath here is prepared bind ${…} → needs ::text
+      const pathIdx = src.indexOf("'skipReason', 'object_path_already_exists'");
+      expect(pathIdx).toBeGreaterThan(0);
+      const pathBlock = src.slice(Math.max(0, pathIdx - 300), pathIdx + 200);
+      expect(pathBlock).toMatch(
+        /'existingObjectPath',\s*\$\{existingObjectPath\}::text\b/,
+      );
+      expect(pathBlock).toContain("COALESCE(diagnostic, '{}'::jsonb)");
+
+      // Site 3 — successful finish timing/stepTotalMs diagnostic
+      // stepTotalMs here is prepared bind ${Date.now() - stepStartedAt} → needs ::int
+      // timing already has explicit ::jsonb
+      const stepIdx = src.indexOf("'timing', ");
+      expect(stepIdx).toBeGreaterThan(0);
+      const stepBlock = src.slice(Math.max(0, stepIdx - 120), stepIdx + 300);
+      expect(stepBlock).toMatch(/'stepTotalMs',\s*\$\{Date\.now\(\) - stepStartedAt\}::int\b/);
+      expect(stepBlock).toContain("::jsonb");
     });
   });
 });
