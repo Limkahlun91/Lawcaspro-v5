@@ -120,7 +120,7 @@ export async function writeAuditLog(params: {
   reason?: string;
   requestId?: string | null;
   actingForUserId?: number | string | null;
-}, options?: { db?: RlsDb; strict?: boolean }) {
+}, options?: { db?: RlsDb | typeof db; strict?: boolean }) {
   const targetDb = options?.db;
   const strict = options?.strict ?? false;
   try {

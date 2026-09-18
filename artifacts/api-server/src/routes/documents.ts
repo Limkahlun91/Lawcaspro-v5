@@ -11441,7 +11441,7 @@ function startCaseDocumentRunRunner(
           detail: `caseId=${caseId} templateId=${templateId}`,
           ipAddress: "system",
           userAgent: "system",
-        });
+        }, { db: r });
       } catch (err: unknown) {
         const cfgErr = getSupabaseStorageConfigError(err);
         if (cfgErr) {
@@ -12321,7 +12321,7 @@ async function generateFirmDocument({
         detail: `applicabilityStatus=not_applicable mode=${applicability.modeUsed} overrideUsed=0 reasons=${applicability.applicabilityReasons.join("|")}`,
         ipAddress,
         userAgent,
-      });
+      }, { db: r });
       throw new DocumentGenerationError(
         422,
         "TEMPLATE_APPLICABILITY_BLOCKED",
@@ -12346,7 +12346,7 @@ async function generateFirmDocument({
         detail: `applicabilityStatus=not_applicable mode=${applicability.modeUsed} overrideUsed=0 reasons=${applicability.applicabilityReasons.join("|")}`,
         ipAddress,
         userAgent,
-      });
+      }, { db: r });
       throw new DocumentGenerationError(
         422,
         "TEMPLATE_APPLICABILITY_OVERRIDE_REQUIRED",
@@ -12788,7 +12788,7 @@ async function generateFirmDocument({
           detail: `checklistStatus=blocked mode=${checklistMode} overrideUsed=0 missing=${checklistEval.missingRequiredItems}`,
           ipAddress,
           userAgent,
-        });
+        }, { db: r });
       }
       if (
         checklistMode === "required_with_manual_override" &&
@@ -12804,7 +12804,7 @@ async function generateFirmDocument({
           detail: `checklistStatus=blocked mode=${checklistMode} overrideUsed=0 missing=${checklistEval.missingRequiredItems}`,
           ipAddress,
           userAgent,
-        });
+        }, { db: r });
       }
     }
   }
@@ -12971,7 +12971,7 @@ async function generateFirmDocument({
     detail: `caseId=${caseId} templateId=${templateId} name=${docName} letterhead=${isLetterLike ? (usedLetterheadId ?? "default") : "n/a"} clauses=${clauseSnapshot ? "yes" : "no"} fileName=${downloadName} fallback=${namingPreview.fallbackUsed ? "1" : "0"} collision=${uniq.collisionResolved ? "1" : "0"} applicabilityStatus=${applicability.applicabilityStatus} applicabilityOverrideUsed=${overrideUsed ? "1" : "0"} checklistStatus=${checklistEval.checklistStatus} checklistOverrideUsed=${checklistOverrideUsed ? "1" : "0"}`,
     ipAddress,
     userAgent,
-  });
+  }, { db: r });
   if (preview.usedMode === "bindings") {
     await writeAuditLog({
       firmId,
@@ -12983,7 +12983,7 @@ async function generateFirmDocument({
       detail: `caseId=${caseId} templateId=${templateId} placeholders=${effectivePlaceholders.length} missing=${preview.missingRequiredVariables.length}`,
       ipAddress,
       userAgent,
-    });
+    }, { db: r });
   }
   return {
     caseDocument: created,
@@ -13144,7 +13144,7 @@ async function generateMasterDocument({
         detail: `applicabilityStatus=not_applicable mode=${applicability.modeUsed} overrideUsed=0 reasons=${applicability.applicabilityReasons.join("|")}`,
         ipAddress,
         userAgent,
-      });
+      }, { db: r });
       throw new DocumentGenerationError(
         422,
         "TEMPLATE_APPLICABILITY_BLOCKED",
@@ -13169,7 +13169,7 @@ async function generateMasterDocument({
         detail: `applicabilityStatus=not_applicable mode=${applicability.modeUsed} overrideUsed=0 reasons=${applicability.applicabilityReasons.join("|")}`,
         ipAddress,
         userAgent,
-      });
+      }, { db: r });
       throw new DocumentGenerationError(
         422,
         "TEMPLATE_APPLICABILITY_OVERRIDE_REQUIRED",
@@ -13551,7 +13551,7 @@ async function generateMasterDocument({
           detail: `checklistStatus=blocked mode=${checklistMode} overrideUsed=0 missing=${checklistEval.missingRequiredItems}`,
           ipAddress,
           userAgent,
-        });
+        }, { db: r });
         throw new DocumentGenerationError(
           422,
           "TEMPLATE_CHECKLIST_BLOCKED",
@@ -13573,7 +13573,7 @@ async function generateMasterDocument({
           detail: `checklistStatus=blocked mode=${checklistMode} overrideUsed=0 missing=${checklistEval.missingRequiredItems}`,
           ipAddress,
           userAgent,
-        });
+        }, { db: r });
         throw new DocumentGenerationError(
           422,
           "TEMPLATE_CHECKLIST_OVERRIDE_REQUIRED",
@@ -13892,7 +13892,7 @@ async function generateMasterDocument({
     detail: `caseId=${caseId} masterDocId=${masterDocId} name=${docName} clauses=${clauseSnapshot ? "yes" : "no"} fileName=${fileName} fallback=${namingPreview.fallbackUsed ? "1" : "0"} collision=${uniq.collisionResolved ? "1" : "0"} applicabilityStatus=${applicability.applicabilityStatus} applicabilityOverrideUsed=${overrideUsed ? "1" : "0"} checklistStatus=${checklistEval.checklistStatus} checklistOverrideUsed=${checklistOverrideUsed ? "1" : "0"}`,
     ipAddress,
     userAgent,
-  });
+  }, { db: r });
   if (preview.usedMode === "bindings") {
     await writeAuditLog({
       firmId,
@@ -13904,7 +13904,7 @@ async function generateMasterDocument({
       detail: `caseId=${caseId} platformDocumentId=${masterDocId} placeholders=${placeholders.length} missing=${preview.missingRequiredVariables.length}`,
       ipAddress,
       userAgent,
-    });
+    }, { db: r });
   }
   return {
     caseDocument: created,
