@@ -142,6 +142,10 @@ import {
   selectPurchaserSource,
 } from "../lib/caseVariableResolver.js";
 import { extractDbErrorInfo, type DbErrorInfo } from "../lib/db-error.js";
+import {
+  normalizeDocGenLogAction,
+  type DocGenLogAction,
+} from "../lib/document-generation-log-action.js";
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -805,18 +809,6 @@ function sanitizePathSegment(v: string): string {
   );
 }
 
-type DocGenLogAction =
-  | "download" | "print"
-  | "DOCUMENT_GENERATION_STARTED"
-  | "DOCUMENT_GENERATION_SUCCEEDED"
-  | "DOCUMENT_GENERATION_FAILED"
-  | "DOCUMENT_GENERATION_PARTIAL"
-  | "DOCUMENT_ZIP_CREATED"
-  | "DOCUMENT_ZIP_DOWNLOAD_SUCCEEDED"
-  | "DOCUMENT_ZIP_DOWNLOAD_FAILED"
-  | "DOCUMENT_SYSTEM_PRINT_PREPARED"
-  | "DOCUMENT_SYSTEM_PRINT_FAILED";
-
 async function writeDocumentGenerationLog(
   r: DbConn,
   args: {
@@ -841,12 +833,7 @@ async function writeDocumentGenerationLog(
     requestId?: string | null;
   },
 ): Promise<void> {
-  const sqlstateForError = (e: unknown): string | null => {
-    if (!e || typeof e !== "object") return null;
-    const rec = e as Record<string, unknown>;
-    const v = rec["code"] ?? rec["sqlState"] ?? rec["SQLSTATE"] ?? null;
-    return typeof v === "string" ? v : null;
-  };
+  const dbActionType = normalizeDocGenLogAction(args.actionType);
   try {
     const exists = await tableExists(r, "public.document_generation_logs");
     if (!exists) return;
@@ -871,7 +858,7 @@ async function writeDocumentGenerationLog(
           ${args.firmId},
           ${args.userId ?? null},
           ${args.caseIds.length === 1 ? args.caseIds[0] : null},
-          ${args.actionType},
+          ${dbActionType},
           ${fileNames as any},
           ${args.caseIds as any},
           ${generatedFiles as any},
@@ -905,7 +892,7 @@ async function writeDocumentGenerationLog(
             ${args.firmId},
             ${args.userId ?? null},
             ${args.caseIds.length === 1 ? args.caseIds[0] : null},
-            ${args.actionType},
+            ${dbActionType},
             ${fileNames as any},
             ${args.caseIds as any},
             ${generatedFiles as any},
@@ -933,7 +920,7 @@ async function writeDocumentGenerationLog(
             ${args.firmId},
             ${args.userId ?? null},
             ${args.caseIds.length === 1 ? args.caseIds[0] : null},
-            ${args.actionType},
+            ${dbActionType},
             ${fileNames as any},
             ${args.printCopies ?? null},
             now()
@@ -945,6 +932,7 @@ async function writeDocumentGenerationLog(
     }
     if (usedFallback !== "tier1") {
       try {
+        const info = extractDbErrorInfo(lastError);
         logger.warn(
           {
             event: "document_generation_log_schema_fallback_used",
@@ -952,9 +940,12 @@ async function writeDocumentGenerationLog(
             userId: args.userId ?? null,
             jobId: args.jobId ?? null,
             actionType: args.actionType,
+            dbActionType,
             requestId: args.requestId ?? null,
             fallback: usedFallback,
-            sqlstate: sqlstateForError(lastError),
+            sqlstate: info.sqlstate,
+            constraint: info.constraint,
+            message: info.message,
           },
           "[documents] document_generation_logs fallback tier used",
         );
@@ -983,19 +974,20 @@ async function writeDocumentGenerationLog(
     }
   } catch (err) {
     try {
+      const info = extractDbErrorInfo(err);
       logger.error(
         {
           event: "document_generation_log_write_failed",
           firmId: args.firmId,
           userId: args.userId ?? null,
           actionType: args.actionType,
+          dbActionType,
           jobId: args.jobId ?? null,
           requestId: args.requestId ?? null,
-          errorCode:
-            err && typeof err === "object"
-              ? String((err as Record<string, unknown>).error_code ?? (err as Record<string, unknown>).code ?? null)
-              : null,
-          sqlstate: sqlstateForError(err),
+          errorCode: info.code,
+          sqlstate: info.sqlstate,
+          constraint: info.constraint,
+          message: info.message,
         },
         "[documents] document_generation_logs.write_failed",
       );
