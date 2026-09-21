@@ -154,4 +154,20 @@ describe("docgen audit — tenant RLS DB context passed (42501 audit_logs permis
     expect(asyncOk).toBeDefined();
     expect(asyncOk!.hasDbROption).toBe(true);
   });
+
+  it("job-route audits: both documents.generation_jobs.finalize sites + documents.generation_jobs.download pass tenant rlsDb `r`", () => {
+    expect(fs.existsSync(ROUTES_DOCS_PATH)).toBe(true);
+    const src = fs.readFileSync(ROUTES_DOCS_PATH, "utf8");
+    const calls = findWriteAuditLogCallBlocks(src);
+    const finalize = calls.filter(
+      (c) => c.action === "documents.generation_jobs.finalize",
+    );
+    expect(finalize).toHaveLength(2);
+    for (const c of finalize) expect(c.hasDbROption).toBe(true);
+    const download = calls.filter(
+      (c) => c.action === "documents.generation_jobs.download",
+    );
+    expect(download).toHaveLength(1);
+    expect(download[0]!.hasDbROption).toBe(true);
+  });
 });

@@ -21676,7 +21676,7 @@ router.post(
           detail: `jobId=${jobId}`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: r });
 
         res.status(200).json({
           ok: true,
@@ -21728,7 +21728,7 @@ router.post(
         detail: `jobId=${jobId}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: r });
 
       res.status(200).json({
         ok: true,
@@ -22947,7 +22947,7 @@ router.get(
         detail: `jobId=${jobId}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: r });
       return;
     } catch (err) {
       if (res.headersSent) {
