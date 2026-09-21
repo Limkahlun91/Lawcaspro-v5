@@ -16389,8 +16389,10 @@ function resolveDocGenNextAction(args: {
   status: string;
   progress: DocGenJobProgress;
   downloadObjectPath?: string | null;
-}): "run_next" | "finalize" | "download" | "stop" {
+}): "run_next" | "finalize" | "download" | "stop" | "wait" {
   if (args.status === "failed") return "stop";
+  if (args.status === "cancelled") return "stop";
+  if (args.status === "paused") return "wait";
   if (args.status === "generated_download_failed") return "download";
   if (args.status === "completed" || args.status === "completed_with_errors") {
     return "download";
@@ -16420,15 +16422,15 @@ async function finalizeDocGenJobIfDone(
 }> {
   const preJobs = await queryRows(
     r,
-    sql`SELECT status, action, download_object_path, download_file_name, download_mime_type, config, case_ids FROM document_generation_jobs WHERE id = ${args.jobId} AND firm_id = ${args.firmId} LIMIT 1`,
+    sql`SELECT status, action, download_object_path, download_file_name, download_mime_type, config, case_ids, created_by FROM document_generation_jobs WHERE id = ${args.jobId} AND firm_id = ${args.firmId} LIMIT 1`,
   );
   const preJob = preJobs[0] as any;
   const preStatus = String(preJob?.status ?? "");
-  if (preStatus === "failed") {
+  if (preStatus !== "pending" && preStatus !== "running") {
     const progress = await computeDocGenJobProgress(r, args);
     return {
       finalized: false,
-      status: "failed",
+      status: preStatus || "failed",
       progress,
       downloadObjectPath:
         typeof preJob?.download_object_path === "string"
@@ -16456,57 +16458,61 @@ async function finalizeDocGenJobIfDone(
         : "failed";
   const statusToSet = finalStatus === "failed" ? "failed" : "finalizing";
 
-  const jobs = await queryRows(
-    r,
-    sql`SELECT status, action, download_object_path, download_file_name, download_mime_type, config, case_ids FROM document_generation_jobs WHERE id = ${args.jobId} AND firm_id = ${args.firmId} LIMIT 1`,
-  );
-  const job = jobs[0] as any;
-  const currentStatus = String(job?.status ?? "");
-  if (
-    currentStatus === "completed" ||
-    currentStatus === "completed_with_errors" ||
-    currentStatus === "finalizing" ||
-    currentStatus === "failed"
-  ) {
+  const updatedRows = finalStatus === "failed"
+    ? await queryRows(
+        r,
+        sql`
+          UPDATE document_generation_jobs
+          SET status = ${statusToSet},
+              total_count = ${progress.total},
+              success_count = ${progress.success},
+              failed_count = ${progress.failed},
+              pending_count = 0,
+              finished_at = now()
+          WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
+            AND status IN ('pending','running')
+          RETURNING status, action, download_object_path, download_file_name, download_mime_type, config, case_ids, created_by
+        `,
+      )
+    : await queryRows(
+        r,
+        sql`
+          UPDATE document_generation_jobs
+          SET status = ${statusToSet},
+              total_count = ${progress.total},
+              success_count = ${progress.success},
+              failed_count = ${progress.failed},
+              pending_count = 0
+          WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
+            AND status IN ('pending','running')
+          RETURNING status, action, download_object_path, download_file_name, download_mime_type, config, case_ids, created_by
+        `,
+      );
+
+  if (!updatedRows || updatedRows.length === 0) {
+    const actualJobs = await queryRows(
+      r,
+      sql`SELECT status, action, download_object_path, download_file_name, download_mime_type, config, case_ids, created_by FROM document_generation_jobs WHERE id = ${args.jobId} AND firm_id = ${args.firmId} LIMIT 1`,
+    );
+    const actualJob = actualJobs[0] as any;
+    const actualStatus = String(actualJob?.status ?? "");
+    const actualProgress = await computeDocGenJobProgress(r, args);
     return {
       finalized: false,
-      status: currentStatus || finalStatus,
-      progress,
+      status: actualStatus || statusToSet,
+      progress: actualProgress,
       downloadObjectPath:
-        typeof job?.download_object_path === "string"
-          ? String(job.download_object_path)
+        typeof actualJob?.download_object_path === "string"
+          ? String(actualJob.download_object_path)
           : null,
       downloadFileName:
-        typeof job?.download_file_name === "string"
-          ? String(job.download_file_name)
+        typeof actualJob?.download_file_name === "string"
+          ? String(actualJob.download_file_name)
           : null,
     };
   }
 
-  await queryRows(
-    r,
-    sql`
-      UPDATE document_generation_jobs
-      SET status = ${statusToSet},
-          total_count = ${progress.total},
-          success_count = ${progress.success},
-          failed_count = ${progress.failed},
-          pending_count = 0
-      WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
-    `,
-  );
-
-  if (statusToSet === "failed") {
-    await queryRows(
-      r,
-      sql`
-        UPDATE document_generation_jobs
-        SET finished_at = now()
-        WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
-      `,
-    );
-  }
-
+  const updatedJob = updatedRows[0] as any;
   {
     const actionType: DocGenLogAction =
       finalStatus === "completed"
@@ -16514,7 +16520,7 @@ async function finalizeDocGenJobIfDone(
         : finalStatus === "completed_with_errors"
           ? "DOCUMENT_GENERATION_PARTIAL"
           : "DOCUMENT_GENERATION_FAILED";
-    const caseIdsRaw = job?.case_ids;
+    const caseIdsRaw = updatedJob?.case_ids ?? preJob?.case_ids;
     const caseIds = Array.isArray(caseIdsRaw)
       ? caseIdsRaw
           .map((x) => (typeof x === "number" ? x : Number.parseInt(String(x ?? ""), 10)))
@@ -16523,9 +16529,11 @@ async function finalizeDocGenJobIfDone(
           .filter((x) => x > 0)
       : [];
     const userId =
-      typeof (job as any)?.user_id === "number"
-        ? Number((job as any).user_id)
-        : null;
+      typeof updatedJob?.created_by === "number"
+        ? Number(updatedJob.created_by)
+        : typeof preJob?.created_by === "number"
+          ? Number(preJob.created_by)
+          : null;
     try {
       await writeDocumentGenerationLog(r, {
         firmId: args.firmId,
@@ -16545,12 +16553,12 @@ async function finalizeDocGenJobIfDone(
     status: statusToSet,
     progress,
     downloadObjectPath:
-      typeof job?.download_object_path === "string"
-        ? String(job.download_object_path)
+      typeof updatedJob?.download_object_path === "string"
+        ? String(updatedJob.download_object_path)
         : null,
     downloadFileName:
-      typeof job?.download_file_name === "string"
-        ? String(job.download_file_name)
+      typeof updatedJob?.download_file_name === "string"
+        ? String(updatedJob.download_file_name)
         : null,
   };
 }
@@ -16694,7 +16702,7 @@ async function ensureDocGenJobDownloadObject(
 } | null> {
   const rows = await queryRows(
     r,
-    sql`SELECT status, action, download_object_path, download_file_name, download_mime_type, config, case_ids, user_id FROM document_generation_jobs WHERE id = ${args.jobId} AND firm_id = ${args.firmId} LIMIT 1`,
+    sql`SELECT status, action, download_object_path, download_file_name, download_mime_type, config, case_ids, created_by FROM document_generation_jobs WHERE id = ${args.jobId} AND firm_id = ${args.firmId} LIMIT 1`,
   );
   const job = rows[0] as any;
   if (!job) return null;
@@ -16761,8 +16769,8 @@ async function ensureDocGenJobDownloadObject(
       : {};
 
   const userId =
-    typeof (job as any)?.user_id === "number"
-      ? Number((job as any).user_id)
+    typeof (job as any)?.created_by === "number"
+      ? Number((job as any).created_by)
       : null;
   const caseIdsRaw = job?.case_ids;
   const caseIds = Array.isArray(caseIdsRaw)
@@ -17274,10 +17282,10 @@ async function recoverStaleDocumentGenerationJob(
   if (!isHeartbeatStale(job.last_heartbeat_at, args.staleMs)) return;
 
   {
-    const setParts: Array<ReturnType<typeof sql>> = [sql`status = 'pending'`];
-    if (caps.items.phase) setParts.push(sql`phase = 'recovered'`);
+    const itemSetParts: Array<ReturnType<typeof sql>> = [sql`status = 'pending'`];
+    if (caps.items.phase) itemSetParts.push(sql`phase = 'recovered'`);
     if (caps.items.diagnostic)
-      setParts.push(
+      itemSetParts.push(
         sql`diagnostic = jsonb_build_object(
               'recoveredAt', now(),
               'reason', 'stale_running_item',
@@ -17285,26 +17293,11 @@ async function recoverStaleDocumentGenerationJob(
               'startedAt', started_at
             )`,
       );
-    await queryRows(
-      r,
-      sql`
-      UPDATE document_generation_job_items
-      SET ${sql.join(setParts, sql`, `)}
-      WHERE firm_id = ${args.firmId}
-        AND job_id = ${args.jobId}
-        AND status = 'running'
-        AND started_at IS NOT NULL
-        AND started_at < now() - (${Math.max(1, Math.trunc(args.staleMs))}::int * interval '1 millisecond')
-    `,
-    );
-  }
-
-  {
-    const setParts: Array<ReturnType<typeof sql>> = [sql`status = 'pending'`];
-    if (caps.jobs.recoveredAt) setParts.push(sql`recovered_at = now()`);
+    const parentSetParts: Array<ReturnType<typeof sql>> = [sql`status = 'pending'`];
+    if (caps.jobs.recoveredAt) parentSetParts.push(sql`recovered_at = now()`);
     if (caps.jobs.lastHeartbeatAt)
-      setParts.push(sql`last_heartbeat_at = now()`);
-    setParts.push(
+      parentSetParts.push(sql`last_heartbeat_at = now()`);
+    parentSetParts.push(
       sql`pending_count = (
             SELECT COUNT(*)
             FROM document_generation_job_items
@@ -17316,9 +17309,35 @@ async function recoverStaleDocumentGenerationJob(
     await queryRows(
       r,
       sql`
-      UPDATE document_generation_jobs
-      SET ${sql.join(setParts, sql`, `)}
-      WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
+      WITH active_job AS (
+        SELECT id
+        FROM document_generation_jobs
+        WHERE id = ${args.jobId}
+          AND firm_id = ${args.firmId}
+          AND status IN ('pending','running')
+          AND (
+            last_heartbeat_at IS NULL
+            OR last_heartbeat_at <
+              now() - (${Math.max(1, Math.trunc(args.staleMs))}::int * interval '1 millisecond')
+          )
+        FOR UPDATE
+      ),
+      recovered_items AS (
+        UPDATE document_generation_job_items i
+        SET ${sql.join(itemSetParts, sql`, `)}
+        FROM active_job j
+        WHERE i.job_id = j.id
+          AND i.firm_id = ${args.firmId}
+          AND i.status = 'running'
+          AND i.started_at IS NOT NULL
+          AND i.started_at < now() - (${Math.max(1, Math.trunc(args.staleMs))}::int * interval '1 millisecond')
+        RETURNING i.id
+      )
+      UPDATE document_generation_jobs j
+      SET ${sql.join(parentSetParts, sql`, `)}
+      FROM active_job a
+      WHERE j.id = a.id
+        AND j.firm_id = ${args.firmId}
     `,
     );
   }
@@ -17446,6 +17465,8 @@ async function startDocumentGenerationJobRunner(
         status === "completed" ||
         status === "completed_with_errors" ||
         status === "failed" ||
+        status === "paused" ||
+        status === "cancelled" ||
         pending <= 0
       )
         return { stoppedReason: "no_work", stepsRun, elapsedMs: Date.now() - started };
@@ -17487,6 +17508,7 @@ async function startDocumentGenerationJobRunner(
           UPDATE document_generation_jobs
           SET ${sql.join(setParts, sql`, `)}
           WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
+            AND status IN ('pending','running')
         `,
       );
     } catch {}
@@ -17518,14 +17540,9 @@ async function processAutomationGenerationJobStep(
   if (!job) return;
 
   const status = String((job as any).status ?? "");
-  if (
-    status === "completed" ||
-    status === "completed_with_errors" ||
-    status === "failed"
-  )
-    return;
+  if (status !== "pending" && status !== "running") return;
 
-  if (status !== "running") {
+  if (status === "pending") {
     const setParts: Array<ReturnType<typeof sql>> = [
       sql`status = 'running'`,
       sql`started_at = COALESCE(started_at, now())`,
@@ -17548,14 +17565,38 @@ async function processAutomationGenerationJobStep(
         "docgen.step.job_status_running",
       );
     } catch {}
-    await queryRows(
+    const promoted = await queryRows(
       r,
       sql`
         UPDATE document_generation_jobs
         SET ${sql.join(setParts, sql`, `)}
         WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
+          AND status = 'pending'
+        RETURNING id
       `,
     );
+    if (!promoted || (promoted as any[]).length < 1) {
+      const recheck = await queryRows(
+        r,
+        sql`
+          SELECT status
+          FROM document_generation_jobs
+          WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
+          LIMIT 1
+        `,
+      );
+      const latestStatus = String((recheck[0] as any)?.status ?? "");
+      if (
+        latestStatus === "paused" ||
+        latestStatus === "cancelled" ||
+        latestStatus === "completed" ||
+        latestStatus === "completed_with_errors" ||
+        latestStatus === "failed" ||
+        latestStatus !== "running"
+      ) {
+        return;
+      }
+    }
   }
 
   {
@@ -17563,9 +17604,19 @@ async function processAutomationGenerationJobStep(
     const templateVerCol = caps.items.templateVersionId ? sql`template_version_id` : sql`NULL::int`;
     try {
       const dupSql = sql`
-        WITH dups AS (
+        WITH active_job AS (
+          SELECT id
+          FROM document_generation_jobs
+          WHERE id = ${args.jobId}
+            AND firm_id = ${args.firmId}
+            AND status = 'running'
+          FOR UPDATE
+        ),
+        dups AS (
           SELECT p.id AS pending_id
           FROM document_generation_job_items p
+          JOIN active_job j
+            ON j.id = p.job_id
           WHERE p.job_id = ${args.jobId}
             AND p.firm_id = ${args.firmId}
             AND p.status = 'pending'
@@ -17656,14 +17707,24 @@ async function processAutomationGenerationJobStep(
         setParts.push(sql`started_at = COALESCE(started_at, now())`);
       if (caps.items.phase) setParts.push(sql`phase = 'generating'`);
       return sql`
-        WITH next AS (
+        WITH active_job AS (
           SELECT id
-          FROM document_generation_job_items
-          WHERE job_id = ${args.jobId}
+          FROM document_generation_jobs
+          WHERE id = ${args.jobId}
             AND firm_id = ${args.firmId}
-            AND status = 'pending'
-          ORDER BY id ASC
-          FOR UPDATE SKIP LOCKED
+            AND status = 'running'
+          FOR UPDATE
+        ),
+        next AS (
+          SELECT i.id
+          FROM document_generation_job_items i
+          JOIN active_job j
+            ON j.id = i.job_id
+          WHERE i.job_id = ${args.jobId}
+            AND i.firm_id = ${args.firmId}
+            AND i.status = 'pending'
+          ORDER BY i.id ASC
+          FOR UPDATE OF i SKIP LOCKED
           LIMIT 1
         )
         UPDATE document_generation_job_items i
@@ -17847,6 +17908,7 @@ async function processAutomationGenerationJobStep(
               UPDATE document_generation_jobs
               SET ${sql.join(setParts, sql`, `)}
               WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
+                AND status IN ('pending','running')
             `,
           );
         }
@@ -17890,6 +17952,7 @@ async function processAutomationGenerationJobStep(
           UPDATE document_generation_jobs
           SET ${sql.join(setParts, sql`, `)}
           WHERE id = ${args.jobId} AND firm_id = ${args.firmId}
+            AND status IN ('pending','running')
         `,
       );
     }
@@ -20654,6 +20717,78 @@ router.post(
           firmId: req.firmId!,
           jobId,
         });
+        if (statusBefore === "paused") {
+          const nextActionBefore: "wait" = "wait";
+          const jobPayload: Record<string, unknown> = {
+            ...(preJob as any),
+            status: statusBefore,
+            total_count: progressBefore.total,
+            success_count: progressBefore.success,
+            failed_count: progressBefore.failed,
+            pending_count: progressBefore.pending,
+          };
+          res.status(200).json({
+            ok: true,
+            jobId,
+            status: statusBefore,
+            progress: progressBefore,
+            nextAction: nextActionBefore,
+            error: {
+              code: "JOB_PAUSED",
+              message: "Job is paused. Use resume to continue.",
+            },
+            job: jobPayload,
+            meta: {
+              request_id: requestId ?? null,
+              jobId,
+              firmId: req.firmId ?? null,
+              userId: req.userId ?? null,
+              status_before: statusBefore,
+              status_after: statusBefore,
+              nextAction: nextActionBefore,
+              terminal: false,
+              paused: true,
+              timestamp: new Date().toISOString(),
+              duration_ms: Date.now() - startedAt,
+            },
+          });
+          return;
+        }
+        if (statusBefore === "cancelled") {
+          const nextActionBefore: "stop" = "stop";
+          const jobPayload: Record<string, unknown> = {
+            ...(preJob as any),
+            status: statusBefore,
+            total_count: progressBefore.total,
+            success_count: progressBefore.success,
+            failed_count: progressBefore.failed,
+            pending_count: progressBefore.pending,
+            active: false,
+          };
+          res.status(200).json({
+            ok: true,
+            jobId,
+            status: statusBefore,
+            progress: progressBefore,
+            nextAction: nextActionBefore,
+            active: false,
+            job: jobPayload,
+            meta: {
+              request_id: requestId ?? null,
+              jobId,
+              firmId: req.firmId ?? null,
+              userId: req.userId ?? null,
+              status_before: statusBefore,
+              status_after: statusBefore,
+              nextAction: nextActionBefore,
+              terminal: true,
+              cancelled: true,
+              timestamp: new Date().toISOString(),
+              duration_ms: Date.now() - startedAt,
+            },
+          });
+          return;
+        }
         const progressComplete =
           progressBefore.total > 0 &&
           progressBefore.pending === 0 &&
@@ -21392,7 +21527,11 @@ router.get(
       progress.success + progress.failed === progress.total;
     const canDownload = progressComplete && progress.success > 0;
     const nextAction =
-      progress.total > 0 && progress.failed === progress.total
+      status === "cancelled"
+        ? ("stop" as const)
+        : status === "paused"
+        ? ("wait" as const)
+        : progress.total > 0 && progress.failed === progress.total
         ? ("failed" as const)
         : canDownload
           ? ("download" as const)
@@ -21405,10 +21544,11 @@ router.get(
       canDownload ? `/documents/jobs/${jobId}/download` : undefined;
     const downloadManifestUrl =
       canDownload ? `/documents/jobs/${jobId}/download-manifest` : undefined;
-
+    const statusForcedActiveFalse = status === "failed" || status === "cancelled";
     const jobPayload: Record<string, unknown> = {
       ...(job as any),
       status,
+      ...(statusForcedActiveFalse ? { active: false } : {}),
       total_count: progress.total,
       success_count: progress.success,
       failed_count: progress.failed,
@@ -21485,6 +21625,67 @@ router.post(
         return;
       }
 
+      const readFreshFinalizeState = async (): Promise<{
+        row: any | null;
+        status: string;
+        progress: { total: number; success: number; failed: number; pending: number; running: number };
+        nextAction: "wait" | "stop" | "download" | "run_next";
+        active: boolean;
+      }> => {
+        const rows = await queryRows(
+          r,
+          sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!} LIMIT 1`,
+        );
+        const row: any = (rows && rows[0]) ?? null;
+        const freshStatus = row ? String(row.status ?? "") : "";
+        const freshProgress = await computeDocGenJobProgress(r, { firmId: req.firmId!, jobId });
+        let nextAction: "wait" | "stop" | "download" | "run_next" = "stop";
+        if (freshStatus === "paused") nextAction = "wait";
+        else if (freshStatus === "cancelled") nextAction = "stop";
+        else if (freshStatus === "failed") nextAction = "stop";
+        else if (freshStatus === "completed" || freshStatus === "completed_with_errors" || freshStatus === "generated_download_failed") nextAction = "download";
+        else if (freshStatus === "finalizing") nextAction = "wait";
+        else if (freshStatus === "pending" || freshStatus === "running") nextAction = "run_next";
+        const active = !(freshStatus === "failed" || freshStatus === "cancelled");
+        return { row, status: freshStatus, progress: freshProgress, nextAction, active };
+      };
+
+      const buildResponseFromFresh = (
+        fresh: {
+          status: string;
+          progress: { total: number; success: number; failed: number; pending: number; running: number };
+          nextAction: "wait" | "stop" | "download" | "run_next";
+          active: boolean;
+          row: any | null;
+        },
+        opts: { lostRace?: boolean } = {},
+      ) => {
+        const base: any = {
+          ok: true,
+          jobId,
+          status: fresh.status || "failed",
+          progress: fresh.progress,
+          nextAction: fresh.nextAction,
+          active: fresh.active,
+        };
+        if (fresh.status === "completed" || fresh.status === "completed_with_errors") {
+          const op = fresh.row && typeof fresh.row.download_object_path === "string" ? fresh.row.download_object_path : null;
+          const fn = fresh.row && typeof fresh.row.download_file_name === "string" ? fresh.row.download_file_name : null;
+          if (op) base.downloadUrl = `/documents/jobs/${jobId}/download`;
+          if (fn) base.fileName = fn;
+        }
+        if (opts.lostRace) {
+          (base as any).conflict = true;
+          (base as any).note = "Another state transition won the race; current real state returned.";
+        }
+        base.meta = {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        };
+        return base;
+      };
+
       {
         const acquiredRows = await queryRows(
           r,
@@ -21493,7 +21694,7 @@ router.post(
             SET timeout_at = now() + interval '2 minutes',
                 last_heartbeat_at = now()
             WHERE id = ${jobId} AND firm_id = ${req.firmId!}
-              AND status IN ('pending','running','finalizing','completed','completed_with_errors','generated_download_failed')
+              AND status IN ('pending','running','finalizing')
               AND (
                 timeout_at IS NULL OR timeout_at < now()
                 OR last_heartbeat_at IS NULL OR last_heartbeat_at < now() - interval '2 minutes'
@@ -21503,12 +21704,38 @@ router.post(
         );
         lockAcquired = acquiredRows.length > 0;
         if (!lockAcquired) {
+          const fresh = await readFreshFinalizeState();
+          if (!fresh.row) {
+            res.status(404).json({
+              ok: false,
+              error: { code: "JOB_NOT_FOUND", message: "Job not found", details: null, retryable: false },
+              meta: {
+                request_id: requestId ?? null,
+                timestamp: new Date().toISOString(),
+                duration_ms: Date.now() - startedAt,
+              },
+            });
+            return;
+          }
+          const inFlightStates = ["pending", "running", "finalizing"];
+          if (!inFlightStates.includes(fresh.status)) {
+            const freshResp = buildResponseFromFresh(fresh);
+            const terminalOrPaused =
+              fresh.status === "paused" ||
+              fresh.status === "cancelled" ||
+              fresh.status === "completed" ||
+              fresh.status === "completed_with_errors" ||
+              fresh.status === "generated_download_failed" ||
+              fresh.status === "failed";
+            res.status(terminalOrPaused ? 200 : 409).json(freshResp);
+            return;
+          }
           res.status(409).json({
             ok: false,
             error: {
               code: "FINALIZE_IN_FLIGHT",
               message: "Another finalize is processing this job. Please retry.",
-              details: null,
+              details: { status: fresh.status, progress: fresh.progress },
               retryable: true,
             },
             meta: {
@@ -21580,60 +21807,124 @@ router.post(
         );
       } catch {}
 
-      // TODO(docgen): implement finalize-next resumable finalization to avoid serverless timeouts for large/slow bundles.
-      const finalStatus =
-        progress.failed === 0
-          ? "completed"
-          : progress.success > 0
-            ? "completed_with_errors"
-            : "failed";
-      if (finalStatus === "failed") {
-        await queryRows(
-          r,
-          sql`
-            UPDATE document_generation_jobs
-            SET status = 'failed',
-                total_count = ${progress.total},
-                success_count = ${progress.success},
-                failed_count = ${progress.failed},
-                pending_count = 0,
-                finished_at = now()
-            WHERE id = ${jobId} AND firm_id = ${req.firmId!}
-          `,
-        );
-        res.status(200).json({
-          ok: true,
-          jobId,
-          status: "failed",
-          progress,
-          nextAction: "stop",
+      const freshAfterLock = await readFreshFinalizeState();
+      if (!freshAfterLock.row) {
+        res.status(404).json({
+          ok: false,
+          error: { code: "JOB_NOT_FOUND", message: "Job not found", details: null, retryable: false },
           meta: {
             request_id: requestId ?? null,
             timestamp: new Date().toISOString(),
             duration_ms: Date.now() - startedAt,
           },
         });
-        try {
-          logger.info(
-            {
-              firmId: req.firmId ?? null,
-              userId: req.userId ?? null,
-              jobId,
-              requestId: requestId ?? null,
-              status: "failed",
-              progress,
-              elapsedMs: Date.now() - startedAt,
-            },
-            "docgen.finalize.complete",
-          );
-        } catch {}
         return;
       }
 
-      await finalizeDocGenJobIfDone(r, { firmId: req.firmId!, jobId });
+      let finalProgress = progress;
+      let finalAction: "print" | "download" | "zip" = String((job as any).action ?? "download").toLowerCase() === "print" ? "print" : "zip";
 
-      const action = String((job as any).action ?? "download").toLowerCase();
-      if (action === "print") {
+      if (freshAfterLock.status === "finalizing") {
+        finalProgress = freshAfterLock.progress;
+        const fp = finalProgress;
+        const fDone =
+          fp.total > 0 &&
+          fp.pending === 0 &&
+          fp.running === 0 &&
+          fp.success + fp.failed === fp.total;
+        if (!fDone) {
+          res.status(409).json({
+            ok: false,
+            error: {
+              code: "JOB_NOT_READY_FOR_FINALIZE",
+              message: "Finalizing job still has pending or running work and cannot be packaged yet.",
+              details: { status: "finalizing", progress: fp },
+              retryable: true,
+            },
+            meta: {
+              request_id: requestId ?? null,
+              timestamp: new Date().toISOString(),
+              duration_ms: Date.now() - startedAt,
+            },
+          });
+          return;
+        }
+        finalAction = String((freshAfterLock.row as any).action ?? "download").toLowerCase() === "print" ? "print" : "zip";
+      } else if (freshAfterLock.status === "pending" || freshAfterLock.status === "running") {
+        const fin = await finalizeDocGenJobIfDone(r, { firmId: req.firmId!, jobId });
+        if (!fin.finalized) {
+          const fresh = await readFreshFinalizeState();
+          const realState = buildResponseFromFresh(fresh, { lostRace: true });
+          const statusCode =
+            fresh.status === "paused" ||
+            fresh.status === "cancelled" ||
+            fresh.status === "completed" ||
+            fresh.status === "completed_with_errors" ||
+            fresh.status === "failed" ||
+            fresh.status === "generated_download_failed"
+              ? 200
+              : 409;
+          res.status(statusCode).json(realState);
+          try {
+            logger.info(
+              {
+                firmId: req.firmId ?? null,
+                userId: req.userId ?? null,
+                jobId,
+                requestId: requestId ?? null,
+                status: fresh.status,
+                progress: fresh.progress,
+                lostRace: true,
+                elapsedMs: Date.now() - startedAt,
+              },
+              "docgen.finalize.lost_race",
+            );
+          } catch {}
+          return;
+        }
+        if (fin.status === "failed") {
+          const fresh = await readFreshFinalizeState();
+          const realState = buildResponseFromFresh(fresh);
+          res.status(200).json(realState);
+          try {
+            logger.info(
+              {
+                firmId: req.firmId ?? null,
+                userId: req.userId ?? null,
+                jobId,
+                requestId: requestId ?? null,
+                status: "failed",
+                progress: fresh.progress,
+                elapsedMs: Date.now() - startedAt,
+              },
+              "docgen.finalize.complete",
+            );
+          } catch {}
+          return;
+        }
+        finalProgress = fin.progress;
+        finalAction = String((job as any).action ?? "download").toLowerCase() === "print" ? "print" : "zip";
+      } else {
+        const realState = buildResponseFromFresh(freshAfterLock);
+        const terminalOrPaused =
+          freshAfterLock.status === "paused" ||
+          freshAfterLock.status === "cancelled" ||
+          freshAfterLock.status === "completed" ||
+          freshAfterLock.status === "completed_with_errors" ||
+          freshAfterLock.status === "generated_download_failed" ||
+          freshAfterLock.status === "failed";
+        res.status(terminalOrPaused ? 200 : 409).json(realState);
+        return;
+      }
+
+      const finalStatus: string =
+        finalProgress.failed === 0
+          ? "completed"
+          : finalProgress.success > 0
+            ? "completed_with_errors"
+            : "failed";
+
+      if (finalAction === "print") {
         const download = await ensureDocGenJobDownloadObject(r, {
           firmId: req.firmId!,
           jobId,
@@ -21644,7 +21935,7 @@ router.post(
             error: {
               code: "FINALIZE_FAILED",
               message: "Failed to finalize print bundle",
-              details: { progress },
+              details: { progress: finalProgress },
               retryable: true,
             },
             meta: {
@@ -21656,15 +21947,32 @@ router.post(
           return;
         }
 
-        await queryRows(
+        const transitioned = await queryRows(
           r,
           sql`
             UPDATE document_generation_jobs
             SET status = ${finalStatus},
                 finished_at = now()
             WHERE id = ${jobId} AND firm_id = ${req.firmId!}
+              AND status = 'finalizing'
+            RETURNING *
           `,
         );
+        if (!transitioned || transitioned.length === 0) {
+          const fresh = await readFreshFinalizeState();
+          const actualState = buildResponseFromFresh(fresh, { lostRace: true });
+          const statusCode =
+            fresh.status === "paused" ||
+            fresh.status === "cancelled" ||
+            fresh.status === "completed" ||
+            fresh.status === "completed_with_errors" ||
+            fresh.status === "failed" ||
+            fresh.status === "generated_download_failed"
+              ? 200
+              : 409;
+          res.status(statusCode).json(actualState);
+          return;
+        }
 
         await writeAuditLog({
           firmId: req.firmId,
@@ -21682,7 +21990,7 @@ router.post(
           ok: true,
           jobId,
           status: finalStatus,
-          progress,
+          progress: finalProgress,
           nextAction: "download",
           downloadUrl: `/documents/jobs/${jobId}/download`,
           fileName: download.downloadFileName,
@@ -21701,22 +22009,39 @@ router.post(
           `Document_Automation_${new Date().toISOString().slice(0, 10)}.zip`,
         ) || `document-automation-${jobId}.zip`;
 
-      await queryRows(
+      const zipTransitioned = await queryRows(
         r,
         sql`
           UPDATE document_generation_jobs
           SET status = ${finalStatus},
-              total_count = ${progress.total},
-              success_count = ${progress.success},
-              failed_count = ${progress.failed},
+              total_count = ${finalProgress.total},
+              success_count = ${finalProgress.success},
+              failed_count = ${finalProgress.failed},
               pending_count = 0,
               download_object_path = NULL,
               download_file_name = ${zipFileName},
               download_mime_type = 'application/zip',
               finished_at = now()
           WHERE id = ${jobId} AND firm_id = ${req.firmId!}
+            AND status = 'finalizing'
+          RETURNING *
         `,
       );
+      if (!zipTransitioned || zipTransitioned.length === 0) {
+        const fresh = await readFreshFinalizeState();
+        const actualState = buildResponseFromFresh(fresh, { lostRace: true });
+        const statusCode =
+          fresh.status === "paused" ||
+          fresh.status === "cancelled" ||
+          fresh.status === "completed" ||
+          fresh.status === "completed_with_errors" ||
+          fresh.status === "failed" ||
+          fresh.status === "generated_download_failed"
+            ? 200
+            : 409;
+        res.status(statusCode).json(actualState);
+        return;
+      }
 
       await writeAuditLog({
         firmId: req.firmId,
@@ -21734,7 +22059,7 @@ router.post(
         ok: true,
         jobId,
         status: finalStatus,
-        progress,
+        progress: finalProgress,
         nextAction: "download",
         downloadManifestUrl: `/documents/jobs/${jobId}/download-manifest`,
         fileName: zipFileName,
@@ -21753,7 +22078,7 @@ router.post(
             jobId,
             requestId: requestId ?? null,
             status: finalStatus,
-            progress,
+            progress: finalProgress,
             downloadObjectPath: null,
             elapsedMs: Date.now() - startedAt,
           },
@@ -21916,6 +22241,450 @@ router.get(
   },
 );
 
+router.post(
+  "/documents/jobs/:jobId/pause",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "generate"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const startedAt = Date.now();
+    const r = getRlsDb(req, res);
+    if (!r) return;
+    const requestId =
+      one(req.headers["x-request-id"] as any) ||
+      one(req.headers["x-vercel-id"] as any) ||
+      undefined;
+    const jobId = one((req.params as any).jobId) ?? "";
+    if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+      res.status(400).json({
+        ok: false,
+        error: { code: "INVALID_JOB_ID", message: "Invalid jobId", details: null, retryable: false },
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+      return;
+    }
+    try {
+      const preJobs = await queryRows(
+        r,
+        sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
+      );
+      const preJob = preJobs[0] as any;
+      if (!preJob) {
+        res.status(404).json({
+          ok: false,
+          error: { code: "JOB_NOT_FOUND", message: "Job not found", details: null, retryable: false },
+          meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+        });
+        return;
+      }
+      const statusBefore = String(preJob.status ?? "");
+      const updatedRows = await queryRows(
+        r,
+        sql`
+          UPDATE document_generation_jobs
+          SET status = 'paused',
+              timeout_at = NULL,
+              last_heartbeat_at = now()
+          WHERE id = ${jobId} AND firm_id = ${req.firmId!}
+            AND status IN ('pending','running')
+          RETURNING *
+        `,
+      );
+      if (!updatedRows || updatedRows.length === 0) {
+        const rereadRows = await queryRows(
+          r,
+          sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!} LIMIT 1`,
+        );
+        const rereadJob = rereadRows[0] as any;
+        const actualStatus = String(rereadJob?.status ?? statusBefore);
+        const progress = await computeDocGenJobProgress(r, { firmId: req.firmId!, jobId });
+        const nextAction = resolveDocGenNextAction({ status: actualStatus, progress });
+        res.status(409).json({
+          ok: false,
+          error: {
+            code: "JOB_NOT_ACTIVE",
+            message: `Only running/pending jobs may be paused (current: ${actualStatus})`,
+            details: { status: actualStatus },
+            retryable: false,
+          },
+          jobId,
+          status: actualStatus,
+          progress,
+          nextAction,
+          meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+        });
+        return;
+      }
+      const updatedJob = updatedRows[0] as any;
+      const actualStatusAfter = String(updatedJob.status ?? "paused");
+      const progress = await computeDocGenJobProgress(r, { firmId: req.firmId!, jobId });
+      await writeAuditLog({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "documents.generation_jobs.pause",
+        entityType: "document_generation_job",
+        entityId: undefined,
+        detail: `jobId=${jobId} status_before=${statusBefore}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      }, { db: r });
+      const jobPayload: Record<string, unknown> = {
+        ...(updatedJob as any),
+        status: actualStatusAfter,
+        total_count: progress.total,
+        success_count: progress.success,
+        failed_count: progress.failed,
+        pending_count: progress.pending,
+        running_count: progress.running,
+      };
+      res.status(200).json({
+        ok: true,
+        jobId,
+        status: actualStatusAfter,
+        progress,
+        nextAction: "wait",
+        job: jobPayload,
+        meta: {
+          request_id: requestId ?? null,
+          jobId,
+          firmId: req.firmId ?? null,
+          userId: req.userId ?? null,
+          status_before: statusBefore,
+          status_after: actualStatusAfter,
+          nextAction: "wait",
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: {
+          code: "PAUSE_FAILED",
+          message: "Failed to pause job",
+          details: err instanceof Error ? err.message : String(err ?? ""),
+          retryable: true,
+        },
+        meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+      });
+    }
+  },
+);
+
+router.post(
+  "/documents/jobs/:jobId/resume",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "generate"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const startedAt = Date.now();
+    const r = getRlsDb(req, res);
+    if (!r) return;
+    const requestId =
+      one(req.headers["x-request-id"] as any) ||
+      one(req.headers["x-vercel-id"] as any) ||
+      undefined;
+    const jobId = one((req.params as any).jobId) ?? "";
+    if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+      res.status(400).json({
+        ok: false,
+        error: { code: "INVALID_JOB_ID", message: "Invalid jobId", details: null, retryable: false },
+        meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+      });
+      return;
+    }
+    try {
+      const preJobs = await queryRows(
+        r,
+        sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
+      );
+      const preJob = preJobs[0] as any;
+      if (!preJob) {
+        res.status(404).json({
+          ok: false,
+          error: { code: "JOB_NOT_FOUND", message: "Job not found", details: null, retryable: false },
+          meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+        });
+        return;
+      }
+      const statusBefore = String(preJob.status ?? "");
+      const updatedRows = await queryRows(
+        r,
+        sql`
+          UPDATE document_generation_jobs
+          SET status = 'running',
+              last_heartbeat_at = now()
+          WHERE id = ${jobId} AND firm_id = ${req.firmId!}
+            AND status = 'paused'
+          RETURNING *
+        `,
+      );
+      if (!updatedRows || updatedRows.length === 0) {
+        const rereadRows = await queryRows(
+          r,
+          sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!} LIMIT 1`,
+        );
+        const rereadJob = rereadRows[0] as any;
+        const actualStatus = String(rereadJob?.status ?? statusBefore);
+        const progress = await computeDocGenJobProgress(r, { firmId: req.firmId!, jobId });
+        const nextAction = resolveDocGenNextAction({ status: actualStatus, progress });
+        res.status(409).json({
+          ok: false,
+          error: {
+            code: "JOB_NOT_PAUSED",
+            message: `Only paused jobs may be resumed (current: ${actualStatus})`,
+            details: { status: actualStatus },
+            retryable: false,
+          },
+          jobId,
+          status: actualStatus,
+          progress,
+          nextAction,
+          meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+        });
+        return;
+      }
+      const updatedJob = updatedRows[0] as any;
+      const actualStatusAfter = String(updatedJob.status ?? "running");
+      const progress = await computeDocGenJobProgress(r, { firmId: req.firmId!, jobId });
+      const hasPending = progress.pending > 0 || progress.running > 0;
+      const nextAction: "run_next" | "finalize" | "download" | "stop" | "wait" = hasPending ? "run_next" : "wait";
+      await writeAuditLog({
+        firmId: req.firmId,
+        actorId: req.userId,
+        actorType: req.userType,
+        action: "documents.generation_jobs.resume",
+        entityType: "document_generation_job",
+        entityId: undefined,
+        detail: `jobId=${jobId} status_before=${statusBefore} pending=${progress.pending} running=${progress.running}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      }, { db: r });
+      const jobPayload: Record<string, unknown> = {
+        ...(updatedJob as any),
+        status: actualStatusAfter,
+        total_count: progress.total,
+        success_count: progress.success,
+        failed_count: progress.failed,
+        pending_count: progress.pending,
+        running_count: progress.running,
+      };
+      res.status(200).json({
+        ok: true,
+        jobId,
+        status: actualStatusAfter,
+        progress,
+        nextAction,
+        job: jobPayload,
+        meta: {
+          request_id: requestId ?? null,
+          jobId,
+          firmId: req.firmId ?? null,
+          userId: req.userId ?? null,
+          status_before: statusBefore,
+          status_after: actualStatusAfter,
+          nextAction,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: {
+          code: "RESUME_FAILED",
+          message: "Failed to resume job",
+          details: err instanceof Error ? err.message : String(err ?? ""),
+          retryable: true,
+        },
+        meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+      });
+    }
+  },
+);
+
+router.post(
+  "/documents/jobs/:jobId/cancel",
+  requireAuth,
+  requireFirmUser,
+  requirePermission("documents", "generate"),
+  async (req: AuthRequest, res): Promise<void> => {
+    const startedAt = Date.now();
+    const r = getRlsDb(req, res);
+    if (!r) return;
+    const requestId =
+      one(req.headers["x-request-id"] as any) ||
+      one(req.headers["x-vercel-id"] as any) ||
+      undefined;
+    const jobId = one((req.params as any).jobId) ?? "";
+    if (!/^[0-9a-fA-F-]{36}$/.test(jobId)) {
+      res.status(400).json({
+        ok: false,
+        error: { code: "INVALID_JOB_ID", message: "Invalid jobId", details: null, retryable: false },
+        meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+      });
+      return;
+    }
+    try {
+      const preJobs = await queryRows(
+        r,
+        sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!}`,
+      );
+      const preJob = preJobs[0] as any;
+      if (!preJob) {
+        res.status(404).json({
+          ok: false,
+          error: { code: "JOB_NOT_FOUND", message: "Job not found", details: null, retryable: false },
+          meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+        });
+        return;
+      }
+      const statusBefore = String(preJob.status ?? "");
+      const updatedRows = await queryRows(
+        r,
+        sql`
+          UPDATE document_generation_jobs
+          SET status = 'cancelled',
+              finished_at = now(),
+              timeout_at = NULL,
+              last_heartbeat_at = now()
+          WHERE id = ${jobId} AND firm_id = ${req.firmId!}
+            AND status IN ('pending','running','paused')
+          RETURNING *
+        `,
+      );
+      const progress = await computeDocGenJobProgress(r, { firmId: req.firmId!, jobId });
+      if (updatedRows && updatedRows.length > 0) {
+        const updatedJob = updatedRows[0] as any;
+        const actualStatusAfter = String(updatedJob.status ?? "cancelled");
+        await writeAuditLog({
+          firmId: req.firmId,
+          actorId: req.userId,
+          actorType: req.userType,
+          action: "documents.generation_jobs.cancel",
+          entityType: "document_generation_job",
+          entityId: undefined,
+          detail: `jobId=${jobId} status_before=${statusBefore} success=${progress.success} failed=${progress.failed} pending=${progress.pending} running=${progress.running}`,
+          ipAddress: req.ip,
+          userAgent: req.headers["user-agent"],
+        }, { db: r });
+        const jobPayload: Record<string, unknown> = {
+          ...(updatedJob as any),
+          status: actualStatusAfter,
+          active: false,
+          total_count: progress.total,
+          success_count: progress.success,
+          failed_count: progress.failed,
+          pending_count: progress.pending,
+          running_count: progress.running,
+        };
+        res.status(200).json({
+          ok: true,
+          jobId,
+          status: actualStatusAfter,
+          progress,
+          nextAction: "stop",
+          active: false,
+          job: jobPayload,
+          meta: {
+            request_id: requestId ?? null,
+            jobId,
+            firmId: req.firmId ?? null,
+            userId: req.userId ?? null,
+            status_before: statusBefore,
+            status_after: actualStatusAfter,
+            nextAction: "stop",
+            terminal: true,
+            cancelled: true,
+            idempotent: false,
+            timestamp: new Date().toISOString(),
+            duration_ms: Date.now() - startedAt,
+          },
+        });
+        return;
+      }
+      const rereadRows = await queryRows(
+        r,
+        sql`SELECT * FROM document_generation_jobs WHERE id = ${jobId} AND firm_id = ${req.firmId!} LIMIT 1`,
+      );
+      const rereadJob = rereadRows[0] as any;
+      const actualStatus = String(rereadJob?.status ?? statusBefore);
+      if (actualStatus === "cancelled") {
+        const jobPayload: Record<string, unknown> = {
+          ...(rereadJob as any),
+          status: "cancelled",
+          active: false,
+          total_count: progress.total,
+          success_count: progress.success,
+          failed_count: progress.failed,
+          pending_count: progress.pending,
+          running_count: progress.running,
+        };
+        res.status(200).json({
+          ok: true,
+          jobId,
+          status: "cancelled",
+          progress,
+          nextAction: "stop",
+          active: false,
+          job: jobPayload,
+          meta: {
+            request_id: requestId ?? null,
+            jobId,
+            firmId: req.firmId ?? null,
+            userId: req.userId ?? null,
+            status_before: statusBefore,
+            status_after: "cancelled",
+            nextAction: "stop",
+            terminal: true,
+            cancelled: true,
+            idempotent: true,
+            timestamp: new Date().toISOString(),
+            duration_ms: Date.now() - startedAt,
+          },
+        });
+        return;
+      }
+      const nextAction = resolveDocGenNextAction({ status: actualStatus, progress });
+      res.status(409).json({
+        ok: false,
+        error: {
+          code: "JOB_NOT_CANCELLABLE",
+          message: `Only pending, running, or paused jobs may be cancelled (current: ${actualStatus})`,
+          details: { status: actualStatus },
+          retryable: false,
+        },
+        jobId,
+        status: actualStatus,
+        progress,
+        nextAction,
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+      return;
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: {
+          code: "CANCEL_FAILED",
+          message: "Failed to cancel job",
+          details: err instanceof Error ? err.message : String(err ?? ""),
+          retryable: true,
+        },
+        meta: { request_id: requestId ?? null, timestamp: new Date().toISOString(), duration_ms: Date.now() - startedAt },
+      });
+    }
+  },
+);
+
 router.get(
   "/documents/status/:jobId",
   requireAuth,
@@ -22022,6 +22791,37 @@ router.get(
               ? String(job.error_summary)
               : "Document package build failed. Use Retry Download to re-package (documents already generated — no regeneration).",
         },
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+      return;
+    }
+
+    if (st === "paused") {
+      res.json({
+        ok: true,
+        jobId,
+        status: "paused",
+        nextAction: "wait",
+        meta: {
+          request_id: requestId ?? null,
+          timestamp: new Date().toISOString(),
+          duration_ms: Date.now() - startedAt,
+        },
+      });
+      return;
+    }
+
+    if (st === "cancelled") {
+      res.json({
+        ok: true,
+        jobId,
+        status: "cancelled",
+        nextAction: "stop",
+        active: false,
         meta: {
           request_id: requestId ?? null,
           timestamp: new Date().toISOString(),
@@ -22157,6 +22957,10 @@ router.get(
     const nextAction =
       status === "failed"
         ? ("stop" as const)
+        : status === "cancelled"
+        ? ("stop" as const)
+        : status === "paused"
+        ? ("wait" as const)
         : status === "generated_download_failed"
         ? ("download" as const)
         : progress.total > 0 && progress.failed === progress.total
@@ -22172,7 +22976,7 @@ router.get(
       canDownload ? `/documents/jobs/${jobId}/download` : undefined;
     const downloadManifestUrl =
       canDownload ? `/documents/jobs/${jobId}/download-manifest` : undefined;
-    const statusForcedActiveFalse = status === "failed";
+    const statusForcedActiveFalse = status === "failed" || status === "cancelled";
     const jobPayload: Record<string, unknown> = {
       ...(job as any),
       status,

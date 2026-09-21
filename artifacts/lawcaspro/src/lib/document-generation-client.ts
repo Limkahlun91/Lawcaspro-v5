@@ -21,7 +21,7 @@ function toInt(v: unknown): number {
   return 0;
 }
 
-export type DocumentGenerationJobStatus = "pending" | "running" | "completed" | "failed" | string;
+export type DocumentGenerationJobStatus = "pending" | "running" | "completed" | "failed" | "paused" | "cancelled" | string;
 export type DocumentGenerationJobAction = "download" | "print" | string;
 
 export type NormalizedGenerationJobItem = {
@@ -153,6 +153,42 @@ export async function finalizeGenerationJob(
   return normalizeGenerationJob(raw);
 }
 
+export async function pauseGenerationJob(
+  jobId: string,
+  opts?: { signal?: AbortSignal },
+): Promise<NormalizedGenerationJob> {
+  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}/pause`, {
+    method: "POST",
+    timeoutMs: GENERATION_TIMEOUT_MS,
+    signal: opts?.signal,
+  });
+  return normalizeGenerationJob(raw);
+}
+
+export async function resumeGenerationJob(
+  jobId: string,
+  opts?: { signal?: AbortSignal },
+): Promise<NormalizedGenerationJob> {
+  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}/resume`, {
+    method: "POST",
+    timeoutMs: GENERATION_TIMEOUT_MS,
+    signal: opts?.signal,
+  });
+  return normalizeGenerationJob(raw);
+}
+
+export async function cancelGenerationJob(
+  jobId: string,
+  opts?: { signal?: AbortSignal },
+): Promise<NormalizedGenerationJob> {
+  const raw = await apiFetchJson<unknown>(`/documents/jobs/${jobId}/cancel`, {
+    method: "POST",
+    timeoutMs: GENERATION_TIMEOUT_MS,
+    signal: opts?.signal,
+  });
+  return normalizeGenerationJob(raw);
+}
+
 export async function getGenerationJobStatus(
   jobId: string,
   opts?: { signal?: AbortSignal },
@@ -246,7 +282,7 @@ export function normalizeGenerationJob(raw: unknown): NormalizedGenerationJob {
     : undefined;
 
   const nextActionRaw = asString((root as any).nextAction ?? (root as any).next_action);
-  const nextAction =
+  let nextAction =
     nextActionRaw === "download" ||
     nextActionRaw === "run_next" ||
     nextActionRaw === "finalize" ||
@@ -256,6 +292,13 @@ export function normalizeGenerationJob(raw: unknown): NormalizedGenerationJob {
     nextActionRaw === "failed"
       ? (nextActionRaw as "run_next" | "finalize" | "download" | "stop" | "wait" | "continue" | "failed")
       : undefined;
+  if (!nextAction) {
+    const sl = String(status).toLowerCase();
+    if (sl === "cancelled") nextAction = "stop";
+    else if (sl === "paused") nextAction = "wait";
+    else if (sl === "failed") nextAction = "stop";
+    else if (sl === "generated_download_failed") nextAction = "download";
+  }
 
   const canDownload = typeof (root as any).canDownload === "boolean" ? Boolean((root as any).canDownload) : undefined;
 
@@ -293,7 +336,12 @@ export function normalizeGenerationJob(raw: unknown): NormalizedGenerationJob {
         ? (root as any).active
         : undefined;
   const statusLower = String(status).toLowerCase();
-  const active = statusLower === "failed" ? false : typeof activeRaw === "boolean" ? activeRaw : undefined;
+  const active =
+    statusLower === "failed" || statusLower === "cancelled"
+      ? false
+      : typeof activeRaw === "boolean"
+        ? activeRaw
+        : undefined;
 
   const creatorUserId =
     asNumber((jobRaw as any).creatorUserId ?? (jobRaw as any).creator_user_id) ??

@@ -27,6 +27,9 @@ import {
   runNextGenerationJob,
   getGenerationJobStatus,
   getGenerationJobDownloadManifest,
+  pauseGenerationJob,
+  resumeGenerationJob,
+  cancelGenerationJob,
   type NormalizedGenerationJob,
 } from "@/lib/document-generation-client";
 import {
@@ -204,6 +207,9 @@ export default function DocumentAutomationHub() {
   const [job, setJob] = useState<NormalizedGenerationJob | null>(null);
   const [jobError, setJobError] = useState<string | null>(null);
   const [runnerNotice, setRunnerNotice] = useState<string | null>(null);
+  const [jobControlBusy, setJobControlBusy] = useState<
+    null | "pause" | "resume" | "cancel"
+  >(null);
 
   type DownloadManifest = {
     ok: true;
@@ -2120,9 +2126,145 @@ export default function DocumentAutomationHub() {
     void continueJob(jobId);
   };
 
+  const handlePauseJob = async () => {
+    const jobId = activeJobId;
+    if (!jobId) return;
+    setJobControlBusy("pause");
+    runnerRef.current.running = false;
+    try { pollAbortRef.current?.abort(); } catch {}
+    if (pollTimerRef.current) {
+      try { window.clearInterval(pollTimerRef.current); } catch {}
+      pollTimerRef.current = null;
+    }
+    try {
+      const result = await pauseGenerationJob(jobId);
+      setJobStage("ready");
+      setJob(result);
+      setRunnerNotice("Generation paused by user");
+      setJobError(null);
+      devLog("job:paused", { jobId, status: String(result.status ?? "") });
+    } catch (err) {
+      try {
+        const refreshed = await getGenerationJobStatus(jobId);
+        setJob(refreshed);
+        const st = String(refreshed.status ?? "").toLowerCase();
+        if (st === "running" || st === "pending") {
+          setRunnerNotice(null);
+          const hasPending = Number(refreshed.pendingCount ?? 0) > 0 || Number((refreshed.progress?.running) ?? refreshed.runningCount ?? 0) > 0;
+          if (hasPending) {
+            void continueJob(jobId);
+          }
+        } else if (st === "paused") {
+          setJobStage("ready");
+          setRunnerNotice("Generation paused by user");
+        } else {
+          setJobStage("ready");
+          setRunnerNotice(null);
+        }
+        setJobError(null);
+      } catch (err2) {
+        const msg = extractErrorMessage(err) || extractErrorMessage(err2);
+        setJobError(msg || "Failed to pause generation job");
+        setJobStage("error");
+      }
+    } finally {
+      setJobControlBusy(null);
+    }
+  };
+
+  const handleResumeJob = async () => {
+    const jobId = activeJobId;
+    if (!jobId) return;
+    if (displayStatus !== "PAUSED") return;
+    setJobControlBusy("resume");
+    try {
+      const result = await resumeGenerationJob(jobId);
+      setJob(result);
+      setRunnerNotice(null);
+      setJobError(null);
+      devLog("job:resumed", { jobId, status: String(result.status ?? ""), nextAction: result.nextAction ?? null });
+      void continueJob(jobId);
+    } catch (err) {
+      try {
+        const refreshed = await getGenerationJobStatus(jobId);
+        setJob(refreshed);
+        const st = String(refreshed.status ?? "").toLowerCase();
+        if (st === "running" || st === "pending") {
+          setRunnerNotice(null);
+          const hasPending = Number(refreshed.pendingCount ?? 0) > 0 || Number((refreshed.progress?.running) ?? refreshed.runningCount ?? 0) > 0;
+          if (hasPending) {
+            void continueJob(jobId);
+          }
+        } else if (st === "paused") {
+          setRunnerNotice("Generation paused — resume could not be applied. Please try Refresh and retry.");
+        } else {
+          setRunnerNotice(null);
+        }
+        setJobError(null);
+      } catch (err2) {
+        const msg = extractErrorMessage(err) || extractErrorMessage(err2);
+        setJobError(msg || "Failed to resume generation job");
+        setJobStage("error");
+      }
+    } finally {
+      setJobControlBusy(null);
+    }
+  };
+
+  const handleCancelJob = async () => {
+    const jobId = activeJobId;
+    if (!jobId) return;
+    const ok = window.confirm("Cancel this generation job? Completed files will be kept. Pending documents will not continue.");
+    if (!ok) return;
+    setJobControlBusy("cancel");
+    runnerRef.current.running = false;
+    try { pollAbortRef.current?.abort(); } catch {}
+    if (pollTimerRef.current) {
+      try { window.clearInterval(pollTimerRef.current); } catch {}
+      pollTimerRef.current = null;
+    }
+    try {
+      const result = await cancelGenerationJob(jobId);
+      setJobStage("ready");
+      setJob(result);
+      setJobError(null);
+      setRunnerNotice("Job cancelled by user");
+      devLog("job:cancelled", { jobId, status: String(result.status ?? "") });
+    } catch (err) {
+      try {
+        const refreshed = await getGenerationJobStatus(jobId);
+        setJob(refreshed);
+        const st = String(refreshed.status ?? "").toLowerCase();
+        if (st === "cancelled") {
+          setJobStage("ready");
+          setRunnerNotice("Job cancelled by user");
+          setJobError(null);
+        } else if (st === "running" || st === "pending") {
+          const hasPending = Number(refreshed.pendingCount ?? 0) > 0 || Number((refreshed.progress?.running) ?? refreshed.runningCount ?? 0) > 0;
+          if (hasPending) {
+            void continueJob(jobId);
+          }
+          setRunnerNotice("Cancel did not take effect — job still active. Please try Refresh and retry Cancel.");
+          setJobError(null);
+        } else {
+          setJobStage("ready");
+          setRunnerNotice(null);
+          setJobError(null);
+        }
+      } catch (err2) {
+        const msg = extractErrorMessage(err) || extractErrorMessage(err2);
+        setJobError(msg || "Failed to cancel generation job");
+        setJobStage("error");
+      }
+    } finally {
+      setJobControlBusy(null);
+    }
+  };
+
   function StatusBadge({ status }: { status: DocGenDisplayStatus }) {
     const map: Record<DocGenDisplayStatus, { label: string; className: string; icon: any }> = {
       GENERATING: { label: "Generating", className: "bg-blue-50 text-blue-700 border-blue-200", icon: Loader2 },
+      PAUSED: { label: "Paused", className: "bg-amber-50 text-amber-700 border-amber-200", icon: Clock },
       COMPLETED: { label: "Completed", className: "bg-emerald-50 text-emerald-700 border-emerald-200", icon: CheckCircle2 },
       PARTIALLY_COMPLETED: { label: "Partially completed", className: "bg-amber-50 text-amber-700 border-amber-200", icon: AlertTriangle },
       FAILED: { label: "Failed", className: "bg-rose-50 text-rose-700 border-rose-200", icon: XCircle },
@@ -2791,6 +2933,50 @@ export default function DocumentAutomationHub() {
                           ) : null}
 
                           <div className="p-3 flex flex-wrap gap-2">
+                            {displayStatus === "GENERATING" ? (
+                              <>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={!activeJobId || jobControlBusy !== null}
+                                  onClick={() => void handlePauseJob()}
+                                >
+                                  Pause
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="destructive"
+                                  disabled={!activeJobId || jobControlBusy !== null}
+                                  onClick={() => void handleCancelJob()}
+                                >
+                                  Cancel Job
+                                </Button>
+                              </>
+                            ) : null}
+                            {displayStatus === "PAUSED" ? (
+                              <>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="default"
+                                  disabled={!activeJobId || jobControlBusy !== null}
+                                  onClick={() => void handleResumeJob()}
+                                >
+                                  Resume Job
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="destructive"
+                                  disabled={!activeJobId || jobControlBusy !== null}
+                                  onClick={() => void handleCancelJob()}
+                                >
+                                  Cancel Job
+                                </Button>
+                              </>
+                            ) : null}
                             <Button
                               type="button"
                               size="sm"
@@ -2991,7 +3177,7 @@ export default function DocumentAutomationHub() {
                         </div>
                       )}
                       <Button
-                        disabled={busy || (hasActiveJob && displayStatus === "GENERATING") || blocksWordTemplates}
+                        disabled={busy || (hasActiveJob && (displayStatus === "GENERATING" || displayStatus === "PAUSED")) || blocksWordTemplates}
                         className="w-full"
                         onClick={() => runGenerate("download")}
                       >
@@ -3097,7 +3283,7 @@ export default function DocumentAutomationHub() {
                         </div>
                       )}
                       <Button
-                        disabled={busy || (hasActiveJob && displayStatus === "GENERATING") || blocksWordTemplates}
+                        disabled={busy || (hasActiveJob && (displayStatus === "GENERATING" || displayStatus === "PAUSED")) || blocksWordTemplates}
                         className="w-full"
                         onClick={() => runGenerate("print")}
                       >

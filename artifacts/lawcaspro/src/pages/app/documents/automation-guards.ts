@@ -54,6 +54,7 @@ export type DocGenDisplayStatus =
   | "COMPLETED"
   | "PARTIALLY_COMPLETED"
   | "FAILED"
+  | "PAUSED"
   | "CANCELLED"
   | "GENERATED_DOWNLOAD_FAILED";
 
@@ -67,6 +68,8 @@ export function getDisplayStatus(
     snapshot?.downloadObjectPath || snapshot?.downloadUrl || snapshot?.downloadManifestUrl,
   );
   const active = (snapshot as any)?.active;
+  if (st === "cancelled") return "CANCELLED";
+  if (st === "paused") return "PAUSED";
   if (
     st === "failed" ||
     nextAction === "stop" ||
@@ -74,7 +77,6 @@ export function getDisplayStatus(
   ) {
     return "FAILED";
   }
-  if (st === "cancelled") return "CANCELLED";
   if (!isProgressComplete(snapshot)) return "GENERATING";
   if (p.success === 0) return "FAILED";
   if (p.failed === 0) {
@@ -142,6 +144,8 @@ export function getJobTitle(snapshot: NormalizedGenerationJob | null): string {
       return "Partially completed";
     case "FAILED":
       return "Generation stopped";
+    case "PAUSED":
+      return "Generation paused";
     case "CANCELLED":
       return "Generation cancelled";
     case "GENERATED_DOWNLOAD_FAILED":
@@ -159,6 +163,10 @@ export function getJobSummary(snapshot: NormalizedGenerationJob | null): string 
   if (d === "PARTIALLY_COMPLETED") return `${p.success} succeeded, ${p.failed} failed`;
   if (d === "GENERATED_DOWNLOAD_FAILED") return `${p.success} succeeded, package failed`;
   if (d === "CANCELLED") return `${p.success + p.failed} of ${p.total} before cancellation`;
+  if (d === "PAUSED") {
+    const processed = p.success + p.failed;
+    return `Paused at ${processed} / ${p.total}`;
+  }
   const processed = p.success + p.failed;
   return `Processed ${processed} / ${p.total}`;
 }
