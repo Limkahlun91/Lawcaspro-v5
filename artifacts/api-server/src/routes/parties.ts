@@ -18,7 +18,16 @@ type RouterInternalLike = {
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
-function rdb(req: AuthRequest) { return req.rlsDb ?? db; }
+const getRlsDb = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => {
+  const r = req.rlsDb;
+  if (!r) {
+    req.log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb in tenant route");
+    res.status(503).json({ error: "Tenant DB context unavailable" });
+    return null;
+  }
+  return r;
+};
+const getRlsDbTx = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => getRlsDb(req, res);
 
 const CreatePartyBody = z.object({
   partyType: z.enum(["natural_person", "company", "trust"]).default("natural_person"),
@@ -67,8 +76,9 @@ const CreateBeneficialOwnerBody = z.object({
 // GET /parties — list firm parties with optional search
 // ---------------------------------------------------------------------------
 router.get("/parties", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const pdb = getRlsDb(req, res); if (!pdb) return;
   const { q, type } = req.query as Record<string, string>;
-  let query = db.select().from(partiesTable)
+  let query = pdb.select().from(partiesTable)
     .where(and(
       eq(partiesTable.firmId, req.firmId!),
       isNull(partiesTable.deletedAt),
@@ -91,6 +101,7 @@ router.get("/parties", requireAuth, requireFirmUser, async (req: AuthRequest, re
 // POST /parties — create a party
 // ---------------------------------------------------------------------------
 router.post("/parties", sensitiveRateLimiter, requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const pdb = getRlsDb(req, res); if (!pdb) return;
   const parsed = CreatePartyBody.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
@@ -121,10 +132,10 @@ router.post("/parties", sensitiveRateLimiter, requireAuth, requireFirmUser, asyn
     createdBy: req.userId,
   } satisfies typeof partiesTable.$inferInsert;
 
-  const [party] = await rdb(req).insert(partiesTable).values(partyInsert).returning();
+  const [party] = await pdb.insert(partiesTable).values(partyInsert).returning();
 
   // Auto-create compliance profile
-  await rdb(req).insert(complianceProfilesTable).values({
+  await pdb.insert(complianceProfilesTable).values({
     firmId: req.firmId!,
     partyId: party.id,
     cddStatus: "not_started",
@@ -148,18 +159,19 @@ router.post("/parties", sensitiveRateLimiter, requireAuth, requireFirmUser, asyn
 // GET /parties/:id — get party detail with compliance profile
 // ---------------------------------------------------------------------------
 router.get("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const pdb = getRlsDb(req, res); if (!pdb) return;
   const id = Number(req.params.id);
-  const [party] = await rdb(req).select().from(partiesTable)
+  const [party] = await pdb.select().from(partiesTable)
     .where(and(eq(partiesTable.id, id), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
   if (!party) { res.status(404).json({ error: "Party not found" }); return; }
 
-  const [profile] = await rdb(req).select().from(complianceProfilesTable)
+  const [profile] = await pdb.select().from(complianceProfilesTable)
     .where(and(eq(complianceProfilesTable.partyId, id), eq(complianceProfilesTable.firmId, req.firmId!)));
 
-  const bos = await rdb(req).select().from(beneficialOwnersTable)
+  const bos = await pdb.select().from(beneficialOwnersTable)
     .where(and(eq(beneficialOwnersTable.partyId, id), eq(beneficialOwnersTable.firmId, req.firmId!)));
 
-  const caseLinks = await rdb(req).select().from(casePartiesTable)
+  const caseLinks = await pdb.select().from(casePartiesTable)
     .where(and(eq(casePartiesTable.partyId, id), eq(casePartiesTable.firmId, req.firmId!)));
 
   res.json({ ...party, complianceProfile: profile ?? null, beneficialOwners: bos, caseLinks });
@@ -169,8 +181,9 @@ router.get("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest
 // PATCH /parties/:id — update party
 // ---------------------------------------------------------------------------
 router.patch("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const pdb = getRlsDb(req, res); if (!pdb) return;
   const id = Number(req.params.id);
-  const [party] = await rdb(req).select().from(partiesTable)
+  const [party] = await pdb.select().from(partiesTable)
     .where(and(eq(partiesTable.id, id), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
   if (!party) { res.status(404).json({ error: "Party not found" }); return; }
 
@@ -200,7 +213,7 @@ router.patch("/parties/:id", requireAuth, requireFirmUser, async (req: AuthReque
   if (parsed.data.hasLayeredOwnership !== undefined) updatePayload.hasLayeredOwnership = parsed.data.hasLayeredOwnership;
   if (parsed.data.directors !== undefined) updatePayload.directors = parsed.data.directors;
 
-  const [updated] = await rdb(req).update(partiesTable).set(updatePayload).where(eq(partiesTable.id, id)).returning();
+  const [updated] = await pdb.update(partiesTable).set(updatePayload).where(eq(partiesTable.id, id)).returning();
 
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
@@ -215,12 +228,13 @@ router.patch("/parties/:id", requireAuth, requireFirmUser, async (req: AuthReque
 // DELETE /parties/:id — soft-delete party
 // ---------------------------------------------------------------------------
 router.delete("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const pdb = getRlsDb(req, res); if (!pdb) return;
   const id = Number(req.params.id);
-  const [party] = await rdb(req).select().from(partiesTable)
+  const [party] = await pdb.select().from(partiesTable)
     .where(and(eq(partiesTable.id, id), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
   if (!party) { res.status(404).json({ error: "Party not found" }); return; }
 
-  await rdb(req).update(partiesTable).set({ deletedAt: new Date() }).where(eq(partiesTable.id, id));
+  await pdb.update(partiesTable).set({ deletedAt: new Date() }).where(eq(partiesTable.id, id));
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
     action: "compliance.party_deleted", entityType: "party", entityId: id,
@@ -233,8 +247,9 @@ router.delete("/parties/:id", requireAuth, requireFirmUser, async (req: AuthRequ
 // POST /parties/:id/beneficial-owners — add a beneficial owner
 // ---------------------------------------------------------------------------
 router.post("/parties/:id/beneficial-owners", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const pdb = getRlsDb(req, res); if (!pdb) return;
   const partyId = Number(req.params.id);
-  const [party] = await rdb(req).select().from(partiesTable)
+  const [party] = await pdb.select().from(partiesTable)
     .where(and(eq(partiesTable.id, partyId), eq(partiesTable.firmId, req.firmId!), isNull(partiesTable.deletedAt)));
   if (!party) { res.status(404).json({ error: "Party not found" }); return; }
 
@@ -256,7 +271,7 @@ router.post("/parties/:id/beneficial-owners", requireAuth, requireFirmUser, asyn
     throughEntityName: parsed.data.throughEntityName,
   } satisfies typeof beneficialOwnersTable.$inferInsert;
 
-  const [bo] = await rdb(req).insert(beneficialOwnersTable).values(boInsert).returning();
+  const [bo] = await pdb.insert(beneficialOwnersTable).values(boInsert).returning();
 
   await writeAuditLog({
     actorId: req.userId, firmId: req.firmId, actorType: "firm_user",
@@ -271,8 +286,9 @@ router.post("/parties/:id/beneficial-owners", requireAuth, requireFirmUser, asyn
 // DELETE /parties/:id/beneficial-owners/:boId
 // ---------------------------------------------------------------------------
 router.delete("/parties/:id/beneficial-owners/:boId", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const pdb = getRlsDb(req, res); if (!pdb) return;
   const boId = Number(req.params.boId);
-  await rdb(req).delete(beneficialOwnersTable).where(
+  await pdb.delete(beneficialOwnersTable).where(
     and(eq(beneficialOwnersTable.id, boId), eq(beneficialOwnersTable.firmId, req.firmId!))
   );
   await writeAuditLog({
@@ -287,8 +303,9 @@ router.delete("/parties/:id/beneficial-owners/:boId", requireAuth, requireFirmUs
 // GET /cases/:caseId/parties — list parties linked to a case
 // ---------------------------------------------------------------------------
 router.get("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const pdb = getRlsDb(req, res); if (!pdb) return;
   const caseId = Number(req.params.caseId);
-  const links = await rdb(req).select({
+  const links = await pdb.select({
     id: casePartiesTable.id,
     partyId: casePartiesTable.partyId,
     partyRole: casePartiesTable.partyRole,
@@ -302,6 +319,7 @@ router.get("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: A
 // POST /cases/:caseId/parties — link a party to a case
 // ---------------------------------------------------------------------------
 router.post("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const pdb = getRlsDb(req, res); if (!pdb) return;
   const caseId = Number(req.params.caseId);
   const parsed = z.object({
     partyId: z.number().int(),
@@ -310,7 +328,7 @@ router.post("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: 
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues }); return; }
 
   // Check for duplicate
-  const [existing] = await rdb(req).select().from(casePartiesTable)
+  const [existing] = await pdb.select().from(casePartiesTable)
     .where(and(
       eq(casePartiesTable.caseId, caseId),
       eq(casePartiesTable.partyId, parsed.data.partyId),
@@ -318,7 +336,7 @@ router.post("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: 
     ));
   if (existing) { res.status(409).json({ error: "Party already linked to this case" }); return; }
 
-  const [link] = await rdb(req).insert(casePartiesTable).values({
+  const [link] = await pdb.insert(casePartiesTable).values({
     firmId: req.firmId!,
     caseId,
     partyId: parsed.data.partyId,
@@ -340,9 +358,10 @@ router.post("/cases/:caseId/parties", requireAuth, requireFirmUser, async (req: 
 // DELETE /cases/:caseId/parties/:partyId — unlink a party from a case
 // ---------------------------------------------------------------------------
 router.delete("/cases/:caseId/parties/:partyId", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const pdb = getRlsDb(req, res); if (!pdb) return;
   const caseId = Number(req.params.caseId);
   const partyId = Number(req.params.partyId);
-  await rdb(req).delete(casePartiesTable)
+  await pdb.delete(casePartiesTable)
     .where(and(
       eq(casePartiesTable.caseId, caseId),
       eq(casePartiesTable.partyId, partyId),

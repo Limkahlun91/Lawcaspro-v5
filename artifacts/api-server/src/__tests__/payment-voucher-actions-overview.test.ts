@@ -65,7 +65,7 @@ describe("Payment voucher actions overview", () => {
     expect(res.body?.items).toEqual([]);
   });
 
-  it("returns structured 500 with SQLSTATE for insufficient privilege", async () => {
+  it("returns structured 503 with SQLSTATE for insufficient privilege (fail-closed service unavailable)", async () => {
     const app = express();
     app.use((req: any, _res, next) => {
       req.rlsDb = makeRlsDb({ throwSqlState: "42501" });
@@ -74,7 +74,7 @@ describe("Payment voucher actions overview", () => {
     app.use(router);
 
     const res = await request(app).get("/payment-voucher-actions/my-work/overview");
-    expect(res.status).toBe(500);
+    expect(res.status).toBe(503);
     expect(res.body?.code).toBe("PV_ACTIONS_INSUFFICIENT_PRIVILEGE");
     expect(res.body?.meta?.sqlState).toBe("42501");
     expect(typeof res.body?.meta?.safeCategory).toBe("string");

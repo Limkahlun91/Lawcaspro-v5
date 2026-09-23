@@ -495,6 +495,12 @@ export default function DocumentAutomationHub() {
         const p = getProgress(st);
         const sLower = String(st.status ?? "").toLowerCase();
         const naLower = String(st.nextAction ?? "").toLowerCase();
+        const isReadyForDownload = naLower === "download" || sLower === "completed" || sLower === "completed_with_errors" || Boolean(st.canDownload) || Boolean(st.downloadUrl) || Boolean(st.downloadManifestUrl);
+        if (isReadyForDownload) {
+          setJobError(null);
+          setRunnerNotice(null);
+          if (jobStageRef.current === "error") setJobStage("generating");
+        }
         if (naLower === "stop" || sLower === "failed" || sLower === "cancelled") {
           const hasDocxErr = Array.isArray(st.items) && st.items.some((i) => i?.errorCode === "DOCX_TO_PDF_ENGINE_NOT_CONFIGURED");
           setJobError(
@@ -508,7 +514,11 @@ export default function DocumentAutomationHub() {
         const progressCompleteNow = isProgressComplete(st);
         if (progressCompleteNow) {
           if (p.success > 0) {
-            await finalizeAndDownload(jobId, { snapshot: st });
+            const outcome = await finalizeAndDownload(jobId, { snapshot: st });
+            if (outcome === "not_ready") {
+              await new Promise<void>((r) => setTimeout(r, 1200));
+              continue;
+            }
           } else {
             setJobError("Generation completed but no documents were generated successfully.");
             setJobStage("error");
@@ -545,7 +555,11 @@ export default function DocumentAutomationHub() {
             return;
           }
           if (isProgressComplete(next) && p2.success > 0) {
-            await finalizeAndDownload(jobId, { snapshot: next });
+            const outcome = await finalizeAndDownload(jobId, { snapshot: next });
+            if (outcome === "not_ready") {
+              await new Promise<void>((r) => setTimeout(r, 1200));
+              continue;
+            }
             return;
           }
           setRunnerNotice(formatProcessingNotice(next));
@@ -563,7 +577,11 @@ export default function DocumentAutomationHub() {
               setJob(st2);
               const p3 = getProgress(st2);
               if (isProgressComplete(st2) && p3.success > 0) {
-                await finalizeAndDownload(jobId, { snapshot: st2 });
+                const outcome = await finalizeAndDownload(jobId, { snapshot: st2 });
+                if (outcome === "not_ready") {
+                  await new Promise<void>((r) => setTimeout(r, 1200));
+                  continue;
+                }
                 return;
               }
               if (runNextConsecutive504Ref.current >= 3) {
@@ -587,18 +605,27 @@ export default function DocumentAutomationHub() {
     }
   };
 
+  const getErrorCode = (err: unknown): string => {
+    const r = asRecord(err) ?? {};
+    const direct = safeText((r as any).code);
+    if (direct) return direct;
+    const data = asRecord((r as any).data);
+    const errObj = data ? (asRecord((data as any).error) ?? null) : asRecord((r as any).error);
+    return errObj ? safeText((errObj as any).code) : "";
+  };
+
   const finalizeAndDownload = async (
     jobId: string,
     opts?: { force?: boolean; snapshot?: NormalizedGenerationJob | null },
-  ) => {
+  ): Promise<"done" | "not_ready"> => {
     const force = opts?.force === true;
     if (force) {
       finalizeAttemptedJobIdRef.current = null;
       downloadAttemptedJobIdRef.current = null;
     }
     if (!jobId) throw new Error("jobId is missing");
-    if (!force && downloadAttemptedJobIdRef.current === jobId) return;
-    if (downloadInFlightRef.current) return;
+    if (!force && downloadAttemptedJobIdRef.current === jobId) return "done";
+    if (downloadInFlightRef.current) return "done";
 
     downloadInFlightRef.current = true;
     downloadAttemptedJobIdRef.current = jobId;
@@ -623,7 +650,7 @@ export default function DocumentAutomationHub() {
       if (!progressCompleteNow || p.success <= 0) {
         setRunnerNotice(formatProcessingNotice(snap));
         setJobStage("generating");
-        return;
+        return "done";
       }
       const shouldFinalize =
         snap.nextAction === "finalize" ||
@@ -646,6 +673,31 @@ export default function DocumentAutomationHub() {
             setJob(fin);
             snap = fin;
             devLog("finalize:complete", { jobId, status: String(fin.status ?? "") });
+          } catch (fErr) {
+            const fCode = getErrorCode(fErr);
+            if (fCode === "JOB_NOT_READY_FOR_FINALIZE") {
+              devLog("finalize:not_ready", { jobId });
+              const fresh = await getGenerationJobStatus(jobId);
+              setJob(fresh);
+              setJobError(null);
+              finalizeAttemptedJobIdRef.current = null;
+              downloadAttemptedJobIdRef.current = null;
+              const fp = getProgress(fresh);
+              const fs = String(fresh.status ?? "").toLowerCase();
+              const stillProcessing =
+                fp.pending > 0 ||
+                fp.running > 0 ||
+                fs === "pending" ||
+                fs === "running";
+              if (stillProcessing) {
+                setRunnerNotice(formatProcessingNotice(fresh));
+                setJobStage("generating");
+                return "not_ready";
+              }
+              snap = fresh;
+            } else {
+              throw fErr;
+            }
           } finally {
             finalizeInFlightRef.current = false;
           }
@@ -660,12 +712,13 @@ export default function DocumentAutomationHub() {
           setRunnerNotice(formatProcessingNotice(snap));
           setJobStage("generating");
           await continueJob(jobId);
-          return;
+          return "done";
         }
         throw err;
       }
       devLog("finalizeAndDownload:downloaded", { jobId });
       clearActiveJob();
+      return "done";
     } catch (err) {
       const msg = extractErrorMessage(err);
       devLog("finalizeAndDownload:failed", { jobId, message: msg });
@@ -742,11 +795,12 @@ export default function DocumentAutomationHub() {
         } else {
           setJobStage("ready");
           devLog("job:recovered", { jobId, status: String(st.status ?? ""), nextAction: st.nextAction ?? null });
-          setRunnerNotice(
-            canDownloadNow(st)
-              ? "Previous generation job found. You can retry download."
-              : formatProcessingNotice(st),
-          );
+          if (canDownloadNow(st)) {
+            setJobError(null);
+            setRunnerNotice("Previous generation job found. You can retry download.");
+          } else {
+            setRunnerNotice(formatProcessingNotice(st));
+          }
         }
         try {
           window.localStorage.setItem(pollTimestampStorageKey, String(now));
@@ -1578,7 +1632,12 @@ export default function DocumentAutomationHub() {
               if (progressCompleteNow && p.success > 0) {
                 stopPolling();
                 try {
-                  await finalizeAndDownload(jobId, { snapshot: st });
+                  const outcome = await finalizeAndDownload(jobId, { snapshot: st });
+                  if (outcome === "not_ready") {
+                    await new Promise<void>((r) => setTimeout(r, 1200));
+                    runNextInFlightRef.current = false;
+                    continue;
+                  }
                 } catch {}
                 return;
               }
@@ -1719,7 +1778,12 @@ export default function DocumentAutomationHub() {
               runnerRef.current.state = "downloading";
               stopPolling();
               try {
-                await finalizeAndDownload(jobId, { snapshot: next });
+                const outcome = await finalizeAndDownload(jobId, { snapshot: next });
+                if (outcome === "not_ready") {
+                  await new Promise<void>((r) => setTimeout(r, 1200));
+                  runNextInFlightRef.current = false;
+                  continue;
+                }
               } catch {}
               return;
             }
@@ -1819,7 +1883,12 @@ export default function DocumentAutomationHub() {
                 if (progressCompleteNow && p.success > 0) {
                   stopPolling();
                   try {
-                    await finalizeAndDownload(jobId, { snapshot: st });
+                    const outcome = await finalizeAndDownload(jobId, { snapshot: st });
+                    if (outcome === "not_ready") {
+                      await new Promise<void>((r) => setTimeout(r, 1200));
+                      runNextInFlightRef.current = false;
+                      continue;
+                    }
                   } catch {}
                   return;
                 }
@@ -1844,7 +1913,12 @@ export default function DocumentAutomationHub() {
                 if (isProgressComplete(st) && p.success > 0) {
                   stopPolling();
                   try {
-                    await finalizeAndDownload(jobId, { snapshot: st });
+                    const outcome = await finalizeAndDownload(jobId, { snapshot: st });
+                    if (outcome === "not_ready") {
+                      await new Promise<void>((r) => setTimeout(r, 1200));
+                      runNextInFlightRef.current = false;
+                      continue;
+                    }
                   } catch {}
                   return;
                 }
@@ -2989,11 +3063,27 @@ export default function DocumentAutomationHub() {
                                   try {
                                     const st = await getGenerationJobStatus(activeJobId);
                                     setJob(st);
+                                    setJobError(null);
                                     devLog("job:refresh", {
                                       jobId: activeJobId,
                                       status: String(st.status ?? ""),
                                       nextAction: st.nextAction ?? null,
                                     });
+                                    const stLower = String(st.status ?? "").toLowerCase();
+                                    const naLower = String(st.nextAction ?? "").toLowerCase();
+                                    if (
+                                      stLower === "completed" ||
+                                      stLower === "completed_with_errors" ||
+                                      naLower === "download"
+                                    ) {
+                                      setRunnerNotice(null);
+                                    } else if (stLower === "cancelled") {
+                                      setRunnerNotice("Job cancelled by user");
+                                    } else if (stLower === "paused") {
+                                      setRunnerNotice("Generation paused by user");
+                                    } else {
+                                      setRunnerNotice(formatProcessingNotice(st));
+                                    }
                                     setJobStage("ready");
                                   } catch (err) {
                                     const msg = extractErrorMessage(err);

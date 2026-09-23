@@ -65,6 +65,18 @@ function buildConn(
 describe("Document Automation §8/§9/§G: finalizeDocGenJobIfDone + counters targeted tests", () => {
   it("Test B (§1.B): 6 case × 1 template all success → finalizing + 6/6/0 + finalized=true", async () => {
     const { conn } = buildConn({
+      "update document_generation_jobs": [
+        {
+          status: "finalizing",
+          action: "generate",
+          download_object_path: null,
+          download_file_name: null,
+          download_mime_type: null,
+          config: {},
+          case_ids: [101, 102, 103, 104, 105, 106],
+          created_by: 7,
+        },
+      ],
       "from document_generation_job_items": [
         { total: 6, success: 6, failed: 0, pending: 0, running: 0 },
       ],
@@ -77,7 +89,7 @@ describe("Document Automation §8/§9/§G: finalizeDocGenJobIfDone + counters ta
           download_mime_type: null,
           config: {},
           case_ids: [101, 102, 103, 104, 105, 106],
-          user_id: 7,
+          created_by: 7,
         },
       ],
       "to_regclass": [{ reg: "public.document_generation_logs" }],
@@ -94,6 +106,18 @@ describe("Document Automation §8/§9/§G: finalizeDocGenJobIfDone + counters ta
 
   it("Test C (§1.C): 5 success 1 failed → completed_with_errors partial finalizing", async () => {
     const { conn } = buildConn({
+      "update document_generation_jobs": [
+        {
+          status: "finalizing",
+          action: "generate",
+          download_object_path: "/firm/z.zip",
+          download_file_name: "z.zip",
+          download_mime_type: "application/zip",
+          config: {},
+          case_ids: [1, 2],
+          created_by: 1,
+        },
+      ],
       "from document_generation_job_items": [
         { total: 6, success: 5, failed: 1, pending: 0, running: 0 },
       ],
@@ -101,7 +125,8 @@ describe("Document Automation §8/§9/§G: finalizeDocGenJobIfDone + counters ta
         {
           status: "running", action: "generate",
           download_object_path: "/firm/z.zip", download_file_name: "z.zip",
-          case_ids: [1, 2], user_id: 1,
+          download_mime_type: "application/zip", config: {},
+          case_ids: [1, 2], created_by: 1,
         },
       ],
       "to_regclass": [{ reg: "public.document_generation_logs" }],
@@ -114,11 +139,28 @@ describe("Document Automation §8/§9/§G: finalizeDocGenJobIfDone + counters ta
 
   it("Test D (§1.D): 0 success 6 fail → FAILED statusToSet failed", async () => {
     const { conn } = buildConn({
+      "update document_generation_jobs": [
+        {
+          status: "failed",
+          action: "generate",
+          download_object_path: null,
+          download_file_name: null,
+          download_mime_type: null,
+          config: {},
+          case_ids: [],
+          created_by: 3,
+        },
+      ],
       "from document_generation_job_items": [
         { total: 6, success: 0, failed: 6, pending: 0, running: 0 },
       ],
       "from document_generation_jobs where id": [
-        { status: "running", action: "generate", download_object_path: null, case_ids: [], user_id: 3 },
+        {
+          status: "running", action: "generate",
+          download_object_path: null, download_file_name: null,
+          download_mime_type: null, config: {},
+          case_ids: [], created_by: 3,
+        },
       ],
       "to_regclass": [{ reg: "public.document_generation_logs" }],
     });
@@ -138,8 +180,10 @@ describe("Document Automation §8/§9/§G: finalizeDocGenJobIfDone + counters ta
           status: "completed", action: "generate",
           download_object_path: "/firm/xxx.zip",
           download_file_name: "xxx.zip",
+          download_mime_type: "application/zip",
+          config: {},
           case_ids: [1, 2, 3, 4, 5, 6],
-          user_id: 11,
+          created_by: 11,
         },
       ],
     });
@@ -162,7 +206,13 @@ describe("Document Automation §8/§9/§G: finalizeDocGenJobIfDone + counters ta
       "from document_generation_job_items": [
         { total: 3, success: 1, failed: 1, pending: 1, running: 0 },
       ],
-      "from document_generation_jobs where id": [{ status: "running", case_ids: [1], user_id: 1 }],
+      "from document_generation_jobs where id": [
+        { status: "running", action: "generate",
+          download_object_path: null, download_file_name: null,
+          download_mime_type: null, config: {},
+          case_ids: [1], created_by: 1,
+        },
+      ],
     });
     const out = await finalizeDocGenJobIfDone(conn as any, { firmId: 1, jobId: "job_still_running" });
     expect(out.finalized).toBe(false);

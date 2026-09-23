@@ -23,6 +23,8 @@ import { logger } from "../lib/logger.js";
 import {
   resolveUserFeatureAccessBulk,
   invalidateUserFeatureCacheFor,
+  resolveRequestFirmRoleName,
+  resolveRequestPermissionChecker,
 } from "../services/user-feature-access.js";
 
 type ReqLike = IncomingMessage & {
@@ -534,20 +536,17 @@ routerInternal.get("/users/_self/effective-features", requireAuth, requireFirmUs
     return;
   }
   const tenantContextStartedAt = Date.now();
-  let roleName: string | null = null;
   let roleId: number | null = req.roleId ?? null;
-  const cached = (req as any)._roleCache as
-    | { firmId: number; roleId: number; name: string }
-    | undefined;
-  if (cached && cached.firmId === req.firmId && cached.roleId === roleId) {
-    roleName = cached.name;
-  } else if (roleId) {
-    const [row] = await r
-      .select({ name: rolesTable.name })
-      .from(rolesTable)
-      .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, req.firmId)))
-      .limit(1);
-    roleName = row?.name ?? null;
+  const roleCtx = {
+    firmId: req.firmId,
+    roleId,
+    _roleCache: (req as any)._roleCache as
+      | { firmId: number; roleId: number; name: string }
+      | undefined,
+  };
+  const roleName = await resolveRequestFirmRoleName(roleCtx, r);
+  if ((req as any)._roleCache !== roleCtx._roleCache) {
+    (req as any)._roleCache = roleCtx._roleCache;
   }
   const tenantContextMs = Date.now() - tenantContextStartedAt;
 
@@ -555,28 +554,10 @@ routerInternal.get("/users/_self/effective-features", requireAuth, requireFirmUs
   const allKeys = Array.from(FEATURE_REGISTRY_MAP.keys()).slice().sort();
 
   const entitlementStartedAt = Date.now();
-  // Permission checker fallback to roles table.
-  const permCache = new Map<string, boolean>();
-  let permRows: { module: unknown; action: unknown; allowed: unknown }[] = [];
-  if (roleId) {
-    permRows = (await r
-      .execute(
-        sql`SELECT module, action, allowed FROM permissions WHERE role_id = ${roleId} AND allowed = TRUE`,
-      )
-      .then(
-        (res2) =>
-          (Array.isArray(res2)
-            ? (res2 as unknown as { module: unknown; action: unknown; allowed: unknown }[])
-            : ("rows" in (res2 as any)
-              ? ((res2 as any).rows as { module: unknown; action: unknown; allowed: unknown }[])
-              : [])),
-      )) as { module: unknown; action: unknown; allowed: unknown }[];
-  }
-  for (const pr of permRows) {
-    if (typeof pr.module === "string" && typeof pr.action === "string") {
-      permCache.set(`${pr.module}:${pr.action}`, true);
-    }
-  }
+  // SHARED permission checker — SAME implementation used by requireUserFeatureAccess()
+  // middleware (§0B parity).  Avoids RBAC divergence between _self endpoint result
+  // and per-route allow/deny.
+  const permissionChecker = await resolveRequestPermissionChecker(r, req.firmId ?? null, roleId);
   const permissionMs = Date.now() - entitlementStartedAt;
 
   const userFeatureRowsStartedAt = Date.now();
@@ -587,8 +568,7 @@ routerInternal.get("/users/_self/effective-features", requireAuth, requireFirmUs
     roleId,
     roleName,
     featureKeys: allKeys,
-    permissionChecker: (mod: string, act: string) =>
-      Promise.resolve(Boolean(permCache.get(`${mod}:${act}`))),
+    permissionChecker,
   });
   const userFeatureRowsMs = Date.now() - userFeatureRowsStartedAt;
   const resolveMs = permissionMs + userFeatureRowsMs;

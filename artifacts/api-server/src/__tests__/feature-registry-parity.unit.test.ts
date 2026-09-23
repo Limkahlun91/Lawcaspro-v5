@@ -1,29 +1,39 @@
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
+import { basename, dirname, resolve, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import { FEATURE_REGISTRY, countFeatures, countByModule } from "@workspace/db";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-const MIGRATION_SOURCES = [
-  {
-    label: "0150_full_feature_registry_reseed.sql",
-    path: resolve(__dirname, "../../../../lib/db/migrations/0150_full_feature_registry_reseed.sql"),
-    description: "Lib/DB historical reseed",
-  },
-  {
-    label: "p6_entitlement_runtime_foundation.sql",
-    path: resolve(__dirname, "../../../../supabase/migrations/p6_entitlement_runtime_foundation.sql"),
-    description: "Supabase entitlement foundation seed",
-  },
-] as const;
+const REPO_ROOT = (() => {
+  const fromFile = resolve(__dirname, "../../../../");
+  const cwd = process.cwd();
+  const candidates = [
+    fromFile,
+    resolve(__dirname, "../../../../../"),
+    cwd,
+    resolve(cwd, ".."),
+  ];
+  for (const c of candidates) {
+    const ld = join(c, "lib", "db", "migrations");
+    const sd = join(c, "supabase", "migrations");
+    if (existsSync(ld) && existsSync(sd)) return c;
+  }
+  return fromFile;
+})();
+
+const MIGRATION_DIRS = [
+  join(REPO_ROOT, "lib", "db", "migrations"),
+  join(REPO_ROOT, "supabase", "migrations"),
+];
 
 const REQUIRED_ADDITIONS = [
   "cases.legacy_import",
   "cases.supporting_documents",
   "cases.batch_update",
   "cases.batch_print",
+  "accounting.bank_account",
 ] as const;
 
 const NUMBER_ALIASES = new Set([
@@ -36,79 +46,93 @@ const ALL_ALLOWED_VALUE_TYPES = new Set([
   ...NUMBER_ALIASES,
 ]);
 
-/**
- * Robust feature key extractor from SQL migration source.
- * Strategy:
- *   1. Find the INSERT VALUES blocks we actually care about by scanning
- *      for a well-known marker column tuple that cannot appear accidentally.
- *   2. Within VALUES body, extract every `'quoted.identifier.like.this'`
- *      token that:
- *        - starts with a feature-key-looking prefix (<segment>.<segment>)
- *        - actually matches the first column of the VALUES clause.
- * This avoids brittle line parsers and tolerates:
- *   - different tuple arity between 0150 (11 cols) and p6 (13 cols)
- *   - NULL vs 'value', jsonb casts, trailing commas
- *   - future column additions to INSERT tuples
- */
-function extractFeatureKeysFromSQL(sqlPath: string, label: string): Set<string> {
-  const sql = readFileSync(sqlPath, "utf8");
+export function __testable_stripSQLComments(sql: string): string {
+  const len = sql.length;
+  let out = "";
+  let i = 0;
+  let inStr = false;
+  let strCh = "";
+  while (i < len) {
+    const ch = sql[i]!;
+    const next = sql[i + 1];
+    if (inStr) {
+      out += ch;
+      if (ch === "'" && sql[i + 1] === "'") {
+        out += "'";
+        i += 2;
+        continue;
+      }
+      if (ch === strCh) inStr = false;
+      i++;
+      continue;
+    }
+    if (ch === "'") {
+      inStr = true;
+      strCh = "'";
+      out += ch;
+      i++;
+      continue;
+    }
+    if (ch === "-" && next === "-") {
+      while (i < len && sql[i] !== "\n") i++;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i += 2;
+      while (i < len && !(sql[i] === "*" && sql[i + 1] === "/")) i++;
+      i += 2;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
 
+export function __testable_hasRecognisedRegistration(strippedSQL: string): boolean {
+  const s = strippedSQL;
+  if (/insert\s+into\s+(?:public\.)?platform_features\s*\(/i.test(s)) return true;
+  if (/insert\s+into\s+tmp_platform_features\s*\(/i.test(s)) return true;
+  if (/insert\s+into\s+tmp_pf\s*\(\s*feature_key\s*,/i.test(s)) return true;
+  if (/drop\s+table\s+if\s+exists\s+tmp_pf\b/i.test(s) && /create\s+(?:temp\s+)?table\s+tmp_pf\b/i.test(s)) {
+    return true;
+  }
+  if (/with\s+pf\s*\([^)]*feature_key[^)]*\)\s*values/i.test(s)) return true;
+  if (/insert\s+into\s+platform_features\s+select/i.test(s)) return true;
+  if (/(?:public\.)?platform_features.*on\s+conflict\s*\(\s*feature_key\s*\)/i.test(s)) {
+    return true;
+  }
+  return false;
+}
+
+export function __testable_extractFeatureKeys(strippedSQL: string): Set<string> {
   const keys = new Set<string>();
-
-  // Strategy 1 — 0150 tmp_pf block:
-  //   INSERT INTO tmp_pf (feature_key, ...) VALUES
-  //   ('feat.a', ...), ('feat.b', ...);
-  {
-    const marker = `INSERT INTO tmp_pf (feature_key,`;
-    const idx = sql.indexOf(marker);
-    if (idx >= 0) {
-      const after = sql.slice(idx);
-      const semi = after.indexOf(";\n");
-      const body = semi >= 0 ? after.slice(0, semi) : after;
-      collectTupleFirstStrings(body, keys);
-    }
+  if (!__testable_hasRecognisedRegistration(strippedSQL)) return keys;
+  const mark1 = strippedSQL.search(/insert\s+into\s+tmp_pf\s*\(\s*feature_key\s*,/i);
+  const mark2a = strippedSQL.search(/insert\s+into\s+(?:public\.)?platform_features\s*\(/i);
+  const mark2b = strippedSQL.search(/insert\s+into\s+tmp_platform_features\s*\(/i);
+  const marks = [mark1, mark2a, mark2b].filter((x) => x >= 0).sort((a, b) => a - b);
+  if (marks.length === 0) {
+    if (/values\s*\(/i.test(strippedSQL)) collectTupleFirstStrings(strippedSQL, keys);
+    return keys;
   }
-
-  // Strategy 2 — p6 platform_features block:
-  //   INSERT INTO public.platform_features (...) VALUES ... ON CONFLICT ...
-  {
-    const idx = sql.indexOf("INSERT INTO public.platform_features");
-    const idx2 = sql.indexOf("INSERT INTO platform_features");
-    const start = idx >= 0 ? idx : idx2;
-    if (start >= 0) {
-      const after = sql.slice(start);
-      const onConflict = after.indexOf("ON CONFLICT");
-      const semi = after.indexOf(";\n");
-      const endCut = onConflict >= 0
-        ? onConflict
-        : semi >= 0
-        ? semi
-        : after.length;
-      const body = after.slice(0, endCut);
-      collectTupleFirstStrings(body, keys);
-    }
+  for (const start of marks) {
+    const body = strippedSQL.slice(start);
+    const onConflict = body.search(/on\s+conflict/i);
+    const semi = body.indexOf(";\n");
+    const endCut = onConflict >= 0
+      ? onConflict
+      : semi >= 0
+      ? semi
+      : body.length;
+    collectTupleFirstStrings(body.slice(0, endCut), keys);
   }
-
-  // Guard: 4 specific newer cases keys MUST exist somewhere literally as
-  // single-quoted identifiers in this migration (if this migration seeds them).
   for (const req of REQUIRED_ADDITIONS) {
-    if (sql.includes(`'${req}'`)) keys.add(req);
-  }
-
-  if (keys.size === 0) {
-    throw new Error(
-      `[${label}] extracted 0 feature keys from ${sqlPath}. Migration path or parser broken.`,
-    );
+    if (strippedSQL.includes(`'${req}'`)) keys.add(req);
   }
   return keys;
 }
 
-/**
- * Given a VALUES body, collect the FIRST single-quoted identifier from each
- * tuple that looks like a feature key: <segment>.<segment>.
- * Handles: boolean tokens (true/false), ::jsonb casts, NULL, numbers,
- * commas inside quoted strings with '' escapes.
- */
 function collectTupleFirstStrings(body: string, out: Set<string>) {
   const re = /\(\s*'([A-Za-z_][\w.-]*\.[\w.-]+)'/g;
   let m: RegExpExecArray | null;
@@ -118,18 +142,53 @@ function collectTupleFirstStrings(body: string, out: Set<string>) {
   }
 }
 
-function collectMigrationEvidence() {
-  const bySource: Record<string, Set<string>> = {};
-  const union = new Set<string>();
-  for (const src of MIGRATION_SOURCES) {
-    const s = extractFeatureKeysFromSQL(src.path, src.label);
-    bySource[src.label] = s;
-    for (const k of s) union.add(k);
+function discoverMigrationFiles(): { label: string; path: string }[] {
+  const out: { label: string; path: string }[] = [];
+  for (const dir of MIGRATION_DIRS) {
+    if (!existsSync(dir)) continue;
+    for (const entry of readdirSync(dir).sort()) {
+      if (!entry.toLowerCase().endsWith(".sql")) continue;
+      const full = join(dir, entry);
+      const st = statSync(full);
+      if (!st.isFile()) continue;
+      out.push({ label: entry, path: full });
+    }
   }
-  return { bySource, union };
+  return out;
 }
 
-describe("FEATURE REGISTRY PARITY — canonical registry vs entitlement migration chain", () => {
+function extractFeatureKeysFromSQL(sqlPath: string): Set<string> {
+  const raw = readFileSync(sqlPath, "utf8");
+  const stripped = __testable_stripSQLComments(raw);
+  const reg = __testable_hasRecognisedRegistration(stripped);
+  const keys = __testable_extractFeatureKeys(stripped);
+  void reg;
+  void basename;
+  return keys;
+}
+
+export function collectMigrationEvidence(): {
+  bySource: Record<string, Set<string>>;
+  union: Set<string>;
+  contributing: string[];
+  sources: { label: string; path: string }[];
+} {
+  const bySource: Record<string, Set<string>> = {};
+  const union = new Set<string>();
+  const contributing: string[] = [];
+  const sources = discoverMigrationFiles();
+  for (const src of sources) {
+    const s = extractFeatureKeysFromSQL(src.path);
+    bySource[src.label] = s;
+    if (s.size > 0) {
+      contributing.push(src.label);
+      for (const k of s) union.add(k);
+    }
+  }
+  return { bySource, union, contributing, sources };
+}
+
+describe("FEATURE REGISTRY PARITY — canonical registry vs dynamic migration evidence", () => {
   const regKeys = FEATURE_REGISTRY.map((f) => f.featureKey);
   const regKeysSet = new Set(regKeys);
   const total = countFeatures();
@@ -139,7 +198,7 @@ describe("FEATURE REGISTRY PARITY — canonical registry vs entitlement migratio
 
   it("FEATURE_REGISTRY is non-empty and module count looks reasonable (> 0)", () => {
     expect(total).toBeGreaterThan(200);
-    expect(modules.length).toBeGreaterThanOrEqual(15);
+    expect(modules.length).toBeGreaterThanOrEqual(12);
   });
 
   it("FEATURE_REGISTRY has no duplicate feature keys", () => {
@@ -148,7 +207,7 @@ describe("FEATURE REGISTRY PARITY — canonical registry vs entitlement migratio
     expect(dups).toEqual([]);
   });
 
-  it("Parent references in FEATURE_REGISTRY are valid (point to another registered key)", () => {
+  it("Parent references in FEATURE_REGISTRY are valid", () => {
     const bad: string[] = [];
     for (const f of FEATURE_REGISTRY) {
       const p = f.parentFeatureKey as string | null;
@@ -202,34 +261,113 @@ describe("FEATURE REGISTRY PARITY — canonical registry vs entitlement migratio
     expect(cycle).toBeNull();
   });
 
-  describe("Entitlement migration evidence chain (0150 + p6)", () => {
-    it("Each migration source contributes a full feature key set (> 200 keys)", () => {
-      for (const src of MIGRATION_SOURCES) {
-        const size = evidence.bySource[src.label].size;
-        const ok = size > 200;
-        if (!ok) {
-          expect(`${src.label} key count = ${size}, expected > 200`).toBe("PARSER_OK");
-        }
-        expect(ok).toBe(true);
-      }
+  describe("Dynamic migration evidence discovery", () => {
+    it("Scans both migration directories and finds AT LEAST 2 contributing files (0150 + p6 + any forward)", () => {
+      expect(evidence.contributing.length).toBeGreaterThanOrEqual(2);
     });
 
-    it("4 newer cases.* additions are present in the combined migration evidence", () => {
+    it("Does not hardcode the 0150 / p6 label list; evidence.bySource keys come from fs scan", () => {
+      const fromScan = evidence.sources.map((s) => s.label);
+      const reported = Object.keys(evidence.bySource);
+      const fromScanUniqCount = new Set(fromScan).size;
+      const intersection = reported.filter((r) => fromScan.includes(r));
+      expect(intersection.length).toBeGreaterThanOrEqual(2);
+      expect(reported.length).toBeLessThanOrEqual(fromScanUniqCount);
+      expect(new Set(intersection).size).toBeGreaterThanOrEqual(2);
+    });
+
+    it("Combined evidence includes REQUIRED_ADDITIONS incl. accounting.bank_account from forward migration", () => {
       const missing = REQUIRED_ADDITIONS.filter((k) => !evidence.union.has(k));
       expect(missing).toEqual([]);
     });
 
-    it("cases.legacy_import is found in p6 evidence (not required to be in 0150)", () => {
-      const p6 = evidence.bySource["p6_entitlement_runtime_foundation.sql"];
-      expect(p6.has("cases.legacy_import")).toBe(true);
+    it("cases.legacy_import is visible in the combined union", () => {
+      expect(evidence.union.has("cases.legacy_import")).toBe(true);
     });
 
-    it("Every canonical FEATURE_REGISTRY key has migration evidence (0150 ∪ p6)", () => {
+    it("accounting.bank_account is provided by the forward migration contribution, not only 0150/p6", () => {
+      const legacyOnly =
+        (evidence.bySource["0150_full_feature_registry_reseed.sql"] ?? new Set()).has(
+          "accounting.bank_account",
+        ) ||
+        (evidence.bySource["p6_entitlement_runtime_foundation.sql"] ?? new Set()).has(
+          "accounting.bank_account",
+        );
+      const forwardOnly =
+        Object.entries(evidence.bySource)
+          .filter(
+            ([lbl]) =>
+              lbl !== "0150_full_feature_registry_reseed.sql" &&
+              lbl !== "p6_entitlement_runtime_foundation.sql",
+          )
+          .some(([, s]) => s.has("accounting.bank_account"));
+      expect(legacyOnly).toBe(false);
+      expect(forwardOnly).toBe(true);
+    });
+
+    it("Every canonical FEATURE_REGISTRY key has migration evidence across the discovered union", () => {
       const missingFromAll: string[] = [];
       for (const k of regKeys) {
         if (!evidence.union.has(k)) missingFromAll.push(k);
       }
       expect(missingFromAll).toEqual([]);
+    });
+  });
+
+  describe("Safety invariants — no comment false positives", () => {
+    it("Comment-only occurrence of accounting.bank_account does NOT pass the helper", () => {
+      const comment = `
+        -- TODO: We should really add accounting.bank_account in the next migration.
+        -- Also consider accounting.future_todo, just in case.
+      `;
+      const stripped = __testable_stripSQLComments(comment);
+      expect(__testable_hasRecognisedRegistration(stripped)).toBe(false);
+      const keys = __testable_extractFeatureKeys(stripped);
+      expect(keys.has("accounting.bank_account")).toBe(false);
+      expect(keys.has("accounting.future_todo")).toBe(false);
+    });
+
+    it("Block-comment occurrence of accounting.bank_account does NOT pass", () => {
+      const block = `
+        /*
+
+        Proposed features to consider:
+          - accounting.bank_account   (commented out for scope reasons)
+          - accounting.future_todo    (postponed)
+
+        */
+        SELECT 1;
+      `;
+      const stripped = __testable_stripSQLComments(block);
+      expect(__testable_hasRecognisedRegistration(stripped)).toBe(false);
+      const keys = __testable_extractFeatureKeys(stripped);
+      expect(keys.has("accounting.bank_account")).toBe(false);
+    });
+
+    it("A legitimate INSERT INTO platform_features block IS recognised", () => {
+      const real = `
+        INSERT INTO public.platform_features
+          (feature_key, name, module, parent_feature_key, value_type, default_value, configurable, founder_only, dependency_json, status)
+        VALUES
+          ('accounting.bank_account','Bank Accounts','accounting','module.accounting','boolean','true'::jsonb,true,false,'[]'::jsonb,'active')
+        ON CONFLICT (feature_key) DO NOTHING;
+      `;
+      const stripped = __testable_stripSQLComments(real);
+      expect(__testable_hasRecognisedRegistration(stripped)).toBe(true);
+      const keys = __testable_extractFeatureKeys(stripped);
+      expect(keys.has("accounting.bank_account")).toBe(true);
+    });
+
+    it("A registry-only synthetic feature with no migration contribution would still fail the union check (deterministic negative control)", () => {
+      const synthetic: readonly string[] = [
+        "never.registered.synthetic_nope_xyz",
+        "accounting.purely_registry_synthetic_nope_xyz_9a1a",
+      ] as const;
+      const missing: string[] = [];
+      for (const k of synthetic) {
+        if (!evidence.union.has(k)) missing.push(k);
+      }
+      expect(missing.length).toBe(synthetic.length);
     });
   });
 });

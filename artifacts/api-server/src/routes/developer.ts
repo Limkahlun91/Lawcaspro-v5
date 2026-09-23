@@ -88,7 +88,19 @@ const routerInternal = expressRouter as unknown as RouterInternalLike;
 
 type AuthRequestLike = AuthRequest & ReqLike;
 type DbConn = typeof db | RlsDb;
-const rdb = (req: AuthRequestLike): DbConn => (req.rlsDb as DbConn | undefined) ?? db;
+type RouteRes = {
+  status: (code: number) => RouteResLike;
+  json: (body: unknown) => unknown;
+};
+type RlsConn = NonNullable<AuthRequest["rlsDb"]>;
+const getRlsDb = (req: AuthRequestLike, res: RouteRes): RlsConn | null => {
+  const r = (req.rlsDb as RlsConn | undefined) ?? null;
+  if (!r) {
+    res.status(503).json({ error: "Tenant DB context unavailable", code: "RLS_CONTEXT_MISSING" });
+    return null;
+  }
+  return r;
+};
 
 function safeFilenameAscii(filename: string): string {
   const base = filename.replace(/[\r\n"]/g, "").trim();
@@ -101,7 +113,8 @@ async function requireDeveloperUser(req: AuthRequestLike, res: RouteResLike): Pr
     res.status(403).json({ error: "Forbidden" });
     return null;
   }
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return null;
   const [role] = await r
     .select({ name: rolesTable.name })
     .from(rolesTable)
@@ -188,7 +201,8 @@ const purchaserNamesSql = sql<string | null>`(
 routerInternal.get("/developer/dashboard", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
 
   const [agg] = await r
     .select({
@@ -253,7 +267,8 @@ routerInternal.get("/developer/dashboard", requireAuth, requireFirmUser, async (
 routerInternal.get("/developer/inventory", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const q = ListInventoryQuery(req.query);
   const offset = (q.page - 1) * q.limit;
 
@@ -340,7 +355,8 @@ routerInternal.patch("/developer/cases/:caseId/status", requireAuth, requireFirm
 routerInternal.get("/developer/inventory/export.xlsx", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const q = ListInventoryQuery(req.query);
 
   const conditions: any[] = [
@@ -404,7 +420,8 @@ routerInternal.get("/developer/inventory/export.xlsx", requireAuth, requireFirmU
 routerInternal.get("/developer/cases/:caseId/messages", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const caseId = Number((req.params as any)?.caseId);
   if (!Number.isFinite(caseId) || caseId <= 0) {
     res.status(400).json({ error: "Invalid caseId" });
@@ -466,7 +483,8 @@ routerInternal.get("/developer/cases/:caseId/messages", requireAuth, requireFirm
 routerInternal.post("/developer/cases/:caseId/messages", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const caseId = Number((req.params as any)?.caseId);
   if (!Number.isFinite(caseId) || caseId <= 0) {
     res.status(400).json({ error: "Invalid caseId" });
@@ -524,7 +542,8 @@ routerInternal.post("/developer/cases/:caseId/messages", requireAuth, requireFir
 routerInternal.get("/developer/cases/:caseId/progress", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const caseId = Number((req.params as any)?.caseId);
   if (!Number.isFinite(caseId) || caseId <= 0) {
     res.status(400).json({ error: "Invalid caseId" });
@@ -646,7 +665,8 @@ function enrichAssignments(
 routerInternal.get("/developer/portal/projects", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const rows = await r
     .select({
       id: projectsTable.id,
@@ -671,7 +691,8 @@ routerInternal.get("/developer/portal/projects", requireAuth, requireFirmUser, a
 routerInternal.get("/developer/portal/overview", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const projectIdRaw = typeof (req.query as any)?.projectId === "string" ? Number((req.query as any).projectId) : null;
   const projectId = Number.isFinite(projectIdRaw) && projectIdRaw !== null && (projectIdRaw as number) > 0 ? (projectIdRaw as number) : null;
   const baseConditions: any[] = [
@@ -760,7 +781,8 @@ routerInternal.get("/developer/portal/overview", requireAuth, requireFirmUser, a
 routerInternal.get("/developer/portal/units", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const q = ListInventoryQuery(req.query);
   const offset = (q.page - 1) * q.limit;
 
@@ -823,7 +845,8 @@ routerInternal.get("/developer/portal/units", requireAuth, requireFirmUser, asyn
 routerInternal.get("/developer/portal/units/:caseId", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const caseId = Number((req.params as any)?.caseId);
   if (!Number.isFinite(caseId) || caseId <= 0) {
     res.status(400).json({ error: "Invalid caseId" });
@@ -869,7 +892,8 @@ routerInternal.get("/developer/portal/units/:caseId", requireAuth, requireFirmUs
 routerInternal.get("/developer/portal/export.xlsx", requireAuth, requireFirmUser, async (req: AuthRequestLike, res: RouteResLike) => {
   const ctx = await requireDeveloperUser(req, res);
   if (!ctx) return;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const q = ListInventoryQuery(req.query);
   const EXPORT_SAFETY_CAP = 5000;
 

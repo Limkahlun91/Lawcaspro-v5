@@ -250,6 +250,7 @@ const ACCOUNTING: FeatureDefinition[] = asFeat("accounting", null, { routeHint: 
   { featureKey: "accounting.overcollection", name: "Overcollection", parentFeatureKey: "module.accounting" },
   { featureKey: "accounting.office_income", name: "Office Income", parentFeatureKey: "module.accounting" },
   { featureKey: "accounting.bank_transaction", name: "Bank Transaction", parentFeatureKey: "module.accounting" },
+  { featureKey: "accounting.bank_account", name: "Bank Accounts", parentFeatureKey: "module.accounting", backendGuardKey: "accounting:read" },
   { featureKey: "accounting.bank_reconciliation", name: "Bank Reconciliation", parentFeatureKey: "module.accounting" },
   { featureKey: "accounting.payment", name: "Payment (out)", parentFeatureKey: "module.accounting" },
   { featureKey: "accounting.refund", name: "Refund", parentFeatureKey: "module.accounting" },

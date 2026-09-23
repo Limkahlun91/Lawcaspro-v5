@@ -1,6 +1,6 @@
 import express, { type Router as ExpressRouter, type Response } from "express";
 import { eq, desc, and, count, inArray, isNull } from "drizzle-orm";
-import { db, quotationItemsTable, quotationsTable, regulatoryRuleSetsTable, regulatoryRuleVersionsTable, sql } from "@workspace/db";
+import { db, quotationItemsTable, quotationsTable, regulatoryRuleSetsTable, regulatoryRuleVersionsTable, sql, casesTable, type AppDb, type RlsDb } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { applyRule } from "./regulatory.js";
 import { logger } from "../lib/logger.js";
@@ -48,6 +48,18 @@ type RouterInternalLike = {
 
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
+
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const getRlsDb = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => {
+  const r = req.rlsDb;
+  if (!r) {
+    req.log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb in tenant route");
+    res.status(503).json({ error: "Tenant DB context unavailable" });
+    return null;
+  }
+  return r;
+};
+const getRlsDbTx = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => getRlsDb(req, res);
 
 const DEFAULT_TAX_RATE = 8;
 
@@ -133,7 +145,8 @@ async function fetchQuotationsWithAggregates(
     offset: number;
     q?: string;
     allowDeleted?: boolean;
-  }
+  },
+  conn: typeof db = db
 ) {
   const { caseId, statuses, includeItems, limit, offset, q, allowDeleted } = opts;
 
@@ -147,19 +160,29 @@ async function fetchQuotationsWithAggregates(
   }
   const whereClause = where.length === 1 ? where[0]! : and(...where);
 
-  const totalResult = await db
+  const totalResult = await conn
     .select({ value: count() })
     .from(quotationsTable)
     .where(whereClause);
   const total = Number(totalResult[0]?.value ?? 0);
 
-  const rows = await db.select().from(quotationsTable)
+  const rows = await conn.select().from(quotationsTable)
     .where(whereClause)
     .orderBy(desc(quotationsTable.createdAt))
     .limit(limit)
     .offset(offset);
 
   const qIds = rows.map(r => r.id);
+  const caseIds = Array.from(new Set(
+    rows.map((q: any) => typeof q?.caseId === "number" && Number.isFinite(q.caseId) ? q.caseId : null)
+      .filter((v): v is number => typeof v === "number"),
+  ));
+  const caseRefs = caseIds.length
+    ? await conn.select({ caseId: casesTable.id, referenceNo: casesTable.referenceNo })
+        .from(casesTable)
+        .where(and(eq(casesTable.firmId, firmId), inArray(casesTable.id, caseIds), isNull(casesTable.deletedAt)))
+    : [];
+  const caseRefMap = new Map<number, string | null>(caseRefs.map((cr) => [cr.caseId, cr.referenceNo ?? null]));
   const results: any[] = rows.map(q => ({
     ...q,
     purchasePrice: q.purchasePrice ? parseFloat(q.purchasePrice) : null,
@@ -170,10 +193,14 @@ async function fetchQuotationsWithAggregates(
     totalExclTax: 0,
     totalTax: 0,
     totalInclTax: 0,
+    caseId: typeof (q as any).caseId === "number" && Number.isFinite((q as any).caseId) ? (q as any).caseId : null,
+    caseReferenceNo: (typeof (q as any).caseId === "number" && Number.isFinite((q as any).caseId))
+      ? (caseRefMap.get((q as any).caseId) ?? null)
+      : null,
   }));
 
   if (includeItems && qIds.length > 0) {
-    const itemCountsRaw = await db
+    const itemCountsRaw = await conn
       .select({ quotationId: quotationItemsTable.quotationId, count: count() })
       .from(quotationItemsTable)
       .where(inArray(quotationItemsTable.quotationId, qIds))
@@ -181,7 +208,7 @@ async function fetchQuotationsWithAggregates(
     const itemCountById = new Map<number, number>();
     for (const r of itemCountsRaw) itemCountById.set(r.quotationId, Number(r.count || 0));
 
-    const allItems = await db.select().from(quotationItemsTable)
+    const allItems = await conn.select().from(quotationItemsTable)
       .where(inArray(quotationItemsTable.quotationId, qIds));
     const itemsById = new Map<number, any[]>();
     for (const it of allItems) {
@@ -202,6 +229,7 @@ async function fetchQuotationsWithAggregates(
 }
 
 router.get("/quotations", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.quotation"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const qdb = getRlsDb(req, res); if (!qdb) return;
   try {
     const firmId = req.firmId!;
     const caseIdStr = one((req.query as any)?.caseId);
@@ -264,7 +292,7 @@ router.get("/quotations", requireAuth, requireFirmUser, requireUserFeatureAccess
       limit: finalLimit,
       offset: finalOffset,
       q,
-    });
+    }, qdb as any);
 
     if (paginated) {
       const currentPage = Number.isInteger(page) && page >= 1 ? page : Math.floor(finalOffset / finalLimit) + 1;
@@ -288,6 +316,7 @@ router.get("/quotations", requireAuth, requireFirmUser, requireUserFeatureAccess
 });
 
 router.get("/quotations/all", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.quotation"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const qdb = getRlsDb(req, res); if (!qdb) return;
   try {
     const firmId = req.firmId!;
     const caseIdStr = one((req.query as any)?.caseId);
@@ -325,7 +354,7 @@ router.get("/quotations/all", requireAuth, requireFirmUser, requireUserFeatureAc
       includeItems,
       limit: finalLimit,
       offset: finalOffset,
-    });
+    }, qdb as any);
 
     const hasMore = finalOffset + results.length < total;
     res.json({
@@ -344,6 +373,7 @@ router.get("/quotations/all", requireAuth, requireFirmUser, requireUserFeatureAc
 });
 
 router.post("/quotations", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.quotation"), requirePermission("accounting", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const qdb = getRlsDb(req, res); if (!qdb) return;
   const requestId = (req.headers["x-request-id"] as string | undefined) ?? `${req.firmId ?? ""}-${req.userId ?? ""}-${Date.now()}`;
   try {
     const firmId = req.firmId!;
@@ -371,7 +401,7 @@ router.post("/quotations", requireAuth, requireFirmUser, requireUserFeatureAcces
     const finalClientName = derivedClientName || (typeof clientName === "string" ? clientName.trim() : "");
     if (!finalClientName) { res.status(400).json({ error: "clientName or clientDetails is required" }); return; }
 
-    const result = await db.transaction(async (tx) => {
+    const result = await (qdb as any).transaction(async (tx: any) => {
       let itemRows: Array<ReturnType<typeof normalizeItem>> = [];
       const [quotation] = await tx.insert(quotationsTable).values({
         ...quotationData,
@@ -458,21 +488,32 @@ router.post("/quotations", requireAuth, requireFirmUser, requireUserFeatureAcces
   }
 });
 
-router.get("/quotations/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/quotations/:id", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.quotation"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const qdb = getRlsDb(req, res); if (!qdb) return;
   try {
     const firmId = (req as AuthRequest).firmId!;
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
 
-    const [quotation] = await db.select().from(quotationsTable)
+    const [quotation] = await (qdb as any).select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
 
     if (!quotation) { res.status(404).json({ error: "Quotation not found" }); return; }
 
-    const items = await db.select().from(quotationItemsTable)
+    const items = await (qdb as any).select().from(quotationItemsTable)
       .where(eq(quotationItemsTable.quotationId, id))
       .orderBy(quotationItemsTable.sortOrder);
+
+    const caseReferenceNo: string | null = (typeof (quotation as any).caseId === "number" && Number.isFinite((quotation as any).caseId))
+      ? (await (async () => {
+          const [c] = await (qdb as any).select({ referenceNo: casesTable.referenceNo })
+            .from(casesTable)
+            .where(and(eq(casesTable.id, (quotation as any).caseId), eq(casesTable.firmId, firmId), isNull(casesTable.deletedAt)))
+            .limit(1);
+          return c?.referenceNo ?? null;
+        })())
+      : null;
 
     res.json({
       ...quotation,
@@ -481,6 +522,8 @@ router.get("/quotations/:id", requireAuth, requireFirmUser, requirePermission("a
       items: items.map(formatItem),
       createdAt: quotation.createdAt.toISOString(),
       updatedAt: quotation.updatedAt.toISOString(),
+      caseId: typeof (quotation as any).caseId === "number" && Number.isFinite((quotation as any).caseId) ? (quotation as any).caseId : null,
+      caseReferenceNo: caseReferenceNo,
     });
     return;
   } catch (err) {
@@ -490,7 +533,8 @@ router.get("/quotations/:id", requireAuth, requireFirmUser, requirePermission("a
   }
 });
 
-router.patch("/quotations/:id", requireAuth, requireFirmUser, requirePermission("accounting", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.patch("/quotations/:id", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.quotation"), requirePermission("accounting", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const qdb = getRlsDb(req, res); if (!qdb) return;
   try {
     const firmId = req.firmId!;
     const userId = req.userId!;
@@ -507,7 +551,7 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, requirePermission(
       ...quotationData
     } = req.body ?? {};
 
-    const [existing] = await db.select().from(quotationsTable)
+    const [existing] = await (qdb as any).select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
 
     if (!existing) { res.status(404).json({ error: "Quotation not found" }); return; }
@@ -516,7 +560,7 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, requirePermission(
     const normalizedClientDetails = normalizeClientDetails(clientDetails ?? client_details);
     const derivedClientName = normalizedClientDetails.length > 0 ? joinClientNames(normalizedClientDetails) : "";
 
-    const result = await db.transaction(async (tx) => {
+    const result = await (qdb as any).transaction(async (tx: any) => {
       const updateData: Record<string, unknown> = { ...quotationData, taxRate: String(nextTaxRate) };
       if (normalizedClientDetails.length > 0) {
         updateData.clientDetails = normalizedClientDetails;
@@ -575,7 +619,8 @@ router.patch("/quotations/:id", requireAuth, requireFirmUser, requirePermission(
   }
 });
 
-router.delete("/quotations/:id", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.delete("/quotations/:id", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.quotation"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const qdb = getRlsDb(req, res); if (!qdb) return;
   try {
     const firmId = req.firmId!;
     const userId = req.userId!;
@@ -583,12 +628,12 @@ router.delete("/quotations/:id", requireAuth, requireFirmUser, requirePermission
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
 
-    const [existing] = await db.select().from(quotationsTable)
+    const [existing] = await (qdb as any).select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
 
     if (!existing) { res.status(404).json({ error: "Quotation not found" }); return; }
 
-    await db.transaction(async (tx) => {
+    await (qdb as any).transaction(async (tx: any) => {
       await tx.delete(quotationItemsTable).where(eq(quotationItemsTable.quotationId, id));
       await tx.delete(quotationsTable).where(eq(quotationsTable.id, id));
     });
@@ -612,7 +657,8 @@ router.delete("/quotations/:id", requireAuth, requireFirmUser, requirePermission
   }
 });
 
-router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, requirePermission("accounting", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.quotation"), requirePermission("accounting", "create"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const qdb = getRlsDb(req, res); if (!qdb) return;
   try {
     const firmId = req.firmId!;
     const userId = req.userId!;
@@ -620,12 +666,12 @@ router.post("/quotations/:id/duplicate", requireAuth, requireFirmUser, requirePe
     const id = idStr ? parseInt(idStr, 10) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
 
-    const [original] = await db.select().from(quotationsTable)
+    const [original] = await (qdb as any).select().from(quotationsTable)
       .where(and(eq(quotationsTable.id, id), eq(quotationsTable.firmId, firmId)));
 
     if (!original) { res.status(404).json({ error: "Quotation not found" }); return; }
 
-    const result = await db.transaction(async (tx) => {
+    const result = await (qdb as any).transaction(async (tx: any) => {
       const [newQuotation] = await tx.insert(quotationsTable).values({
         firmId,
         caseId: original.caseId,
@@ -712,13 +758,14 @@ async function getActiveRule(code: string, asOf: string) {
   return versions.find(v => v.effectiveFrom <= asOf && (!v.effectiveTo || v.effectiveTo >= asOf)) || null;
 }
 
-router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, requirePermission("accounting", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.quotation"), requirePermission("accounting", "edit"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const qdb = getRlsDb(req, res); if (!qdb) return;
   try {
     const quotationIdStr = one(req.params.id);
     const quotationId = quotationIdStr ? parseInt(quotationIdStr) : NaN;
     if (isNaN(quotationId)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
     const firmId = req.firmId!;
-    const [q] = await db.select().from(quotationsTable).where(and(eq(quotationsTable.id, quotationId), eq(quotationsTable.firmId, firmId)));
+    const [q] = await (qdb as any).select().from(quotationsTable).where(and(eq(quotationsTable.id, quotationId), eq(quotationsTable.firmId, firmId)));
     if (!q) { res.status(404).json({ error: "Quotation not found" }); return; }
 
     const purchasePrice = parseFloat(String(q.purchasePrice ?? req.body.purchasePrice ?? 0));
@@ -826,19 +873,19 @@ router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, requ
     }
 
     // Remove existing system-generated items, keep manual ones
-    await db.delete(quotationItemsTable).where(
+    await (qdb as any).delete(quotationItemsTable).where(
       and(eq(quotationItemsTable.quotationId, quotationId), eq(quotationItemsTable.isSystemGenerated, true))
     );
 
     // Re-sort non-system items after sortOrder
-    const manualItems = await db.select().from(quotationItemsTable).where(eq(quotationItemsTable.quotationId, quotationId)).orderBy(quotationItemsTable.sortOrder);
+    const manualItems = await (qdb as any).select().from(quotationItemsTable).where(eq(quotationItemsTable.quotationId, quotationId)).orderBy(quotationItemsTable.sortOrder);
     for (let i = 0; i < manualItems.length; i++) {
-      await db.update(quotationItemsTable).set({ sortOrder: sortOrder + i }).where(eq(quotationItemsTable.id, manualItems[i].id));
+      await (qdb as any).update(quotationItemsTable).set({ sortOrder: sortOrder + i }).where(eq(quotationItemsTable.id, manualItems[i].id));
     }
 
     // Insert system items
     if (systemItems.length) {
-      await db.insert(quotationItemsTable).values(systemItems.map(i => ({
+      await (qdb as any).insert(quotationItemsTable).values(systemItems.map(i => ({
         quotationId,
         section: i.section,
         description: i.description,
@@ -853,7 +900,7 @@ router.post("/quotations/:id/auto-calculate", requireAuth, requireFirmUser, requ
       })));
     }
 
-    const allItems = await db.select().from(quotationItemsTable).where(eq(quotationItemsTable.quotationId, quotationId)).orderBy(quotationItemsTable.sortOrder);
+    const allItems = await (qdb as any).select().from(quotationItemsTable).where(eq(quotationItemsTable.quotationId, quotationId)).orderBy(quotationItemsTable.sortOrder);
     const totals = {
       subtotal: allItems.reduce((s, i) => s + parseFloat(i.amountExclTax || "0"), 0),
       tax: allItems.reduce((s, i) => s + parseFloat(i.taxAmount || "0"), 0),

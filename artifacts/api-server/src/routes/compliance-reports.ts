@@ -17,6 +17,7 @@ import {
   usersTable,
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest } from "../lib/auth.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
 import { queryOne } from "../lib/http.js";
 import {
   parseLedgerAmount,
@@ -27,6 +28,18 @@ import { withDbStatementTimeout, type StatementTimeoutCategory } from "../module
 import pino from "pino";
 
 const cl = pino({ name: "compliance-reports" });
+
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const getRlsDb = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => {
+  const r = req.rlsDb;
+  if (!r) {
+    req.log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb in tenant route");
+    res.status(503).json({ error: "Tenant DB context unavailable" });
+    return null;
+  }
+  return r;
+};
+const getRlsDbTx = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => getRlsDb(req, res);
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -120,7 +133,7 @@ function styleTotalsRow(ws: ExcelJS.Worksheet, rowIdx: number, colCount: number)
 
 // ── Bills Delivered Book ──────────────────────────────────────────────────────
 // Malaysian Solicitors' Accounts Rules: firms must maintain a bills-delivered book
-router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.reports"), requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb;
   if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
   const from = one((req.query as any).from);
@@ -389,7 +402,7 @@ router.get("/reports/bills-delivered-book", requireAuth, requireFirmUser, requir
 });
 
 // ── Client Account Statement (Trust) ──────────────────────────────────────────
-router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.reports"), requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb;
   const conn = req.rlsClient;
   if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
@@ -679,8 +692,9 @@ router.get("/reports/trust-account-statement", requireAuth, requireFirmUser, req
   }
 });
 
-router.get("/reports/client-account-statement", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const r = req.rlsDb ?? db;
+router.get("/reports/client-account-statement", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.reports"), requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const conn = req.rlsClient;
   const caseId = one((req.query as any).caseId);
   const category: StatementTimeoutCategory = "report";
@@ -730,7 +744,7 @@ router.get("/reports/client-account-statement", requireAuth, requireFirmUser, re
 });
 
 // ── Matter Aging Report ───────────────────────────────────────────────────────
-router.get("/reports/matter-aging", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/reports/matter-aging", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.reports"), requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const r = req.rlsDb;
   if (!r) { res.status(500).json({ error: "Internal Server Error" }); return; }
   const format = one((req.query as any).format);
@@ -950,8 +964,9 @@ router.get("/reports/matter-aging", requireAuth, requireFirmUser, requirePermiss
 });
 
 // ── Time Summary Report ────────────────────────────────────────────────────────
-router.get("/reports/time-summary", requireAuth, requireFirmUser, requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const r = req.rlsDb ?? db;
+router.get("/reports/time-summary", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.reports"), requirePermission("reports", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const from = one((req.query as any).from);
   const to = one((req.query as any).to);
   if (from && !isYmd(from)) { res.status(400).json({ error: "Invalid from date (YYYY-MM-DD)" }); return; }

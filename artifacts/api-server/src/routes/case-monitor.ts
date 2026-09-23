@@ -14,6 +14,18 @@ import {
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog, requireManagementRoleForDashboard } from "../lib/auth.js";
 import { extractDbErrorInfo } from "../lib/db-error.js";
+import { requireUserFeatureAccess } from "../services/user-feature-access.js";
+
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const getRlsDb = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => {
+  const r = req.rlsDb;
+  if (!r) {
+    req.log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb in case-monitor tenant route");
+    res.status(503).json({ error: "Tenant DB context unavailable" });
+    return null;
+  }
+  return r;
+};
 
 type RouterInternalLike = {
   get: (path: string, ...handlers: unknown[]) => unknown;
@@ -26,8 +38,6 @@ type RouterInternalLike = {
 
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
-
-const rdb = (req: AuthRequest) => req.rlsDb ?? db;
 
 const one = (v: unknown): string | undefined => {
   if (v === undefined || v === null) return undefined;
@@ -121,13 +131,15 @@ router.get(
   "/case-monitor/summary",
   requireAuth,
   requireFirmUser,
+  requireUserFeatureAccess("cases.monitor"),
   requirePermission("case_monitor", "view"),
   requireManagementRoleForDashboard,
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const firmId = Number(req.firmId);
       if (!Number.isFinite(firmId)) { res.status(400).json({ error: "Invalid firm context" }); return; }
-      const orm = rdb(req);
+      const orm = getRlsDb(req, res);
+      if (!orm) return;
       const totalsRows = await orm
         .select({ total: count(caseBottleneckSnapshotsTable.id).mapWith(Number) })
         .from(caseBottleneckSnapshotsTable)
@@ -274,13 +286,15 @@ router.get(
   "/case-monitor/bottlenecks",
   requireAuth,
   requireFirmUser,
+  requireUserFeatureAccess("cases.monitor"),
   requirePermission("case_monitor", "view"),
   requireManagementRoleForDashboard,
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
       const firmId = Number(req.firmId);
       if (!Number.isFinite(firmId)) { res.status(400).json({ error: "Invalid firm context" }); return; }
-      const orm = rdb(req);
+      const orm = getRlsDb(req, res);
+      if (!orm) return;
 
       const includeResolvedRaw = one(req.query.includeResolved);
       const kindRaw = one(req.query.kind);
@@ -381,6 +395,7 @@ router.post(
   "/case-monitor/bottlenecks/:id/resolve",
   requireAuth,
   requireFirmUser,
+  requireUserFeatureAccess("cases.monitor"),
   requirePermission("case_monitor", "view"),
   requireManagementRoleForDashboard,
   async (req: AuthRequest, res: Response): Promise<void> => {
@@ -392,7 +407,8 @@ router.post(
       const parsed = ResolveSchema.safeParse(req.body);
       if (!parsed.success) { res.status(400).json({ error: "Invalid payload", details: parsed.error.issues }); return; }
 
-      const orm = rdb(req);
+      const orm = getRlsDb(req, res);
+      if (!orm) return;
       const existing = await orm
         .select({
           id: caseBottleneckSnapshotsTable.id,
@@ -457,6 +473,7 @@ router.post(
   "/case-monitor/bottlenecks/:id/escalate",
   requireAuth,
   requireFirmUser,
+  requireUserFeatureAccess("cases.monitor"),
   requirePermission("case_monitor", "view"),
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
@@ -467,7 +484,8 @@ router.post(
       const parsed = EscalateSchema.safeParse(req.body ?? {});
       if (!parsed.success) { res.status(400).json({ error: "Invalid payload", details: parsed.error.issues }); return; }
 
-      const orm = rdb(req);
+      const orm = getRlsDb(req, res);
+      if (!orm) return;
       const existing = await orm
         .select({
           id: caseBottleneckSnapshotsTable.id,

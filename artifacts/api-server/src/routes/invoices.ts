@@ -1,5 +1,5 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
-import { eq, and, desc, count } from "drizzle-orm";
+import { eq, and, desc, count, inArray, isNull } from "drizzle-orm";
 import {
   db, invoicesTable, invoiceItemsTable, quotationsTable, quotationItemsTable,
   casesTable, clientsTable, casePurchasersTable, ledgerEntriesTable, caseLedgersTable,
@@ -23,7 +23,16 @@ const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
-const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+const getRlsDb = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => {
+  const r = req.rlsDb;
+  if (!r) {
+    req.log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb in tenant route");
+    res.status(503).json({ error: "Tenant DB context unavailable" });
+    return null;
+  }
+  return r;
+};
+const getRlsDbTx = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => getRlsDb(req, res);
 
 function firmGuard(req: AuthRequest, firmId: number): boolean {
   return req.firmId === firmId;
@@ -91,9 +100,10 @@ function emitInvoiceErrorLog(
   return { errorCode: resolvedClass, sqlState, schemaObject };
 }
 
-router.get("/invoices", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/invoices", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.invoice"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const r = rdb(req);
+    const r = getRlsDb(req, res);
+  if (!r) return;
     const conn = req.rlsClient;
     const { page, limit, offset } = parsePageLimit(req, { defaultLimit: 30, maxLimit: 200 });
     const caseIdStr = queryOne(req.query, "caseId");
@@ -125,10 +135,30 @@ router.get("/invoices", requireAuth, requireFirmUser, requirePermission("account
 
     const [[{ value: totalRaw }], rows] = await Promise.all([totalPromise, listPromise]);
     const totalCount = typeof totalRaw === "number" ? totalRaw : Number(totalRaw ?? 0);
+    const firmId = req.firmId!;
+    const caseIds = Array.from(new Set(
+      rows.map((inv: any) => typeof inv?.caseId === "number" && Number.isFinite(inv.caseId) ? inv.caseId : null)
+        .filter((v): v is number => typeof v === "number"),
+    ));
+    const caseRefs = caseIds.length
+      ? await r.select({ caseId: casesTable.id, referenceNo: casesTable.referenceNo })
+          .from(casesTable)
+          .where(and(eq(casesTable.firmId, firmId), inArray(casesTable.id, caseIds), isNull(casesTable.deletedAt)))
+      : [];
+    const caseRefMap = new Map<number, string | null>(caseRefs.map((cr) => [cr.caseId, cr.referenceNo ?? null]));
+    const enriched = rows.map((inv: any) => {
+      const out: any = String((inv as any).status ?? "") === "void" ? { ...inv, amountDue: "0.00" } : { ...inv };
+      if (typeof inv?.caseId === "number" && Number.isFinite(inv.caseId)) {
+        out.referenceNo = caseRefMap.get(inv.caseId) ?? null;
+      } else {
+        out.referenceNo = null;
+      }
+      return out;
+    });
     res.setHeader("X-Total-Count", String(totalCount));
     res.setHeader("X-Page", String(page));
     res.setHeader("X-Limit", String(limit));
-    res.json(rows.map((inv) => (String((inv as any).status ?? "") === "void" ? { ...inv, amountDue: "0.00" } : inv)));
+    res.json(enriched);
   } catch (err) {
     const diag = emitInvoiceErrorLog(req, "/invoices", err, "INVOICE_QUERY_FAILED");
     if (diag.errorCode === "INVOICE_TIMEOUT") {
@@ -146,15 +176,25 @@ router.get("/invoices", requireAuth, requireFirmUser, requirePermission("account
 });
 
 // Detail
-router.get("/invoices/:id", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/invoices/:id", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.invoice"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const r = rdb(req);
+    const r = getRlsDb(req, res);
+  if (!r) return;
     const idStr = one(req.params.id);
     const id = idStr ? parseInt(idStr) : NaN;
     if (isNaN(id)) { res.status(400).json({ error: "Invalid invoice ID" }); return; }
     const [inv] = await r.select().from(invoicesTable).where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!)));
     if (!inv) { res.status(404).json({ error: "Invoice not found" }); return; }
     const items = await r.select().from(invoiceItemsTable).where(eq(invoiceItemsTable.invoiceId, id)).orderBy(invoiceItemsTable.sortOrder);
+    const caseReferenceNo: string | null = (typeof (inv as any).caseId === "number" && Number.isFinite((inv as any).caseId))
+      ? (await (async () => {
+          const [c] = await r.select({ referenceNo: casesTable.referenceNo })
+            .from(casesTable)
+            .where(and(eq(casesTable.id, (inv as any).caseId), eq(casesTable.firmId, req.firmId!), isNull(casesTable.deletedAt)))
+            .limit(1);
+          return c?.referenceNo ?? null;
+        })())
+      : null;
     const billTo = await (async () => {
       if (inv.quotationId) {
         const [q] = await r.select().from(quotationsTable)
@@ -197,7 +237,7 @@ router.get("/invoices/:id", requireAuth, requireFirmUser, requirePermission("acc
       }
       return { billToName: null, billToAddress: null, clientDetails: [] as Array<{ name: string; tin?: string }> };
     })();
-    res.json({ ...inv, items, ...billTo });
+    res.json({ ...inv, items, ...billTo, referenceNo: caseReferenceNo });
   } catch (err) {
     const diag = emitInvoiceErrorLog(req, "/invoices/:id", err, "INVOICE_QUERY_FAILED");
     const httpStatus = diag.errorCode === "INVOICE_SCHEMA_MISMATCH" ? 503 : 500;
@@ -211,8 +251,9 @@ router.get("/invoices/:id", requireAuth, requireFirmUser, requirePermission("acc
 });
 
 // Create from quotation
-router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const r = rdb(req);
+router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requireUserFeatureAccess("accounting.invoice"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const quotationIdStr = one(req.params.quotationId);
   const quotationId = quotationIdStr ? parseInt(quotationIdStr) : NaN;
   if (isNaN(quotationId)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
@@ -261,8 +302,9 @@ router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requi
 });
 
 // Create manually
-router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const r = rdb(req);
+router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requireUserFeatureAccess("accounting.invoice"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const { caseId, quotationId, items, notes, issuedDate, dueDate } = req.body;
   const rawItems = Array.isArray(items) ? items : [];
   const parsedItems = rawItems
@@ -313,8 +355,9 @@ router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, req
 });
 
 // Issue invoice (draft → issued)
-router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const r = rdb(req);
+router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requireUserFeatureAccess("accounting.invoice"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid invoice ID" }); return; }
@@ -358,8 +401,9 @@ router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFir
 });
 
 // Void invoice
-router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), requireReAuth, async (req: AuthRequest, res: Response): Promise<void> => {
-  const r = rdb(req);
+router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.invoice"), requirePermission("accounting", "write"), requireReAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid invoice ID" }); return; }

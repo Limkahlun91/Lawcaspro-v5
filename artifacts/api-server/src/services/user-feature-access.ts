@@ -19,23 +19,24 @@
  *   - classifiesDenialCode() helper
  */
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { AppDb, RlsDb } from "@workspace/db";
 import {
   db,
   firmUserFeatureAccessTable,
+  rolesTable,
   FEATURE_REGISTRY_MAP,
   getFeatureDefinition,
   childrenOf,
   isFeatureRegistered,
 } from "@workspace/db";
+import type { AuthRequest } from "../lib/auth.js";
 import {
   resolveEntitlementsBulk,
   type EntitlementResult,
 } from "./entitlement-resolver.js";
 import { ApiError } from "../lib/api-response.js";
 import { logger } from "../lib/logger.js";
-import type { AuthRequest } from "../lib/auth.js";
 import { Response, NextFunction } from "express";
 
 export type EffectiveUserFeatureSource =
@@ -120,6 +121,45 @@ function isPartnerRoleName(roleName: unknown): boolean {
 
 export { isPartnerRoleName };
 
+export interface RequestFirmRoleContext {
+  firmId: number | undefined | null;
+  roleId: number | undefined | null;
+  _roleCache?: { firmId: number; roleId: number; name: string } | undefined;
+}
+
+export async function resolveRequestFirmRoleName(
+  ctx: RequestFirmRoleContext,
+  r: AppDb | RlsDb,
+): Promise<string | null> {
+  const firmId = typeof ctx.firmId === "number" ? ctx.firmId : null;
+  const roleId = typeof ctx.roleId === "number" ? ctx.roleId : null;
+  if (firmId == null || roleId == null) return null;
+
+  const cached = ctx._roleCache;
+  if (cached && cached.firmId === firmId && cached.roleId === roleId && typeof cached.name === "string") {
+    return cached.name;
+  }
+
+  try {
+    const [row] = await r
+      .select({ name: rolesTable.name })
+      .from(rolesTable)
+      .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)))
+      .limit(1);
+    const resolved = typeof row?.name === "string" ? row.name : null;
+    if (resolved && cached !== undefined) {
+      (ctx as RequestFirmRoleContext & { _roleCache: { firmId: number; roleId: number; name: string } })._roleCache = {
+        firmId,
+        roleId,
+        name: resolved,
+      };
+    }
+    return resolved;
+  } catch (err) {
+    return null;
+  }
+}
+
 function parentKeyOf(featureKey: string): string | null {
   if (!isFeatureRegistered(featureKey)) return null;
   const def = getFeatureDefinition(featureKey);
@@ -140,12 +180,27 @@ async function loadUserRowsBulk(
   if (!featureKeys.length) return out;
 
   const cached = userCacheGet(firmId, userId);
+  const missingKeys: string[] = [];
+
   if (cached) {
     for (const k of featureKeys) {
-      const c = cached.get(k);
-      if (typeof c?.userRow === "boolean") out.set(k, c.userRow);
+      if (cached.has(k)) {
+        const c = cached.get(k)!;
+        // null = explicitly cached as "confirmed no explicit DB row"; boolean = explicit row
+        if (typeof c.userRow === "boolean") {
+          out.set(k, c.userRow);
+        }
+        // else c.userRow is null → no explicit row → skip from out (no override)
+      } else {
+        missingKeys.push(k);
+      }
     }
-    return out;
+    if (missingKeys.length === 0) {
+      return out;
+    }
+  } else {
+    // Cache does not exist at all → query all requested keys
+    missingKeys.push(...featureKeys);
   }
 
   const rows = await r
@@ -158,16 +213,74 @@ async function loadUserRowsBulk(
       and(
         eq(firmUserFeatureAccessTable.firmId, firmId),
         eq(firmUserFeatureAccessTable.userId, userId),
-        inArray(firmUserFeatureAccessTable.featureKey, featureKeys as string[]),
+        inArray(firmUserFeatureAccessTable.featureKey, missingKeys as string[]),
       ),
     );
-  const store: CacheVal["data"] = new Map();
+
+  const foundKeys = new Set<string>();
   for (const row of rows) {
-    out.set(row.featureKey, Boolean(row.isEnabled));
-    store.set(row.featureKey, { userRow: Boolean(row.isEnabled) });
+    const b = Boolean(row.isEnabled);
+    out.set(row.featureKey, b);
+    foundKeys.add(row.featureKey);
   }
-  userCachePut(firmId, userId, store);
+
+  // Merge back: keep existing cache entries, add new ones (including null sentinel for no-row)
+  const merged: CacheVal["data"] = cached ? new Map(cached.entries()) : new Map();
+  for (const k of missingKeys) {
+    if (foundKeys.has(k)) {
+      const b = out.get(k)!;
+      merged.set(k, { userRow: b });
+    } else {
+      merged.set(k, { userRow: null }); // Sentinel: explicitly checked, confirmed no row
+    }
+  }
+  userCachePut(firmId, userId, merged);
+
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Shared request-scoped permission checker — ONE source of truth used by:
+//   (a) requireUserFeatureAccess() middleware
+//   (b) GET /users/_self/effective-features
+// Ensures RBAC resolution is identical in both locations (no STEP4 divergence).
+// ---------------------------------------------------------------------------
+
+export async function resolveRequestPermissionChecker(
+  r: AppDb | RlsDb,
+  firmId: number | null,
+  roleId: number | null,
+): Promise<PermissionChecker> {
+  const permCache = new Map<string, boolean>();
+
+  if (firmId && typeof firmId === "number" && roleId && typeof roleId === "number") {
+    try {
+      const res0 = await r.execute(
+        sql`SELECT p.module, p.action, p.allowed
+            FROM permissions p
+            JOIN roles ro ON ro.id = p.role_id
+            WHERE p.role_id = ${roleId}
+              AND ro.firm_id = ${firmId}
+              AND p.allowed = TRUE`,
+      );
+      const permRows: { module: unknown; action: unknown; allowed: unknown }[] = Array.isArray(res0)
+        ? (res0 as any[])
+        : (res0 && typeof res0 === "object" && "rows" in (res0 as any))
+          ? ((res0 as any).rows as any[])
+          : [];
+      for (const pr of permRows) {
+        if (typeof pr.module === "string" && typeof pr.action === "string") {
+          permCache.set(`${pr.module}:${pr.action}`, true);
+        }
+      }
+    } catch {
+      // DB read failure — default to empty cache (deny all)
+    }
+  }
+
+  return async (mod: string, act: string): Promise<boolean> => {
+    return Boolean(permCache.get(`${mod}:${act}`));
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -326,9 +439,13 @@ export async function resolveUserFeatureAccessBulk(params: {
           };
       continue;
     }
-    // STEP 4 — Fallback role permission OR default allow for non-RBAC keys
+    // STEP 4 — Fallback role permission.
+    // SAFE DEFAULT: if hint exists (RBAC required key), but NO permissionChecker
+    // supplied to this bulk call → DEFAULT DENY (legacy bug was default-allow).
+    // The shared resolveRequestPermissionChecker() MUST be provided by callers
+    // (middleware + effective-features) for consistent RBAC.
     const hint = moduleActionFor(k);
-    let roleOk = true;
+    let roleOk = false;
     if (hint && permissionChecker) {
       try {
         roleOk = Boolean(await permissionChecker(hint.mod, hint.action));
@@ -336,8 +453,10 @@ export async function resolveUserFeatureAccessBulk(params: {
         roleOk = false;
       }
     } else if (hint) {
-      // No permission checker provided — legacy fallback: allowed unless the
-      // feature registry says it requires RBAC.
+      // RBAC-required key but no permission checker supplied → safe deny.
+      roleOk = false;
+    } else {
+      // No hint at all → no RBAC mapping → legacy-safe allow (non-RBAC features).
       roleOk = true;
     }
     results[k] = roleOk
@@ -409,13 +528,28 @@ export function requireUserFeatureAccess(featureKey: string) {
       return;
     }
     const r = (req.rlsDb ?? db) as AppDb | RlsDb;
-    let roleName: string | null = null;
-    const cached = (req as any)._roleCache as
-      | { firmId: number; roleId: number; name: string }
-      | undefined;
-    if (cached && cached.firmId === req.firmId && cached.roleId === req.roleId) {
-      roleName = cached.name;
+    const roleCtx = {
+      firmId: req.firmId,
+      roleId: req.roleId ?? null,
+      _roleCache: (req as any)._roleCache as
+        | { firmId: number; roleId: number; name: string }
+        | undefined,
+    };
+    const roleName = await resolveRequestFirmRoleName(roleCtx, r);
+    if ((req as any)._roleCache !== roleCtx._roleCache) {
+      (req as any)._roleCache = roleCtx._roleCache;
     }
+
+    // SHARED PERMISSION CHECKER — SAME implementation as _self/effective-features.
+    // This guarantees identical RBAC answers between middleware evaluation and
+    // the API endpoint used by frontend sidebar/feature guards.
+    let permChecker: PermissionChecker | undefined;
+    try {
+      permChecker = await resolveRequestPermissionChecker(r, req.firmId ?? null, req.roleId ?? null);
+    } catch {
+      permChecker = undefined;
+    }
+
     const resU = await resolveUserFeatureAccess({
       r,
       firmId: req.firmId,
@@ -423,6 +557,7 @@ export function requireUserFeatureAccess(featureKey: string) {
       roleId: req.roleId ?? null,
       roleName,
       featureKey,
+      permissionChecker: permChecker,
     });
     if (!resU.effectiveEnabled) {
       res.status(403).json({

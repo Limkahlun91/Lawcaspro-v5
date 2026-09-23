@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams, useLocation } from "wouter";
+import { useParams, useLocation, Link } from "wouter";
 import { useGetQuotation, getGetQuotationQueryKey, getListQuotationsQueryKey, useUpdateQuotation, useDeleteQuotation, useDuplicateQuotation } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -1000,6 +1000,21 @@ export default function QuotationDetail() {
                   <p className="text-sm font-medium">{quotation.loanAmount}</p>
                 </div>
               )}
+              <div className="md:col-span-3">
+                <Label className="text-xs text-slate-500">Case Reference</Label>
+                {typeof (quotation as any).caseId === "number" && Number.isFinite((quotation as any).caseId) && (quotation as any).caseReferenceNo ? (
+                  <p className="text-sm font-medium">
+                    <Link
+                      href={`/app/cases/${(quotation as any).caseId}`}
+                      className="text-blue-600 hover:text-blue-800 hover:underline"
+                    >
+                      {(quotation as any).caseReferenceNo}
+                    </Link>
+                  </p>
+                ) : (
+                  <p className="text-sm italic text-slate-500">Unlinked</p>
+                )}
+              </div>
             </div>
           )}
         </CardContent>

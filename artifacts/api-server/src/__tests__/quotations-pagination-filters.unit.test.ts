@@ -136,7 +136,7 @@ const makeRlsDb = () => {
     b.where = () => b;
     b.orderBy = () => b;
     b.groupBy = () => b;
-    b.returning = async () => [];
+    b.returning = async () => [{ id: 1 }];
     b.set = () => b;
     b.values = () => b;
     b.insert = () => b;
@@ -160,9 +160,42 @@ const makeRlsDb = () => {
       }
       return rows;
     };
+    b.then = async (resolve: any, reject: any) => {
+      try {
+        const rows = makeMockQuotationRows(savedOffset, savedLimit);
+        if (savedLimit > 1000 || savedLimit === 99999) return resolve([{ value: TOTAL_MOCK_ROWS }]);
+        resolve(rows);
+      } catch (e) { reject(e); }
+    };
     return b as FakeSelect;
   };
-  return { execute: async () => ({ rows: [] }), select };
+  const db: any = {
+    execute: async (q: any) => ({ rows: [] }),
+    select,
+    insert: () => {
+      const c: any = {};
+      c.from = () => c; c.where = () => c; c.set = () => c;
+      c.values = () => c; c.returning = async () => [{ id: 1 }];
+      c.then = async (resolve: any) => resolve(undefined);
+      return c;
+    },
+    update: () => {
+      const c: any = {};
+      c.from = () => c; c.where = () => c; c.set = () => c;
+      c.values = () => c; c.returning = async () => [{ id: 1 }];
+      c.then = async (resolve: any) => resolve(undefined);
+      return c;
+    },
+    delete: () => {
+      const c: any = {};
+      c.from = () => c; c.where = () => c; c.set = () => c;
+      c.values = () => c; c.returning = async () => [{ id: 1 }];
+      c.then = async (resolve: any) => resolve(undefined);
+      return c;
+    },
+    transaction: async (fn: any) => fn(db),
+  };
+  return db;
 };
 
 vi.mock("../lib/auth.js", () => {
@@ -171,6 +204,7 @@ vi.mock("../lib/auth.js", () => {
     req.userId = 1;
     req.firmId = 1;
     req.roleId = 1;
+    req._roleCache = { firmId: 1, roleId: 1, name: "PARTNER" };
     req.timing = { startAt: Date.now(), sections: { authSessionMs: 10, permissionMs: 5, tenantContextDbConnectMs: 7, tenantContextMs: 8 } };
     next();
   };
@@ -190,7 +224,17 @@ vi.mock("../lib/auth.js", () => {
   };
 });
 
-vi.mock("@workspace/db", () => {
+vi.mock("../services/user-feature-access.js", () => ({
+  requireUserFeatureAccess: () => async (_req: any, _res: any, next: any) => next(),
+  requireAnyUserFeatureAccess: () => async (_req: any, _res: any, next: any) => next(),
+  requireUserFeatureAccessOrPermission: () => async (_req: any, _res: any, next: any) => next(),
+  resolveUserFeatureAccess: async () => ({ effectiveEnabled: true, source: "partner_allow", denialCode: null }),
+  resolveUserFeatureAccessBulk: async () => new Map(),
+  resolveRequestFirmRoleName: async () => "PARTNER",
+}));
+
+vi.mock("@workspace/db", async (importOriginal) => {
+  const actual: any = await importOriginal();
   const state = { quotationsQueryCount: 0 };
 
   const mockOffsetImpl = (
@@ -267,18 +311,47 @@ vi.mock("@workspace/db", () => {
         savedOffset = n;
         return mockOffsetImpl(savedOffset, savedLimit, currentFrom, grouped, hadLimit);
       };
+      s.returning = async () => mockOffsetImpl(savedOffset, savedLimit, currentFrom, grouped, hadLimit);
+      s.then = async (resolve: any, reject: any) => {
+        try {
+          const rows = mockOffsetImpl(savedOffset, savedLimit, currentFrom, grouped, hadLimit);
+          resolve(rows);
+        } catch (e) { reject(e); }
+      };
       return s;
     };
-    b.insert = () => b;
-    b.update = () => b;
-    b.delete = () => b;
+    const bindChain = (chainer: any) => {
+      chainer.from = () => chainer;
+      chainer.where = () => chainer;
+      chainer.set = () => chainer;
+      chainer.values = () => chainer;
+      chainer.returning = async () => [{ id: 1 }];
+      chainer.then = async (resolve: any) => resolve(undefined);
+      return chainer;
+    };
+    b.insert = () => bindChain({});
+    b.update = () => bindChain({});
+    b.delete = () => bindChain({});
+    b.execute = async (q: any) => {
+      const tbl =
+        q && typeof q.text === "string"
+          ? (/firm_user_feature_access/i.test(q.text) ? "fufa"
+            : /roles/i.test(q.text) ? "roles"
+            : null)
+          : null;
+      if (tbl === "fufa") return [];
+      if (tbl === "roles") return [];
+      return [];
+    };
     b.transaction = async (fn: any) => fn(b);
     return b;
   };
 
   return {
+    ...actual,
     db: makeDb(),
     quotationsTable: {
+      ...(actual.quotationsTable || {}),
       id: "id",
       firmId: "firmId",
       caseId: "caseId",
@@ -290,6 +363,7 @@ vi.mock("@workspace/db", () => {
       $inferSelect: {} as any,
     },
     quotationItemsTable: {
+      ...(actual.quotationItemsTable || {}),
       quotationId: "quotationId",
       id: "id",
       isSystemGenerated: "isSystemGenerated",
@@ -306,15 +380,15 @@ vi.mock("@workspace/db", () => {
       itemType: "item_type",
       $inferSelect: {} as any,
     },
-    regulatoryRuleSetsTable: { code: "code", id: "id" },
-    regulatoryRuleVersionsTable: { ruleSetId: "ruleSetId", effectiveFrom: "effectiveFrom", effectiveTo: "effectiveTo", rules: "rules" },
-    sql: (strings: TemplateStringsArray, ...vals: any[]) => ({ __isSql: true, text: String.raw(strings, ...vals) }) as any,
-    eq: () => ({}),
-    desc: () => ({}),
-    and: () => ({}),
-    count: () => ({}),
-    inArray: () => ({}),
-    isNull: () => ({}),
+    regulatoryRuleSetsTable: { ...(actual.regulatoryRuleSetsTable || {}), code: "code", id: "id" },
+    regulatoryRuleVersionsTable: { ...(actual.regulatoryRuleVersionsTable || {}), ruleSetId: "ruleSetId", effectiveFrom: "effectiveFrom", effectiveTo: "effectiveTo", rules: "rules" },
+    sql: actual.sql || ((strings: TemplateStringsArray, ...vals: any[]) => ({ __isSql: true, text: String.raw(strings, ...vals) }) as any),
+    eq: actual.eq || (() => ({})),
+    desc: actual.desc || (() => ({})),
+    and: actual.and || (() => ({})),
+    count: actual.count || (() => ({})),
+    inArray: actual.inArray || (() => ({})),
+    isNull: actual.isNull || (() => ({})),
   };
 });
 

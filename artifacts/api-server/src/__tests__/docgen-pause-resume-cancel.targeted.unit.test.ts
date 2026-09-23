@@ -1244,7 +1244,7 @@ describe("docgen pause/resume/cancel — focused regression suite (FAST FIX MODE
     expect(runNextFinalizing).toBe(-1);
   });
 
-  it("RACE-H/I/J/K. lock zero-row calls readFreshFinalizeState; paused/cancelled returns real state NOT FINALIZE_IN_FLIGHT; FINALIZE_IN_FLIGHT reserved for pending/running/finalizing only", () => {
+  it("RACE-H/I/J/K. lock zero-row calls readFreshFinalizeState; paused/cancelled returns real state NOT FINALIZE_IN_FLIGHT; FINALIZE_IN_FLIGHT reserved for active recent-heartbeat finalizing only; pending/running -> run_next", () => {
     expect(fs.existsSync(ROUTES_DOCS_PATH)).toBe(true);
     const src = fs.readFileSync(ROUTES_DOCS_PATH, "utf8");
     const body = extractRouteBodyByPath(src, '"/documents/jobs/:jobId/finalize"');
@@ -1254,21 +1254,48 @@ describe("docgen pause/resume/cancel — focused regression suite (FAST FIX MODE
     const branchStart = body.indexOf("if (!lockAcquired)", lockFailed);
     expect(branchStart).toBeGreaterThan(lockFailed);
     const nextReturn = body.indexOf("FINALIZE_IN_FLIGHT", branchStart);
-    const lockBlock = body.slice(branchStart, nextReturn > branchStart ? nextReturn + 500 : branchStart + 2500);
+    const lockBlock = body.slice(branchStart, nextReturn > branchStart ? nextReturn + 1200 : branchStart + 3500);
     expect(lockBlock.includes("readFreshFinalizeState()")).toBe(true);
-    const inFlightIdx = lockBlock.indexOf('"pending", "running", "finalizing"');
-    expect(inFlightIdx).toBeGreaterThan(0);
-    const pausedElsewhere = lockBlock.indexOf('"paused"');
-    const cancelledElsewhere = lockBlock.indexOf('"cancelled"');
-    expect(pausedElsewhere).toBeGreaterThan(0);
-    expect(cancelledElsewhere).toBeGreaterThan(0);
+    const oldThreeStateList = lockBlock.indexOf('"pending", "running", "finalizing"');
+    expect(oldThreeStateList).toBe(-1);
+    const terminalOrPaused = lockBlock.indexOf('terminalOrPaused');
+    const pausedStr = lockBlock.indexOf('s === "paused"');
+    const cancelledStr = lockBlock.indexOf('s === "cancelled"');
+    const completedStr = lockBlock.indexOf('s === "completed"');
+    const pendingStr = lockBlock.indexOf('s === "pending"');
+    const runningStr = lockBlock.indexOf('s === "running"');
+    const finalizingStr = lockBlock.indexOf('s === "finalizing"');
     const inFlightCode = lockBlock.indexOf('"FINALIZE_IN_FLIGHT"');
-    expect(pausedElsewhere < inFlightCode).toBe(true);
-    expect(cancelledElsewhere < inFlightCode).toBe(true);
+    const runNextInBlock = lockBlock.indexOf('"run_next"');
+    expect(terminalOrPaused > 0 || pausedStr > 0 || cancelledStr > 0 || completedStr > 0).toBe(true);
+    expect(pendingStr).toBeGreaterThan(0);
+    expect(runningStr).toBeGreaterThan(0);
+    expect(finalizingStr).toBeGreaterThan(0);
+    expect(inFlightCode).toBeGreaterThan(0);
+    const firstTerminalCheck = Math.min(
+      pausedStr > 0 ? pausedStr : Infinity,
+      cancelledStr > 0 ? cancelledStr : Infinity,
+      completedStr > 0 ? completedStr : Infinity,
+      terminalOrPaused > 0 ? terminalOrPaused : Infinity,
+    );
+    expect(firstTerminalCheck).toBeLessThan(inFlightCode);
+    expect(pendingStr).toBeLessThan(inFlightCode);
+    expect(runningStr).toBeLessThan(inFlightCode);
+    expect(finalizingStr).toBeLessThan(inFlightCode);
     const realRespB4InFlight = lockBlock.lastIndexOf("res.status(", inFlightCode - 1);
-    expect(realRespB4InFlight).toBeGreaterThan(pausedElsewhere);
-    const inflightBranchGuarded = lockBlock.slice(inFlightIdx).indexOf("FINALIZE_IN_FLIGHT");
-    expect(inflightBranchGuarded).toBeGreaterThan(0);
+    expect(realRespB4InFlight).toBeGreaterThan(firstTerminalCheck);
+    const pendingRespLoc = lockBlock.indexOf("res.status", pendingStr);
+    const runningRespLoc = lockBlock.indexOf("res.status", runningStr);
+    expect(pendingRespLoc).toBeGreaterThan(pendingStr);
+    expect(runningRespLoc).toBeGreaterThan(runningStr);
+    expect(pendingRespLoc).toBeLessThan(inFlightCode);
+    expect(runningRespLoc).toBeLessThan(inFlightCode);
+    const pendingRespSlice = lockBlock.slice(pendingStr, pendingRespLoc + 300);
+    const runningRespSlice = lockBlock.slice(runningStr, runningRespLoc + 300);
+    const pendingHasBuildFresh = pendingRespSlice.includes("buildResponseFromFresh");
+    const runningHasBuildFresh = runningRespSlice.includes("buildResponseFromFresh");
+    expect(pendingHasBuildFresh).toBe(true);
+    expect(runningHasBuildFresh).toBe(true);
   });
 
   it("RACE-L. recoverStale active_job SAME SQL CTE contains status IN (pending,running) + last_heartbeat_at stale check + FOR UPDATE lock", () => {
@@ -1393,6 +1420,49 @@ describe("docgen pause/resume/cancel — focused regression suite (FAST FIX MODE
     );
     expect(secondStandaloneUpdate).toBe(-1);
     expect(body.indexOf("started_at IS NOT NULL")).toBeGreaterThan(activeJobStart);
+  });
+
+  it("RACE-A/B/C/D. parent RETURNING j.id + conditional active runner delete: recoveredJobs.length>0 guard, 0-row race keeps marker, ONE atomic CTE, no second parent UPDATE", () => {
+    expect(fs.existsSync(ROUTES_DOCS_PATH)).toBe(true);
+    const src = fs.readFileSync(ROUTES_DOCS_PATH, "utf8");
+    const body = extractFunctionBodyByName(src, "recoverStaleDocumentGenerationJob");
+    expect(body.length).toBeGreaterThan(200);
+
+    const finalParent = body.indexOf("UPDATE document_generation_jobs j");
+    expect(finalParent).toBeGreaterThan(0);
+
+    const returningIdx = body.indexOf("RETURNING j.id", finalParent);
+    expect(returningIdx).toBeGreaterThan(finalParent);
+
+    const recoveredJobsVar = body.indexOf("const recoveredJobs = await queryRows");
+    expect(recoveredJobsVar).toBeGreaterThan(0);
+    expect(recoveredJobsVar).toBeLessThan(finalParent);
+
+    const ifCond = body.indexOf("if (recoveredJobs.length > 0) {", returningIdx);
+    expect(ifCond).toBeGreaterThan(returningIdx);
+
+    const deleteBlock = body.slice(ifCond, ifCond + 500);
+    expect(deleteBlock.includes("activeDocumentGenerationJobRunners.delete(key)")).toBe(true);
+
+    const activeJobCte = body.indexOf("WITH active_job AS (");
+    const forUpdate = body.indexOf("FOR UPDATE", activeJobCte);
+    const recoveredItems = body.indexOf("recovered_items AS (", forUpdate);
+    expect(activeJobCte).toBeGreaterThan(0);
+    expect(forUpdate).toBeGreaterThan(activeJobCte);
+    expect(recoveredItems).toBeGreaterThan(forUpdate);
+    expect(finalParent).toBeGreaterThan(recoveredItems);
+
+    const secondStandaloneUpdate = body.indexOf(
+      "UPDATE document_generation_jobs",
+      finalParent + 50,
+    );
+    expect(secondStandaloneUpdate).toBe(-1);
+
+    const uncondDeleteAfter = body.indexOf(
+      "activeDocumentGenerationJobRunners.delete(key)",
+      ifCond + 400,
+    );
+    expect(uncondDeleteAfter).toBe(-1);
   });
 
   it("SCHEMA-A. ensureDocGenJobDownloadObject SELECT uses created_by (DGJ col); ZERO user_id refs", () => {

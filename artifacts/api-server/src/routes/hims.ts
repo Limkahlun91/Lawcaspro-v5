@@ -39,6 +39,17 @@ const FEATURE_KEY = "module.hims";
 const expressRouter: ExpressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
+type RlsConn = NonNullable<AuthRequest["rlsDb"]>;
+const getRlsDb = (req: AuthRequest, res: Response): RlsConn | null => {
+  const r = req.rlsDb;
+  if (!r) {
+    req.log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb in tenant HIMS route");
+    res.status(503).json({ error: "Tenant DB context unavailable", code: "RLS_CONTEXT_MISSING" });
+    return null;
+  }
+  return r;
+};
+
 const parseIntParam = (raw: unknown, field: string): number => {
   const v = typeof raw === "number" ? raw : typeof raw === "string" ? parseInt(raw, 10) : NaN;
   if (!Number.isFinite(v) || v <= 0) {
@@ -63,7 +74,8 @@ router.get("/hims/cases", requireAuth, requireFirmUser, requireUserFeatureAccess
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const firmId = req.firmId!;
     const userId = req.userId!;
-    const r = req.rlsDb ?? db;
+    const r = getRlsDb(req, res);
+    if (!r) return;
     const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : null;
 
     let roleName: string | null = null;
@@ -556,7 +568,8 @@ router.get("/hims/cases/:caseId/status", requireAuth, requireFirmUser, requireUs
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const firmId = req.firmId!;
     const caseId = parseIntParam(one(req.params?.caseId), "caseId");
-    const r = req.rlsDb ?? db;
+    const r = getRlsDb(req, res);
+    if (!r) return;
     const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : null;
     let roleName: string | null = null;
     const roleCache = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
@@ -592,7 +605,8 @@ router.post("/hims/cases/:caseId/check", requireAuth, requireFirmUser, requireUs
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const firmId = req.firmId!;
     const caseId = parseIntParam(one(req.params?.caseId), "caseId");
-    const r = req.rlsDb ?? db;
+    const r = getRlsDb(req, res);
+    if (!r) return;
     const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : null;
     let roleName: string | null = null;
     const roleCache = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
@@ -638,7 +652,8 @@ router.get("/hims/cases/:caseId/comparisons", requireAuth, requireFirmUser, requ
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const firmId = req.firmId!;
     const caseId = parseIntParam(one(req.params?.caseId), "caseId");
-    const r = req.rlsDb ?? db;
+    const r = getRlsDb(req, res);
+    if (!r) return;
     const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : null;
     let roleName: string | null = null;
     const roleCache = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
@@ -674,7 +689,8 @@ router.post("/hims/cases/:caseId/compare", requireAuth, requireFirmUser, require
     await assertFirmFeatureEnabled(req.rlsDb!, req.firmId!, FEATURE_KEY);
     const firmId = req.firmId!;
     const caseId = parseIntParam(one(req.params?.caseId), "caseId");
-    const r = req.rlsDb ?? db;
+    const r = getRlsDb(req, res);
+    if (!r) return;
     const roleId = typeof req.roleId === "number" && req.roleId > 0 ? req.roleId : null;
     let roleName: string | null = null;
     const roleCache = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;

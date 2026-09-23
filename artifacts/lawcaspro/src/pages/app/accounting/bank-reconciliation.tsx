@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -15,6 +16,9 @@ type BankTransactionRow = {
   id: string;
   bank_account_id?: number | null;
   case_id?: number | null;
+  caseId?: number | null;
+  referenceNo?: string | null;
+  caseReferenceNo?: string | null;
   transaction_date: string;
   description: string;
   reference_no: string | null;
@@ -432,10 +436,17 @@ export default function BankReconciliationPage() {
                           )}
                         </td>
                         <td className="py-2 px-3 min-w-[260px]">
-                          {r.case ? (
+                          {(r.case || r.caseId || r.case_id) && (r.caseReferenceNo || r.referenceNo) ? (
                             <div>
-                              <div className="text-sm font-medium text-emerald-700">✓ {r.case.title}</div>
-                              <div className="text-xs text-slate-500">Case #{r.case.case_id}</div>
+                              <Link
+                                href={`/app/cases/${Number(r.caseId ?? r.case_id ?? r.case?.case_id)}`}
+                                className="text-indigo-600 hover:text-indigo-800 font-medium text-sm"
+                              >
+                                {r.caseReferenceNo || r.referenceNo}
+                              </Link>
+                              {r.case?.title && (
+                                <div className="text-xs text-slate-500 mt-0.5">{r.case.title}</div>
+                              )}
                             </div>
                           ) : r.recommended_case ? (
                             <div className="flex items-start justify-between gap-2">
@@ -456,19 +467,22 @@ export default function BankReconciliationPage() {
                               </Button>
                             </div>
                           ) : (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={isBusy || bindMutation.isPending}
-                              onClick={() => {
-                                setAssignTx(r);
-                                setAssignOpen(true);
-                                setCaseQuery("");
-                                setCaseResults([]);
-                              }}
-                            >
-                              Search & Assign
-                            </Button>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="italic text-slate-500 text-sm">Unlinked</span>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={isBusy || bindMutation.isPending}
+                                onClick={() => {
+                                  setAssignTx(r);
+                                  setAssignOpen(true);
+                                  setCaseQuery("");
+                                  setCaseResults([]);
+                                }}
+                              >
+                                Search & Assign
+                              </Button>
+                            </div>
                           )}
                         </td>
                         <td className="py-2 px-3">

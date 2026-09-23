@@ -1,4 +1,4 @@
-import { useParams, useLocation } from "wouter";
+import { useParams, useLocation, Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Download } from "lucide-react";
@@ -40,6 +40,8 @@ type ReceiptDetailResponse = {
   paymentMethod: string;
   accountType: string;
   amount: number | string;
+  caseId?: number | null;
+  caseReferenceNo?: string | null;
   referenceNo?: string | null;
   notes?: string | null;
   isReversed?: boolean;
@@ -175,7 +177,22 @@ export default function ReceiptDetail() {
               <div className="text-sm font-medium text-slate-900">{rec.accountType}</div>
             </div>
             <div className="sm:col-span-2">
-              <div className="text-xs text-slate-500">Reference No</div>
+              <div className="text-xs text-slate-500">Case Reference</div>
+              <div className="text-sm text-slate-900">
+                {typeof rec.caseId === "number" && Number.isFinite(rec.caseId) && rec.caseReferenceNo ? (
+                  <Link
+                    href={`/app/cases/${rec.caseId}`}
+                    className="font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                  >
+                    {rec.caseReferenceNo}
+                  </Link>
+                ) : (
+                  <span className="italic text-slate-500">Unlinked</span>
+                )}
+              </div>
+            </div>
+            <div className="sm:col-span-2">
+              <div className="text-xs text-slate-500">Bank / Cheque Ref</div>
               <div className="text-sm text-slate-900">{rec.referenceNo || "—"}</div>
             </div>
             {rec.notes ? (

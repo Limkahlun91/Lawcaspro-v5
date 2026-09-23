@@ -31,7 +31,23 @@ describe("GET /api/accounting/cases/search contract", () => {
     expect(payload.meta).toHaveProperty("duration_ms");
 
     const item = payload.data.items[0];
-    expect(Object.keys(item).sort()).toEqual(["developerName", "id", "projectName", "purchaserLabel", "purchaserNames", "referenceNo", "shortLabel", "status"].sort());
+    expect(Object.keys(item).sort()).toEqual(
+      [
+        "borrowerNames",
+        "developerName",
+        "id",
+        "parcelNo",
+        "projectName",
+        "propertyAddress",
+        "propertyLabel",
+        "propertyParcelNo",
+        "purchaserLabel",
+        "purchaserNames",
+        "referenceNo",
+        "shortLabel",
+        "status",
+      ].sort(),
+    );
   });
 
   it("enforces max limit=50", async () => {

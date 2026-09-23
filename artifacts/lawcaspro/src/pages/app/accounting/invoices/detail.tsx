@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams, useLocation } from "wouter";
+import { useParams, useLocation, Link } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Download, CheckCircle, XCircle, Plus, AlertCircle, FileText, RefreshCw, Send, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -36,6 +36,7 @@ type InvoiceItem = {
 type InvoiceDetailResponse = {
   id: number;
   caseId?: number | null;
+  referenceNo?: string | null;
   invoiceNo: string;
   status: string;
   subtotal?: number | string;
@@ -347,6 +348,19 @@ export default function InvoiceDetail() {
             </span>
             {inv.issuedDate && <span className="text-sm text-slate-400">Issued: {inv.issuedDate}</span>}
             {inv.dueDate && <span className="text-sm text-slate-400">Due: {inv.dueDate}</span>}
+          </div>
+          <div className="mt-2 flex items-center gap-2 text-sm">
+            <span className="text-slate-400">Case:</span>
+            {typeof inv.caseId === "number" && Number.isFinite(inv.caseId) && inv.referenceNo ? (
+              <Link
+                href={`/app/cases/${inv.caseId}`}
+                className="font-medium text-blue-600 hover:text-blue-800 hover:underline"
+              >
+                {inv.referenceNo}
+              </Link>
+            ) : (
+              <span className="italic text-slate-500">Unlinked</span>
+            )}
           </div>
         </div>
         <div className="flex gap-2 flex-wrap">

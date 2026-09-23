@@ -1,4 +1,4 @@
-import express, { type Router as ExpressRouter } from "express";
+import express, { type Response, type Router as ExpressRouter } from "express";
 import { and, asc, count, countDistinct, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
   caseAssignmentsTable,
@@ -27,7 +27,16 @@ const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
 type DbConn = typeof db | RlsDb;
-const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+type RlsConn = NonNullable<AuthRequest["rlsDb"]>;
+const getRlsDb = (req: AuthRequest, res: Response): RlsConn | null => {
+  const r = req.rlsDb as RlsConn | undefined;
+  if (!r) {
+    req.log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb in tenant reports route");
+    res.status(503).json({ error: "Tenant DB context unavailable", code: "RLS_CONTEXT_MISSING" });
+    return null;
+  }
+  return r;
+};
 
 async function hasRolePermission(
   r: DbConn,
@@ -77,7 +86,8 @@ router.get("/reports/overview", requireAuth, requireFirmUser, requirePermission(
   try {
     const firmId = req.firmId!;
     const userId = req.userId!;
-    const r = rdb(req);
+    const r = getRlsDb(req, res);
+    if (!r) return;
     const elevated = await canBypassCaseAssignment(r, firmId, req.roleId);
     const canSeeAccounting = await hasRolePermission(r, firmId, req.roleId, "accounting", "read");
 

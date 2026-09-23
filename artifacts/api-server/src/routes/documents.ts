@@ -4701,8 +4701,8 @@ router.get(
   "/document-variables",
   requireAuth,
   requireFirmUser,
-  requirePermission("documents", "read"),
   requireUserFeatureAccess("documents.variables"),
+  requirePermission("documents", "read"),
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;
@@ -4766,8 +4766,8 @@ router.get(
   "/documents/variables",
   requireAuth,
   requireFirmUser,
-  requirePermission("documents", "read"),
   requireUserFeatureAccess("documents.variables"),
+  requirePermission("documents", "read"),
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;
@@ -5337,8 +5337,8 @@ router.get(
   "/documents/custom-variables",
   requireAuth,
   requireFirmUser,
-  requirePermission("documents", "read"),
   requireUserFeatureAccess("documents.variables"),
+  requirePermission("documents", "read"),
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;
@@ -5384,8 +5384,8 @@ router.post(
   "/documents/custom-variables",
   requireAuth,
   requireFirmUser,
-  requirePermission("documents", "update"),
   requireUserFeatureAccess("documents.variables"),
+  requirePermission("documents", "update"),
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;
@@ -5543,8 +5543,8 @@ router.put(
   "/documents/custom-variables/:id",
   requireAuth,
   requireFirmUser,
-  requirePermission("documents", "update"),
   requireUserFeatureAccess("documents.variables"),
+  requirePermission("documents", "update"),
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;
@@ -5638,8 +5638,8 @@ router.get(
   "/documents/custom-variables/:id/preview",
   requireAuth,
   requireFirmUser,
-  requirePermission("documents", "read"),
   requireUserFeatureAccess("documents.variables"),
+  requirePermission("documents", "read"),
   async (req: AuthRequest, res): Promise<void> => {
     const r = getRlsDb(req, res);
     if (!r) return;
@@ -16494,12 +16494,21 @@ async function finalizeDocGenJobIfDone(
       r,
       sql`SELECT status, action, download_object_path, download_file_name, download_mime_type, config, case_ids, created_by FROM document_generation_jobs WHERE id = ${args.jobId} AND firm_id = ${args.firmId} LIMIT 1`,
     );
-    const actualJob = actualJobs[0] as any;
+    const actualJob = actualJobs && actualJobs[0] ? (actualJobs[0] as any) : null;
     const actualStatus = String(actualJob?.status ?? "");
     const actualProgress = await computeDocGenJobProgress(r, args);
+    if (!actualJob) {
+      return {
+        finalized: false,
+        status: "failed",
+        progress: actualProgress,
+        downloadObjectPath: null,
+        downloadFileName: null,
+      };
+    }
     return {
       finalized: false,
-      status: actualStatus || statusToSet,
+      status: actualStatus || "failed",
       progress: actualProgress,
       downloadObjectPath:
         typeof actualJob?.download_object_path === "string"
@@ -17306,7 +17315,7 @@ async function recoverStaleDocumentGenerationJob(
               AND status IN ('pending','running')
           )`,
     );
-    await queryRows(
+    const recoveredJobs = await queryRows(
       r,
       sql`
       WITH active_job AS (
@@ -17338,12 +17347,14 @@ async function recoverStaleDocumentGenerationJob(
       FROM active_job a
       WHERE j.id = a.id
         AND j.firm_id = ${args.firmId}
+      RETURNING j.id
     `,
     );
+    if (recoveredJobs.length > 0) {
+      const key = `${args.firmId}:${args.jobId}`;
+      activeDocumentGenerationJobRunners.delete(key);
+    }
   }
-
-  const key = `${args.firmId}:${args.jobId}`;
-  activeDocumentGenerationJobRunners.delete(key);
 }
 
 async function startDocumentGenerationJobRunner(
@@ -21717,33 +21728,43 @@ router.post(
             });
             return;
           }
-          const inFlightStates = ["pending", "running", "finalizing"];
-          if (!inFlightStates.includes(fresh.status)) {
+          const s = fresh.status;
+          const terminalOrPaused =
+            s === "paused" ||
+            s === "cancelled" ||
+            s === "completed" ||
+            s === "completed_with_errors" ||
+            s === "generated_download_failed" ||
+            s === "failed";
+          if (terminalOrPaused) {
             const freshResp = buildResponseFromFresh(fresh);
-            const terminalOrPaused =
-              fresh.status === "paused" ||
-              fresh.status === "cancelled" ||
-              fresh.status === "completed" ||
-              fresh.status === "completed_with_errors" ||
-              fresh.status === "generated_download_failed" ||
-              fresh.status === "failed";
-            res.status(terminalOrPaused ? 200 : 409).json(freshResp);
+            res.status(200).json(freshResp);
             return;
           }
-          res.status(409).json({
-            ok: false,
-            error: {
-              code: "FINALIZE_IN_FLIGHT",
-              message: "Another finalize is processing this job. Please retry.",
-              details: { status: fresh.status, progress: fresh.progress },
-              retryable: true,
-            },
-            meta: {
-              request_id: requestId ?? null,
-              timestamp: new Date().toISOString(),
-              duration_ms: Date.now() - startedAt,
-            },
-          });
+          if (s === "pending" || s === "running") {
+            const freshResp = buildResponseFromFresh(fresh);
+            res.status(409).json(freshResp);
+            return;
+          }
+          if (s === "finalizing") {
+            res.status(409).json({
+              ok: false,
+              error: {
+                code: "FINALIZE_IN_FLIGHT",
+                message: "Another finalize is processing this job. Please retry.",
+                details: { status: fresh.status, progress: fresh.progress },
+                retryable: true,
+              },
+              meta: {
+                request_id: requestId ?? null,
+                timestamp: new Date().toISOString(),
+                duration_ms: Date.now() - startedAt,
+              },
+            });
+            return;
+          }
+          const fallback = buildResponseFromFresh(fresh);
+          res.status(409).json(fallback);
           return;
         }
       }

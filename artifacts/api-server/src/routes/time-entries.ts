@@ -3,6 +3,18 @@ import { eq, and, desc } from "drizzle-orm";
 import { db, sql, timeEntriesTable, usersTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, type AuthRequest } from "../lib/auth.js";
 
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const getRlsDb = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => {
+  const r = req.rlsDb;
+  if (!r) {
+    req.log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb in tenant route");
+    res.status(503).json({ error: "Tenant DB context unavailable" });
+    return null;
+  }
+  return r;
+};
+const getRlsDbTx = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => getRlsDb(req, res);
+
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 
 type RouterInternalLike = {
@@ -16,19 +28,23 @@ const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
 
 router.get("/time-entries", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const caseId = one((req.query as any).caseId);
   const conds = [eq(timeEntriesTable.firmId, req.firmId!)];
   if (caseId) conds.push(eq(timeEntriesTable.caseId, parseInt(caseId, 10)));
-  const rows = await db.select().from(timeEntriesTable).where(and(...conds)).orderBy(desc(timeEntriesTable.entryDate));
+  const rows = await r.select().from(timeEntriesTable).where(and(...conds)).orderBy(desc(timeEntriesTable.entryDate));
   res.json(rows);
 });
 
 router.get("/time-entries/summary", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const caseId = one((req.query as any).caseId);
   const conds = [eq(timeEntriesTable.firmId, req.firmId!)];
   if (caseId) conds.push(eq(timeEntriesTable.caseId, parseInt(caseId, 10)));
   const cond = and(...conds);
-  const [row] = await db.select({
+  const [row] = await r.select({
     totalHours: sql<string>`COALESCE(SUM(hours), 0)`,
     totalAmount: sql<string>`COALESCE(SUM(hours * rate_per_hour), 0)`,
     billableHours: sql<string>`COALESCE(SUM(CASE WHEN is_billable THEN hours ELSE 0 END), 0)`,
@@ -66,7 +82,9 @@ router.post("/time-entries", requireAuth, requireFirmUser, async (req: AuthReque
     createdBy: req.userId!,
   } satisfies typeof timeEntriesTable.$inferInsert;
 
-  const [row] = await db.insert(timeEntriesTable).values(insert).returning();
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const [row] = await r.insert(timeEntriesTable).values(insert).returning();
   res.status(201).json(row);
 });
 
@@ -94,16 +112,20 @@ router.put("/time-entries/:id", requireAuth, requireFirmUser, async (req: AuthRe
   }
   if (entryDate !== undefined) patch.entryDate = typeof entryDate === "string" ? entryDate : String(entryDate);
 
-  const [row] = await db.update(timeEntriesTable).set(patch).where(and(eq(timeEntriesTable.id, id), eq(timeEntriesTable.firmId, req.firmId!))).returning();
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const [row] = await r.update(timeEntriesTable).set(patch).where(and(eq(timeEntriesTable.id, id), eq(timeEntriesTable.firmId, req.firmId!))).returning();
   if (!row) { res.status(404).json({ error: "Not found" }); return; }
   res.json(row);
 });
 
 router.delete("/time-entries/:id", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid time entry ID" }); return; }
-  await db.delete(timeEntriesTable).where(and(eq(timeEntriesTable.id, id), eq(timeEntriesTable.firmId, req.firmId!)));
+  await r.delete(timeEntriesTable).where(and(eq(timeEntriesTable.id, id), eq(timeEntriesTable.firmId, req.firmId!)));
   res.json({ success: true });
 });
 

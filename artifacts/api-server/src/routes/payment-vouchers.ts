@@ -77,7 +77,16 @@ const router = expressRouter as unknown as RouterInternalLike;
 
 type DbConn = TrackingDbConn;
 type DbTxConn = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
-const rdb = (req: AuthRequest): DbConn => (req.rlsDb ?? db) as unknown as DbConn;
+const getRlsDb = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => {
+  const r = req.rlsDb;
+  if (!r) {
+    req.log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb in tenant route");
+    res.status(503).json({ error: "Tenant DB context unavailable" });
+    return null;
+  }
+  return r;
+};
+const getRlsDbTx = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => getRlsDb(req, res);
 
 function parsePageLimit(
   req: AuthRequest,
@@ -525,9 +534,10 @@ async function getRoleName(req: AuthRequest): Promise<string> {
   return String((req as { roleName?: unknown }).roleName ?? "").trim();
 }
 
-async function roleHasPermission(req: AuthRequest, module: string, action: string): Promise<boolean> {
+async function roleHasPermission(req: AuthRequest, res: Response, module: string, action: string): Promise<boolean> {
   if (!req.roleId) return false;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return false;
   const rows = await r
     .select({ id: permissionsTable.id })
     .from(permissionsTable)
@@ -742,8 +752,9 @@ async function buildQuotationUnclaimedWarnings(
   return warnings;
 }
 
-async function getAccountingSettings(req: AuthRequest): Promise<AccountingSettingsRecord> {
-  const r = rdb(req);
+async function getAccountingSettings(req: AuthRequest, res: Response): Promise<AccountingSettingsRecord | null> {
+  const r = getRlsDb(req, res);
+  if (!r) return null;
   try {
     const result = await safeLoadAccountingSettings({
       firmId: req.firmId!,
@@ -939,7 +950,8 @@ router.get("/payment-vouchers/create-options", requireAuth, requireFirmUser, req
   const caseIdRaw = one((req.query as any).caseId);
   const caseId = caseIdRaw ? Number(caseIdRaw) : NaN;
   const caseIdValue = Number.isFinite(caseId) && caseId > 0 ? Number(caseId) : null;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
 
   const [responsibleLawyers, approvingPartners] = await Promise.all([
     r
@@ -1038,7 +1050,8 @@ router.get("/payment-vouchers/create-options", requireAuth, requireFirmUser, req
 router.get("/payment-vouchers/my-approvals", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.payment_voucher"), async (req: AuthRequest, res: Response): Promise<void> => {
   const firmId = req.firmId!;
   const userId = req.userId!;
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
 
   try {
     const rows = await r
@@ -1108,7 +1121,8 @@ router.get("/payment-vouchers", requireAuth, requireFirmUser, requireUserFeature
     conds.push(eq(paymentVouchersTable.caseId, n));
   }
   if (status) conds.push(eq(paymentVouchersTable.status, status));
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   try {
     const withScopedTimeouts = async <T,>(fn: (conn: any) => Promise<T>): Promise<T> => {
       if (req.rlsDb) {
@@ -1240,7 +1254,8 @@ router.get("/payment-vouchers/:id(\\d+)", requireAuth, requireFirmUser, requireU
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid voucher ID" }); return; }
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const [pv] = await r.select().from(paymentVouchersTable).where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)));
   if (!pv) { res.status(404).json({ error: "Payment voucher not found" }); return; }
   const items = await r.select().from(paymentVoucherItemsTable).where(eq(paymentVoucherItemsTable.voucherId, id)).orderBy(paymentVoucherItemsTable.sortOrder);
@@ -1329,7 +1344,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   }
 
   emitPvCreateTiming(req, "payload_validated");
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const now = new Date();
   const normalizedClientRequestId =
     typeof parsed.data.clientRequestId === "string" && parsed.data.clientRequestId.trim()
@@ -1411,8 +1427,8 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   }
   const roleName = await getRoleName(req);
   const roleKind = classifyCaseWorkflowRole(roleName);
-  const canCreateAccountingRequest = await roleHasPermission(req, "accounting", "create");
-  const canCreateCaseScopedRequest = await roleHasPermission(req, "cases", "update");
+  const canCreateAccountingRequest = await roleHasPermission(req, res, "accounting", "create");
+  const canCreateCaseScopedRequest = await roleHasPermission(req, res, "cases", "update");
   if ((voucherType === "account_transfer" || voucherType === "internal_transfer" || voucherType === "file_to_file_transfer") && !canCreateAccountingRequest) {
     res.status(403).json({ error: "Forbidden", code: "FORBIDDEN" });
     return;
@@ -1685,9 +1701,11 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
       }
       throw err;
     }
+    const loadedRdb = getRlsDb(req, res);
+    if (!loadedRdb) return;
     const loaded = await safeLoadAccountingSettings({
       firmId: req.firmId!,
-      db: rdb(req) as any,
+      db: loadedRdb as any,
       accountingSettingsTable,
       sql,
       eq,
@@ -2218,10 +2236,11 @@ router.post("/payment-vouchers", sensitiveRateLimiter, requireAuth, requireFirmU
   }
 });
 
-router.post("/payment-vouchers/preflight", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/payment-vouchers/preflight", sensitiveRateLimiter, requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.payment_voucher"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const parsed = CreatePaymentVoucherBody.partial().safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const settings = await safeLoadAccountingSettingsOrDefault({
     firmId: req.firmId!,
     db: r as any,
@@ -2273,7 +2292,7 @@ router.post("/payment-vouchers/preflight", sensitiveRateLimiter, requireAuth, re
   });
 });
 
-router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, requireFirmUser, async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.payment_voucher"), async (req: AuthRequest, res: Response): Promise<void> => {
   const startedAt = Date.now();
   const raw = one(req.params.clientRequestId);
   const clientRequestId = typeof raw === "string" ? raw.trim() : "";
@@ -2281,13 +2300,14 @@ router.get("/payment-vouchers/by-client-request/:clientRequestId", requireAuth, 
     res.status(400).json({ error: "Invalid clientRequestId" });
     return;
   }
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   try {
     const stopPermissions = createSectionTimer(req, "pv.by_client_request.permissions");
     const [canReadAccounting, canReviewAccounting, canApproveAccounting, roleName] = await Promise.all([
-      roleHasPermission(req, "accounting", "read"),
-      roleHasPermission(req, "accounting", "review"),
-      roleHasPermission(req, "accounting", "approve"),
+      roleHasPermission(req, res, "accounting", "read"),
+      roleHasPermission(req, res, "accounting", "review"),
+      roleHasPermission(req, res, "accounting", "approve"),
       getRoleName(req),
     ]);
     const roleKind = classifyCaseWorkflowRole(roleName);
@@ -2409,7 +2429,8 @@ router.post("/payment-vouchers/discard-draft", requireAuth, requireFirmUser, req
     res.status(400).json({ error: "clientRequestId is required", code: "CLIENT_REQUEST_ID_REQUIRED" });
     return;
   }
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   try {
     const [existing] = await r
       .select({ id: paymentVouchersTable.id, status: paymentVouchersTable.status, clientRequestId: paymentVouchersTable.clientRequestId })
@@ -2458,14 +2479,15 @@ router.post("/payment-vouchers/discard-draft", requireAuth, requireFirmUser, req
 });
 
 // Status transition
-router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAuth, requireFirmUser, requireReAuth, async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.payment_voucher"), requireReAuth, async (req: AuthRequest, res: Response): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid voucher ID" }); return; }
   const parsed = PaymentVoucherTransitionBody.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
 
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const [pv] = await r.select().from(paymentVouchersTable).where(and(eq(paymentVouchersTable.id, id), eq(paymentVouchersTable.firmId, req.firmId!)));
   if (!pv) { res.status(404).json({ error: "Voucher not found" }); return; }
   if (pv.isReversed) { res.status(400).json({ error: "Reversed voucher cannot be transitioned" }); return; }
@@ -2486,11 +2508,11 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
     return;
   }
   const roleKind = await classifyCaseWorkflowRoleWithSettings(req, roleName, settings);
-  const canReview = await roleHasPermission(req, "accounting", "review");
-  const canApprove = await roleHasPermission(req, "accounting", "approve");
-  const canMarkReceived = await roleHasPermission(req, "accounting", "mark_received");
-  const canMarkPaid = await roleHasPermission(req, "accounting", "mark_paid");
-  const canOverrideSla = await roleHasPermission(req, "accounting", "override_sla");
+  const canReview = await roleHasPermission(req, res, "accounting", "review");
+  const canApprove = await roleHasPermission(req, res, "accounting", "approve");
+  const canMarkReceived = await roleHasPermission(req, res, "accounting", "mark_received");
+  const canMarkPaid = await roleHasPermission(req, res, "accounting", "mark_paid");
+  const canOverrideSla = await roleHasPermission(req, res, "accounting", "override_sla");
 
   const updateFields: Partial<typeof paymentVouchersTable.$inferInsert> = { updatedAt: now };
   const fromStatus = pv.status;
@@ -3213,11 +3235,12 @@ router.post("/payment-vouchers/:id/transition", sensitiveRateLimiter, requireAut
 });
 
 // History timeline (audit logs + transitions merged)
-router.get("/payment-vouchers/:id(\\d+)/history", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/payment-vouchers/:id(\\d+)/history", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.payment_voucher"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const idStr = one(req.params.id);
   const id = idStr ? parseInt(idStr) : NaN;
   if (isNaN(id)) { res.status(400).json({ error: "Invalid voucher ID" }); return; }
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const [pv] = await r
     .select({ id: paymentVouchersTable.id, voucherNo: paymentVouchersTable.voucherNo, caseId: paymentVouchersTable.caseId })
     .from(paymentVouchersTable)
@@ -3274,7 +3297,8 @@ router.get("/ledger", requireAuth, requireFirmUser, requirePermission("accountin
     if (normalized === "client") conds.push(sql`${ledgerEntriesTable.accountType} IN ('client','trust')`);
     else conds.push(eq(ledgerEntriesTable.accountType, normalized));
   }
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const conn = req.rlsClient;
   const cond = and(...conds);
   const category: StatementTimeoutCategory = "search";
@@ -3293,10 +3317,33 @@ router.get("/ledger", requireAuth, requireFirmUser, requirePermission("accountin
       : r.select().from(ledgerEntriesTable).where(cond).orderBy(ledgerEntriesTable.entryDate, ledgerEntriesTable.createdAt).limit(limit).offset(offset);
     const [[{ value: totalRaw }], rows] = await Promise.all([totalPromise, listPromise]);
     const totalCount = typeof totalRaw === "number" ? totalRaw : Number(totalRaw ?? 0);
+    const caseIds: number[] = [];
+    for (const row of rows as any[]) {
+      const cid = Number((row as any).caseId ?? null);
+      if (Number.isFinite(cid) && cid > 0) caseIds.push(cid);
+    }
+    const caseRefById = new Map<number, string>();
+    if (caseIds.length > 0) {
+      const distinctCaseIds = Array.from(new Set(caseIds));
+      const caseRefRows = await (r as any)
+        .select({ id: casesTable.id, referenceNo: casesTable.referenceNo })
+        .from(casesTable)
+        .where(and(eq(casesTable.firmId, req.firmId!), inArray(casesTable.id, distinctCaseIds)));
+      for (const cr of caseRefRows as any[]) {
+        if (cr && typeof cr.id === "number" && typeof cr.referenceNo === "string") {
+          caseRefById.set(Number(cr.id), String(cr.referenceNo));
+        }
+      }
+    }
+    const enriched = (rows as any[]).map((row) => {
+      const cid = Number((row as any).caseId ?? null);
+      const caseReferenceNo = Number.isFinite(cid) && cid > 0 ? (caseRefById.get(cid) ?? null) : null;
+      return { ...row, caseReferenceNo };
+    });
     res.setHeader("X-Total-Count", String(totalCount));
     res.setHeader("X-Page", String(page));
     res.setHeader("X-Limit", String(limit));
-    res.json(rows);
+    res.json(enriched);
   } catch (err) {
     req.log?.error?.({ err, route: req.originalUrl, firmId: req.firmId, userId: req.userId }, "ledger.list_failed");
     if (err instanceof Error && (err as any).code === "STATEMENT_TIMEOUT") {
@@ -3316,7 +3363,8 @@ router.get("/ledger/summary", requireAuth, requireFirmUser, requirePermission("a
     conds.push(eq(ledgerEntriesTable.caseId, n));
   }
   const cond = and(...conds);
-  const r = rdb(req);
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const conn = req.rlsClient;
   const category: StatementTimeoutCategory = "aggregate";
   try {

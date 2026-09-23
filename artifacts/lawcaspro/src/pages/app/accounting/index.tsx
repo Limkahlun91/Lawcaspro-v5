@@ -752,6 +752,7 @@ function InvoicesTab() {
                   )}
                 </th>
                 <th className="px-4 py-3 text-left font-medium">Invoice No</th>
+                <th className="px-4 py-3 text-left font-medium">Case Reference</th>
                 <th className="px-4 py-3 text-left font-medium">Issued</th>
                 <th className="px-4 py-3 text-left font-medium">Due</th>
                 <th className="px-4 py-3 text-left font-medium">Status</th>
@@ -774,6 +775,15 @@ function InvoicesTab() {
                     )}
                   </td>
                   <td className="px-4 py-3 font-medium text-slate-900">{inv.invoiceNo}</td>
+                  <td className="px-4 py-3">
+                    {Number.isFinite(inv.caseId) && (inv.caseReferenceNo || inv.referenceNo) ? (
+                      <Link href={`/app/cases/${inv.caseId}`} className="text-indigo-600 hover:text-indigo-800 font-medium">
+                        {inv.caseReferenceNo || inv.referenceNo}
+                      </Link>
+                    ) : (
+                      <span className="italic text-slate-500">Unlinked</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-slate-500">{inv.issuedDate ?? "—"}</td>
                   <td className="px-4 py-3 text-slate-500">{inv.dueDate ?? "—"}</td>
                   <td className="px-4 py-3"><StatusBadge status={inv.status} /></td>
@@ -965,8 +975,9 @@ function ReceiptsTab() {
                 <th className="px-4 py-3 text-left font-medium">Date</th>
                 <th className="px-4 py-3 text-left font-medium">Method</th>
                 <th className="px-4 py-3 text-left font-medium">Account</th>
+                <th className="px-4 py-3 text-left font-medium">Case Reference</th>
                 <th className="px-4 py-3 text-right font-medium">Amount</th>
-                <th className="px-4 py-3 text-left font-medium">Reference</th>
+                <th className="px-4 py-3 text-left font-medium">Bank / Cheque Ref</th>
                 <th className="px-4 py-3 text-left font-medium">Status</th>
                 <th className="px-4 py-3" />
               </tr>
@@ -981,6 +992,15 @@ function ReceiptsTab() {
                     <span className="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-600">
                       {String(r.accountType ?? "") === "balance_sheet" ? "Balance Sheet / FD" : (String(r.accountType ?? "") === "trust" ? "Client Account" : `${String(r.accountType ?? "").replace(/\b\w/g, (c: string) => c.toUpperCase())} Account`)}
                     </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    {Number.isFinite(r.caseId) && r.caseReferenceNo ? (
+                      <Link href={`/app/cases/${r.caseId}`} className="text-indigo-600 hover:text-indigo-800 font-medium">
+                        {r.caseReferenceNo}
+                      </Link>
+                    ) : (
+                      <span className="italic text-slate-500">Unlinked</span>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right font-semibold text-green-600">{fmt(r.amount)}</td>
                   <td className="px-4 py-3 text-slate-400 text-xs">{r.referenceNo || "—"}</td>
@@ -1053,8 +1073,9 @@ function QuotationsTab() {
           <table className="w-full text-sm min-w-[900px]">
             <thead>
               <tr className="bg-slate-50 border-b text-slate-500 text-xs uppercase tracking-wide">
-                <th className="px-4 py-3 text-left font-medium">File Ref</th>
+                <th className="px-4 py-3 text-left font-medium">Quotation Ref</th>
                 <th className="px-4 py-3 text-left font-medium">Client Name</th>
+                <th className="px-4 py-3 text-left font-medium">Case Reference</th>
                 <th className="px-4 py-3 text-left font-medium">Date</th>
                 <th className="px-4 py-3 text-right font-medium">Amount</th>
                 <th className="px-4 py-3 text-left font-medium">Status</th>
@@ -1066,6 +1087,15 @@ function QuotationsTab() {
                 <tr key={q.id} className="hover:bg-slate-50 transition-colors cursor-pointer" onClick={() => setLocation(`/app/quotations/${q.id}`)}>
                   <td className="px-4 py-3 font-medium text-slate-900">{q.referenceNo}</td>
                   <td className="px-4 py-3 text-slate-700">{q.clientName}</td>
+                  <td className="px-4 py-3">
+                    {Number.isFinite(q.caseId) && q.caseReferenceNo ? (
+                      <Link href={`/app/cases/${q.caseId}`} onClick={(e) => e.stopPropagation()} className="text-indigo-600 hover:text-indigo-800 font-medium">
+                        {q.caseReferenceNo}
+                      </Link>
+                    ) : (
+                      <span className="italic text-slate-500">Unlinked</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3 text-slate-500">
                     {q.createdAt ? new Date(String(q.createdAt)).toLocaleDateString("en-MY") : "—"}
                   </td>
@@ -2347,6 +2377,7 @@ export function PaymentVouchersTab() {
                 <th className="px-4 py-3 text-left font-medium">Type</th>
                 <th className="px-4 py-3 text-left font-medium">Payee</th>
                 <th className="px-4 py-3 text-left font-medium">Purpose</th>
+                <th className="px-4 py-3 text-left font-medium">Case Reference</th>
                 <th className="px-4 py-3 text-left font-medium">Approval</th>
                 <th className="px-4 py-3 text-left font-medium">Accounts Processing</th>
                 <th className="px-4 py-3 text-left font-medium">Status</th>
@@ -2459,6 +2490,15 @@ export function PaymentVouchersTab() {
                     <td className="px-4 py-3 text-slate-700 capitalize">{String(pv.voucherType ?? "external_payment").replace(/_/g, " ")}</td>
                     <td className="px-4 py-3 text-slate-700">{pv.payeeName}</td>
                     <td className="px-4 py-3 text-slate-500 max-w-xs truncate">{pv.purpose}</td>
+                    <td className="px-4 py-3">
+                      {Number.isFinite(pv.caseId) && pv.caseReferenceNo ? (
+                        <Link href={`/app/cases/${pv.caseId}`} className="text-indigo-600 hover:text-indigo-800 font-medium">
+                          {pv.caseReferenceNo}
+                        </Link>
+                      ) : (
+                        <span className="italic text-slate-500">Unlinked</span>
+                      )}
+                    </td>
                     <td className="px-4 py-3"><ApprovalBadge status={String(pv.approvalStatus ?? "approved")} /></td>
                     <td className="px-4 py-3">
                       <div className="space-y-1 text-xs text-slate-600">

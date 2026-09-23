@@ -1,12 +1,13 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { and, desc, eq, sql } from "drizzle-orm";
-import { caseAssignmentsTable, casePurchasersTable, casesTable, clientsTable, db, developersTable, invoicesTable, paymentVouchersTable, projectsTable, quotationsTable, receiptsTable, rolesTable, usersTable } from "@workspace/db";
+import { caseAssignmentsTable, casePurchasersTable, casesTable, clientsTable, db, developersTable, invoicesTable, paymentVouchersTable, projectsTable, quotationsTable, receiptsTable, rolesTable, usersTable, type AppDb, type RlsDb } from "@workspace/db";
 import multer from "multer";
 import { PDFParse } from "pdf-parse";
 import OpenAI from "openai";
 import * as XLSX from "xlsx";
 import { z } from "zod";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog, hasCasesFirmwideScope } from "../lib/auth.js";
+import { requireUserFeatureAccess, resolveRequestFirmRoleName } from "../services/user-feature-access.js";
 import { computeInvoiceMetrics } from "../services/invoice-metrics.js";
 
 type SqlChunk = ReturnType<typeof sql>;
@@ -20,6 +21,18 @@ type RouterInternalLike = {
 
 const expressRouter = express.Router();
 const router = expressRouter as unknown as RouterInternalLike;
+
+type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
+const getRlsDb = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => {
+  const r = req.rlsDb;
+  if (!r) {
+    req.log?.error?.({ route: req.originalUrl, userId: req.userId, firmId: req.firmId }, "missing req.rlsDb in tenant route");
+    res.status(503).json({ error: "Tenant DB context unavailable" });
+    return null;
+  }
+  return r;
+};
+const getRlsDbTx = (req: AuthRequest, res: Response): NonNullable<AuthRequest["rlsDb"]> | null => getRlsDb(req, res);
 
 function safeFilenameAscii(filename: string): string {
   const clean = String(filename || "export").replace(/[^a-zA-Z0-9._-]+/g, "_");
@@ -40,15 +53,9 @@ const upload = multer({
   },
 });
 
-async function queryRows(query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
-  const result = await db.execute(query);
-  if (Array.isArray(result)) return result as Record<string, unknown>[];
-  if ("rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
-  return [];
-}
-
-async function queryRowsFromReq(req: AuthRequest, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
-  const executor = (req.rlsDb ?? db) as unknown as { execute: (q: ReturnType<typeof sql>) => Promise<unknown> };
+async function queryRowsFromReq(req: AuthRequest, res: Response, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[] | null> {
+  const executor = getRlsDb(req, res);
+  if (!executor) return null;
   const result = await executor.execute(query);
   if (Array.isArray(result)) return result as Record<string, unknown>[];
   if (result && typeof result === "object" && "rows" in result) return (result as { rows: Record<string, unknown>[] }).rows;
@@ -153,8 +160,8 @@ function parseIdInt(v: unknown): number | null {
 
 const CATEGORIES = ["legal_fee", "disbursement", "stamp_duty", "professional_fee", "other"] as const;
 
-router.get("/accounting", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const rows = await queryRows(sql`
+router.get("/accounting", requireAuth, requireFirmUser, requireUserFeatureAccess("module.accounting"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const rows = await queryRowsFromReq(req, res, sql`
     SELECT be.id, be.case_id, be.description, be.amount, be.quantity,
       be.is_paid as "isPaid", be.created_at as "billedAt",
       c.reference_no as "caseReferenceNo"
@@ -167,14 +174,15 @@ router.get("/accounting", requireAuth, requireFirmUser, requirePermission("accou
   res.json(rows);
 });
 
-router.get("/accounting/cases/:caseId/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/accounting/cases/:caseId/summary", requireAuth, requireFirmUser, requireUserFeatureAccess("module.accounting"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   if (!Number.isFinite(caseId) || caseId <= 0) {
     res.status(400).json({ error: "Invalid caseId" });
     return;
   }
 
-  const r = (req.rlsDb ?? db) as unknown as Pick<typeof db, "select">;
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const firmId = req.firmId!;
   const [row] = await r
     .select({
@@ -296,9 +304,9 @@ router.get("/accounting/cases/:caseId/summary", requireAuth, requireFirmUser, re
   });
 });
 
-router.get("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/cases/:caseId/billing", requireAuth, requireFirmUser, requireUserFeatureAccess("module.accounting"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFromReq(req, res, sql`
     SELECT be.*, u.name as created_by_name
     FROM case_billing_entries be
     LEFT JOIN users u ON be.created_by = u.id
@@ -308,7 +316,7 @@ router.get("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermis
   res.json(rows);
 });
 
-router.post("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/cases/:caseId/billing", requireAuth, requireFirmUser, requireUserFeatureAccess("module.accounting"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const { category, description, amount, quantity, isPaid } = req.body as {
     category: string;
@@ -323,7 +331,7 @@ router.post("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermi
     return;
   }
 
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFromReq(req, res, sql`
     INSERT INTO case_billing_entries (case_id, firm_id, category, description, amount, quantity, is_paid, created_by)
     VALUES (${caseId}, ${req.firmId!}, ${category ?? "disbursement"}, ${description}, ${amount}, ${quantity ?? 1}, ${isPaid ?? false}, ${req.userId!})
     RETURNING *
@@ -337,7 +345,7 @@ router.post("/cases/:caseId/billing", requireAuth, requireFirmUser, requirePermi
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.billing.create", entityType: "case_billing_entry", entityId: createdId, detail: `caseId=${caseId} amount=${amount}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
-router.patch("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.patch("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, requireUserFeatureAccess("module.accounting"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const entryId = Number(req.params.entryId);
   const { category, description, amount, quantity, isPaid } = req.body as Partial<{
@@ -367,7 +375,7 @@ router.patch("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, re
 
   const setClause = sql.join(parts, sql`, `);
 
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFromReq(req, res, sql`
     UPDATE case_billing_entries SET ${setClause}
     WHERE id = ${entryId} AND case_id = ${caseId} AND firm_id = ${req.firmId!}
     RETURNING *
@@ -382,11 +390,11 @@ router.patch("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, re
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.billing.update", entityType: "case_billing_entry", entityId: entryId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
-router.delete("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.delete("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, requireUserFeatureAccess("module.accounting"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
   const entryId = Number(req.params.entryId);
 
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFromReq(req, res, sql`
     DELETE FROM case_billing_entries
     WHERE id = ${entryId} AND case_id = ${caseId} AND firm_id = ${req.firmId!}
     RETURNING *
@@ -401,9 +409,9 @@ router.delete("/cases/:caseId/billing/:entryId", requireAuth, requireFirmUser, r
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.billing.delete", entityType: "case_billing_entry", entityId: entryId, detail: `caseId=${caseId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
-router.get("/cases/:caseId/billing/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/cases/:caseId/billing/summary", requireAuth, requireFirmUser, requireUserFeatureAccess("module.accounting"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const caseId = Number(req.params.caseId);
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFromReq(req, res, sql`
     SELECT 
       category,
       COUNT(*) as entry_count,
@@ -416,7 +424,7 @@ router.get("/cases/:caseId/billing/summary", requireAuth, requireFirmUser, requi
     ORDER BY category
   `);
 
-  const overall = await queryRows(sql`
+  const overall = await queryRowsFromReq(req, res, sql`
     SELECT 
       COUNT(*) as entry_count,
       SUM(amount * quantity) as total,
@@ -429,14 +437,15 @@ router.get("/cases/:caseId/billing/summary", requireAuth, requireFirmUser, requi
   res.json({ byCategory: rows, overall: overall[0] ?? { total: 0, paid: 0, outstanding: 0 } });
 });
 
-router.get("/accounting/invoice-metrics", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const r = (req.rlsDb ?? db) as unknown as typeof db;
+router.get("/accounting/invoice-metrics", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.invoice"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const r = getRlsDb(req, res);
+  if (!r) return;
   const metrics = await computeInvoiceMetrics(r as any, { firmId: req.firmId! });
   res.json(metrics);
 });
 
-router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const topCases = await queryRows(sql`
+router.get("/accounting/summary", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.dashboard"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const topCases = await queryRowsFromReq(req, res, sql`
     SELECT c.reference_no, c.id as case_id,
       SUM(be.amount * be.quantity) as total,
       SUM(CASE WHEN be.is_paid THEN be.amount * be.quantity ELSE 0 END) as paid,
@@ -450,7 +459,7 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
     LIMIT 10
   `);
 
-  const monthly = await queryRows(sql`
+  const monthly = await queryRowsFromReq(req, res, sql`
     SELECT 
       TO_CHAR(created_at, 'YYYY-MM') as month,
       SUM(amount * quantity) as total,
@@ -462,7 +471,7 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
     LIMIT 12
   `);
 
-  const totals = await queryRows(sql`
+  const totals = await queryRowsFromReq(req, res, sql`
     SELECT 
       SUM(amount * quantity) as total,
       SUM(CASE WHEN is_paid THEN amount * quantity ELSE 0 END) as paid,
@@ -472,7 +481,7 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
     WHERE firm_id = ${req.firmId!}
   `);
 
-  const byCategory = await queryRows(sql`
+  const byCategory = await queryRowsFromReq(req, res, sql`
     SELECT category, SUM(amount * quantity) as total
     FROM case_billing_entries
     WHERE firm_id = ${req.firmId!}
@@ -488,10 +497,10 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
   });
 });
 
-router.get("/accounting/dashboard/counters", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/accounting/dashboard/counters", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.dashboard"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const firmId = req.firmId!;
   try {
-    const rows = await queryRowsFromReq(req, sql`
+    const rows = await queryRowsFromReq(req, res, sql`
       SELECT
         COUNT(*)::bigint AS total,
         COUNT(*) FILTER (WHERE approval_status = 'pending_approval')::bigint AS waiting_approval,
@@ -566,8 +575,8 @@ router.get("/accounting/dashboard/counters", requireAuth, requireFirmUser, requi
   }
 });
 
-router.get("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const rows = await queryRows(sql`
+router.get("/accounting/bank-accounts", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.bank_account"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+  const rows = await queryRowsFromReq(req, res, sql`
     SELECT
       id,
       bank_name,
@@ -587,7 +596,7 @@ router.get("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePer
   res.json({ data: rows });
 });
 
-router.post("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/accounting/bank-accounts", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.bank_account"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
   const bankName = typeof body.bankName === "string" ? body.bankName.trim() : "";
   const accountName = typeof body.accountName === "string" ? body.accountName.trim() : "";
@@ -601,7 +610,7 @@ router.post("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePe
   if (!bankName || !accountNo) { res.status(422).json({ error: "bankName and accountNo are required" }); return; }
   if (openingBalanceDate === null) { res.status(422).json({ error: "openingBalanceDate is required (YYYY-MM-DD)" }); return; }
 
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFromReq(req, res, sql`
     INSERT INTO firm_bank_accounts
       (firm_id, bank_name, account_name, account_no, account_type, gl_code, opening_balance, opening_balance_date, is_default, created_at, updated_at)
     VALUES
@@ -613,7 +622,7 @@ router.post("/accounting/bank-accounts", requireAuth, requireFirmUser, requirePe
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.bank_accounts.create", entityType: "firm_bank_account", detail: `bank=${bankName} accountNo=${accountNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
-router.patch("/accounting/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.patch("/accounting/bank-accounts/:id", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.bank_account"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = parseIdInt((req.params as any).id);
   if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
   const body = (req.body && typeof req.body === "object") ? (req.body as Record<string, unknown>) : {};
@@ -658,7 +667,7 @@ router.patch("/accounting/bank-accounts/:id", requireAuth, requireFirmUser, requ
   if (patch.length === 0) { res.status(400).json({ error: "No changes" }); return; }
   patch.push(sql`updated_at = now()`);
 
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFromReq(req, res, sql`
     UPDATE firm_bank_accounts
     SET ${sql.join(patch, sql`, `)}
     WHERE firm_id = ${req.firmId!} AND id = ${id}
@@ -670,10 +679,10 @@ router.patch("/accounting/bank-accounts/:id", requireAuth, requireFirmUser, requ
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.bank_accounts.update", entityType: "firm_bank_account", detail: `id=${id}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
 });
 
-router.delete("/accounting/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.delete("/accounting/bank-accounts/:id", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.bank_account"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = parseIdInt((req.params as any).id);
   if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFromReq(req, res, sql`
     DELETE FROM firm_bank_accounts
     WHERE firm_id = ${req.firmId!} AND id = ${id}
     RETURNING id
@@ -687,6 +696,7 @@ router.post(
   "/accounting/bank-statements/parse",
   requireAuth,
   requireFirmUser,
+  requireUserFeatureAccess("accounting.bank_reconciliation"),
   requirePermission("accounting", "write"),
   upload.single("file"),
   async (req: AuthRequest, res: Response): Promise<void> => {
@@ -697,7 +707,7 @@ router.post(
     }
     const bankAccountId = parseIdInt((req.body as any)?.bankAccountId);
     if (!bankAccountId) { res.status(422).json({ error: "bankAccountId is required" }); return; }
-    const acct = await queryRows(sql`SELECT id FROM firm_bank_accounts WHERE firm_id = ${req.firmId!} AND id = ${bankAccountId} LIMIT 1`);
+    const acct = await queryRowsFromReq(req, res, sql`SELECT id FROM firm_bank_accounts WHERE firm_id = ${req.firmId!} AND id = ${bankAccountId} LIMIT 1`);
     if (!acct[0]) { res.status(404).json({ error: "Bank account not found" }); return; }
 
     let rawText = "";
@@ -789,7 +799,7 @@ router.post(
 
     let inserted = 0;
     try {
-      const rows = await queryRows(sql`
+      const rows = await queryRowsFromReq(req, res, sql`
         INSERT INTO bank_transactions (firm_id, bank_account_id, transaction_date, description, reference_no, withdrawal, deposit, balance, is_exported)
         VALUES ${sql.join(values, sql`, `)}
         RETURNING id
@@ -814,14 +824,14 @@ router.post(
   }
 );
 
-router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.bank_transaction"), requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
   const firmId = req.firmId!;
   const bankAccountId = parseIdInt((req.query as any)?.bankAccountId);
   if (!bankAccountId) { res.status(422).json({ error: "bankAccountId is required" }); return; }
-  const acct = await queryRows(sql`SELECT id FROM firm_bank_accounts WHERE firm_id = ${firmId} AND id = ${bankAccountId} LIMIT 1`);
+  const acct = await queryRowsFromReq(req, res, sql`SELECT id FROM firm_bank_accounts WHERE firm_id = ${firmId} AND id = ${bankAccountId} LIMIT 1`);
   if (!acct[0]) { res.status(404).json({ error: "Bank account not found" }); return; }
 
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFromReq(req, res, sql`
     SELECT
       id,
       bank_account_id,
@@ -850,7 +860,7 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
   ));
 
   const caseInfoRows = boundCaseIds.length
-    ? await queryRows(sql`
+    ? await queryRowsFromReq(req, res, sql`
         SELECT
           c.id,
           c.reference_no,
@@ -879,7 +889,7 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
   let outstandingMap = new Map<number, number>();
 
   if (hasCandidates) {
-    const candidateRows = await queryRows(sql`
+    const candidateRows = await queryRowsFromReq(req, res, sql`
       SELECT
         c.id,
         c.reference_no,
@@ -906,7 +916,7 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
 
     const candidateIds = candidates.map((c) => c.case_id);
     if (candidateIds.length) {
-      const outstandingRows = await queryRows(sql`
+      const outstandingRows = await queryRowsFromReq(req, res, sql`
         SELECT
           case_id,
           SUM(CASE WHEN status = 'void' THEN 0 ELSE amount_due END) as outstanding
@@ -934,6 +944,14 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
     const descLower = String(r.description ?? "").toLowerCase();
 
     const boundCase = caseId ? (caseInfoMap.get(caseId) ?? { case_id: caseId, title: `Case #${caseId}` }) : null;
+    const boundCaseRefNo: string | null = (() => {
+      if (!caseId) return null;
+      for (const cr of caseInfoRows as any[]) {
+        const id = parseIdInt(cr.id);
+        if (id === caseId) return String((cr as any).reference_no ?? "") || null;
+      }
+      return null;
+    })();
     let recommendedCase: { case_id: number; title: string; match_reason: string } | null = null;
 
     if (!caseId && deposit > 0 && candidates.length) {
@@ -971,6 +989,8 @@ router.get("/accounting/bank-transactions", requireAuth, requireFirmUser, requir
     return {
       ...r,
       case: boundCase,
+      caseId: caseId ?? null,
+      referenceNo: boundCaseRefNo,
       recommended_case: recommendedCase,
     };
   });
@@ -983,23 +1003,16 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
   const firmId = req.firmId!;
   const roleId = req.roleId;
   const userId = req.userId!;
-  const r = (req.rlsDb ?? db) as any;
-  let roleName: string | null = null;
-  if (roleId) {
-    const cached = (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined;
-    if (cached && cached.firmId === firmId && cached.roleId === roleId) {
-      roleName = cached.name;
-    } else {
-      const [role] = await r
-        .select({ name: rolesTable.name })
-        .from(rolesTable)
-        .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)))
-        .limit(1);
-      roleName = role?.name ?? null;
-      if (roleName) {
-        (req as any)._roleCache = { firmId, roleId, name: roleName };
-      }
-    }
+  const r = getRlsDb(req, res);
+  if (!r) return;
+  const roleCtx = {
+    firmId,
+    roleId: roleId ?? null,
+    _roleCache: (req as any)._roleCache as { firmId: number; roleId: number; name: string } | undefined,
+  };
+  const roleName = await resolveRequestFirmRoleName(roleCtx, r as AppDb | RlsDb);
+  if ((req as any)._roleCache !== roleCtx._roleCache) {
+    (req as any)._roleCache = roleCtx._roleCache;
   }
   const hasFirmwideScope = await hasCasesFirmwideScope(r, firmId, roleId ?? undefined, roleName);
   const q = typeof (req.query as any)?.query === "string" ? String((req.query as any).query).trim() : "";
@@ -1029,7 +1042,7 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
   const caseAssignScope = hasFirmwideScope
     ? sql``
     : sql`AND EXISTS (SELECT 1 FROM case_assignments ca WHERE ca.case_id = c.id AND ca.user_id = ${userId} AND ca.unassigned_at IS NULL)`;
-  const rows = await queryRowsFromReq(req, sql`
+  const rows = await queryRowsFromReq(req, res, sql`
     SELECT
       c.id,
       c.reference_no,
@@ -1172,9 +1185,9 @@ export async function handleAccountingCaseSearch(req: AuthRequest, res: Response
   });
 }
 
-router.get("/accounting/cases/search", requireAuth, requireFirmUser, requirePermission("accounting", "read"), handleAccountingCaseSearch);
+router.get("/accounting/cases/search", requireAuth, requireFirmUser, requireUserFeatureAccess("module.accounting"), requirePermission("accounting", "read"), handleAccountingCaseSearch);
 
-router.post("/accounting/bank-transactions/:id/bind-case", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/accounting/bank-transactions/:id/bind-case", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.bank_transaction"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const firmId = req.firmId!;
   const id = String(req.params.id ?? "").trim();
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) { res.status(400).json({ error: "Invalid id" }); return; }
@@ -1190,7 +1203,9 @@ router.post("/accounting/bank-transactions/:id/bind-case", requireAuth, requireF
   };
 
   try {
-    const result = await db.transaction(async (tx) => {
+    const txDb = getRlsDbTx(req, res);
+    if (!txDb) return;
+    const result = await (txDb as any).transaction(async (tx: any) => {
       const txRows = await queryRowsFrom(tx as any, sql`
         SELECT id, bank_account_id, case_id, transaction_date, description, deposit
         FROM bank_transactions
@@ -1259,7 +1274,7 @@ router.post("/accounting/bank-transactions/:id/bind-case", requireAuth, requireF
   }
 });
 
-router.patch("/accounting/bank-transactions/:id", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.patch("/accounting/bank-transactions/:id", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.bank_transaction"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   const id = String(req.params.id ?? "").trim();
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
@@ -1295,7 +1310,7 @@ router.patch("/accounting/bank-transactions/:id", requireAuth, requireFirmUser, 
   parts.push(sql`updated_at = NOW()`);
   const setClause = sql.join(parts, sql`, `);
 
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFromReq(req, res, sql`
     UPDATE bank_transactions
     SET ${setClause}
     WHERE id = ${id}::uuid AND firm_id = ${req.firmId!}
@@ -1320,7 +1335,7 @@ router.patch("/accounting/bank-transactions/:id", requireAuth, requireFirmUser, 
 async function exportBankTransactionsXlsx(req: AuthRequest, res: Response): Promise<void> {
   const bankAccountId = parseIdInt((req.query as any)?.bankAccountId);
   if (!bankAccountId) { res.status(422).json({ error: "bankAccountId is required" }); return; }
-  const acctRows = await queryRows(sql`
+  const acctRows = await queryRowsFromReq(req, res, sql`
     SELECT id, account_name, bank_name, gl_code
     FROM firm_bank_accounts
     WHERE firm_id = ${req.firmId!} AND id = ${bankAccountId}
@@ -1330,7 +1345,7 @@ async function exportBankTransactionsXlsx(req: AuthRequest, res: Response): Prom
   if (!acct) { res.status(404).json({ error: "Bank account not found" }); return; }
   const bankAccountName = String((acct as any).account_name ?? (acct as any).bank_name ?? "");
   const glCode = (acct as any).gl_code ? String((acct as any).gl_code) : "";
-  const rows = await queryRows(sql`
+  const rows = await queryRowsFromReq(req, res, sql`
     SELECT
       id,
       transaction_date,
@@ -1376,7 +1391,7 @@ async function exportBankTransactionsXlsx(req: AuthRequest, res: Response): Prom
 
   if (rows.length > 0) {
     const ids = rows.map((x: any) => String(x.id)).filter(Boolean);
-    await queryRows(sql`
+    await queryRowsFromReq(req, res, sql`
       UPDATE bank_transactions
       SET is_exported = true, exported_at = COALESCE(exported_at, NOW()), updated_at = NOW()
       WHERE firm_id = ${req.firmId!}
@@ -1401,7 +1416,7 @@ async function exportBankTransactionsXlsx(req: AuthRequest, res: Response): Prom
   res.send(buf);
 }
 
-router.get("/accounting/bank-transactions/export", requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.get("/accounting/bank-transactions/export", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.bank_transaction"), requirePermission("accounting", "write"), async (req: AuthRequest, res: Response): Promise<void> => {
   await exportBankTransactionsXlsx(req, res);
 });
 
