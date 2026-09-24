@@ -260,23 +260,9 @@ export async function resolveUserFeatureAccessBulk(params: {
   // STEP 3 — Explicit user rows.
   const userRows = await loadUserRowsBulk(r, firmId, userId, uniqKeys);
 
-  // Parent ON/OFF propagation
-  const parentFirmEnabled = (k: string): boolean => {
-    let cur: string | null = k;
-    // Walk up chain including k itself — ensure no parent is OFF at firm level
-    const seen = new Set<string>();
-    while (cur && !seen.has(cur)) {
-      seen.add(cur);
-      const e = entitlements[cur];
-      if (!e?.enabled) return false;
-      cur = parentKeyOf(cur);
-    }
-    return true;
-  };
-
   for (const k of uniqKeys) {
     const ent = entitlements[k];
-    const firmEnabled = Boolean(ent?.enabled) && parentFirmEnabled(k);
+    const firmEnabled = Boolean(ent?.enabled);
     const parentKey = parentKeyOf(k);
     if (!firmEnabled) {
       results[k] = {
@@ -286,8 +272,11 @@ export async function resolveUserFeatureAccessBulk(params: {
         effectiveEnabled: false,
         source: "firm_entitlement_denied",
         denialCode:
-          ent && parentKey && !parentFirmEnabled(parentKey) ? "PARENT_OFF" : "FIRM_ENTITLEMENT_OFF",
-        denialReason: ent?.denialReason ?? `Firm entitlement OFF: ${k}`,
+          ent?.denied === "parent_disabled"
+            ? "PARENT_OFF"
+            : "FIRM_ENTITLEMENT_OFF",
+        denialReason:
+          ent?.denialReason ?? `Firm entitlement OFF: ${k}`,
         parentKey,
       };
       continue;
