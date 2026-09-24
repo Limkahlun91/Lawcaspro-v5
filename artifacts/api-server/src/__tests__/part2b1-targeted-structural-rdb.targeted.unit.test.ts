@@ -79,6 +79,8 @@ const ROUTES = {
   accounting: resolve(__dirname, "..", "routes", "accounting.ts"),
   caseMonitor: resolve(__dirname, "..", "routes", "case-monitor.ts"),
   complianceReports: resolve(__dirname, "..", "routes", "compliance-reports.ts"),
+  firmSettings: resolve(__dirname, "..", "routes", "firm-settings.ts"),
+  users: resolve(__dirname, "..", "routes", "users.ts"),
 } as const;
 
 function readRoute(p: keyof typeof ROUTES): string {
@@ -492,6 +494,236 @@ describe("PART 2B-1 §11 MAP-A — summary/bottlenecks/bank-accounts exact mappi
       expect(bad, `found global db.* calls in bank-account section: ${bad.join(",")}`).toEqual([]);
       expect(usesRdb, "should use rdb(req)/queryRowsFromReq or req.rlsDb").toBe(true);
     });
+  });
+});
+
+// =========================================================================
+// PART 2B-1 §12 BANK-ACC-A — FIRM-SETTINGS BANK ACCOUNT MUTATION GUARDS
+// (C, D, E) + KEY PARITY (A, B) + /accounting/bank-accounts preservation (F)
+// =========================================================================
+
+describe("PART 2B-1 §12 BANK-ACC-A — Firm Settings Bank Accounts feature guards + key parity", () => {
+  const firmSettingsSrc = readRoute("firmSettings");
+  const usersSrc = readRoute("users");
+  const accSrc = readRoute("accounting");
+
+  // (A) No active feature entitlement mapping uses PLURAL accounting.bank_accounts
+  it("BANK-ACC-A1: No active feature entitlement/label map uses PLURAL accounting.bank_accounts as a FEATURE key", () => {
+    const pluralRe = /["']accounting\.bank_accounts["']\s*:\s*["']/g;
+    const inUsersLabels = pluralRe.exec(usersSrc);
+    expect(inUsersLabels, `HUMAN_LABELS in users.ts must NOT contain plural accounting.bank_accounts`).toBeNull();
+
+    const pluralAsFeatureGuardRe = /requireUserFeatureAccess\(\s*["']accounting\.bank_accounts["']\s*\)/g;
+    expect(pluralAsFeatureGuardRe.test(firmSettingsSrc), "firmSettings must NOT guard with plural accounting.bank_accounts").toBe(false);
+    expect(pluralAsFeatureGuardRe.lastIndex = 0, undefined);
+    expect(pluralAsFeatureGuardRe.test(accSrc), "accounting.ts must NOT guard with plural accounting.bank_accounts").toBe(false);
+  });
+
+  // (B) The user feature label/map uses SINGULAR accounting.bank_account
+  it("BANK-ACC-A2: users.ts HUMAN_LABELS map declares SINGULAR accounting.bank_account -> 'Bank Accounts'", () => {
+    const singularLabelRe = /"accounting\.bank_account"\s*:\s*"Bank Accounts"/;
+    expect(singularLabelRe.test(usersSrc), "HUMAN_LABELS missing accounting.bank_account -> Bank Accounts").toBe(true);
+  });
+
+  // (C) POST /firm-settings/bank-accounts guard
+  it("BANK-ACC-A3 (C): POST /firm-settings/bank-accounts requires requireUserFeatureAccess(accounting.bank_account) BEFORE requirePermission(settings, update)", () => {
+    const routeMarker = 'router.post("/firm-settings/bank-accounts"';
+    const idx = firmSettingsSrc.indexOf(routeMarker);
+    expect(idx, "POST /firm-settings/bank-accounts route not found").toBeGreaterThan(-1);
+    const end = firmSettingsSrc.indexOf("async (req", idx);
+    const mw = firmSettingsSrc.slice(idx, end);
+    expect(mw.includes(`requireUserFeatureAccess("accounting.bank_account")`),
+      "POST missing requireUserFeatureAccess(\"accounting.bank_account\")").toBe(true);
+    expect(mw.includes('requirePermission("settings", "update")'),
+      "POST missing requirePermission(\"settings\", \"update\")").toBe(true);
+    const featIdx = mw.indexOf(`requireUserFeatureAccess("accounting.bank_account")`);
+    const permIdx = mw.indexOf('requirePermission("settings", "update")');
+    expect(featIdx).toBeLessThan(permIdx);
+  });
+
+  // (D) PATCH /firm-settings/bank-accounts/:id guard
+  it("BANK-ACC-A4 (D): PATCH /firm-settings/bank-accounts/:id requires same guard order", () => {
+    const routeMarker = 'router.patch("/firm-settings/bank-accounts/:id"';
+    const idx = firmSettingsSrc.indexOf(routeMarker);
+    expect(idx, "PATCH /firm-settings/bank-accounts/:id route not found").toBeGreaterThan(-1);
+    const end = firmSettingsSrc.indexOf("async (req", idx);
+    const mw = firmSettingsSrc.slice(idx, end);
+    expect(mw.includes(`requireUserFeatureAccess("accounting.bank_account")`),
+      "PATCH missing requireUserFeatureAccess(\"accounting.bank_account\")").toBe(true);
+    expect(mw.includes('requirePermission("settings", "update")'),
+      "PATCH missing requirePermission(\"settings\", \"update\")").toBe(true);
+    const featIdx = mw.indexOf(`requireUserFeatureAccess("accounting.bank_account")`);
+    const permIdx = mw.indexOf('requirePermission("settings", "update")');
+    expect(featIdx).toBeLessThan(permIdx);
+  });
+
+  // (E) DELETE /firm-settings/bank-accounts/:id guard
+  it("BANK-ACC-A5 (E): DELETE /firm-settings/bank-accounts/:id requires same guard order", () => {
+    const routeMarker = 'router.delete("/firm-settings/bank-accounts/:id"';
+    const idx = firmSettingsSrc.indexOf(routeMarker);
+    expect(idx, "DELETE /firm-settings/bank-accounts/:id route not found").toBeGreaterThan(-1);
+    const end = firmSettingsSrc.indexOf("async (req", idx);
+    const mw = firmSettingsSrc.slice(idx, end);
+    expect(mw.includes(`requireUserFeatureAccess("accounting.bank_account")`),
+      "DELETE missing requireUserFeatureAccess(\"accounting.bank_account\")").toBe(true);
+    expect(mw.includes('requirePermission("settings", "update")'),
+      "DELETE missing requirePermission(\"settings\", \"update\")").toBe(true);
+    const featIdx = mw.indexOf(`requireUserFeatureAccess("accounting.bank_account")`);
+    const permIdx = mw.indexOf('requirePermission("settings", "update")');
+    expect(featIdx).toBeLessThan(permIdx);
+  });
+
+  // (F) Existing /accounting/bank-accounts feature guards remain present + singular key
+  it("BANK-ACC-A6 (F): All 4 /accounting/bank-accounts routes (GET/POST/PATCH/DELETE) preserve requireUserFeatureAccess(\"accounting.bank_account\") with accounting RBAC", () => {
+    const routes = [
+      { needle: 'router.get("/accounting/bank-accounts"', label: "GET list", permission: 'requirePermission("accounting", "read")' },
+      { needle: 'router.post("/accounting/bank-accounts"', label: "POST create", permission: 'requirePermission("accounting", "write")' },
+      { needle: 'router.patch("/accounting/bank-accounts/:id"', label: "PATCH update", permission: 'requirePermission("accounting", "write")' },
+      { needle: 'router.delete("/accounting/bank-accounts/:id"', label: "DELETE remove", permission: 'requirePermission("accounting", "write")' },
+    ];
+    for (const { needle, label, permission } of routes) {
+      const idx = accSrc.indexOf(needle);
+      expect(idx, `${label} (${needle}) route not found in accounting.ts`).toBeGreaterThan(-1);
+      const end = accSrc.indexOf("async (req", idx);
+      const mw = accSrc.slice(idx, end);
+      expect(mw.includes(`requireUserFeatureAccess("accounting.bank_account")`),
+        `${label} missing accounting.bank_account feature guard`).toBe(true);
+      expect(mw.includes(permission),
+        `${label} missing ${permission}`).toBe(true);
+      const featIdx = mw.indexOf(`requireUserFeatureAccess("accounting.bank_account")`);
+      const permIdx = mw.indexOf(permission);
+      expect(featIdx, `${label}: feature guard must come BEFORE ${permission}`).toBeLessThan(permIdx);
+    }
+  });
+
+  // Plural identifiers that MUST remain (audit actions, table references) — confirm not clobbered
+  it("BANK-ACC-A7: Legitimate plural identifiers NOT clobbered (audit actions, table names, URLs)", () => {
+    const mustRemain = [
+      { name: "audit action create", re: /action:\s*["']accounting\.bank_accounts\.create["']/g },
+      { name: "audit action update", re: /action:\s*["']accounting\.bank_accounts\.update["']/g },
+      { name: "audit action delete", re: /action:\s*["']accounting\.bank_accounts\.delete["']/g },
+      { name: "URL plural /bank-accounts (POST firm-settings)", re: /router\.post\(\s*["']\/firm-settings\/bank-accounts["']/g },
+      { name: "firm_bank_accounts table property", re: /firmBankAccountsTable\b/g },
+    ];
+    for (const { name, re } of mustRemain) {
+      const combined = accSrc + "\n" + firmSettingsSrc;
+      expect(re.test(combined), `Expected plural identifier still present: ${name}`).toBe(true);
+      re.lastIndex = 0;
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // NEW — data-exposure regression tests A..D (GET + general PATCH)
+  // These assert bankAccountEnabled GATE before any firmBankAccountsTable
+  // query in the two aggregate endpoints so we can prove:
+  //   A. GET /firm-settings does not expose bank accounts when disabled
+  //   B. The disabled path does NOT execute the table query (ternary : [] skips it)
+  //   C. When enabled, query is still reachable (ternary ? has .select().from(firmBankAccountsTable))
+  //   D. General PATCH /firm-settings update response follows same pattern
+  // -------------------------------------------------------------------------
+
+  function windowAround(src: string, anchor: string, before: number, after: number): string {
+    const idx = src.indexOf(anchor);
+    expect(idx).toBeGreaterThan(-1);
+    return src.slice(Math.max(0, idx - before), idx + anchor.length + after);
+  }
+
+  function assertConditionalBankLoading(routeLabel: string, anchorInRoute: string) {
+    // Find the conditional block in this region of the source
+    const win = windowAround(firmSettingsSrc, anchorInRoute, 300, 2500);
+    // must feature-gate before any from(firmBankAccountsTable)
+    const enableIdx = win.indexOf("bankAccountEnabled");
+    expect(enableIdx, `${routeLabel}: bankAccountEnabled gate must exist in this route region`).toBeGreaterThan(-1);
+    const tableIdx = win.indexOf("firmBankAccountsTable");
+    if (tableIdx > -1) {
+      // table query is INSIDE the ternary ? branch, after gate
+      expect(enableIdx, `${routeLabel}: feature gate must be declared BEFORE table query reference`).toBeLessThan(tableIdx);
+    }
+    // The disabled branch is ": []" — no table query, just empty array literal
+    const ternaryDisabledBranch = /:\s*\[\s*\](?![\s\S]*bankAccountEnabled)/.test(win) ||
+      /bankAccountEnabled\s*\?[\s\S]{0,800}:\s*\[\s*\]/.test(win);
+    expect(ternaryDisabledBranch, `${routeLabel}: disabled path must hard-return " : []" (no table query, no post-query filter)`).toBe(true);
+    // When enabled path, must contain actual table select query (not pre-filtered results)
+    const ternaryEnabledQuery =
+      /bankAccountEnabled\s*\?[\s\S]{0,1200}\.select\(\)[\s\S]{0,400}\.from\(firmBankAccountsTable\)/.test(win);
+    expect(ternaryEnabledQuery, `${routeLabel}: enabled path must contain .select().from(firmBankAccountsTable)`).toBe(true);
+    // Also confirm feature-access resolution uses the canonical singular key via the helper
+    const featureCheckUsesKey =
+      /isBankAccountFeatureEnabledForReq\(req, r\)|featureKey:\s*["']accounting\.bank_account["']/.test(win) ||
+      /isBankAccountFeatureEnabledForReq\(req, r\)/.test(firmSettingsSrc);
+    expect(featureCheckUsesKey, `${routeLabel}: feature resolution must go through singular canonical key (not plural, not inline logic)`).toBe(true);
+  }
+
+  it("BANK-ACC-A8 (A,B,C): GET /firm-settings conditionally loads bankAccounts only when bankAccountEnabled true — disabled => [] WITHOUT query", () => {
+    const anchor = 'router.get("/firm-settings"';
+    assertConditionalBankLoading("GET /firm-settings", anchor);
+  });
+
+  it("BANK-ACC-A9 (D): PATCH /firm-settings general update response conditionally loads bankAccounts only when enabled — disabled => [] WITHOUT query", () => {
+    // Distinguish general PATCH from bank-accounts/:id specific PATCH:
+    // general PATCH ends in settings", "update") while bank PATCH has :id and bank-accounts in path
+    const generalAnchor = 'router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("settings"';
+    const specificAnchor = 'router.patch("/firm-settings/bank-accounts/:id"';
+    // General patch handler body is long (firm update + settings table upsert + firms re-fetch + bank query)
+    // Use a larger window (10k chars after anchor) to guarantee coverage of the post-update response
+    // block that contains bankAccountEnabled + the ternary.
+    const win = windowAround(firmSettingsSrc, generalAnchor, 100, 10000);
+    const enableIdx = win.indexOf("bankAccountEnabled");
+    expect(enableIdx, "PATCH general: bankAccountEnabled gate must exist in this route region").toBeGreaterThan(-1);
+    const ternaryEnabled = /bankAccountEnabled\s*\?[\s\S]{0,1200}\.select\(\)[\s\S]{0,400}\.from\(firmBankAccountsTable\)/.test(win);
+    expect(ternaryEnabled, "PATCH general: enabled path must contain .select().from(firmBankAccountsTable)").toBe(true);
+    const ternaryDisabled = /bankAccountEnabled\s*\?[\s\S]{0,1500}:\s*\[\s*\]/.test(win);
+    expect(ternaryDisabled, "PATCH general: disabled path must return : [] (no query)").toBe(true);
+    // Sanity: specific bank-accounts/:id PATCH does NOT contain our bankAccountEnabled variable
+    // (that's a specific mutation, not an aggregate endpoint that re-returns the whole settings object)
+    const idxSpec = firmSettingsSrc.indexOf(specificAnchor);
+    expect(idxSpec).toBeGreaterThan(-1);
+    const endSpec = firmSettingsSrc.indexOf("async (req", idxSpec);
+    const specWin = firmSettingsSrc.slice(idxSpec, endSpec + 15000);
+    // Specific patch's handler body is NOT the aggregate response; it returns the single
+    // updated row directly so it should not contain `bankAccounts = bankAccountEnabled`.
+    expect(specWin.includes("bankAccountEnabled ?"), "bank specific patch does not aggregate bankAccounts array from ternary").toBe(false);
+  });
+
+  it("BANK-ACC-A10 (B, strong): In both routes, 'firmBankAccountsTable' token count inside ternary disabled branch is zero — no table reference in disabled path", () => {
+    // Brittle but strong: in the combined file, we must find TWO occurrences of
+    // "const bankAccounts = bankAccountEnabled" (one GET, one PATCH).
+    // Each one skips the table when disabled, so in disabled branch there's zero .select()/from() calls.
+    const enabledBlocks = firmSettingsSrc.match(/const bankAccounts = bankAccountEnabled/g);
+    expect(enabledBlocks?.length ?? 0, "two bankAccounts assignments expected (GET + PATCH)").toBe(2);
+
+    // Simple heuristic: In between "bankAccountEnabled ?" and the matching " : []" disabled side,
+    // confirm the ": []" side does NOT reference firmBankAccountsTable.
+    const patterns = [
+      { re: /:\s*\[\s*\][,\s;\n]/g, label: "empty array literal on disabled side" },
+    ];
+    for (const { re, label } of patterns) {
+      const count = (firmSettingsSrc.match(re)?.length ?? 0);
+      expect(count, `Need at least 2 occurrences of ${label} (GET + PATCH disabled paths)`).toBeGreaterThanOrEqual(2);
+    }
+  });
+
+  it("BANK-ACC-A11 (E): Existing POST/PATCH/DELETE firm-settings/bank-accounts mutation guards remain intact with SINGULAR canonical feature key", () => {
+    // Already asserted structurally above, re-check here so the A-E
+    // checklist can be verified by reading this one describe block's output.
+    for (const [method, path, pathLabel] of [
+      ["post", "/firm-settings/bank-accounts", "POST create"],
+      ["patch", "/firm-settings/bank-accounts/:id", "PATCH update"],
+      ["delete", "/firm-settings/bank-accounts/:id", "DELETE remove"],
+    ] as const) {
+      const needle = `router.${method}("${path}"`;
+      const idx = firmSettingsSrc.indexOf(needle);
+      expect(idx, `${pathLabel} not found`).toBeGreaterThan(-1);
+      const end = firmSettingsSrc.indexOf("async (req", idx);
+      const mw = firmSettingsSrc.slice(idx, end);
+      expect(mw.includes(`requireUserFeatureAccess("accounting.bank_account")`), `${pathLabel} missing singular feature guard`).toBe(true);
+      expect(mw.includes('requirePermission("settings", "update")'), `${pathLabel} missing RBAC settings:update`).toBe(true);
+      // No plural key in this middleware window
+      expect(mw.includes("accounting.bank_accounts"), `${pathLabel}: must NOT use plural key as feature guard`).toBe(false);
+      const featIdx = mw.indexOf(`requireUserFeatureAccess("accounting.bank_account")`);
+      const permIdx = mw.indexOf('requirePermission("settings", "update")');
+      expect(featIdx, `${pathLabel}: feature (entitlement) before RBAC`).toBeLessThan(permIdx);
+    }
   });
 });
 

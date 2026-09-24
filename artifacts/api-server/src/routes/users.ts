@@ -672,7 +672,7 @@ const HUMAN_LABELS: Record<string, string> = {
   "accounting.quotation": "Quotations",
   "accounting.invoice": "Invoices",
   "accounting.receipt": "Receipts",
-  "accounting.bank_accounts": "Bank Accounts",
+  "accounting.bank_account": "Bank Accounts",
   "accounting.bank_reconciliation": "Bank Reconciliation",
   "accounting.case_ledger": "Ledger",
   "accounting.reports": "Reports",

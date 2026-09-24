@@ -178,6 +178,8 @@ describe("Part1 §G.7: Every new/active requireUserFeatureAccess key exists in f
   const routeFiles = [
     ["accounting.ts", "accounting"],
     ["quotations.ts", "quotations"],
+    ["firm-settings.ts", "firmSettings"],
+    ["users.ts", "users"],
   ] as const;
 
   const activeKeys = [
@@ -213,6 +215,15 @@ describe("Part1 §G.7: Every new/active requireUserFeatureAccess key exists in f
     expect(registeredKeys.has(key)).toBe(true);
   });
 
+  it("PART1-G7-A: PLURAL accounting.bank_accounts is NOT a registry-declared feature key (canonical is SINGULAR accounting.bank_account)", () => {
+    expect(registeredKeys.has("accounting.bank_accounts"), "accounting.bank_accounts (plural) must NOT be a registered feature key; canonical is accounting.bank_account").toBe(false);
+    expect(registeredKeys.has("accounting.bank_account"), "accounting.bank_account (singular) MUST be registered").toBe(true);
+  });
+
+  it("PART1-G7-B: activeKeys list does NOT contain the PLURAL accounting.bank_accounts (regression guard)", () => {
+    expect(activeKeys.includes("accounting.bank_accounts"), "activeKeys should NOT contain PLURAL accounting.bank_accounts").toBe(false);
+  });
+
   it("No route in accounting.ts references an unregistered feature key", () => {
     const src = readFileSync(
       pathResolve(__dirname, "..", "routes", "accounting.ts"),
@@ -227,6 +238,8 @@ describe("Part1 §G.7: Every new/active requireUserFeatureAccess key exists in f
     for (const key of found) {
       expect(registeredKeys.has(key)).toBe(true);
     }
+    // Extra guard: no plural key in accounting.ts feature guards
+    expect(found.includes("accounting.bank_accounts"), "accounting.ts must never use PLURAL accounting.bank_accounts as a feature key").toBe(false);
   });
 
   it("No route in quotations.ts references an unregistered feature key", () => {
@@ -243,6 +256,32 @@ describe("Part1 §G.7: Every new/active requireUserFeatureAccess key exists in f
     for (const key of found) {
       expect(registeredKeys.has(key)).toBe(true);
     }
+  });
+
+  it("No route in firm-settings.ts references an unregistered feature key (incl. accounting.bank_account SINGULAR, NO PLURAL)", () => {
+    const src = readFileSync(
+      pathResolve(__dirname, "..", "routes", "firm-settings.ts"),
+      "utf8"
+    );
+    const re = /requireUserFeatureAccess\(\s*["'`]([^"'`]+)["'`]\s*\)/g;
+    let m: RegExpExecArray | null;
+    const found: string[] = [];
+    while ((m = re.exec(src)) !== null) found.push(m[1]);
+
+    expect(found.includes("accounting.bank_account"), "firm-settings.ts must require accounting.bank_account feature for bank account mutations").toBe(true);
+    for (const key of found) {
+      expect(registeredKeys.has(key), `firm-settings.ts uses unregistered feature key: ${key}`).toBe(true);
+    }
+    expect(found.includes("accounting.bank_accounts"), "firm-settings.ts must never use PLURAL accounting.bank_accounts as a feature key").toBe(false);
+  });
+
+  it("PART1-G7-C: users.ts HUMAN_LABELS uses SINGULAR accounting.bank_account (NOT plural) for the Bank Accounts label", () => {
+    const usersSrc = readFileSync(
+      pathResolve(__dirname, "..", "routes", "users.ts"),
+      "utf8"
+    );
+    expect(usersSrc).toContain('"accounting.bank_account": "Bank Accounts"');
+    expect(usersSrc).not.toContain('"accounting.bank_accounts": "Bank Accounts"');
   });
 });
 

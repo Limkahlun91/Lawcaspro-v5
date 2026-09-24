@@ -480,6 +480,7 @@ function FirmInfoTab() {
   const { user } = useAuth();
   const canUpdate = hasPermission(user, "settings", "update");
   const firmId = user?.firmId;
+  const bankAccountFeature = useFeature("accounting.bank_account");
 
   const firmSettingsQuery = useQuery<FirmSettings>({
     queryKey: ["firm-settings"],
@@ -842,11 +843,12 @@ function FirmInfoTab() {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Bank Accounts</CardTitle>
-        </CardHeader>
-        <CardContent>
+      {bankAccountFeature.enabled ? (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Bank Accounts</CardTitle>
+          </CardHeader>
+          <CardContent>
           {(settings?.bankAccounts ?? []).length > 0 && (
             <div className="overflow-x-auto">
               <table className="w-full text-sm mb-4 min-w-[720px]">
@@ -984,8 +986,9 @@ function FirmInfoTab() {
               <Plus className="w-4 h-4 mr-1" /> Add
             </Button>
           </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      ) : null}
     </div>
   );
 }

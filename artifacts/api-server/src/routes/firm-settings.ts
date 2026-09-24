@@ -3,6 +3,7 @@ import { Readable } from "stream";
 import { eq, and } from "drizzle-orm";
 import { db, firmBankAccountsTable, firmsTable, sql } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, type AuthRequest, writeAuditLog } from "../lib/auth.js";
+import { resolveRequestFirmRoleName, resolveUserFeatureAccess, requireUserFeatureAccess } from "../services/user-feature-access.js";
 import { one } from "../lib/http.js";
 import { getSupabaseStorageConfigError, ObjectNotFoundError, SupabaseStorageService } from "../lib/objectStorage.js";
 import { extractDbErrorInfo } from "../lib/db-error.js";
@@ -22,6 +23,31 @@ const supabaseStorage = new SupabaseStorageService();
 
 type DbConn = typeof db | NonNullable<AuthRequest["rlsDb"]>;
 const rdb = (req: AuthRequest): DbConn => req.rlsDb ?? db;
+
+async function isBankAccountFeatureEnabledForReq(req: AuthRequest, r: DbConn): Promise<boolean> {
+  const firmId = typeof req.firmId === "number" ? req.firmId : null;
+  const userId = typeof req.userId === "number" ? req.userId : null;
+  if (firmId == null || userId == null) return false;
+  try {
+    const roleCtx = { firmId, roleId: req.roleId ?? null, _roleCache: (req as any)._roleCache };
+    const roleName = await resolveRequestFirmRoleName(roleCtx, r as any);
+    if ((req as any)._roleCache !== roleCtx._roleCache) {
+      (req as any)._roleCache = roleCtx._roleCache;
+    }
+    const result = await resolveUserFeatureAccess({
+      r: r as any,
+      firmId,
+      userId,
+      roleId: req.roleId ?? null,
+      roleName,
+      featureKey: "accounting.bank_account",
+    });
+    return Boolean(result?.effectiveEnabled);
+  } catch (err) {
+    req.log?.warn?.({ err, firmId, userId }, "bank_account feature check failed; treating as disabled");
+    return false;
+  }
+}
 
 async function queryRows(r: DbConn, query: ReturnType<typeof sql>): Promise<Record<string, unknown>[]> {
   const result = await (r as any).execute(query);
@@ -132,15 +158,18 @@ router.get("/firm-settings", requireAuth, requireFirmUser, async (req: AuthReque
       return;
     }
     const showMasterDocuments = masterSetting.useMasterDocuments;
-    const bankAccounts = await (async () => {
-      try {
-        const rows = await (r as any).select().from(firmBankAccountsTable)
-          .where(eq(firmBankAccountsTable.firmId, firmId));
-        return Array.isArray(rows) ? rows : [];
-      } catch {
-        return [];
-      }
-    })();
+    const bankAccountEnabled = await isBankAccountFeatureEnabledForReq(req, r);
+    const bankAccounts = bankAccountEnabled
+      ? await (async () => {
+          try {
+            const rows = await (r as any).select().from(firmBankAccountsTable)
+              .where(eq(firmBankAccountsTable.firmId, firmId));
+            return Array.isArray(rows) ? rows : [];
+          } catch {
+            return [];
+          }
+        })()
+      : [];
 
     res.status(200).json({
       ok: true,
@@ -361,15 +390,18 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
         throw err;
       }
     }
-    const bankAccounts = await (async () => {
-      try {
-        const rows = await (r as any).select().from(firmBankAccountsTable)
-          .where(eq(firmBankAccountsTable.firmId, firmId));
-        return Array.isArray(rows) ? rows : [];
-      } catch {
-        return [];
-      }
-    })();
+    const bankAccountEnabled = await isBankAccountFeatureEnabledForReq(req, r);
+    const bankAccounts = bankAccountEnabled
+      ? await (async () => {
+          try {
+            const rows = await (r as any).select().from(firmBankAccountsTable)
+              .where(eq(firmBankAccountsTable.firmId, firmId));
+            return Array.isArray(rows) ? rows : [];
+          } catch {
+            return [];
+          }
+        })()
+      : [];
 
     const masterSetting = await safeGetUseMasterDocuments(r, firmId);
     const showMasterDocumentsResolved = masterSetting.useMasterDocuments;
@@ -433,7 +465,7 @@ router.patch("/firm-settings", requireAuth, requireFirmUser, requirePermission("
   }
 });
 
-router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.bank_account"), requirePermission("settings", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const r = req.rlsDb;
     if (!r) {
@@ -522,7 +554,7 @@ router.post("/firm-settings/bank-accounts", requireAuth, requireFirmUser, requir
   }
 });
 
-router.patch("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.patch("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.bank_account"), requirePermission("settings", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const r = req.rlsDb;
     if (!r) {
@@ -625,7 +657,7 @@ router.patch("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, r
   }
 });
 
-router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requirePermission("settings", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
+router.delete("/firm-settings/bank-accounts/:id", requireAuth, requireFirmUser, requireUserFeatureAccess("accounting.bank_account"), requirePermission("settings", "update"), async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const r = req.rlsDb;
     if (!r) {
