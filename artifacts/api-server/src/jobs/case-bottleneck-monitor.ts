@@ -14,6 +14,7 @@ import {
 import { logger } from "../lib/logger.js";
 import { writeAuditLog } from "../lib/auth.js";
 import { withAuthSafeDb, withTenantSafeDb, type AuthSafeDbContext, isTransientDbConnectionError } from "../lib/auth-safe-db.js";
+import { filterFirmsForJob } from "../services/entitlement-resolver.js";
 import type { RlsDb } from "@workspace/db";
 
 const CASE_NO_MOVEMENT_DAYS = 3;
@@ -659,7 +660,11 @@ export async function tickAllFirms(opts?: { lockHandle?: AdvisoryLockHandle | nu
       return { skipped: true, created: 0, resolved: 0, escalated: 0 };
     }
     const firms = await enumerateActiveFirmIds();
-    for (const f of firms) {
+    // Job guard: decouple bottleneck scan from raw feature key resolution.
+    // Only process firms for which ALL gating features of the case_bottleneck job are enabled.
+    // Pass-through when jobGuardMap: case_bottleneck → {dashboard.alerts, cases.monitor} etc.
+    const filteredFirms = await filterFirmsForJob("case_bottleneck", firms);
+    for (const f of filteredFirms) {
       try {
         const result = await scanBottlenecksForFirm(f.id);
         created += result.createdSnapshots.length;

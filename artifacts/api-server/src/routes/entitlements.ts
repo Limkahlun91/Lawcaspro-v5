@@ -53,9 +53,62 @@ import {
   ensureRolePermissionsInitialized,
 } from "../lib/auth.js";
 import { ApiError, sendError, sendOk, parseIntParam, type ResLike } from "../lib/api-response.js";
+import { invalidateAllUserFeatureCachesForFirm } from "../services/user-feature-access.js";
 
 const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
 type FirmFeatureStateSrc = "plan" | "founder_override" | "temporary_override" | "registry_default";
+
+// Shared helper: set permanent override mode for (firmId, featureKey) WITHOUT
+// relying on invalid ON CONFLICT(firm_id, feature_key) target against the partial
+// unique index uq_firm_entitlement_permanent (WHERE override_kind='permanent').
+// Correct behaviour per G0.10: UPDATE the existing permanent row IN PLACE when one
+// exists (regardless of current expiry); INSERT when none exists.
+async function setPermanentOverrideMode(
+  firmId: number,
+  featureKey: string,
+  mode: "enabled" | "disabled",
+  reason: string,
+  createdBy: number | null,
+) {
+  const t = firmEntitlementOverridesTable;
+  // 1. Find any existing permanent row for (firmId, featureKey).
+  //    Use LIMIT 1 (most recent by id) if duplicates exist (defensive).
+  const existing = await db
+    .select({ id: t.id })
+    .from(t)
+    .where(and(eq(t.firmId, firmId), eq(t.featureKey, featureKey), eq(t.overrideKind, "permanent")))
+    .orderBy(sql`${t.id} DESC`)
+    .limit(1);
+  if (existing.length > 0) {
+    // UPDATE IN PLACE the existing permanent row — DO NOT expire-and-insert.
+    // Re-activate by clearing expiresAt so the resolver treats it as active permanent.
+    await db
+      .update(t)
+      .set({
+        overrideMode: mode,
+        reason,
+        expiresAt: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(t.id, existing[0].id));
+    return existing[0].id;
+  } else {
+    const [row] = await db
+      .insert(t)
+      .values({
+        firmId,
+        featureKey,
+        overrideKind: "permanent",
+        overrideMode: mode,
+        effectiveFrom: null,
+        expiresAt: null,
+        reason,
+        createdBy,
+      })
+      .returning({ id: t.id });
+    return row ? row.id : null;
+  }
+}
 
 const expressRouter = express.Router();
 type RouterInternalLike = {
@@ -290,6 +343,7 @@ router.post("/founder/firms/:firmId/entitlements/override", requireAuth, require
       .returning();
     await writeAuditLog({ firmId, actorId: req.userId, actorType: req.userType, action: "founder.entitlement_override.create", entityType: "firm_entitlement_override", entityId: Number(row.id), detail: JSON.stringify(b), ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"] });
     setFirmEntitlementsCacheDirty(firmId);
+    invalidateAllUserFeatureCachesForFirm(firmId);
     sendOk(res, { item: row }, { status: 201 });
   } catch (err) { sendError(res, err); }
 });
@@ -320,6 +374,7 @@ router.patch("/founder/firms/:firmId/entitlements/override/:overrideId", require
     if (!row) throw new ApiError({ status: 404, code: "NOT_FOUND", message: "Override not found", retryable: false });
     await writeAuditLog({ firmId, actorId: req.userId, actorType: req.userType, action: "founder.entitlement_override.update", entityType: "firm_entitlement_override", entityId: Number(row.id), detail: JSON.stringify(b), ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"] });
     setFirmEntitlementsCacheDirty(firmId);
+    invalidateAllUserFeatureCachesForFirm(firmId);
     sendOk(res, { item: row });
   } catch (err) { sendError(res, err); }
 });
@@ -332,6 +387,7 @@ router.delete("/founder/firms/:firmId/entitlements/override/:overrideId", requir
     if (!row) throw new ApiError({ status: 404, code: "NOT_FOUND", message: "Override not found", retryable: false });
     await writeAuditLog({ firmId, actorId: req.userId, actorType: req.userType, action: "founder.entitlement_override.delete", entityType: "firm_entitlement_override", entityId: Number(row.id), ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"] });
     setFirmEntitlementsCacheDirty(firmId);
+    invalidateAllUserFeatureCachesForFirm(firmId);
     sendOk(res, { deleted: true });
   } catch (err) { sendError(res, err); }
 });
@@ -376,6 +432,7 @@ router.patch("/founder/firms/:firmId/subscription", requireAuth, requireFounder,
     });
     await writeAuditLog({ firmId, actorId: req.userId, actorType: req.userType, action: "founder.subscription.update", entityType: "firm", entityId: firmId, detail: JSON.stringify(b), ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"], before: before as any, after: after as any, reason: b.reason ?? undefined });
     setFirmEntitlementsCacheDirty(firmId);
+    invalidateAllUserFeatureCachesForFirm(firmId);
     sendOk(res, { item: after });
   } catch (err) { sendError(res, err); }
 });
@@ -575,6 +632,7 @@ router.post("/founder/firms/:firmId/entitlements/emergency", requireAuth, requir
       ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"],
     });
     setFirmEntitlementsCacheDirty(firmId);
+    invalidateAllUserFeatureCachesForFirm(firmId);
     sendOk(res, { item: row }, { status: 201 });
   } catch (err) { sendError(res, err); }
 });
@@ -646,6 +704,7 @@ router.post("/founder/firms/:firmId/entitlements/bulk-override", requireAuth, re
       ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"],
     });
     setFirmEntitlementsCacheDirty(firmId);
+    invalidateAllUserFeatureCachesForFirm(firmId);
     sendOk(res, { firmId, mode: parsed.data.mode, count: parsed.data.featureKeys.length });
   } catch (err) { sendError(res, err); }
 });
@@ -687,25 +746,13 @@ router.patch("/founder/firms/:firmId/features/:featureKey", requireAuth, require
           or(isNull(firmEntitlementOverridesTable.expiresAt), gte(firmEntitlementOverridesTable.expiresAt, now)),
         ));
     } else {
-      const now = new Date();
-      await db
-        .update(firmEntitlementOverridesTable)
-        .set({ expiresAt: now, updatedAt: now })
-        .where(and(
-          eq(firmEntitlementOverridesTable.firmId, firmId),
-          eq(firmEntitlementOverridesTable.featureKey, featureKey),
-          or(isNull(firmEntitlementOverridesTable.expiresAt), gte(firmEntitlementOverridesTable.expiresAt, now)),
-        ));
-      await db.insert(firmEntitlementOverridesTable).values({
+      await setPermanentOverrideMode(
         firmId,
         featureKey,
-        overrideKind: "permanent",
-        overrideMode: modeRaw === "enabled" ? "enabled" : "disabled",
-        effectiveFrom: null,
-        expiresAt: null,
+        modeRaw === "enabled" ? "enabled" : "disabled",
         reason,
-        createdBy: req.userId ?? null,
-      }).onConflictDoNothing({ target: [firmEntitlementOverridesTable.firmId, firmEntitlementOverridesTable.featureKey] });
+        req.userId ?? null,
+      );
     }
     await writeAuditLog({
       firmId, actorId: req.userId, actorType: req.userType,
@@ -715,6 +762,7 @@ router.patch("/founder/firms/:firmId/features/:featureKey", requireAuth, require
       ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"],
     });
     setFirmEntitlementsCacheDirty(firmId);
+    invalidateAllUserFeatureCachesForFirm(firmId);
 
     const effective = await getEffectiveEntitlement(firmId, featureKey);
     const source: FirmFeatureStateSrc =
@@ -762,25 +810,13 @@ router.patch("/platform/firms/:firmId/features/:featureKey", requireAuth, requir
           or(isNull(firmEntitlementOverridesTable.expiresAt), gte(firmEntitlementOverridesTable.expiresAt, now)),
         ));
     } else {
-      const now = new Date();
-      await db
-        .update(firmEntitlementOverridesTable)
-        .set({ expiresAt: now, updatedAt: now })
-        .where(and(
-          eq(firmEntitlementOverridesTable.firmId, firmId),
-          eq(firmEntitlementOverridesTable.featureKey, featureKey),
-          or(isNull(firmEntitlementOverridesTable.expiresAt), gte(firmEntitlementOverridesTable.expiresAt, now)),
-        ));
-      await db.insert(firmEntitlementOverridesTable).values({
+      await setPermanentOverrideMode(
         firmId,
         featureKey,
-        overrideKind: "permanent",
-        overrideMode: modeRaw === "enabled" ? "enabled" : "disabled",
-        effectiveFrom: null,
-        expiresAt: null,
+        modeRaw === "enabled" ? "enabled" : "disabled",
         reason,
-        createdBy: req.userId ?? null,
-      }).onConflictDoNothing({ target: [firmEntitlementOverridesTable.firmId, firmEntitlementOverridesTable.featureKey] });
+        req.userId ?? null,
+      );
     }
     await writeAuditLog({
       firmId, actorId: req.userId, actorType: req.userType,
@@ -790,6 +826,7 @@ router.patch("/platform/firms/:firmId/features/:featureKey", requireAuth, requir
       ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"],
     });
     setFirmEntitlementsCacheDirty(firmId);
+    invalidateAllUserFeatureCachesForFirm(firmId);
     const effective = await getEffectiveEntitlement(firmId, featureKey);
     const source: FirmFeatureStateSrc =
       effective.source === "firm_override_temporary" ? "temporary_override" :
@@ -826,6 +863,7 @@ router.post("/founder/firms/:firmId/entitlements/reset", requireAuth, requireFou
       ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"],
     });
     setFirmEntitlementsCacheDirty(firmId);
+    invalidateAllUserFeatureCachesForFirm(firmId);
     sendOk(res, { firmId, reset: (res2 as any)?.rowCount ?? null });
   } catch (err) { sendError(res, err); }
 });

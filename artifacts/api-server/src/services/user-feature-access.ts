@@ -80,6 +80,34 @@ export function invalidateUserFeatureCacheFor(firmId: number, userId: number) {
   logger.debug({ firmId, userId }, "user_feature_access.cache_invalidated");
 }
 
+/**
+ * Invalidate EVERY user-level cache row belonging to a given firmId.
+ * This must be called synchronously after ANY entitlement mutation that
+ * touches the firm's override rows (permanent / temp / plan / consent /
+ * emergency toggle) so that downstream user sessions with cached
+ * `firm_user_feature_access` rows cannot observe stale results for up to
+ * the 120s TTL.  Cache prefix isolation is guaranteed by the `${firmId}|…`
+ * key format — other firms are left entirely untouched.
+ */
+export function invalidateAllUserFeatureCachesForFirm(firmId: number) {
+  if (!firmId || !Number.isFinite(firmId)) return;
+  const targetPrefix = `${firmId}|`;
+  let removed = 0;
+  // Iterate a snapshot of keys to avoid iterator invalidation during delete.
+  const keys = Array.from(FIRM_USER_CACHE.keys());
+  for (const k of keys) {
+    if (k.startsWith(targetPrefix)) {
+      if (FIRM_USER_CACHE.delete(k)) removed++;
+    }
+  }
+  if (removed > 0) {
+    logger.debug(
+      { firmId, removedEntries: removed },
+      "user_feature_access.cache_invalidated_all_users_for_firm",
+    );
+  }
+}
+
 const USER_CACHE_MAX = 200;
 function userCacheGet(firmId: number, userId: number): CacheVal["data"] | null {
   const key = `${firmId}|${userId}`;

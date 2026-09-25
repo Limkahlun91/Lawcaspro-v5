@@ -478,6 +478,48 @@ function mapOverrideMode(isEnabled: boolean): FirmOverrideLike["overrideMode"] {
 }
 
 // ---------------------------------------------------------------------------
+// Explicit boundary validators (G0.7 BOOT-safety policy).
+//
+// These validators fire ONLY at the external/API data ingress boundary.
+// Real programming bugs (undefined references, null function calls, broken
+// logic paths) still throw normally (and correctly) so BOOT monitors surface
+// them to developers as intended.  Only malformed external payloads degrade
+// safely to fail-closed deterministic states.
+// ---------------------------------------------------------------------------
+
+type ValidFeatureEntry = {
+  readonly firmEnabled?: unknown;
+  readonly source?: unknown;
+  readonly denialCode?: unknown;
+  readonly denialReason?: unknown;
+  readonly [_: string]: unknown;
+};
+
+function isValidFeatureEntry(v: unknown): v is ValidFeatureEntry {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+type ValidFeatureBundleShape = {
+  readonly effective: Record<string, ValidFeatureEntry>;
+  readonly explicitOverrides?: unknown;
+  readonly firmId?: unknown;
+};
+
+/**
+ * Validates the exact externally sourced UserEffectiveFeatureBundle shape.
+ * Returns true when `bundle.effective` is a non-array object (the effective
+ * map), allowing safe downstream Object.entries iteration without throwing
+ * on type mismatches.  Everything else (including non-objects, arrays,
+ * nulls, and undefined bundles) returns false and triggers deterministic
+ * fail-closed degradation.
+ */
+function isValidFeatureBundle(bundle: unknown): bundle is ValidFeatureBundleShape {
+  if (!bundle || typeof bundle !== "object") return false;
+  const eff = (bundle as Partial<{ effective: unknown }>).effective;
+  return !!eff && typeof eff === "object" && !Array.isArray(eff);
+}
+
+// ---------------------------------------------------------------------------
 // React hooks: fetch entitlements + registry once per user session
 // useFirmEntitlements() is a DERIVED projection from the single canonical
 // UserEffectiveFeatureBundle cached under effectiveFeaturesQueryKey(firmId, userId).
@@ -492,34 +534,54 @@ export function useFirmEntitlements<TFirmOverride = FirmOverrideLike>(): {
 } {
   const raw = useUserEffectiveFeatures();
   const data = useMemo<FirmEntitlementsBundle | undefined>(() => {
+    // Deterministic degrade-to-empty ONLY when raw.data exists (not loading)
+    // but fails explicit boundary shape validation.  All other code paths
+    // (normal flow / undefined access / programming bugs) throw normally so
+    // BOOT monitors can surface them correctly to developers.
     if (!raw.data) return undefined;
-    const eff = raw.data.effective ?? {};
+    const bundle: unknown = raw.data;
+    if (!isValidFeatureBundle(bundle)) {
+      // External payload malformed → deterministic fail-closed (empty bundle).
+      return {
+        firm: null,
+        plan: null,
+        subscriptionPolicy: null,
+        items: {},
+        overrides: [],
+      } as FirmEntitlementsBundle;
+    }
+    const eff = bundle.effective;
     const items: Record<string, EntitlementLike> = {};
     for (const [key, value] of Object.entries(eff)) {
+      if (!isValidFeatureEntry(value)) continue;
       const firmOn = Boolean(value.firmEnabled);
       items[key] = {
         featureKey: key,
         enabled: firmOn,
         value: firmOn,
         valueType: "boolean",
-        source: mapEntitlementSource(value.source),
-        denied: firmOn ? null : value.denialCode ?? null,
-        denialReason: value.denialReason ?? null,
+        source: mapEntitlementSource((value.source ?? null) as UserEffectiveFeature["source"] | null),
+        denied: firmOn ? null : (typeof value.denialCode === "string" ? value.denialCode : null),
+        denialReason: typeof value.denialReason === "string" ? value.denialReason : null,
         usage: null,
       };
     }
-    const overrides: FirmOverrideLike[] = Array.isArray(raw.data.explicitOverrides)
-      ? raw.data.explicitOverrides.map((o, i) => ({
-          id: i + 1,
-          featureKey: o.featureKey,
-          overrideMode: mapOverrideMode(Boolean(o.isEnabled)),
-          createdAt: new Date().toISOString(),
-        }))
+    const explicitOverrides: unknown = bundle.explicitOverrides;
+    const overrides: FirmOverrideLike[] = Array.isArray(explicitOverrides)
+      ? explicitOverrides
+          .filter((o: unknown) => o && typeof o === "object")
+          .map((o: Partial<{ featureKey: string; isEnabled: boolean }>, i) => ({
+            id: i + 1,
+            featureKey: typeof o.featureKey === "string" ? o.featureKey : `__override_${i + 1}`,
+            overrideMode: mapOverrideMode(Boolean(o.isEnabled)),
+            createdAt: new Date().toISOString(),
+          }))
       : [];
+    const rawFirmId: unknown = bundle.firmId;
     return {
-      firm: raw.data.firmId
+      firm: rawFirmId != null
         ? {
-            id: raw.data.firmId,
+            id: Number(rawFirmId),
             status: "active",
             subStatus: null,
             planId: null,
@@ -586,11 +648,16 @@ export interface UseFeatureResult {
 export function useFeature(featureKey: string | undefined | null): UseFeatureResult {
   const { data, isLoading } = useFirmEntitlements();
   return useMemo<UseFeatureResult>(() => {
+    // No broad try/catch: programming bugs (undefined refs / call to null)
+    // throw correctly so BOOT monitors surface them.  Deterministic
+    // degrade-to-deny ONLY when boundary inputs are malformed per below:
+    //   - no featureKey supplied
+    //   - still loading + no cached item yet
+    //   - featureKey not present in bundle (deny-by-default per Part 2 §11)
     if (!featureKey) return { isLoading, enabled: false, entitlement: undefined, limit: undefined };
     const item = data?.items?.[featureKey];
     if (isLoading && !item) return { isLoading: true, enabled: false, entitlement: undefined, limit: undefined };
     if (!item) {
-      // Unknown/unregistered feature key → deny by default (Part 2 §11)
       return {
         isLoading: false,
         enabled: false,
@@ -604,9 +671,9 @@ export function useFeature(featureKey: string | undefined | null): UseFeatureRes
       isLoading: false,
       enabled: !!item.enabled,
       entitlement: item,
-      limit: item.limit ?? undefined,
-      denialCode: item.denied ?? null,
-      denialReason: item.denialReason ?? null,
+      limit: typeof item.limit === "number" ? item.limit : undefined,
+      denialCode: (item.denied as unknown as string | null) ?? null,
+      denialReason: typeof item.denialReason === "string" ? item.denialReason : null,
       source: item.source,
     };
   }, [featureKey, data, isLoading]);

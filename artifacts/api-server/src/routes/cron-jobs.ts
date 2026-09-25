@@ -4,6 +4,7 @@ import { paymentVouchersTable, paymentVoucherActionsTable, userNotificationsTabl
 import { and, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { logger } from "../lib/logger.js";
 import { writeAuditLog } from "../lib/auth.js";
+import { canFirmRunJobsFor } from "../services/entitlement-resolver.js";
 import { tickAllFirms as tickCaseBottleneckAllFirms } from "../jobs/case-bottleneck-monitor.js";
 import {
   AccountingSettingsLoaderError,
@@ -405,7 +406,20 @@ export async function tickPaymentVoucherSla(args?: { channel?: string }): Promis
     ))
     .orderBy(paymentVouchersTable.paymentDueAt);
 
+  // Job guard: decouple tick execution from raw feature key resolution.
+  // Firms for which any gating feature key is disabled are skipped entirely.
+  const disabledFirmIds = new Set<number>();
+  {
+    const distinctFirmIds = Array.from(new Set(vouchers.map((r) => Number(r.firmId)).filter((n) => Number.isFinite(n) && n > 0)));
+    for (const fid of distinctFirmIds) {
+      const ok = await canFirmRunJobsFor(fid, "payment_voucher_sla", db);
+      if (!ok) disabledFirmIds.add(fid);
+    }
+  }
+
   for (const row of vouchers) {
+    const rowFirmId = Number(row.firmId);
+    if (disabledFirmIds.has(rowFirmId)) continue;
     try {
       result.vouchersProcessed++;
       if (row.status === "pending_account" && !row.receivedAt) continue;
