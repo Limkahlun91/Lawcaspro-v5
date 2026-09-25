@@ -28,6 +28,8 @@ import {
   getFeatureDefinition,
   childrenOf,
   isFeatureRegistered,
+  permissionsTable,
+  rolesTable,
 } from "@workspace/db";
 import {
   resolveEntitlementsBulk,
@@ -155,6 +157,54 @@ function parentKeyOf(featureKey: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Permission checker — unified PermissionChecker that queries the permissions table
+// using the same (roleId, module, action) triple as requirePermission().
+//
+// This is the single shared source of truth plugged into resolveUserFeatureAccess
+// STEP 4 so that the resolver no longer silently falls back to legacy allow when
+// a feature has a valid backendGuardKey mapping but no explicit user row.
+//
+// To avoid repeated DB round-trips, the checker stores results on a request-level
+// cache using `(roleId_firmId_module_action` so bulk feature lookups.
+// ---------------------------------------------------------------------------
+
+export function makeRequestScopedPermissionChecker(params: {
+  r: AppDb | RlsDb;
+  firmId: number;
+  roleId: number | null;
+}): PermissionChecker {
+  const { r, firmId, roleId } = params;
+  const memo = new Map<string, boolean>();
+  return async function permissionChecker(moduleName: string, action: string): Promise<boolean> {
+    if (!roleId || !firmId) return false;
+    const k = `${firmId}|${roleId}|${moduleName}|${action}`;
+    const cached = memo.get(k);
+    if (typeof cached === "boolean") return cached;
+
+    const [role] = await r
+      .select({ id: rolesTable.id })
+      .from(rolesTable)
+      .where(and(eq(rolesTable.id, roleId), eq(rolesTable.firmId, firmId)))
+      .limit(1);
+    if (!role) {
+      memo.set(k, false);
+      return false;
+    }
+    const [perm] = await r
+      .select({ allowed: permissionsTable.allowed })
+      .from(permissionsTable)
+      .where(and(
+        eq(permissionsTable.roleId, roleId),
+        eq(permissionsTable.module, moduleName),
+        eq(permissionsTable.action, action),
+      ));
+    const ok = Boolean(perm?.allowed ?? false);
+    memo.set(k, ok);
+    return ok;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Load explicit user rows (bulk)
 // ---------------------------------------------------------------------------
 
@@ -253,7 +303,10 @@ export async function resolveUserFeatureAccessBulk(params: {
   permissionChecker?: PermissionChecker;
 }): Promise<Record<string, UserFeatureEffectiveResult>> {
   const { r, firmId, userId, roleId, roleName, featureKeys } = params;
-  const permissionChecker: PermissionChecker | undefined = params.permissionChecker;
+  let permissionChecker: PermissionChecker | undefined = params.permissionChecker;
+  if (!permissionChecker && firmId && roleId) {
+    permissionChecker = makeRequestScopedPermissionChecker({ r, firmId, roleId });
+  }
   const results: Record<string, UserFeatureEffectiveResult> = {};
 
   if (!firmId || !userId) {

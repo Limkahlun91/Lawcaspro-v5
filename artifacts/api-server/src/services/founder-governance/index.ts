@@ -105,9 +105,42 @@ export function assertFounderPermission(ctx: FounderGovernanceContext, permissio
 }
 
 export function assertActiveSupportSessionForFirm(ctx: FounderGovernanceContext, firmId: number): void {
-  void ctx;
-  void firmId;
-  return;
+  if (!firmId || !Number.isFinite(firmId)) {
+    throw new ApiError({
+      status: 403,
+      code: "PERMISSION_DENIED",
+      message: "Permission denied",
+      retryable: false,
+      details: { reason: "invalid_target_firm", supportSessionId: ctx.impersonation.supportSessionId ?? null },
+    });
+  }
+  if (!ctx.impersonation.active) {
+    throw new ApiError({
+      status: 403,
+      code: "PERMISSION_DENIED",
+      message: "Permission denied",
+      retryable: false,
+      details: {
+        reason: "no_active_support_session",
+        targetFirmId: firmId,
+        supportSessionId: ctx.impersonation.supportSessionId ?? null,
+      },
+    });
+  }
+  if (ctx.impersonation.targetFirmId !== firmId) {
+    throw new ApiError({
+      status: 403,
+      code: "PERMISSION_DENIED",
+      message: "Permission denied",
+      retryable: false,
+      details: {
+        reason: "support_session_target_firm_mismatch",
+        targetFirmId: firmId,
+        sessionBoundFirmId: ctx.impersonation.targetFirmId ?? null,
+        supportSessionId: ctx.impersonation.supportSessionId ?? null,
+      },
+    });
+  }
 }
 
 function makeRequestCode(prefix: string): string {
