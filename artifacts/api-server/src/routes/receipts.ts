@@ -1,6 +1,6 @@
 import express, { type Response, type Router as ExpressRouter } from "express";
 import { eq, and, desc, count, or } from "drizzle-orm";
-import { db, firmBankAccountsTable, invoicesTable, ledgerEntriesTable, receiptAllocationsTable, receiptsTable, sql, quotationsTable, clientsTable, casePurchasersTable, caseLedgersTable, casesTable } from "@workspace/db";
+import { db, firmBankAccountsTable, invoicesTable, ledgerEntriesTable, receiptAllocationsTable, receiptsTable, sql, quotationsTable, clientsTable, casePurchasersTable, caseLedgersTable, casesTable, caseKeyDatesTable } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
 import { syncCaseFinancialTotals } from "../lib/caseFinancialSync.js";
@@ -287,7 +287,7 @@ router.get("/receipts/:id", requireAuth, requireFirmUser, requirePermission("acc
 // Create receipt
 router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, requirePermission("accounting", "write"), async (req: AuthRequest, res): Promise<void> => {
   const { caseId, invoiceId, paymentMethod, bankAccountId, accountType, amount,
-    receivedDate, referenceNo, notes, allocations } = req.body;
+    receivedDate, referenceNo, notes, allocations, idempotencyKey } = req.body;
   if (!amount || !receivedDate) { res.status(400).json({ error: "amount and receivedDate required" }); return; }
 
   const amountNum = Number(amount);
@@ -301,6 +301,8 @@ router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, req
   if (invoiceIdNum !== null && (!Number.isFinite(invoiceIdNum) || invoiceIdNum <= 0)) { res.status(400).json({ error: "Invalid invoiceId" }); return; }
   const bankAccountIdNum = bankAccountId ? Number(bankAccountId) : null;
   if (bankAccountIdNum !== null && (!Number.isFinite(bankAccountIdNum) || bankAccountIdNum <= 0)) { res.status(400).json({ error: "Invalid bankAccountId" }); return; }
+
+  const idemKeyRaw = (typeof idempotencyKey === "string" && idempotencyKey.trim().length > 0) ? idempotencyKey.trim() : null;
 
   const paymentAccountType = normalizeLedgerAccountType(accountType);
 
@@ -328,6 +330,25 @@ router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, req
     if (effectiveCaseId) {
       const [c] = await tx.select({ id: casesTable.id }).from(casesTable).where(and(eq(casesTable.id, effectiveCaseId), eq(casesTable.firmId, req.firmId!))).limit(1);
       if (!c) return { kind: "case_not_found" as const };
+      const [kd] = await tx.select({ fullSettlementDate: caseKeyDatesTable.fullSettlementDate })
+        .from(caseKeyDatesTable)
+        .where(and(eq(caseKeyDatesTable.caseId, effectiveCaseId), eq(caseKeyDatesTable.firmId, req.firmId!)))
+        .limit(1);
+      if (kd && kd.fullSettlementDate) return { kind: "case_already_settled" as const };
+    }
+
+    if (idemKeyRaw) {
+      try {
+        const idemEventKey = `RECEIPT_IDEM:${String(req.firmId!)}:${idemKeyRaw}`;
+        const [existingIdem] = await tx.select({ id: caseLedgersTable.id, sourceId: caseLedgersTable.sourceId })
+          .from(caseLedgersTable)
+          .where(and(eq(caseLedgersTable.firmId, req.firmId!), eq(caseLedgersTable.eventKey, idemEventKey)))
+          .limit(1);
+        if (existingIdem && existingIdem.sourceId) {
+          const [recRow] = await tx.select().from(receiptsTable).where(and(eq(receiptsTable.id, Number(existingIdem.sourceId)), eq(receiptsTable.firmId, req.firmId!))).limit(1);
+          if (recRow) return { kind: "ok" as const, rec: recRow, idempotentReplay: true as const };
+        }
+      } catch { /* skip idem pre-check; downstream anchor dedupe still active */ }
     }
 
     const receiptNo = await nextReceiptNo(tx, req.firmId!);
@@ -408,6 +429,45 @@ router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, req
           eventKey: evtKey,
         } satisfies typeof caseLedgersTable.$inferInsert);
       }
+      if (idemKeyRaw) {
+        const idemAnchorKey = `RECEIPT_IDEM:${String(req.firmId!)}:${idemKeyRaw}`;
+        const [anchorExists] = await tx.select({ id: caseLedgersTable.id })
+          .from(caseLedgersTable)
+          .where(and(eq(caseLedgersTable.firmId, req.firmId!), eq(caseLedgersTable.eventKey, idemAnchorKey)))
+          .limit(1);
+        if (!anchorExists) {
+          try {
+            await tx.insert(caseLedgersTable).values({
+              firmId: req.firmId!,
+              caseId: effectiveCaseId,
+              transactionDate: receivedDateStr,
+              entryCategory: paymentAccountType,
+              entryType: "idem_anchor",
+              description: `Receipt Idempotency anchor for ${idemKeyRaw}`,
+              amount: "0.00",
+              debitCents: 0,
+              creditCents: 0,
+              sourceType: "receipt",
+              sourceId: rec.id,
+              sourceReference: receiptNo,
+              eventKey: idemAnchorKey,
+            } satisfies typeof caseLedgersTable.$inferInsert);
+          } catch (idemCollide) {
+            const info = (idemCollide as any).sqlState ?? (idemCollide as any).sqlstate ?? "";
+            if (info === "23505") {
+              const [idemCollideRec] = await tx.select({ sourceId: caseLedgersTable.sourceId })
+                .from(caseLedgersTable)
+                .where(and(eq(caseLedgersTable.firmId, req.firmId!), eq(caseLedgersTable.eventKey, idemAnchorKey)))
+                .limit(1);
+              if (idemCollideRec && idemCollideRec.sourceId) {
+                const [existingRow] = await tx.select().from(receiptsTable).where(and(eq(receiptsTable.id, Number(idemCollideRec.sourceId)), eq(receiptsTable.firmId, req.firmId!))).limit(1);
+                if (existingRow) return { kind: "ok" as const, rec: existingRow, idempotentReplay: true as const };
+              }
+            }
+            throw idemCollide;
+          }
+        }
+      }
       await applyAdvanceRecovery(tx, {
         firmId: req.firmId!,
         caseId: effectiveCaseId,
@@ -426,8 +486,9 @@ router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, req
   if (created.kind === "case_invoice_mismatch") { res.status(400).json({ error: "caseId does not match invoice caseId" }); return; }
   if (created.kind === "case_not_found") { res.status(400).json({ error: "Invalid caseId" }); return; }
   if (created.kind === "allocation_invoice_not_found") { res.status(400).json({ error: "Invalid allocation invoiceId" }); return; }
+  if (created.kind === "case_already_settled") { res.status(409).json({ error: "CASE_ALREADY_SETTLED" }); return; }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.receipt.create", entityType: "receipt", entityId: created.rec.id, detail: `receiptNo=${created.rec.receiptNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.receipt.create", entityType: "receipt", entityId: created.rec.id, detail: `receiptNo=${created.rec.receiptNo}${(created as any).idempotentReplay ? " replay=true" : ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
   res.status(201).json(created.rec);
 });
 
@@ -439,6 +500,18 @@ router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireF
   const [rec] = await db.select().from(receiptsTable).where(and(eq(receiptsTable.id, id), eq(receiptsTable.firmId, req.firmId!)));
   if (!rec) { res.status(404).json({ error: "Receipt not found" }); return; }
   if (rec.isReversed) { res.status(400).json({ error: "Already reversed" }); return; }
+
+  const caseIdResolved = rec.caseId ? Number(rec.caseId) : null;
+  if (caseIdResolved) {
+    const [kd] = await db.select({ fullSettlementDate: caseKeyDatesTable.fullSettlementDate })
+      .from(caseKeyDatesTable)
+      .where(and(eq(caseKeyDatesTable.caseId, caseIdResolved), eq(caseKeyDatesTable.firmId, req.firmId!)))
+      .limit(1);
+    if (kd && kd.fullSettlementDate) {
+      res.status(409).json({ error: "CASE_ALREADY_SETTLED" });
+      return;
+    }
+  }
 
   const reversed = await (db as any).transaction(async (tx: typeof db) => {
     await tx.update(receiptsTable).set({ isReversed: true, reversedBy: req.userId!, reversedAt: new Date() }).where(eq(receiptsTable.id, id));

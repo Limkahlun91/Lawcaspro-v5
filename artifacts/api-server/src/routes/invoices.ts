@@ -3,7 +3,7 @@ import { eq, and, desc, count } from "drizzle-orm";
 import {
   db, invoicesTable, invoiceItemsTable, quotationsTable, quotationItemsTable,
   casesTable, clientsTable, casePurchasersTable, ledgerEntriesTable, caseLedgersTable,
-  sql,
+  sql, caseKeyDatesTable, receiptsTable, receiptAllocationsTable,
 } from "@workspace/db";
 import { requireAuth, requireFirmUser, requirePartnerOrAccountForInvoices, requirePermission, requireReAuth, type AuthRequest, writeAuditLog } from "../lib/auth.js";
 import { sensitiveRateLimiter } from "../lib/rate-limit.js";
@@ -218,46 +218,62 @@ router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requi
   if (isNaN(quotationId)) { res.status(400).json({ error: "Invalid quotation ID" }); return; }
   const [q] = await r.select().from(quotationsTable).where(and(eq(quotationsTable.id, quotationId), eq(quotationsTable.firmId, req.firmId!)));
   if (!q) { res.status(404).json({ error: "Quotation not found" }); return; }
-  const [existingInv] = await r
-    .select({ id: invoicesTable.id })
-    .from(invoicesTable)
-    .where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.quotationId, quotationId)))
-    .limit(1);
-  if (existingInv) { res.status(409).json({ error: "Quotation already invoiced" }); return; }
-  const qItems = await r.select().from(quotationItemsTable).where(eq(quotationItemsTable.quotationId, quotationId)).orderBy(quotationItemsTable.sortOrder);
 
-  const subtotal = qItems.reduce((s, i) => s + Number(i.amountExclTax), 0);
-  const taxTotal = qItems.reduce((s, i) => s + Number(i.taxAmount), 0);
-  const grandTotal = subtotal + taxTotal;
-  const invoiceNo = await nextInvoiceNo(r, req.firmId!);
-  const today = new Date().toISOString().slice(0, 10);
-  const dueDate = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+  const created = await (r as any).transaction(async (tx: typeof r) => {
+    const [existingInv] = await tx
+      .select({ id: invoicesTable.id })
+      .from(invoicesTable)
+      .where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.quotationId, quotationId)))
+      .limit(1);
+    if (existingInv) return { kind: "already_invoiced" as const };
 
-  const [inv] = await r.insert(invoicesTable).values({
-    firmId: req.firmId!, caseId: q.caseId ?? null, quotationId,
-    invoiceNo, status: "draft",
-    subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2),
-    grandTotal: grandTotal.toFixed(2), amountPaid: "0", amountDue: grandTotal.toFixed(2),
-    issuedDate: today, dueDate,
-    notes: req.body.notes || null, createdBy: req.userId!,
-  }).returning();
+    const qItems = await tx.select().from(quotationItemsTable).where(eq(quotationItemsTable.quotationId, quotationId)).orderBy(quotationItemsTable.sortOrder);
+    const caseId = q.caseId ? Number(q.caseId) : null;
+    if (caseId) {
+      const [kd] = await tx.select({ fullSettlementDate: caseKeyDatesTable.fullSettlementDate })
+        .from(caseKeyDatesTable)
+        .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)))
+        .limit(1);
+      if (kd && kd.fullSettlementDate) return { kind: "case_already_settled" as const };
+    }
 
-  if (qItems.length) {
-    await r.insert(invoiceItemsTable).values(qItems.map((qi, idx) => ({
-      invoiceId: inv.id,
-      description: qi.description,
-      itemType: qi.itemType || "disbursement",
-      itemCategory: qi.itemCategory === "disbursement" ? "disbursement" : "fee",
-      amountExclTax: String(qi.amountExclTax),
-      taxRate: String(qi.taxRate),
-      taxAmount: String(qi.taxAmount),
-      amountInclTax: String(qi.amountInclTax),
-      sortOrder: idx,
-    })));
-  }
+    const subtotal = qItems.reduce((s, i) => s + Number(i.amountExclTax), 0);
+    const taxTotal = qItems.reduce((s, i) => s + Number(i.taxAmount), 0);
+    const grandTotal = subtotal + taxTotal;
+    const invoiceNo = await nextInvoiceNo(tx, req.firmId!);
+    const today = new Date().toISOString().slice(0, 10);
+    const dueDate = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: inv.id, detail: `from=quotation quotationId=${quotationId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.status(201).json(inv);
+    const [inv] = await tx.insert(invoicesTable).values({
+      firmId: req.firmId!, caseId: q.caseId ?? null, quotationId,
+      invoiceNo, status: "draft",
+      subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2),
+      grandTotal: grandTotal.toFixed(2), amountPaid: "0", amountDue: grandTotal.toFixed(2),
+      issuedDate: today, dueDate,
+      notes: req.body.notes || null, createdBy: req.userId!,
+    }).returning();
+
+    if (qItems.length) {
+      await tx.insert(invoiceItemsTable).values(qItems.map((qi, idx) => ({
+        invoiceId: inv.id,
+        description: qi.description,
+        itemType: qi.itemType || "disbursement",
+        itemCategory: qi.itemCategory === "disbursement" ? "disbursement" : "fee",
+        amountExclTax: String(qi.amountExclTax),
+        taxRate: String(qi.taxRate),
+        taxAmount: String(qi.taxAmount),
+        amountInclTax: String(qi.amountInclTax),
+        sortOrder: idx,
+      })));
+    }
+    return { kind: "ok" as const, inv };
+  });
+
+  if (created.kind === "already_invoiced") { res.status(409).json({ error: "Quotation already invoiced" }); return; }
+  if (created.kind === "case_already_settled") { res.status(409).json({ error: "CASE_ALREADY_SETTLED" }); return; }
+
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: created.inv.id, detail: `from=quotation quotationId=${quotationId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.status(201).json(created.inv);
 });
 
 // Create manually
@@ -282,34 +298,60 @@ router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, req
   const subtotal = parsedItems.reduce((s, i) => s + (Number.isFinite(i.amountExclTax) ? i.amountExclTax : 0), 0);
   const taxTotal = parsedItems.reduce((s, i) => s + (Number.isFinite(i.taxAmount) ? i.taxAmount : 0), 0);
   const grandTotal = subtotal + taxTotal;
-  const invoiceNo = await nextInvoiceNo(r, req.firmId!);
-  const today = issuedDate || new Date().toISOString().slice(0, 10);
-  const due = dueDate || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
 
-  const [inv] = await r.insert(invoicesTable).values({
-    firmId: req.firmId!, caseId: caseId || null, quotationId: quotationId || null,
-    invoiceNo, status: "draft",
-    subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2),
-    grandTotal: grandTotal.toFixed(2), amountPaid: "0", amountDue: grandTotal.toFixed(2),
-    issuedDate: typeof today === "string" ? today : String(today), dueDate: typeof due === "string" ? due : String(due),
-    notes: notes || null, createdBy: req.userId!,
-  }).returning();
+  const caseIdNum = caseId ? Number(caseId) : null;
+  const quotationIdNum = quotationId ? Number(quotationId) : null;
 
-  if (parsedItems.length) {
-    await r.insert(invoiceItemsTable).values(parsedItems.map((i, idx) => ({
-      invoiceId: inv.id,
-      description: i.description,
-      itemType: i.itemType || "professional_fee",
-      itemCategory: i.itemCategory,
-      amountExclTax: (Number.isFinite(i.amountExclTax) ? i.amountExclTax : 0).toFixed(2),
-      taxRate: (Number.isFinite(i.taxRate) ? i.taxRate : 0).toFixed(2),
-      taxAmount: (Number.isFinite(i.taxAmount) ? i.taxAmount : 0).toFixed(2),
-      amountInclTax: (Number.isFinite(i.amountInclTax) ? i.amountInclTax : 0).toFixed(2),
-      sortOrder: idx,
-    })));
-  }
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: inv.id, detail: "from=manual", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.status(201).json(inv);
+  const created = await (r as any).transaction(async (tx: typeof r) => {
+    if (caseIdNum && Number.isFinite(caseIdNum)) {
+      const [c] = await tx.select({ id: casesTable.id }).from(casesTable).where(and(eq(casesTable.id, caseIdNum), eq(casesTable.firmId, req.firmId!))).limit(1);
+      if (!c) return { kind: "case_not_found" as const };
+      const [kd] = await tx.select({ fullSettlementDate: caseKeyDatesTable.fullSettlementDate })
+        .from(caseKeyDatesTable)
+        .where(and(eq(caseKeyDatesTable.caseId, caseIdNum), eq(caseKeyDatesTable.firmId, req.firmId!)))
+        .limit(1);
+      if (kd && kd.fullSettlementDate) return { kind: "case_already_settled" as const };
+    }
+    if (quotationIdNum && Number.isFinite(quotationIdNum)) {
+      const [existingInv] = await tx.select({ id: invoicesTable.id }).from(invoicesTable).where(and(eq(invoicesTable.firmId, req.firmId!), eq(invoicesTable.quotationId, quotationIdNum))).limit(1);
+      if (existingInv) return { kind: "quotation_already_invoiced" as const };
+    }
+
+    const invoiceNo = await nextInvoiceNo(tx, req.firmId!);
+    const today = issuedDate || new Date().toISOString().slice(0, 10);
+    const due = dueDate || new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+
+    const [inv] = await tx.insert(invoicesTable).values({
+      firmId: req.firmId!, caseId: caseIdNum || null, quotationId: quotationIdNum || null,
+      invoiceNo, status: "draft",
+      subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2),
+      grandTotal: grandTotal.toFixed(2), amountPaid: "0", amountDue: grandTotal.toFixed(2),
+      issuedDate: typeof today === "string" ? today : String(today), dueDate: typeof due === "string" ? due : String(due),
+      notes: notes || null, createdBy: req.userId!,
+    }).returning();
+
+    if (parsedItems.length) {
+      await tx.insert(invoiceItemsTable).values(parsedItems.map((i, idx) => ({
+        invoiceId: inv.id,
+        description: i.description,
+        itemType: i.itemType || "professional_fee",
+        itemCategory: i.itemCategory,
+        amountExclTax: (Number.isFinite(i.amountExclTax) ? i.amountExclTax : 0).toFixed(2),
+        taxRate: (Number.isFinite(i.taxRate) ? i.taxRate : 0).toFixed(2),
+        taxAmount: (Number.isFinite(i.taxAmount) ? i.taxAmount : 0).toFixed(2),
+        amountInclTax: (Number.isFinite(i.amountInclTax) ? i.amountInclTax : 0).toFixed(2),
+        sortOrder: idx,
+      })));
+    }
+    return { kind: "ok" as const, inv };
+  });
+
+  if (created.kind === "case_not_found") { res.status(400).json({ error: "Invalid caseId" }); return; }
+  if (created.kind === "case_already_settled") { res.status(409).json({ error: "CASE_ALREADY_SETTLED" }); return; }
+  if (created.kind === "quotation_already_invoiced") { res.status(409).json({ error: "Quotation already invoiced" }); return; }
+
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: created.inv.id, detail: "from=manual", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  res.status(201).json(created.inv);
 });
 
 // Issue invoice (draft → issued)
@@ -366,9 +408,86 @@ router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirm
   const [inv] = await r.select().from(invoicesTable).where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!)));
   if (!inv) { res.status(404).json({ error: "Invoice not found" }); return; }
   if (inv.status === "paid") { res.status(400).json({ error: "Cannot void a paid invoice. Issue a credit note." }); return; }
-  const [updated] = await r.update(invoicesTable).set({ status: "void", amountDue: "0.00", updatedAt: new Date() }).where(eq(invoicesTable.id, id)).returning();
+
+  const updated = await (r as any).transaction(async (tx: DbConn) => {
+    const [lockedInv] = await tx.select().from(invoicesTable).where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!))).limit(1);
+    if (!lockedInv) return { kind: "not_found" as const };
+    if (lockedInv.status === "paid") return { kind: "paid" as const };
+
+    const caseId = lockedInv.caseId ? Number(lockedInv.caseId) : null;
+    if (caseId) {
+      const [kd] = await tx.select({ fullSettlementDate: caseKeyDatesTable.fullSettlementDate })
+        .from(caseKeyDatesTable)
+        .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)))
+        .limit(1);
+      if (kd && kd.fullSettlementDate) return { kind: "case_already_settled" as const };
+    }
+
+    const [allocRows] = await tx.select({ total: sql<number>`COALESCE(SUM(amount), 0)` })
+      .from(receiptAllocationsTable)
+      .innerJoin(receiptsTable, and(eq(receiptAllocationsTable.receiptId, receiptsTable.id), eq(receiptsTable.firmId, req.firmId!), sql`${receiptsTable.isReversed} = false`))
+      .where(eq(receiptAllocationsTable.invoiceId, id));
+    const allocTotal = Number(allocRows?.total ?? 0);
+    if (allocTotal > 0) {
+      return { kind: "has_receipts" as const, allocTotal };
+    }
+
+    const [updatedRow] = await tx.update(invoicesTable).set({ status: "void", amountDue: "0.00", amountPaid: "0.00", updatedAt: new Date() })
+      .where(and(eq(invoicesTable.id, id), eq(invoicesTable.firmId, req.firmId!)))
+      .returning();
+
+    if (caseId) {
+      const [billedRow] = await tx.select({ id: caseLedgersTable.id, eventKey: caseLedgersTable.eventKey })
+        .from(caseLedgersTable)
+        .where(and(
+          eq(caseLedgersTable.firmId, req.firmId!),
+          eq(caseLedgersTable.caseId, caseId),
+          eq(caseLedgersTable.sourceType, "invoice"),
+          eq(caseLedgersTable.sourceId, id),
+          eq(caseLedgersTable.entryType, "invoice_billed"),
+        ))
+        .limit(1);
+      if (billedRow && billedRow.id) {
+        const voidEventKey = `INVOICE_VOID:${id}:${String(billedRow.eventKey ?? "")}`;
+        const [voidExists] = await tx.select({ id: caseLedgersTable.id })
+          .from(caseLedgersTable)
+          .where(and(eq(caseLedgersTable.firmId, req.firmId!), eq(caseLedgersTable.caseId, caseId), eq(caseLedgersTable.eventKey, voidEventKey)))
+          .limit(1);
+        if (!voidExists) {
+          const originalAmount = Number(inv.grandTotal ?? 0);
+          const debitCentsOrig = Math.round(originalAmount * 100);
+          await tx.insert(caseLedgersTable).values({
+            firmId: req.firmId!,
+            caseId,
+            transactionDate: new Date().toISOString().slice(0, 10),
+            entryCategory: "office",
+            entryType: "invoice_void",
+            description: `Invoice ${lockedInv.invoiceNo} voided reversal`,
+            amount: Number(originalAmount).toFixed(2),
+            debitCents: 0,
+            creditCents: debitCentsOrig,
+            sourceType: "invoice",
+            sourceId: id,
+            sourceReference: lockedInv.invoiceNo,
+            eventKey: voidEventKey,
+          } satisfies typeof caseLedgersTable.$inferInsert);
+        }
+      }
+      await syncCaseFinancialTotals(tx, { firmId: req.firmId!, caseId });
+    }
+
+    return { kind: "ok" as const, inv: updatedRow };
+  });
+
+  if (updated.kind === "not_found") { res.status(404).json({ error: "Invoice not found" }); return; }
+  if (updated.kind === "paid") { res.status(400).json({ error: "Cannot void a paid invoice. Issue a credit note." }); return; }
+  if (updated.kind === "case_already_settled") { res.status(409).json({ error: "CASE_ALREADY_SETTLED" }); return; }
+  if (updated.kind === "has_receipts") {
+    res.status(409).json({ error: "VOID_NOT_ALLOWED_REVERSE_RECEIPT_FIRST", amountAllocated: Number(updated.allocTotal).toFixed(2) });
+    return;
+  }
   await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.void", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
-  res.json(updated);
+  res.json(updated.inv);
 });
 
 const exportedRouter = expressRouter as unknown as ExpressRouter;

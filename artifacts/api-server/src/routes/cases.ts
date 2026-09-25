@@ -66,6 +66,7 @@ import {
 } from "../lib/resolveCaseReference.js";
 import { computeDashboardStats } from "../services/dashboard-stats.js";
 import { computeMilestonesSummary } from "../services/milestones-summary.js";
+import { invalidateAllUserFeatureCachesForFirm } from "../services/user-feature-access.js";
 import {
   createCaseCanonical,
   CanonicalCaseCreateError,
@@ -1875,12 +1876,18 @@ router.post("/cases/bulk/assign", requireAuthHandler, requireFirmUserHandler, re
   const existingIds = new Set(cases.map((c) => c.id));
   const missingIds = normalizedCaseIds.filter((id: number) => !existingIds.has(id));
 
-  const failures: Array<{ caseId: number; error: string }> = missingIds.map((id) => ({ caseId: id, error: "Case not found" }));
-  let succeeded = 0;
+  if (missingIds.length > 0) {
+    res.status(400).json({ error: "Some caseIds not found", caseIdsNotFound: missingIds });
+    return;
+  }
 
-  for (const { id: caseId } of cases) {
-    try {
-      await r
+  const txResult = await (r as any).transaction(async (tx: typeof r) => {
+    const now = new Date();
+    const caseFailures: Array<{ caseId: number; error: string }> = [];
+    let caseSucceeded = 0;
+
+    for (const { id: caseId } of cases) {
+      await tx
         .update(caseAssignmentsTable)
         .set({ unassignedAt: now })
         .where(and(
@@ -1889,7 +1896,7 @@ router.post("/cases/bulk/assign", requireAuthHandler, requireFirmUserHandler, re
           sql`${caseAssignmentsTable.unassignedAt} IS NULL`
         ));
 
-      await r
+      await tx
         .insert(caseAssignmentsTable)
         .values({
           caseId,
@@ -1911,11 +1918,14 @@ router.post("/cases/bulk/assign", requireAuthHandler, requireFirmUserHandler, re
         userAgent: req.headers["user-agent"],
       });
 
-      succeeded += 1;
-    } catch (err) {
-      failures.push({ caseId, error: err instanceof Error ? err.message : String(err) });
+      caseSucceeded += 1;
     }
-  }
+
+    return { succeeded: caseSucceeded, failures: caseFailures };
+  });
+
+  const { succeeded } = txResult;
+  const failures: Array<{ caseId: number; error: string }> = [];
 
   await writeAuditLog({
     firmId: req.firmId,
@@ -1927,6 +1937,8 @@ router.post("/cases/bulk/assign", requireAuthHandler, requireFirmUserHandler, re
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
   });
+
+  if (req.firmId) invalidateAllUserFeatureCachesForFirm(req.firmId);
 
   res.json({ requested: normalizedCaseIds.length, succeeded, failed: failures.length, failures });
 }));
@@ -1979,42 +1991,49 @@ router.post("/cases/bulk/status", requireAuthHandler, requireFirmUserHandler, re
   const existingIds = new Set(cases.map((c) => c.id));
   const missingIds = normalizedCaseIds.filter((id: number) => !existingIds.has(id));
 
-  const failures: Array<{ caseId: number; error: string }> = missingIds.map((id) => ({ caseId: id, error: "Case not found" }));
-  let succeeded = 0;
+  if (missingIds.length > 0) {
+    res.status(400).json({ error: "Some caseIds not found", caseIdsNotFound: missingIds });
+    return;
+  }
 
   const pathType = moduleRaw === "spa" ? "common" : "loan";
   const statusNameLower = statusName.toLowerCase();
+  const failures: Array<{ caseId: number; error: string }> = [];
 
-  for (const { id: caseId, purchaseMode: purchaseModeRaw, titleType: titleTypeRaw } of cases) {
-    try {
+  const txResult = await (r as any).transaction(async (tx: typeof r) => {
+    let statusSucceeded = 0;
+    const caseFailures: Array<{ caseId: number; error: string }> = [];
+    const now = new Date();
+
+    for (const { id: caseId, purchaseMode: purchaseModeRaw, titleType: titleTypeRaw } of cases) {
       const purchaseMode = String(purchaseModeRaw || "").trim().toLowerCase();
       if (moduleRaw === "loan" && purchaseMode !== "loan") {
-        failures.push({ caseId, error: "Not a loan case" });
-        continue;
+        caseFailures.push({ caseId, error: "Not a loan case" });
+        throw { kind: "validation_failures", failures: caseFailures };
       }
 
       const titleTypeNorm = (normalizeTitleType(titleTypeRaw) ?? String(titleTypeRaw || "").trim().toLowerCase()) || "master";
       const defs = buildWorkflowSteps(purchaseMode, titleTypeNorm);
       const def = defs.find((d) => d.pathType === pathType && String(d.stepName || "").trim().toLowerCase() === statusNameLower);
       if (!def) {
-        failures.push({ caseId, error: `Unsupported status for ${moduleRaw}` });
-        continue;
+        caseFailures.push({ caseId, error: `Unsupported status for ${moduleRaw}` });
+        throw { kind: "validation_failures", failures: caseFailures };
       }
 
-      await ensureCaseWorkflowSteps(r, req.firmId!, caseId);
+      await ensureCaseWorkflowSteps(tx, req.firmId!, caseId);
 
       const requirement = WORKFLOW_AUTOMATION_RULE_BY_STEP_KEY[def.stepKey];
       if (requirement) {
         const keyDateFieldRaw = requirement.keyDateField;
         if (!Object.prototype.hasOwnProperty.call(KEY_DATE_FIELD_TO_STEP_KEY, keyDateFieldRaw)) {
-          failures.push({ caseId, error: "Invalid automated step mapping" });
-          continue;
+          caseFailures.push({ caseId, error: "Invalid automated step mapping" });
+          throw { kind: "validation_failures", failures: caseFailures };
         }
         const keyDateField = keyDateFieldRaw as KeyDateField;
 
         if (requirement.kind === "dateAndWorkflowDoc") {
           const docKey = requirement.docKey as WorkflowDocumentMilestoneKey;
-          const [doc] = await r
+          const [doc] = await tx
             .select({ id: caseWorkflowDocumentsTable.id })
             .from(caseWorkflowDocumentsTable)
             .where(and(
@@ -2027,28 +2046,28 @@ router.post("/cases/bulk/status", requireAuthHandler, requireFirmUserHandler, re
             ))
             .limit(1);
           if (!doc) {
-            failures.push({ caseId, error: "Missing required attachment for this status" });
-            continue;
+            caseFailures.push({ caseId, error: "Missing required attachment for this status" });
+            throw { kind: "validation_failures", failures: caseFailures };
           }
         }
 
         const patch = keyDatePatchFromWorkflow(keyDateField, ymd);
-        const [existingKd] = await r
+        const [existingKd] = await tx
           .select({ id: caseKeyDatesTable.id })
           .from(caseKeyDatesTable)
           .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
         if (existingKd) {
-          await r
+          await tx
             .update(caseKeyDatesTable)
             .set({ ...patch, updatedAt: now })
             .where(and(eq(caseKeyDatesTable.caseId, caseId), eq(caseKeyDatesTable.firmId, req.firmId!)));
         } else {
-          await r
+          await tx
             .insert(caseKeyDatesTable)
             .values({ firmId: req.firmId!, caseId, ...patch });
         }
 
-        await r.insert(auditLogsTable).values({
+        await tx.insert(auditLogsTable).values({
           firmId: req.firmId,
           actorId: req.userId,
           actorType: "firm_user",
@@ -2058,7 +2077,7 @@ router.post("/cases/bulk/status", requireAuthHandler, requireFirmUserHandler, re
           detail: JSON.stringify([keyDateField]),
         });
 
-        await syncWorkflowStepsFromCaseState(r, caseId, {
+        await syncWorkflowStepsFromCaseState(tx, caseId, {
           firmId: req.firmId!,
           actorId: req.userId,
           actorType: req.userType ?? "firm_user",
@@ -2066,17 +2085,17 @@ router.post("/cases/bulk/status", requireAuthHandler, requireFirmUserHandler, re
           userAgent: req.headers["user-agent"],
         });
       } else {
-        const [step] = await r
+        const [step] = await tx
           .select({ id: caseWorkflowStepsTable.id, stepName: caseWorkflowStepsTable.stepName })
           .from(caseWorkflowStepsTable)
           .where(and(eq(caseWorkflowStepsTable.caseId, caseId), eq(caseWorkflowStepsTable.stepKey, def.stepKey)))
           .limit(1);
         if (!step) {
-          failures.push({ caseId, error: "Workflow step not found" });
-          continue;
+          caseFailures.push({ caseId, error: "Workflow step not found" });
+          throw { kind: "validation_failures", failures: caseFailures };
         }
 
-        const [updated] = await r
+        const [updated] = await tx
           .update(caseWorkflowStepsTable)
           .set({
             status: "completed",
@@ -2087,11 +2106,11 @@ router.post("/cases/bulk/status", requireAuthHandler, requireFirmUserHandler, re
           .where(and(eq(caseWorkflowStepsTable.id, step.id), eq(caseWorkflowStepsTable.caseId, caseId)))
           .returning();
         if (!updated) {
-          failures.push({ caseId, error: "Workflow step not found" });
-          continue;
+          caseFailures.push({ caseId, error: "Workflow step not found" });
+          throw { kind: "validation_failures", failures: caseFailures };
         }
 
-        await r.insert(auditLogsTable).values({
+        await tx.insert(auditLogsTable).values({
           firmId: req.firmId,
           actorId: req.userId,
           actorType: "firm_user",
@@ -2114,11 +2133,22 @@ router.post("/cases/bulk/status", requireAuthHandler, requireFirmUserHandler, re
         userAgent: req.headers["user-agent"],
       });
 
-      succeeded += 1;
-    } catch (err) {
-      failures.push({ caseId, error: err instanceof Error ? err.message : String(err) });
+      statusSucceeded += 1;
     }
+
+    return { kind: "ok" as const, succeeded: statusSucceeded };
+  }).catch((err: any) => {
+    if (err && typeof err === "object" && err.kind === "validation_failures") {
+      return { kind: "validation_failures" as const, failures: err.failures as Array<{ caseId: number; error: string }> };
+    }
+    throw err;
+  });
+
+  if (txResult.kind === "validation_failures") {
+    res.status(400).json({ requested: normalizedCaseIds.length, succeeded: 0, failed: txResult.failures.length, failures: txResult.failures });
+    return;
   }
+  const { succeeded } = txResult;
 
   await writeAuditLog({
     firmId: req.firmId,
