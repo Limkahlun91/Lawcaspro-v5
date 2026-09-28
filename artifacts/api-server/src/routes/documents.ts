@@ -3351,7 +3351,7 @@ router.patch(
         detail: `name=${folderName}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.json(rows[0]);
     } catch (err: any) {
       if (err?.code === "23505") {
@@ -3417,7 +3417,7 @@ router.delete(
       entityId: folderId,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.sendStatus(204);
   },
 );
@@ -3760,7 +3760,7 @@ router.post(
         detail: `templateId=${templateId} inputFileType=${out.fileType} output=pdf`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.status(200).send(pdfBytes);
     } catch (err: unknown) {
       const cfgErr = getSupabaseStorageConfigError(err);
@@ -3775,7 +3775,7 @@ router.post(
           detail: `templateId=${templateId} code=STORAGE_NOT_CONFIGURED`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: req.rlsDb });
         res
           .status(cfgErr.statusCode)
           .json({ error: cfgErr.error, code: "TEMPLATE_STORAGE_READ_FAILED" });
@@ -3792,7 +3792,7 @@ router.post(
           detail: `templateId=${templateId} code=DATA_FETCH_TIMEOUT`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: req.rlsDb });
         res.status(504).json({
           error: "資料抓取過久，請稍後再試",
           code: "DATA_FETCH_TIMEOUT",
@@ -3810,7 +3810,7 @@ router.post(
           detail: `templateId=${templateId} code=DATA_FETCH_TIMEOUT`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: req.rlsDb });
         res.status(504).json({
           error: "資料抓取過久，請稍後再試",
           code: "DATA_FETCH_TIMEOUT",
@@ -3828,7 +3828,7 @@ router.post(
           detail: `templateId=${templateId} code=FILE_NOT_FOUND`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: req.rlsDb });
         res.status(404).json({
           error: "Missing template file",
           code: "TEMPLATE_FILE_MISSING",
@@ -3955,7 +3955,7 @@ router.post(
         detail: `templateId=${templateId} code=INTERNAL_ERROR`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res
         .status(503)
         .json({ error: "Internal Server Error", code: "INTERNAL_ERROR" });
@@ -4103,7 +4103,7 @@ router.post(
       detail: `name=${name} kind=${effectiveKind} ext=${ext}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.status(201).json(patched[0] ?? rows[0]);
   },
 );
@@ -4217,7 +4217,7 @@ router.post(
       detail: `name=${templateName} ext=${ext}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.status(201).json(created);
   },
 );
@@ -5523,7 +5523,7 @@ router.post(
         detail: `key=${v.key} scope=${scope}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.status(201).json({ ok: true, id });
     } catch (err) {
       logger.error({ err, route: req.path, firmId: req.firmId ?? null, userId: req.userId ?? null, requestId: (res.locals as any)?.requestId ?? null }, "documents_custom_variables.create_failed");
@@ -6487,7 +6487,7 @@ router.put(
       detail: `count=${normalized.length}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     const bindings = await getFirmTemplateBindings(r, req.firmId!, templateId);
     res.json({ bindings });
   },
@@ -6813,7 +6813,7 @@ router.put(
       detail: `updated mode=${applicabilityMode ?? "unchanged"} rules=${applicabilityRules ? "yes" : "no"} checklistMode=${checklistMode ?? "unchanged"} checklistItems=${checklistItems ? "set" : "nochange"}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     const rules = await getFirmTemplateApplicabilityRules(
       r,
       req.firmId!,
@@ -7262,7 +7262,7 @@ router.post(
       detail: `templateId=${templateId} versionNo=${nextNo}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.status(201).json(created);
   },
 );
@@ -7377,7 +7377,7 @@ router.post(
       detail: `templateId=${templateId} versionNo=${(published as any).version_no ?? ""}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json({ version: published, template: updatedTplRows[0] });
   },
 );
@@ -7455,7 +7455,7 @@ router.post(
       detail: `templateId=${templateId} restoredFrom=${versionId} newVersionNo=${nextNo}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.status(201).json(created);
   },
 );
@@ -7500,7 +7500,7 @@ router.post(
       detail: `templateId=${templateId}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json(rows[0]);
   },
 );
@@ -7563,7 +7563,7 @@ router.get(
         detail: `fileName=${fileName}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
     } catch (err) {
       const cfgErr = getSupabaseStorageConfigError(err);
       if (cfgErr) {
@@ -7672,7 +7672,7 @@ router.get(
         detail: `ext=${ext} placeholders=${placeholders.length}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.json({
         templateId,
         fileName,
@@ -7783,7 +7783,7 @@ router.put(
       detail: `templateId=${templateId}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json({
       mappings: (rows[0] as any).pdf_mapping_config ?? { pages: [] },
     });
@@ -7843,7 +7843,7 @@ router.delete(
       detail: deletedName ? `name=${deletedName}` : undefined,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.sendStatus(204);
   },
 );
@@ -8001,7 +8001,7 @@ router.post(
         detail: `name=${name} default=${isDefault}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.status(201).json(created);
     } catch (err: any) {
       if (err?.code === "23505") {
@@ -8291,7 +8291,7 @@ router.patch(
       entityId: letterheadId,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json(rows[0]);
   },
 );
@@ -8346,7 +8346,7 @@ router.post(
       entityId: letterheadId,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json(rows[0]);
   },
 );
@@ -8412,7 +8412,7 @@ router.delete(
       entityId: letterheadId,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.sendStatus(204);
   },
 );
@@ -8494,7 +8494,7 @@ router.get(
         detail: `part=${part} fileName=${fileName}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
     } catch (err) {
       const cfgErr = getSupabaseStorageConfigError(err);
       if (cfgErr) {
@@ -8546,6 +8546,9 @@ router.get(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "view_documents" });
+    if (!accessGranted) return;
+
     const rows = await queryRows(
       r,
       sql`
@@ -8610,6 +8613,9 @@ router.get(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "view_documents" });
+if (!accessGranted) return;
+
 
     const includeAllRequested = truthy((req.query as any).includeAll);
     const includeAll = includeAllRequested
@@ -10472,6 +10478,9 @@ router.post(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+    if (!accessGranted) return;
+
     const exists = await tableExists(r, "public.case_document_checklist_items");
     if (!exists) {
       res.status(503).json({ error: "Checklist tracking not available" });
@@ -10532,7 +10541,7 @@ router.post(
       detail: `checklistKey=${checklistKey} label=${label} required=${isRequired}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.status(201).json(rows[0]);
   },
 );
@@ -10553,6 +10562,9 @@ router.post(
       res.status(400).json({ error: "Invalid params" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+    if (!accessGranted) return;
+
     const exists = await tableExists(r, "public.case_document_checklist_items");
     if (!exists) {
       res.status(503).json({ error: "Checklist tracking not available" });
@@ -10617,7 +10629,7 @@ router.post(
       detail: `checklistKey=${checklistKey} label=${label ?? ""}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json(rows[0]);
   },
 );
@@ -10638,6 +10650,9 @@ router.post(
       res.status(400).json({ error: "Invalid params" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+    if (!accessGranted) return;
+
     const exists = await tableExists(r, "public.case_document_checklist_items");
     if (!exists) {
       res.status(503).json({ error: "Checklist tracking not available" });
@@ -10701,7 +10716,7 @@ router.post(
       detail: `checklistKey=${checklistKey} label=${label ?? ""}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json(rows[0]);
   },
 );
@@ -10722,6 +10737,9 @@ router.post(
       res.status(400).json({ error: "Invalid params" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+    if (!accessGranted) return;
+
     const exists = await tableExists(r, "public.case_document_checklist_items");
     if (!exists) {
       res.status(503).json({ error: "Checklist tracking not available" });
@@ -10781,7 +10799,7 @@ router.post(
       detail: `checklistKey=${checklistKey} label=${label ?? ""} reason=${reason}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json(rows[0]);
   },
 );
@@ -10802,6 +10820,9 @@ router.post(
       res.status(400).json({ error: "Invalid params" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+    if (!accessGranted) return;
+
     const exists = await tableExists(r, "public.case_document_checklist_items");
     if (!exists) {
       res.status(503).json({ error: "Checklist tracking not available" });
@@ -10839,7 +10860,7 @@ router.post(
       detail: `checklistKey=${checklistKey}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json(rows[0]);
   },
 );
@@ -10860,6 +10881,9 @@ router.post(
       res.status(400).json({ error: "Invalid params" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+    if (!accessGranted) return;
+
     const exists = await tableExists(r, "public.case_document_checklist_items");
     if (!exists) {
       res.status(503).json({ error: "Checklist tracking not available" });
@@ -11004,7 +11028,7 @@ router.post(
       detail: `caseId=${caseId} name=${label || checklistKey} fileName=${fileName}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     await writeAuditLog({
       firmId: req.firmId,
       actorId: req.userId,
@@ -11017,7 +11041,7 @@ router.post(
       detail: `checklistKey=${checklistKey} label=${label || ""} caseDocumentId=${createdId ?? ""} prevCaseDocumentId=${previousCaseDocumentId ?? ""}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.status(201).json({ checklist: upserted[0], caseDocument: created });
   },
 );
@@ -11038,6 +11062,9 @@ router.post(
       res.status(400).json({ error: "Invalid params" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+    if (!accessGranted) return;
+
     const exists = await tableExists(r, "public.case_document_checklist_items");
     if (!exists) {
       res.status(503).json({ error: "Checklist tracking not available" });
@@ -11116,7 +11143,7 @@ router.post(
       detail: `checklistKey=${checklistKey} label=${label ?? ""}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json({ ok: true });
   },
 );
@@ -11135,6 +11162,9 @@ router.get(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+    if (!accessGranted) return;
+
     const exists = await tableExists(r, "public.audit_logs");
     if (!exists) {
       res.json([]);
@@ -13974,6 +14004,9 @@ router.post(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "export_documents" });
+if (!accessGranted) return;
+
 
     const body = req.body as Record<string, unknown>;
     const idsRaw = Array.isArray(body.documentIds) ? body.documentIds : [];
@@ -14039,7 +14072,7 @@ router.post(
       detail: `jobId=${jobId} caseId=${caseId} total=${rows.length}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
 
     for (const d of rows) {
       const src =
@@ -14329,7 +14362,7 @@ router.post(
         detail: `cases=${caseIds.length} docs=${entries.length}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.setHeader(
         "Content-Disposition",
         contentDispositionAttachment(outName),
@@ -14736,7 +14769,7 @@ router.post(
       detail: `jobId=${jobId} cases=${caseIds.length} templates=${templateIds.length} action=${actionType}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
 
     try {
       await writeDocumentGenerationLog(r, {
@@ -16174,6 +16207,9 @@ router.post(
       res.status(400).json({ error: "Invalid caseId" });
       return;
     }
+const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "generate_documents" });
+if (!accessGranted) return;
+
 
     const bodySchema = z.object({
       templateIds: z.array(z.union([z.number(), z.string()])).min(1),
@@ -20022,7 +20058,7 @@ router.post(
         detail: `cases=${caseIds.length} templates=${templates.length} outputs=${generatedCount} success=${successCount}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
     } catch (err) {
       const info = extractDbErrorInfo(err);
       const baseMsg =
@@ -24110,7 +24146,7 @@ router.post(
         detail: `cases=${caseIds.length} templates=${templateIds.length} blocked=1`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.status(400).json({
         error: "Missing required data for document generation",
         code: "MISSING_REQUIRED_DATA",
@@ -24188,7 +24224,7 @@ router.post(
       detail: `jobId=${jobId} cases=${caseIds.length} templates=${templateIds.length} action=${config.action}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
 
     res.status(202).json({
       status: "accepted",
@@ -24282,7 +24318,7 @@ router.get(
         detail: `jobId=${jobId}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
     } catch (err) {
       const cfgErr = getSupabaseStorageConfigError(err);
       if (cfgErr) {
@@ -24332,6 +24368,9 @@ router.post(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "generate_documents" });
+if (!accessGranted) return;
+
 
     const body = req.body as Record<string, unknown>;
     const templateId =
@@ -24619,7 +24658,7 @@ router.post(
       detail: `clauseCode=${clauseCode}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.status(201).json(created);
   },
 );
@@ -24723,7 +24762,7 @@ router.put(
       detail: `clauseId=${id}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json(rows[0]);
   },
 );
@@ -24823,7 +24862,7 @@ router.post(
         detail: `clauseCode=${clauseName}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.status(201).json({
         id: Number((created as any).id),
         clauseName: String((created as any).clause_code ?? ""),
@@ -24920,7 +24959,7 @@ router.put(
         detail: `clauseCode=${clauseName}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.json({
         id: Number((updated as any).id),
         clauseName: String((updated as any).clause_code ?? ""),
@@ -24993,7 +25032,7 @@ router.delete(
       detail: `clauseCode=${String((row as any).clause_code ?? "")}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json({ ok: true });
   },
 );
@@ -25085,6 +25124,9 @@ router.get(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+if (!accessGranted) return;
+
 
     const guard = await queryRows(
       r,
@@ -25128,6 +25170,9 @@ router.put(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+if (!accessGranted) return;
+
 
     const guard = await queryRows(
       r,
@@ -25205,7 +25250,7 @@ router.put(
       detail: `keys=${Object.keys(normalized).length}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json({ ok: true, overrides: normalized });
   },
 );
@@ -25224,6 +25269,9 @@ router.post(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "generate_documents" });
+if (!accessGranted) return;
+
 
     const body = req.body as Record<string, unknown>;
     const templateId = toPositiveInt(body.templateId);
@@ -25376,6 +25424,9 @@ router.post(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "generate_documents" });
+if (!accessGranted) return;
+
 
     const body = req.body as Record<string, unknown>;
     const templateId = toPositiveInt(body.templateId);
@@ -25842,7 +25893,7 @@ router.post(
             detail: `caseId=${caseId} mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass} clauses=${clauseRefs.length} target=${insertionTarget ?? ""}`,
             ipAddress: req.ip,
             userAgent: req.headers["user-agent"],
-          });
+          }, { db: req.rlsDb });
           res.json(resp);
           return;
         }
@@ -25886,7 +25937,7 @@ router.post(
             detail: `caseId=${caseId} ext=pdf mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass}`,
             ipAddress: req.ip,
             userAgent: req.headers["user-agent"],
-          });
+          }, { db: req.rlsDb });
           res.json({
             resolvedVariables: preview.resolvedVariables,
             missingRequiredVariables: preview.missingRequiredVariables,
@@ -25915,7 +25966,7 @@ router.post(
           detail: `caseId=${caseId} ext=${ext} applicable=${applicabilityResult.applicable} bypass=${bypass}`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: req.rlsDb });
         res.json({
           resolvedVariables: {},
           missingRequiredVariables: [],
@@ -26280,7 +26331,7 @@ router.post(
         detail: `caseId=${caseId} mode=${preview.usedMode} applicable=${applicabilityResult.applicable} bypass=${bypass} clauses=${clauseRefs.length} target=${insertionTarget ?? ""}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.json({
         resolvedVariables: preview.resolvedVariables,
         missingRequiredVariables: preview.missingRequiredVariables,
@@ -26335,7 +26386,7 @@ router.post(
           detail: `code=STORAGE_NOT_CONFIGURED`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: req.rlsDb });
         res
           .status(cfgErr.statusCode)
           .json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
@@ -26352,7 +26403,7 @@ router.post(
           detail: `code=FILE_NOT_FOUND`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: req.rlsDb });
         res
           .status(404)
           .json({ error: "Template file not found", code: "FILE_NOT_FOUND" });
@@ -26370,7 +26421,7 @@ router.post(
           detail: `code=${err.code}`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: req.rlsDb });
         res.status(err.statusCode).json({
           error: err.message,
           code: err.code,
@@ -26390,7 +26441,7 @@ router.post(
           detail: `code=TEMPLATE_PREVIEW_FAILED`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: req.rlsDb });
         res.status(422).json({
           error:
             "The document template contains invalid variable tags. Please check for unclosed brackets or typos.",
@@ -26414,7 +26465,7 @@ router.post(
         detail: `code=INTERNAL_ERROR`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res
         .status(503)
         .json({ error: "Preview failed", code: "TEMPLATE_PREVIEW_FAILED" });
@@ -26526,7 +26577,7 @@ router.post(
         detail: `templateId=${tid}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.status(200).send(outputBuffer);
     } catch (err: unknown) {
       const cfgErr = getSupabaseStorageConfigError(err);
@@ -26541,7 +26592,7 @@ router.post(
           detail: `templateId=${tid} code=STORAGE_NOT_CONFIGURED`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: req.rlsDb });
         res
           .status(cfgErr.statusCode)
           .json({ error: cfgErr.error, code: "STORAGE_NOT_CONFIGURED" });
@@ -26558,7 +26609,7 @@ router.post(
           detail: `templateId=${tid} code=FILE_NOT_FOUND`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: req.rlsDb });
         res
           .status(404)
           .json({ error: "Template file not found", code: "FILE_NOT_FOUND" });
@@ -26585,7 +26636,7 @@ router.post(
         detail: `templateId=${tid} code=INTERNAL_ERROR`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.status(503).json({
         error: "Failed to generate document",
         code: "DOCUMENT_GENERATION_FAILED",
@@ -26742,6 +26793,9 @@ router.post(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "generate_documents" });
+    if (!accessGranted) return;
+
     const body = req.body as Record<string, unknown>;
     const tid = toPositiveInt(body.templateId);
     if (!tid) {
@@ -27312,7 +27366,7 @@ router.post(
         detail: `jobId=${jobId} caseId=${caseId} printKey=${printKey} templateSource=${templateSource} templateId=${templateRefId} output=pdf`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.status(202).json({
         ok: true,
         mode: "job",
@@ -27360,6 +27414,9 @@ router.post(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+    if (!accessGranted) return;
+
     const { name, documentType, objectPath, fileName, fileSize } = req.body as {
       name: string;
       documentType?: string;
@@ -27397,8 +27454,9 @@ router.post(
       });
       return;
     }
-    if (!objectPath.startsWith(`/objects/cases/${req.firmId!}/`)) {
-      res.status(403).json({ error: "Invalid objectPath", code: "FORBIDDEN" });
+    const requiredPrefix = `/objects/cases/${req.firmId!}/case-${caseId}/`;
+    if (!objectPath.startsWith(requiredPrefix)) {
+      res.status(403).json({ error: "Invalid objectPath for case scope", code: "PATH_MISMATCH_CASE_ID" });
       return;
     }
 
@@ -27466,7 +27524,7 @@ router.post(
       detail: `caseId=${caseId} name=${name} fileName=${smartName}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.status(201).json(rows[0]);
   },
 );
@@ -27485,6 +27543,9 @@ router.post(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "export_documents" });
+if (!accessGranted) return;
+
 
     const body =
       req.body && typeof req.body === "object"
@@ -27577,7 +27638,7 @@ router.post(
       detail: `count=${docIds.length}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.status(200).send(Buffer.from(outBytes));
   },
 );
@@ -27598,6 +27659,9 @@ router.get(
       res.status(400).json({ error: "Invalid document ID" });
       return;
     }
+const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "export_documents" });
+if (!accessGranted) return;
+
 
     const rows = await queryRows(
       r,
@@ -27644,7 +27708,7 @@ router.get(
         detail: `caseId=${caseId} fileName=${fileName}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
     } catch (err) {
       const cfgErr = getSupabaseStorageConfigError(err);
       if (cfgErr) {
@@ -27820,6 +27884,9 @@ router.post(
       res.status(400).json({ error: "Invalid caseId/docId" });
       return;
     }
+const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+if (!accessGranted) return;
+
 
     const [doc] = await queryRows(
       r,
@@ -27975,7 +28042,7 @@ router.post(
         detail: `caseId=${caseId} method=${raw.extractionMethod} guess=${guessed} suggestions=${suggestions.length}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
 
       const suggestionRows = await queryRows(
         r,
@@ -28005,7 +28072,7 @@ router.post(
         detail: `caseId=${caseId}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.status(500).json({ error: "Extraction failed" });
     }
   },
@@ -28025,6 +28092,9 @@ router.get(
       res.status(400).json({ error: "Invalid caseId/docId" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "view_documents" });
+    if (!accessGranted) return;
+
     const jobs = await queryRows(
       r,
       sql`
@@ -28093,7 +28163,7 @@ router.post(
       detail: `caseId=${Number((rows[0] as any).case_id)} suggestionId=${suggestionId}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json({ ok: true, suggestion: rows[0] });
   },
 );
@@ -28173,7 +28243,7 @@ router.post(
       detail: `caseId=${Number(s.case_id)} suggestionId=${suggestionId} field=${String(s.field_key)} applied=${outcome.applied ? "1" : "0"} override=${overrideExisting ? "1" : "0"} target=${String(outcome.target)} old=${String(outcome.oldValue ?? "")} new=${String(outcome.newValue ?? "")} snippet=${String(s.source_snippet ?? "").slice(0, 80)}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json({ ok: true, outcome });
   },
 );
@@ -28387,7 +28457,7 @@ router.post(
       detail: `applied=${outcomes.filter((o) => o.applied).length}/${outcomes.length} override=${overrideExisting ? "1" : "0"}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
     res.json({ ok: true, outcomes });
   },
 );
@@ -28408,6 +28478,9 @@ router.delete(
       res.status(400).json({ error: "Invalid document ID" });
       return;
     }
+const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "modify_documents" });
+if (!accessGranted) return;
+
 
     const rows = await queryRows(
       r,
@@ -28436,7 +28509,7 @@ router.delete(
         : `caseId=${caseId}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
 
     if (await tableExists(r, "public.case_document_checklist_items")) {
       const linked = await queryRows(
@@ -28476,7 +28549,7 @@ router.delete(
           detail: `checklistKey=${checklistKey} caseDocumentId=${docId}`,
           ipAddress: req.ip,
           userAgent: req.headers["user-agent"],
-        });
+        }, { db: req.rlsDb });
       }
     }
 

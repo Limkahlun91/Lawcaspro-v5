@@ -1470,7 +1470,7 @@ router.post("/case-list-views", requireAuthHandler, requireFirmUserHandler, requ
       detail: `name=${name}`,
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
 
     res.status(201).json({
       id: created.id,
@@ -1551,7 +1551,7 @@ router.patch("/case-list-views/:id", requireAuthHandler, requireFirmUserHandler,
       detail: "updated",
       ipAddress: req.ip,
       userAgent: req.headers["user-agent"],
-    });
+    }, { db: req.rlsDb });
 
     res.json({
       id: updated.id,
@@ -1611,7 +1611,7 @@ router.delete("/case-list-views/:id", requireAuthHandler, requireFirmUserHandler
     detail: `name=${deleted.name}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
 
   res.status(204).end();
 }));
@@ -1684,7 +1684,7 @@ router.post("/cases/views", requireAuthHandler, requireFirmUserHandler, requireP
     detail: `name=${name} default=${isDefault}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
 
   res.status(201).json({
     id: created.id,
@@ -1779,7 +1779,7 @@ router.patch("/cases/views/:viewId", requireAuthHandler, requireFirmUserHandler,
     detail: "updated",
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
 
   res.json({
     id: updated.id,
@@ -1828,7 +1828,7 @@ router.delete("/cases/views/:viewId", requireAuthHandler, requireFirmUserHandler
     detail: `name=${deleted.name}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
 
   res.status(204).end();
 }));
@@ -1916,7 +1916,7 @@ router.post("/cases/bulk/assign", requireAuthHandler, requireFirmUserHandler, re
         detail: `role=${roleInCase} userId=${targetUserId}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
 
       caseSucceeded += 1;
     }
@@ -1936,7 +1936,7 @@ router.post("/cases/bulk/assign", requireAuthHandler, requireFirmUserHandler, re
     detail: `role=${roleInCase} userId=${targetUserId} requested=${normalizedCaseIds.length} succeeded=${succeeded} failed=${failures.length}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
 
   if (req.firmId) invalidateAllUserFeatureCachesForFirm(req.firmId);
 
@@ -2131,7 +2131,7 @@ router.post("/cases/bulk/status", requireAuthHandler, requireFirmUserHandler, re
         detail: `module=${moduleRaw} status=${statusName} date=${ymd}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
 
       statusSucceeded += 1;
     }
@@ -2159,7 +2159,7 @@ router.post("/cases/bulk/status", requireAuthHandler, requireFirmUserHandler, re
     detail: `module=${moduleRaw} status=${statusName} requested=${normalizedCaseIds.length} succeeded=${succeeded} failed=${failures.length} date=${ymd}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
 
   res.json({ requested: normalizedCaseIds.length, succeeded, failed: failures.length, failures });
 }));
@@ -2380,7 +2380,7 @@ router.patch("/cases/bulk/key-dates", requireAuthHandler, requireFirmUserHandler
     detail: `field=${field} date=${ymd} requested=${requestedIds.length} succeeded=${succeeded} failed=${failures.length}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
 
   res.json({ requested: requestedIds.length, succeeded, failed: failures.length, failures });
 }));
@@ -6022,6 +6022,7 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
         registeredPoaOn: caseKeyDatesTable.registerPoaOn,
         registeredPoaRegistrationNumber: caseKeyDatesTable.registeredPoaRegistrationNumber,
         differentialSumRm: (caseKeyDatesTable as any).differentialSumRm,
+        fullSettlementDate: caseKeyDatesTable.fullSettlementDate,
       })
       .from(caseKeyDatesTable)
       .where(and(eq(caseKeyDatesTable.caseId, params.data.caseId), eq(caseKeyDatesTable.firmId, req.firmId!)))
@@ -6125,6 +6126,18 @@ router.patch("/cases/:caseId/key-dates", requireAuthHandler, requireFirmUserHand
       .values(insertValues)
       .returning();
     kd = inserted;
+  }
+
+  const oldFs = currentKd?.fullSettlementDate ?? null;
+  const newFs = kd?.fullSettlementDate ?? null;
+  if (oldFs !== newFs) {
+    const beforeDate = oldFs ? String(oldFs) : null;
+    const afterDate = newFs ? String(newFs) : null;
+    if (!oldFs && newFs) {
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType ?? "firm_user", action: "cases.settled", entityType: "case", entityId: params.data.caseId, detail: `before=${beforeDate ?? "null"};after=${afterDate}`, ipAddress: req.ip, userAgent: Array.isArray(req.headers["user-agent"]) ? req.headers["user-agent"][0] : req.headers["user-agent"] }, { db: req.rlsDb });
+    } else if (oldFs && !newFs) {
+      await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType ?? "firm_user", action: "cases.unsettled", entityType: "case", entityId: params.data.caseId, detail: `before=${beforeDate};after=${afterDate ?? "null"}`, ipAddress: req.ip, userAgent: Array.isArray(req.headers["user-agent"]) ? req.headers["user-agent"][0] : req.headers["user-agent"] }, { db: req.rlsDb });
+    }
   }
 
   await r.insert(auditLogsTable).values({
@@ -7208,7 +7221,7 @@ router.post("/cases/:caseId/workflow-documents", requireAuthHandler, requireFirm
     detail: `workflowDocumentId=${row.id} milestoneKey=${milestoneKey} fileName=${smartFileName}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
 
   await syncWorkflowStepsFromCaseState(r, caseId, {
     firmId: req.firmId!,
@@ -7316,7 +7329,7 @@ router.delete("/cases/:caseId/workflow-documents/:id", requireAuthHandler, requi
     detail: `workflowDocumentId=${id} milestoneKey=${existing.milestoneKey} fileName=${existing.fileName}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
 
   await syncWorkflowStepsFromCaseState(r, caseId, {
     firmId: req.firmId!,
@@ -7382,7 +7395,7 @@ router.get("/cases/:caseId/workflow-documents/:id/download", requireAuthHandler,
     detail: `workflowDocumentId=${id} milestoneKey=${row.milestoneKey} fileName=${row.fileName}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
   try {
     await streamSupabasePrivateObjectToResponse({
       objectPath: row.objectPath,
@@ -7578,7 +7591,7 @@ router.post("/cases/:caseId/loan-stamping/ensure", requireAuthHandler, requireFi
     detail: `loanStampingItemId=${row?.id ?? ""} itemKey=${itemKey} sortOrder=${row?.sortOrder ?? ""}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
 
   res.status(200).json({
     id: row.id,
@@ -7710,7 +7723,7 @@ router.put("/cases/:caseId/loan-stamping", requireAuthHandler, requireFirmUserHa
     detail: `items=${itemsRaw.length}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
 
   res.json(results.map((x) => ({
     id: x.id,
@@ -7799,7 +7812,7 @@ router.delete("/cases/:caseId/loan-stamping/:id", requireAuthHandler, requireFir
     detail: `loanStampingItemId=${id} itemKey=${existing.itemKey} fileName=${existing.fileName ?? ""}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
   res.status(204).end();
 }));
 
@@ -7921,7 +7934,7 @@ router.post("/cases/:caseId/loan-stamping/:id/file", requireAuthHandler, require
     detail: `loanStampingItemId=${id} itemKey=${existing.itemKey} fileName=${smartFileName}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
   res.json({ ok: true });
 }));
 
@@ -8000,7 +8013,7 @@ router.delete("/cases/:caseId/loan-stamping/:id/file", requireAuthHandler, requi
     detail: `loanStampingItemId=${id} itemKey=${existing.itemKey} fileName=${existing.fileName ?? ""}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
   res.status(204).end();
 }));
 
@@ -8049,7 +8062,7 @@ router.get("/cases/:caseId/loan-stamping/:id/download", requireAuthHandler, requ
     detail: `loanStampingItemId=${id} itemKey=${row.itemKey} fileName=${row.fileName}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
   try {
     await streamSupabasePrivateObjectToResponse({
       objectPath: row.objectPath,
@@ -8170,7 +8183,7 @@ router.post("/cases/:caseId/supp-lo-documents", requireAuthHandler, requireFirmU
     detail: `suppLoDocumentId=${row.id} name=${row.documentName}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
   res.status(201).json({ ...row, documentDate: row.documentDate ? String(row.documentDate) : null, createdAt: toIsoStringSafeOrNull(row.createdAt), updatedAt: toIsoStringSafeOrNull(row.updatedAt) });
 }));
 
@@ -8265,7 +8278,7 @@ router.patch("/cases/:caseId/supp-lo-documents/:id", requireAuthHandler, require
     detail: `suppLoDocumentId=${id}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
   res.json({ ...row, documentDate: row.documentDate ? String(row.documentDate) : null, createdAt: toIsoStringSafeOrNull(row.createdAt), updatedAt: toIsoStringSafeOrNull(row.updatedAt) });
 }));
 
@@ -8330,7 +8343,7 @@ router.delete("/cases/:caseId/supp-lo-documents/:id", requireAuthHandler, requir
     detail: `suppLoDocumentId=${id} fileName=${existing.fileName ?? ""}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
   res.status(204).end();
 }));
 
@@ -8374,7 +8387,7 @@ router.get("/cases/:caseId/supp-lo-documents/:id/download", requireAuthHandler, 
     detail: `suppLoDocumentId=${id} fileName=${row.fileName}`,
     ipAddress: req.ip,
     userAgent: req.headers["user-agent"],
-  });
+  }, { db: req.rlsDb });
   try {
     await streamSupabasePrivateObjectToResponse({
       objectPath: row.objectPath,

@@ -222,6 +222,8 @@ export async function requireAuth(
         status: string;
       }
     | undefined;
+  let matchedTokenPlaintext: string | undefined;
+  let matchedTokenSource: "COOKIE" | "HEADER" | undefined;
   let lookupTiming: SessionUserLookupTiming | undefined;
   try {
     const reqId = getReqId(req);
@@ -233,6 +235,8 @@ export async function requireAuth(
         session = result.session;
         user = result.user;
         lookupTiming = result.timing;
+        matchedTokenPlaintext = token;
+        matchedTokenSource = token === cookieToken ? "COOKIE" : "HEADER";
         break;
       }
       lookupTiming = result?.timing;
@@ -297,6 +301,88 @@ export async function requireAuth(
     });
     res.status(401).json({ error: "User inactive", code: "AUTH_USER_INACTIVE" });
     return;
+  }
+
+  // ---------- G1-9: Session Identity Snapshot cross-check (GUARD CLAUSE) ----------
+  // Only enforce when ALL snapshot columns on the session are populated — this
+  // guarantees graceful backward compatibility for sessions issued before this
+  // gate (they still have the NULL defaults from migration 0170 and survive
+  // until natural expiry).
+  const snapHasAll =
+    typeof (session as unknown as { firmId?: unknown }).firmId !== "undefined" &&
+    (session as unknown as { firmId?: unknown }).firmId !== null &&
+    typeof (session as unknown as { roleId?: unknown }).roleId !== "undefined" &&
+    (session as unknown as { roleId?: unknown }).roleId !== null &&
+    typeof (session as unknown as { userType?: unknown }).userType === "string" &&
+    String((session as unknown as { userType: string }).userType).trim() !== "";
+  if (snapHasAll) {
+    const snap = session as unknown as { firmId: number; roleId: number; userType: string };
+    const firmMismatch = Number(snap.firmId) !== Number(user.firmId ?? -1);
+    const roleMismatch = Number(snap.roleId) !== Number(user.roleId ?? -1);
+    const typeMismatch = String(snap.userType) !== String(user.userType);
+    if (firmMismatch || roleMismatch || typeMismatch) {
+      const tokenHash = matchedTokenPlaintext
+        ? crypto.createHash("sha256").update(matchedTokenPlaintext).digest("hex")
+        : null;
+      if (tokenHash) {
+        try {
+          await deleteSessionByTokenHash(tokenHash);
+        } catch {
+          /* swallow cleanup errors */
+        }
+        invalidateVerifiedSessionCacheByTokenHash(tokenHash);
+        invalidateVerifiedSessionCacheByUserId(user.id);
+      }
+      await writeAuditLog({
+        firmId: user.firmId ?? null,
+        actorId: user.id,
+        actorType: user.userType,
+        action: "auth.session_identity_mismatch",
+        detail: `route=${req.method} ${req.path} firm=${Number(snap.firmId)}->${Number(user.firmId ?? -1)} role=${Number(snap.roleId)}->${Number(user.roleId ?? -1)} type=${String(snap.userType)}->${String(user.userType)}`,
+        ipAddress: req.ip,
+        userAgent: req.headers["user-agent"],
+      });
+      res.status(401).json({ error: "Session identity no longer matches current account state", code: "AUTH_SESSION_IDENTITY_MISMATCH" });
+      return;
+    }
+  }
+
+  // ---------- G1-6: Sliding session refresh ----------
+  // Only refresh when the current TTL is below the 24h sliding threshold to
+  // avoid DB churn on every request; active users average ~1 refresh every
+  // 6 days at the default 7-day token lifetime.
+  const remainingTtlMs = Math.max(0, session.expiresAt.getTime() - Date.now());
+  const SLIDING_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+  const FRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  if (remainingTtlMs > 0 && remainingTtlMs < SLIDING_THRESHOLD_MS && matchedTokenPlaintext && matchedTokenSource === "COOKIE") {
+    try {
+      const freshExpiresAt = new Date(Date.now() + FRESH_TTL_MS);
+      await withAuthSafeDb(async (authDb) => {
+        await authDb
+          .update(sessionsTable)
+          .set({ expiresAt: freshExpiresAt })
+          .where(eq(sessionsTable.id, session.id));
+      }, { retry: true, maxRetries: 2, allowUnsafe: true, ctx: { stage: "auth_require_sliding_refresh", userId: user.id, route: req.path } });
+      const tokenHash = crypto.createHash("sha256").update(matchedTokenPlaintext).digest("hex");
+      invalidateVerifiedSessionCacheByTokenHash(tokenHash);
+      const cookieOpts = {
+        httpOnly: true,
+        secure: (typeof (req as unknown as { secure?: boolean }).secure === "boolean"
+          ? Boolean((req as unknown as { secure: boolean }).secure)
+          : false) || process.env.NODE_ENV === "production",
+        sameSite: (process.env.COOKIE_SAME_SITE?.toLowerCase() === "none"
+          ? "none" as const
+          : process.env.COOKIE_SAME_SITE?.toLowerCase() === "lax"
+            ? "lax" as const
+            : "strict" as const),
+        path: "/",
+        ...(process.env.COOKIE_DOMAIN?.trim() ? { domain: process.env.COOKIE_DOMAIN.trim() } : {}),
+        maxAge: FRESH_TTL_MS,
+      } satisfies Record<string, unknown>;
+      res.cookie("auth_token", matchedTokenPlaintext, cookieOpts as any);
+    } catch (err) {
+      logger.error({ err, route: req.path, userId: user.id }, "auth.require_auth.sliding_refresh_failed");
+    }
   }
 
   req.userId = user.id;
@@ -367,6 +453,25 @@ export function invalidateVerifiedSessionCacheByUserId(userId: number): void {
 export function __clearAuthCachesForTests(): void {
   verifiedSessionCache.clear();
   inflightSessionLookups.clear();
+}
+
+export function __hydrateVerifiedSessionCacheForTests(
+  entries: Iterable<readonly [string, { session: { userId: number; expiresAt: Date }; user?: unknown }]>,
+): void {
+  const nowMs = Date.now();
+  for (const [k, v] of entries) {
+    verifiedSessionCache.set(String(k), {
+      cachedAtMs: nowMs,
+      value: {
+        session: v.session as any,
+        user: (v.user ?? null) as any,
+      } as NonNullable<SessionUserLookupResult>,
+    });
+  }
+}
+
+export function __readVerifiedSessionCacheKeysForTests(): string[] {
+  return Array.from(verifiedSessionCache.keys());
 }
 
 /**
@@ -2389,7 +2494,10 @@ export type CaseAccessPurpose =
   | "edit_case"
   | "batch_update"
   | "view_documents"
+  | "modify_documents"
   | "edit_documents"
+  | "generate_documents"
+  | "export_documents"
   | "print_documents";
 
 export const CANONICAL_CASE_ACCESS_ROLES: Readonly<Record<CaseAccessPurpose, ReadonlyArray<string>>> = {
@@ -2397,7 +2505,10 @@ export const CANONICAL_CASE_ACCESS_ROLES: Readonly<Record<CaseAccessPurpose, Rea
   edit_case: ["lawyer", "clerk", "responsible_lawyer"],
   batch_update: ["lawyer", "clerk", "responsible_lawyer"],
   view_documents: ["lawyer", "clerk", "responsible_lawyer", "supporting_docs_viewer", "supporting_docs_editor", "witness", "client_party"],
+  modify_documents: ["lawyer", "clerk", "responsible_lawyer", "supporting_docs_editor"],
   edit_documents: ["lawyer", "clerk", "responsible_lawyer", "supporting_docs_editor"],
+  generate_documents: ["lawyer", "clerk", "responsible_lawyer", "supporting_docs_editor"],
+  export_documents: ["lawyer", "clerk", "responsible_lawyer", "supporting_docs_viewer", "supporting_docs_editor"],
   print_documents: ["lawyer", "clerk", "responsible_lawyer", "supporting_docs_viewer", "supporting_docs_editor"],
 };
 

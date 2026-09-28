@@ -488,7 +488,7 @@ router.post("/receipts", sensitiveRateLimiter, requireAuth, requireFirmUser, req
   if (created.kind === "allocation_invoice_not_found") { res.status(400).json({ error: "Invalid allocation invoiceId" }); return; }
   if (created.kind === "case_already_settled") { res.status(409).json({ error: "CASE_ALREADY_SETTLED" }); return; }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.receipt.create", entityType: "receipt", entityId: created.rec.id, detail: `receiptNo=${created.rec.receiptNo}${(created as any).idempotentReplay ? " replay=true" : ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.receipt.create", entityType: "receipt", entityId: created.rec.id, detail: `receiptNo=${created.rec.receiptNo}${(created as any).idempotentReplay ? " replay=true" : ""}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: req.rlsDb });
   res.status(201).json(created.rec);
 });
 

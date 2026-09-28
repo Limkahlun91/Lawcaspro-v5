@@ -272,7 +272,7 @@ router.post("/invoices/from-quotation/:quotationId", sensitiveRateLimiter, requi
   if (created.kind === "already_invoiced") { res.status(409).json({ error: "Quotation already invoiced" }); return; }
   if (created.kind === "case_already_settled") { res.status(409).json({ error: "CASE_ALREADY_SETTLED" }); return; }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: created.inv.id, detail: `from=quotation quotationId=${quotationId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: created.inv.id, detail: `from=quotation quotationId=${quotationId}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: req.rlsDb });
   res.status(201).json(created.inv);
 });
 
@@ -350,7 +350,7 @@ router.post("/invoices", sensitiveRateLimiter, requireAuth, requireFirmUser, req
   if (created.kind === "case_already_settled") { res.status(409).json({ error: "CASE_ALREADY_SETTLED" }); return; }
   if (created.kind === "quotation_already_invoiced") { res.status(409).json({ error: "Quotation already invoiced" }); return; }
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: created.inv.id, detail: "from=manual", ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.create", entityType: "invoice", entityId: created.inv.id, detail: "from=manual", ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: req.rlsDb });
   res.status(201).json(created.inv);
 });
 
@@ -395,7 +395,7 @@ router.post("/invoices/:id/issue", sensitiveRateLimiter, requireAuth, requireFir
     return row;
   });
 
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.issue", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.issue", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: req.rlsDb });
   res.json(updated);
 });
 
@@ -486,7 +486,7 @@ router.post("/invoices/:id/void", sensitiveRateLimiter, requireAuth, requireFirm
     res.status(409).json({ error: "VOID_NOT_ALLOWED_REVERSE_RECEIPT_FIRST", amountAllocated: Number(updated.allocTotal).toFixed(2) });
     return;
   }
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.void", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.invoice.void", entityType: "invoice", entityId: id, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: req.rlsDb });
   res.json(updated.inv);
 });
 
