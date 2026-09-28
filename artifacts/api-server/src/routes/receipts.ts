@@ -581,7 +581,7 @@ router.post("/receipts/:id/reverse", sensitiveRateLimiter, requireAuth, requireF
   });
 
   if (!reversed.ok) { res.status(500).json({ error: "Internal Server Error" }); return; }
-  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.receipt.reverse", entityType: "receipt", entityId: id, detail: `receiptNo=${rec.receiptNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] });
+  await writeAuditLog({ firmId: req.firmId, actorId: req.userId, actorType: req.userType, action: "accounting.receipt.reverse", entityType: "receipt", entityId: id, detail: `receiptNo=${rec.receiptNo}`, ipAddress: req.ip, userAgent: req.headers["user-agent"] }, { db: req.rlsDb });
   res.json({ success: true });
 });
 

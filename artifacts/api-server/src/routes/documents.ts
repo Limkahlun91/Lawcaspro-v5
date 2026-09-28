@@ -3275,7 +3275,7 @@ router.post(
         detail: `name=${folderName}`,
         ipAddress: req.ip,
         userAgent: req.headers["user-agent"],
-      });
+      }, { db: req.rlsDb });
       res.status(201).json(rows[0]);
     } catch (err: any) {
       if (err?.code === "23505") {
@@ -3676,6 +3676,12 @@ router.post(
       return;
     }
     const { caseId, templateId } = parsed.data;
+
+    if (req.userType === "firm_user") {
+      const guardDb = (req.rlsDb ?? db) as any;
+      const guardOk = await enforceCaseAccessGeneric(guardDb, req, res, caseId, { purpose: "generate_documents" });
+      if (!guardOk) return;
+    }
 
     const isFounder = req.userType === "founder";
     const firmId = req.userType === "firm_user" ? (req.firmId ?? null) : null;
@@ -4779,6 +4785,11 @@ router.get(
       return;
     }
 
+    {
+      const guardOk = await enforceCaseAccessGeneric(r, req, res, caseIdNum, { purpose: "view_documents" });
+      if (!guardOk) return;
+    }
+
     const activeRaw = one((req.query as any).active);
     const active =
       activeRaw === undefined
@@ -5655,6 +5666,12 @@ router.get(
       sendError(res as any, new ApiError({ status: 400, code: "INVALID_INPUT", message: "Invalid caseId", retryable: false, stage: "documents_custom_variables.preview" }));
       return;
     }
+
+    {
+      const guardOk = await enforceCaseAccessGeneric(r, req, res, caseId, { purpose: "view_documents" });
+      if (!guardOk) return;
+    }
+
     try {
       const rows = await queryRows(
         r,
@@ -8578,6 +8595,8 @@ router.get(
       res.status(400).json({ error: "Invalid case ID" });
       return;
     }
+    const accessGranted = await enforceCaseAccessGeneric(r as any, req, res, caseId, { purpose: "view_documents" });
+    if (!accessGranted) return;
 
     const rows = await queryRows(
       r,
@@ -14276,6 +14295,11 @@ router.post(
       return;
     }
 
+    for (const cid of caseIds) {
+      const guardOk = await enforceCaseAccessGeneric(r, req, res, cid, { purpose: "export_documents" });
+      if (!guardOk) return;
+    }
+
     const refByCaseId = new Map<number, string>();
     for (const row of caseRows) {
       const id =
@@ -14614,6 +14638,11 @@ router.post(
     if (caseRows.length !== caseIds.length) {
       res.status(403).json({ error: "Forbidden", code: "CASE_ACCESS_DENIED" });
       return;
+    }
+
+    for (const cid of caseIds) {
+      const guardOk = await enforceCaseAccessGeneric(r, req, res, cid, { purpose: "generate_documents" });
+      if (!guardOk) return;
     }
 
     const hasPrintMode = await columnExists(r, {
