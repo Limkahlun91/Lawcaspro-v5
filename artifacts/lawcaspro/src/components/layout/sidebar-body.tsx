@@ -21,6 +21,7 @@ import {
   BarChart,
   ScrollText,
   Settings,
+  CreditCard,
   FileText,
   Bell,
   LogOut,
@@ -179,6 +180,22 @@ export function navGroupsForUser(): Array<{
           icon: Calculator,
           perm: ["accounting", "read"],
           featureKey: "accounting.dashboard",
+          roleCheck: isAccountingRole,
+        },
+        {
+          label: "Payment Vouchers",
+          href: "/app/accounting?tab=payment-vouchers",
+          icon: CreditCard,
+          perm: ["accounting", "read"],
+          featureKey: "accounting.payment_voucher",
+          roleCheck: isAccountingRole,
+        },
+        {
+          label: "Quotations",
+          href: "/app/accounting?tab=quotations",
+          icon: FileText,
+          perm: ["accounting", "read"],
+          featureKey: "accounting.quotation",
           roleCheck: isAccountingRole,
         },
         {
@@ -497,7 +514,9 @@ export function SidebarBody({
             : location === item.href ||
               location.startsWith(`${item.href}/`) ||
               (item.href.startsWith("/app/settings") && location.startsWith(item.href.split("?")[0])) ||
-              (item.href === "/app/accounting" && location.startsWith("/app/quotations"))
+              (item.href === "/app/accounting" && (location.startsWith("/app/quotations") || location.startsWith("/app/payment-vouchers"))) ||
+              (item.href === "/app/accounting?tab=quotations" && location.startsWith("/app/quotations")) ||
+              (item.href === "/app/accounting?tab=payment-vouchers" && location.startsWith("/app/payment-vouchers"))
         )
       )
         s.add(group.key);
@@ -678,7 +697,9 @@ export function SidebarBody({
                     location === item.href ||
                     location.startsWith(`${item.href}/`) ||
                     location.startsWith(`${itemPath}/`) ||
-                    (item.href === "/app/accounting" && location.startsWith("/app/quotations"));
+                    (item.href === "/app/accounting" && (location.startsWith("/app/quotations") || location.startsWith("/app/payment-vouchers"))) ||
+                    (item.href === "/app/accounting?tab=quotations" && location.startsWith("/app/quotations")) ||
+                    (item.href === "/app/accounting?tab=payment-vouchers" && location.startsWith("/app/payment-vouchers"));
                   return (
                     <Link key={item.href} href={item.href} onClick={onNavigate}>
                       <div

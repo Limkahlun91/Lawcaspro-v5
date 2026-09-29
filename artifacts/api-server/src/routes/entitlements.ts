@@ -63,37 +63,45 @@ type FirmFeatureStateSrc = "plan" | "founder_override" | "temporary_override" | 
 // unique index uq_firm_entitlement_permanent (WHERE override_kind='permanent').
 // Correct behaviour per G0.10: UPDATE the existing permanent row IN PLACE when one
 // exists (regardless of current expiry); INSERT when none exists.
+//
+// G0.10 HARD FIX — Atomic Read-then-Write Transaction.  Entire helper runs inside a
+// single db.transaction() so the SELECT + UPDATE/INSERT are a single ACID
+// unit — no interleaving, no lost upsert-index-target mismatch, no HTTP 500 from
+// Drizzle/Pg ON CONFLICT partial-index boundary.
 async function setPermanentOverrideMode(
   firmId: number,
   featureKey: string,
   mode: "enabled" | "disabled",
   reason: string,
   createdBy: number | null,
-) {
+): Promise<number | null> {
   const t = firmEntitlementOverridesTable;
-  // 1. Find any existing permanent row for (firmId, featureKey).
-  //    Use LIMIT 1 (most recent by id) if duplicates exist (defensive).
-  const existing = await db
-    .select({ id: t.id })
-    .from(t)
-    .where(and(eq(t.firmId, firmId), eq(t.featureKey, featureKey), eq(t.overrideKind, "permanent")))
-    .orderBy(sql`${t.id} DESC`)
-    .limit(1);
-  if (existing.length > 0) {
-    // UPDATE IN PLACE the existing permanent row — DO NOT expire-and-insert.
-    // Re-activate by clearing expiresAt so the resolver treats it as active permanent.
-    await db
-      .update(t)
-      .set({
-        overrideMode: mode,
-        reason,
-        expiresAt: null,
-        updatedAt: new Date(),
-      })
-      .where(eq(t.id, existing[0].id));
-    return existing[0].id;
-  } else {
-    const [row] = await db
+  return db.transaction(async (tx) => {
+    // 1. Find any existing permanent row for (firmId, featureKey).
+    //    Use LIMIT 1 (most recent by id) if duplicates exist (defensive).
+    const existing = await tx
+      .select({ id: t.id })
+      .from(t)
+      .where(and(eq(t.firmId, firmId), eq(t.featureKey, featureKey), eq(t.overrideKind, "permanent")))
+      .orderBy(sql`${t.id} DESC`)
+      .limit(1);
+    if (existing.length > 0) {
+      // 2. UPDATE IN PLACE the existing permanent row — DO NOT expire-and-insert.
+      //    Preserve created_at / created_by / original row identity.  Reset expiresAt
+      //    so the resolver treats it as active permanent.
+      await tx
+        .update(t)
+        .set({
+          overrideMode: mode,
+          reason,
+          expiresAt: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(t.id, existing[0].id));
+      return existing[0].id;
+    }
+    // 3. No permanent row exists for (firmId, featureKey) — INSERT one.
+    const [row] = await tx
       .insert(t)
       .values({
         firmId,
@@ -107,7 +115,7 @@ async function setPermanentOverrideMode(
       })
       .returning({ id: t.id });
     return row ? row.id : null;
-  }
+  });
 }
 
 const expressRouter = express.Router();
@@ -678,11 +686,38 @@ router.post("/founder/firms/:firmId/entitlements/bulk-override", requireAuth, re
       // enabled/disabled bulk = permanent overrides (no time bound).
       // Permanent overrides use override_kind='permanent' with effectiveFrom=NULL, expiresAt=NULL.
       // The DB unique index uq_firm_entitlement_permanent enforces one permanent row per (firm, feature).
+      //
+      // G0.10 HARD FIX — Replace .onConflictDoNothing({ target: [firmId, featureKey] }) which CANNOT
+      // match the partial unique index (WHERE override_kind='permanent') and causes Drizzle/PG to
+      // throw.  Use the same atomic per-key Read-then-Write pattern inside the transaction as
+      // setPermanentOverrideMode, so each key is handled exactly once regardless of prior state.
       await db.transaction(async (tx) => {
+        const t = firmEntitlementOverridesTable;
         for (const k of parsed.data.featureKeys) {
-          await tx
-            .insert(firmEntitlementOverridesTable)
-            .values({
+          const existing = await tx
+            .select({ id: t.id })
+            .from(t)
+            .where(
+              and(
+                eq(t.firmId, firmId),
+                eq(t.featureKey, k),
+                eq(t.overrideKind, "permanent"),
+              ),
+            )
+            .orderBy(sql`${t.id} DESC`)
+            .limit(1);
+          if (existing.length > 0) {
+            await tx
+              .update(t)
+              .set({
+                overrideMode: parsed.data.mode as any,
+                reason: parsed.data.reason ?? null,
+                expiresAt: null,
+                updatedAt: new Date(),
+              })
+              .where(eq(t.id, existing[0].id));
+          } else {
+            await tx.insert(t).values({
               firmId,
               featureKey: k,
               overrideKind: "permanent",
@@ -691,8 +726,8 @@ router.post("/founder/firms/:firmId/entitlements/bulk-override", requireAuth, re
               expiresAt: null,
               reason: parsed.data.reason ?? null,
               createdBy: req.userId ?? null,
-            })
-            .onConflictDoNothing({ target: [firmEntitlementOverridesTable.firmId, firmEntitlementOverridesTable.featureKey] });
+            });
+          }
         }
       });
     }
@@ -746,13 +781,55 @@ router.patch("/founder/firms/:firmId/features/:featureKey", requireAuth, require
           or(isNull(firmEntitlementOverridesTable.expiresAt), gte(firmEntitlementOverridesTable.expiresAt, now)),
         ));
     } else {
-      await setPermanentOverrideMode(
-        firmId,
-        featureKey,
-        modeRaw === "enabled" ? "enabled" : "disabled",
-        reason,
-        req.userId ?? null,
-      );
+      // ---------------------------------------------------------------------
+      // G0.10 HARD FIX — DIRECT USER-SPECIFIED PATTERN (Founder route)
+      //
+      //   "徹底棄用無法正確映射 Partial Unique Index 的 .onConflictDoNothing()
+      //    改用 Transaction 確保原子性的 Read-then-Write。"
+      // ---------------------------------------------------------------------
+      await db.transaction(async (tx) => {
+        // 1. 精確尋找現有的 permanent 紀錄
+        const existing = await tx
+          .select()
+          .from(firmEntitlementOverridesTable)
+          .where(
+            and(
+              eq(firmEntitlementOverridesTable.firmId, firmId),
+              eq(firmEntitlementOverridesTable.featureKey, featureKey),
+              eq(firmEntitlementOverridesTable.overrideKind, "permanent"),
+            ),
+          )
+          .limit(1);
+
+        if (existing.length > 0) {
+          // 2. 存在則原地 UPDATE，強制 permanent 屬性確保 partial unique index 涵蓋。
+          await tx
+            .update(firmEntitlementOverridesTable)
+            .set({
+              enabled: req.body.mode === "enabled",
+              overrideMode: req.body.mode === "enabled" ? "enabled" : "disabled",
+              overrideKind: "permanent",
+              effectiveFrom: null,
+              expiresAt: null,
+              reason: reason.length > 0 ? reason : null,
+              updatedAt: sql`now()`,
+            } as any)
+            .where(eq(firmEntitlementOverridesTable.id, existing[0].id));
+        } else {
+          // 3. 不存在則 INSERT（補齊 createdBy / reason，保持欄位與 bulk 對稱）
+          await tx.insert(firmEntitlementOverridesTable).values({
+            firmId,
+            featureKey,
+            overrideKind: "permanent",
+            enabled: req.body.mode === "enabled",
+            overrideMode: req.body.mode === "enabled" ? "enabled" : "disabled",
+            effectiveFrom: null,
+            expiresAt: null,
+            reason: reason.length > 0 ? reason : null,
+            createdBy: req.userId ?? null,
+          } as any);
+        }
+      });
     }
     await writeAuditLog({
       firmId, actorId: req.userId, actorType: req.userType,
@@ -761,6 +838,7 @@ router.patch("/founder/firms/:firmId/features/:featureKey", requireAuth, require
       detail: `featureKey=${featureKey} mode=${modeRaw}`,
       ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"],
     });
+    // 嚴格執行雙重失效
     setFirmEntitlementsCacheDirty(firmId);
     invalidateAllUserFeatureCachesForFirm(firmId);
 
@@ -810,13 +888,52 @@ router.patch("/platform/firms/:firmId/features/:featureKey", requireAuth, requir
           or(isNull(firmEntitlementOverridesTable.expiresAt), gte(firmEntitlementOverridesTable.expiresAt, now)),
         ));
     } else {
-      await setPermanentOverrideMode(
-        firmId,
-        featureKey,
-        modeRaw === "enabled" ? "enabled" : "disabled",
-        reason,
-        req.userId ?? null,
-      );
+      // ---------------------------------------------------------------------
+      // G0.10 HARD FIX — DIRECT USER-SPECIFIED PATTERN (Platform alias route)
+      // ---------------------------------------------------------------------
+      await db.transaction(async (tx) => {
+        // 1. 精確尋找現有的 permanent 紀錄
+        const existing = await tx
+          .select()
+          .from(firmEntitlementOverridesTable)
+          .where(
+            and(
+              eq(firmEntitlementOverridesTable.firmId, firmId),
+              eq(firmEntitlementOverridesTable.featureKey, featureKey),
+              eq(firmEntitlementOverridesTable.overrideKind, "permanent"),
+            ),
+          )
+          .limit(1);
+
+        if (existing.length > 0) {
+          // 2. 存在則原地 UPDATE，強制 permanent 屬性確保 partial unique index 涵蓋。
+          await tx
+            .update(firmEntitlementOverridesTable)
+            .set({
+              enabled: req.body.mode === "enabled",
+              overrideMode: req.body.mode === "enabled" ? "enabled" : "disabled",
+              overrideKind: "permanent",
+              effectiveFrom: null,
+              expiresAt: null,
+              reason: reason.length > 0 ? reason : null,
+              updatedAt: sql`now()`,
+            } as any)
+            .where(eq(firmEntitlementOverridesTable.id, existing[0].id));
+        } else {
+          // 3. 不存在則 INSERT（補齊 createdBy / reason，保持欄位與 bulk 對稱）
+          await tx.insert(firmEntitlementOverridesTable).values({
+            firmId,
+            featureKey,
+            overrideKind: "permanent",
+            enabled: req.body.mode === "enabled",
+            overrideMode: req.body.mode === "enabled" ? "enabled" : "disabled",
+            effectiveFrom: null,
+            expiresAt: null,
+            reason: reason.length > 0 ? reason : null,
+            createdBy: req.userId ?? null,
+          } as any);
+        }
+      });
     }
     await writeAuditLog({
       firmId, actorId: req.userId, actorType: req.userType,
@@ -825,6 +942,7 @@ router.patch("/platform/firms/:firmId/features/:featureKey", requireAuth, requir
       detail: `featureKey=${featureKey} mode=${modeRaw}`,
       ipAddress: (req as any).ip, userAgent: (req as any).headers?.["user-agent"],
     });
+    // 嚴格執行雙重失效
     setFirmEntitlementsCacheDirty(firmId);
     invalidateAllUserFeatureCachesForFirm(firmId);
     const effective = await getEffectiveEntitlement(firmId, featureKey);

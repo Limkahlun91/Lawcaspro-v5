@@ -136,6 +136,37 @@ const getSqlState = (err: unknown): string | undefined => {
   return typeof sqlstate === "string" && sqlstate ? sqlstate : undefined;
 };
 
+// ---------- G1-4: Centralised hardened cookie options (auth_token) ----------
+type AuthCookieOpts = {
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: "strict" | "lax" | "none";
+  path: string;
+  domain?: string;
+  maxAge?: number;
+};
+const COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const getAuthCookieOpts = (req: ReqLike | AuthRequestLike, withMaxAge: boolean): AuthCookieOpts => {
+  const reqAny = req as unknown as { secure?: boolean; protocol?: unknown };
+  const behindProxySecure = typeof reqAny.secure === "boolean"
+    ? reqAny.secure
+    : String(reqAny.protocol ?? "").toLowerCase() === "https";
+  const secure = behindProxySecure || process.env.NODE_ENV === "production";
+  const rawSame = process.env.COOKIE_SAME_SITE?.toLowerCase();
+  const sameSite: "strict" | "lax" | "none" =
+    rawSame === "none" ? "none" : rawSame === "lax" ? "lax" : "strict";
+  const domainRaw = process.env.COOKIE_DOMAIN?.trim();
+  const domain = domainRaw ? domainRaw : undefined;
+  return {
+    httpOnly: true,
+    secure,
+    sameSite,
+    path: "/",
+    ...(domain ? { domain } : {}),
+    ...(withMaxAge ? { maxAge: COOKIE_MAX_AGE_MS } : {}),
+  };
+};
+
 async function withTransientDbRetry<T>(
   fn: () => Promise<T>,
   ctx: { route?: string; reqId?: unknown; stage?: string; firmId?: number | null; userId?: number | null; emailHash?: string },
@@ -242,7 +273,7 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
     let useAdminDb = isAuthAdminDbConfigured();
     let useSafeDbFallback = false;
 
-    type LoginDbLike = Pick<typeof db, "select" | "insert" | "update">;
+    type LoginDbLike = Pick<typeof db, "select" | "insert" | "update" | "execute">;
 
     const safeDbFallbackCtx = (fallbackStage: string) => ({
       route: ctx.route,
@@ -302,6 +333,8 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
       status: string;
       totpSecret: string | null;
       totpEnabled: boolean;
+      failedLoginCount: number;
+      lockedUntil: Date | null;
     };
 
     const user: LoginUser | null = await (async () => {
@@ -320,6 +353,8 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
                 status: usersTable.status,
                 totpSecret: usersTable.totpSecret,
                 totpEnabled: usersTable.totpEnabled,
+                failedLoginCount: usersTable.failedLoginCount,
+                lockedUntil: usersTable.lockedUntil,
               })
               .from(usersTable)
               .where(eq(usersTable.email, emailNormalized));
@@ -345,6 +380,8 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
                 userType: usersTable.userType,
                 roleId: usersTable.roleId,
                 status: usersTable.status,
+                failedLoginCount: usersTable.failedLoginCount,
+                lockedUntil: usersTable.lockedUntil,
               })
               .from(usersTable)
               .where(eq(usersTable.email, emailNormalized));
@@ -359,6 +396,8 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
           userType: string;
           roleId: number | null;
           status: string;
+          failedLoginCount: number;
+          lockedUntil: Date | null;
         } | undefined;
 
         if (!u) return null;
@@ -373,6 +412,8 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
           status: u.status,
           totpEnabled: false,
           totpSecret: null,
+          failedLoginCount: u.failedLoginCount,
+          lockedUntil: u.lockedUntil,
         } satisfies LoginUser;
       }
     })();
@@ -420,6 +461,28 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
       return;
     }
 
+    stage = "lockout_check";
+    ctx.stage = stage;
+    if (user.lockedUntil && user.lockedUntil.getTime() > Date.now()) {
+      const retryAfterSec = Math.max(1, Math.ceil((user.lockedUntil.getTime() - Date.now()) / 1000));
+      logger.info({ emailHash, userId: user.id, lockedUntil: user.lockedUntil.toISOString(), retryAfterSec, ms: Date.now() - startedAt }, "auth.login.locked");
+      await insertAuthAuditLog(
+        {
+          firmId: user.firmId,
+          actorId: user.id,
+          actorType: user.userType,
+          action: "auth.login_locked",
+          detail: `retry_after_sec=${retryAfterSec} failed_count=${user.failedLoginCount}`,
+          ipAddress: asNullableString(ip),
+          userAgent: asNullableString(ua),
+        },
+        { ...ctx, stage: "audit_login_locked" },
+      );
+      res.setHeader("Retry-After", String(retryAfterSec));
+      res.status(423).json({ error: "Account locked due to too many failed attempts", code: "AUTH_LOCKED", retryAfterSec });
+      return;
+    }
+
     stage = "password_verify";
     ctx.stage = stage;
     logger.info({ ...ctx }, "auth.login.stage");
@@ -428,6 +491,25 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
     timing.passwordVerifyMs = Date.now() - passwordVerifyStartedAt;
     if (!passwordMatch) {
       logger.info({ emailHash, userId: user.id, userLookupMs, ms: Date.now() - startedAt }, "auth.invalid_password");
+      try {
+        await withLoginDb(async (dbLike) => {
+          await dbLike.execute(sql`
+            WITH updated AS (
+              UPDATE users
+              SET failed_login_count = failed_login_count + 1,
+                  locked_until = CASE
+                    WHEN failed_login_count + 1 >= 30 THEN now() + INTERVAL '30 minutes'
+                    ELSE locked_until
+                  END
+              WHERE id = ${user.id}
+              RETURNING failed_login_count, locked_until
+            )
+            SELECT * FROM updated
+          `);
+        }, "auth_login_increment_failed_password");
+      } catch (incrementErr) {
+        logger.error({ ...ctx, stage: "increment_failed_password", incrementErr }, "auth.login.increment_failed");
+      }
       await insertAuthAuditLog(
         {
           firmId: user.firmId,
@@ -478,6 +560,25 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
       const isValid = totp.validate({ token: totpCode, window: 1 }) !== null;
       if (!isValid) {
         logger.info({ emailHash, userId: user.id, ms: Date.now() - startedAt }, "auth.login.totp_invalid");
+        try {
+          await withLoginDb(async (dbLike) => {
+            await dbLike.execute(sql`
+              WITH updated AS (
+                UPDATE users
+                SET failed_login_count = failed_login_count + 1,
+                    locked_until = CASE
+                      WHEN failed_login_count + 1 >= 30 THEN now() + INTERVAL '30 minutes'
+                      ELSE locked_until
+                    END
+                WHERE id = ${user.id}
+                RETURNING failed_login_count, locked_until
+              )
+              SELECT * FROM updated
+            `);
+          }, "auth_login_increment_failed_totp");
+        } catch (incrementErr) {
+          logger.error({ ...ctx, stage: "increment_failed_totp", incrementErr }, "auth.login.increment_totp_failed");
+        }
         await insertAuthAuditLog(
           {
             firmId: user.firmId,
@@ -494,6 +595,16 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
         return;
       }
       didUseTotp = true;
+    }
+
+    stage = "lockout_reset";
+    ctx.stage = stage;
+    try {
+      await withLoginDb(async (dbLike) => {
+        await dbLike.update(usersTable).set({ failedLoginCount: 0, lockedUntil: null }).where(eq(usersTable.id, user.id));
+      }, "auth_login_reset_lockout");
+    } catch (resetErr) {
+      logger.error({ ...ctx, stage: "lockout_reset", resetErr }, "auth.login.lockout_reset_failed");
     }
 
     stage = "session_create";
@@ -516,6 +627,9 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
           expiresAt,
           userAgent: asNullableString(ua),
           ipAddress: asNullableString(ip),
+          firmId: user.firmId,
+          roleId: user.roleId,
+          userType: user.userType,
         };
         await withLoginDb(async (dbLike) => {
           await dbLike.insert(sessionsTable).values(row);
@@ -601,7 +715,6 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
     timing.firmLookupMs = Date.now() - firmLookupStartedAt;
 
     const payload = {
-      token,
       id: user.id,
       email: user.email,
       name: user.name,
@@ -619,21 +732,20 @@ routerInternal.post("/auth/login", authRateLimiter, async (req: ReqLike, res: Ro
         reqId: getReqId(req) ?? null,
         stage: "response_shape",
         keys: Object.keys(payload).sort(),
-        tokenReturned: true,
+        tokenReturned: false,
         setCookiePresent: true,
-        cookie: { domain: null, path: "/", secure: process.env.NODE_ENV === "production", sameSite: "lax" },
+        cookie: {
+          domain: process.env.COOKIE_DOMAIN?.trim() ?? null,
+          path: "/",
+          secure: process.env.NODE_ENV === "production",
+          sameSite: process.env.COOKIE_SAME_SITE?.toLowerCase() ?? "strict",
+        },
       },
       "auth.login_response_shape",
     );
 
     const responseWriteStartedAt = Date.now();
-    res.cookie("auth_token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    res.cookie("auth_token", token, getAuthCookieOpts(req, true));
 
     res.json(payload);
     timing.responseWriteMs = Date.now() - responseWriteStartedAt;
@@ -715,6 +827,7 @@ routerInternal.post(
     // the same code path the route uses.
     await deleteSessionByTokenHash(tokenHash);
     invalidateVerifiedSessionCacheByTokenHash(tokenHash);
+    invalidateVerifiedSessionCacheByUserId(req.userId!);
   }
   await writeAuditLog({
     firmId: typeof req.firmId === "number" ? req.firmId : req.firmId ?? null,
@@ -724,7 +837,7 @@ routerInternal.post(
     ipAddress: typeof req.ip === "string" ? req.ip : undefined,
     userAgent: asNullableString(req.headers["user-agent"]) ?? undefined,
   });
-  res.clearCookie("auth_token", { path: "/" });
+  res.clearCookie("auth_token", getAuthCookieOpts(req, false));
   sendOk(res, { success: true });
   },
 );
@@ -802,7 +915,7 @@ routerInternal.get("/auth/me", async (req: ReqLike, res: RouteResLike): Promise<
       if (!session || !user) sessionLookupOutcome = "NOT_FOUND";
       else if (session.expiresAt < new Date()) sessionLookupOutcome = "EXPIRED";
       else if (user.status !== "active") sessionLookupOutcome = "INACTIVE";
-      if (typeof cookieToken === "string") res.clearCookie("auth_token", { path: "/" });
+      if (typeof cookieToken === "string") res.clearCookie("auth_token", getAuthCookieOpts(req, false));
       sendOk(res, null);
       logger.info(
         {

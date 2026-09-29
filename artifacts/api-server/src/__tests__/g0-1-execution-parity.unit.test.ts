@@ -139,7 +139,9 @@ describe("G0.1 Execution-based 13-field strict parity (real 0151 SQL in PGlite)"
   const STALE_SORT_KEY = "module.cases";
   const STALE_STATUS_KEY = "storage.file_custody"; // canonical status = inactive
   const STALE_ROUTE_KEY = "module.audit";
+  const STALE_CONFIG_KEY = "cases.create"; // canonical default configurable = true (no explicit configurable:false)
   const REMOVE_ROW_KEY = "cases.overview";
+  const EXTRA_PHANTOM_KEY = "_g01_phantom_feature"; // non-canonical dirty extra. MUST NOT be auto-deleted.
 
   beforeAll(async () => {
     pg = new PGlite();
@@ -174,8 +176,29 @@ describe("G0.1 Execution-based 13-field strict parity (real 0151 SQL in PGlite)"
     const staleRoute = baseRows.find((r) => r.feature_key === STALE_ROUTE_KEY);
     expect(staleRoute).toBeDefined();
     staleRoute!.route_hint = null;
-    // 7) REMOVE ENTIRELY: cases.overview row
+    // 7) CORRUPT (G0.1 FINAL RULE): cases.bulk_update configurable = FALSE (canonical configurable = TRUE)
+    const staleConfig = baseRows.find((r) => r.feature_key === STALE_CONFIG_KEY);
+    expect(staleConfig).toBeDefined();
+    expect(staleConfig!.configurable).toBe(true); // confirm canonical truth before corrupting
+    staleConfig!.configurable = false;
+    // 8) REMOVE ENTIRELY: cases.overview row
+    // 9) INJECT NON-CANONICAL EXTRA PHANTOM ROW (to prove reporting, NOT auto-deletion)
     const insertRows = baseRows.filter((r) => r.feature_key !== REMOVE_ROW_KEY);
+    insertRows.push({
+      feature_key: EXTRA_PHANTOM_KEY,
+      name: "Phantom Feature (should not be auto-deleted)",
+      module: "test",
+      parent_feature_key: null,
+      value_type: "boolean",
+      default_value: { v: false },
+      configurable: true,
+      founder_only: false,
+      dependency_json: [],
+      route_hint: null,
+      description: "Dirty seed extra row for G0.1 unknown-extra assertion",
+      sort_order: 9999,
+      status: "active",
+    });
 
     // Insert via per-row SQL literals (minimal, test-only code path)
     const escStr = (s: unknown): string => {
@@ -199,9 +222,9 @@ describe("G0.1 Execution-based 13-field strict parity (real 0151 SQL in PGlite)"
     await pg.exec(`INSERT INTO platform_features(feature_key,name,module,parent_feature_key,value_type,default_value,configurable,founder_only,dependency_json,route_hint,description,sort_order,status) VALUES\n  ${sqlValues};`);
 
     // Confirm corrupted state BEFORE 0151.
-    const before = (await pg.query<{ feature_key: string; founder_only: boolean; default_value: any; description: string | null; sort_order: number; status: string; route_hint: string | null }>(
-      "SELECT feature_key,founder_only,default_value,description,sort_order,status,route_hint FROM platform_features WHERE feature_key IN ($1,$2,$3,$4,$5,$6)",
-      [CORRUPT_ROW_KEY, STALE_DEFAULT_KEY, STALE_DESC_KEY, STALE_SORT_KEY, STALE_STATUS_KEY, STALE_ROUTE_KEY],
+    const before = (await pg.query<{ feature_key: string; founder_only: boolean; default_value: any; description: string | null; sort_order: number; status: string; route_hint: string | null; configurable: boolean }>(
+      "SELECT feature_key,founder_only,default_value,description,sort_order,status,route_hint,configurable FROM platform_features WHERE feature_key IN ($1,$2,$3,$4,$5,$6,$7,$8)",
+      [CORRUPT_ROW_KEY, STALE_DEFAULT_KEY, STALE_DESC_KEY, STALE_SORT_KEY, STALE_STATUS_KEY, STALE_ROUTE_KEY, STALE_CONFIG_KEY, EXTRA_PHANTOM_KEY],
     )).rows;
     const beforMap = Object.fromEntries(before.map((r) => [r.feature_key, r])) as any;
     expect(beforMap[CORRUPT_ROW_KEY]?.founder_only).toBe(true); // corrupted
@@ -210,6 +233,8 @@ describe("G0.1 Execution-based 13-field strict parity (real 0151 SQL in PGlite)"
     expect(beforMap[STALE_SORT_KEY]?.sort_order).toBe(999); // corrupted
     expect(beforMap[STALE_STATUS_KEY]?.status).toBe("active"); // corrupted
     expect(beforMap[STALE_ROUTE_KEY]?.route_hint).toBeNull(); // corrupted
+    expect(beforMap[STALE_CONFIG_KEY]?.configurable).toBe(false); // corrupted: G0.1 final mandatory 7th dirty seed
+    expect(beforMap[EXTRA_PHANTOM_KEY]).toBeDefined(); // phantom extra row exists
     const missing = await pg.query<{ c: number }>("SELECT COUNT(*)::int c FROM platform_features WHERE feature_key = $1", [REMOVE_ROW_KEY]);
     expect(missing.rows[0].c).toBe(0); // removed
   }, 60000);
@@ -265,12 +290,25 @@ describe("G0.1 Execution-based 13-field strict parity (real 0151 SQL in PGlite)"
     expect(statusRepair?.status).toBe(canonicalProjection(FEATURE_REGISTRY.find((x) => x.featureKey === STALE_STATUS_KEY)!).status);
     const routeRepair = rep(STALE_ROUTE_KEY);
     expect(routeRepair?.route_hint).toBe(canonicalProjection(FEATURE_REGISTRY.find((x) => x.featureKey === STALE_ROUTE_KEY)!).route_hint);
+    const configRepair = rep(STALE_CONFIG_KEY);
+    expect(configRepair?.configurable).toBe(true); // G0.1 FINAL RULE: configurable repaired back to canonical TRUE (0 tolerance)
 
     // 4) Missing row INSERTED.
     expect(rep(REMOVE_ROW_KEY)).toBeDefined();
     expect(rep(REMOVE_ROW_KEY)?.feature_key).toBe(REMOVE_ROW_KEY);
 
+    // 4b) EXTRA NON-CANONICAL ROW EXISTS and WAS NOT auto-deleted.
+    //     Per G0.1 FINAL RULE: "Report unknown extra DB keys; do NOT auto-delete
+    //     unknown rows without approval."  This ASSERTION proves the 0151 parity
+    //     SQL did NOT blindly DELETE non-canonical rows (safety check).
+    const phantomRow = all.find((r) => String(r.feature_key) === EXTRA_PHANTOM_KEY);
+    expect(phantomRow).toBeDefined(); // NOT auto-deleted: report-only behavior respected
+
     // 5) Strict cell-by-cell compare every canonical row × every 13 persisted col.
+    //    G0.1 FINAL RULE: ZERO TOLERANCE for configurable / description / route_hint /
+    //    status / default_value.  Only legitimate JSONB round-trip representation
+    //    normalizations are tolerated (default_value {v:..} unwrap + numeric string,
+    //    dependency_json array ordering, sort_order number coercion).
     const mismatches: string[] = [];
     for (const def of FEATURE_REGISTRY) {
       const canonical = canonicalProjection(def);
@@ -282,23 +320,34 @@ describe("G0.1 Execution-based 13-field strict parity (real 0151 SQL in PGlite)"
         let eq = false;
         if (col === "default_value") {
           const { a: av, b: bv } = normDefaultValue(a, b);
-          eq = Object.is(av, bv) || String(av) === String(bv);
+          // 0 tolerance on WRONG VALUE; only JS/JSONB numeric + boolean repr normalization.
+          if (typeof av === "boolean" && typeof bv === "boolean") eq = av === bv;
+          else if (typeof av === "number" && (typeof bv === "number" || (typeof bv === "string" && bv !== ""))) eq = av === Number(bv);
+          else if ((typeof av === "string" && av !== "") && typeof bv === "number") eq = Number(av) === bv;
+          else if (av == null && bv == null) eq = true;
+          else eq = Object.is(av, bv);
         } else if (col === "dependency_json") {
+          // Pure JSON array-order match (no tolerance).
           const an = normDep(a);
           const bn = normDep(b);
           eq = JSON.stringify(an) === JSON.stringify(bn);
         } else if (col === "configurable" || col === "founder_only") {
-          const aTruthy = a === true || a === "true" || a === "t";
-          const bTruthy = b === true || b === "true" || b === "t";
-          const aFalsy = a === false || a === "false" || a === "f";
-          const bFalsy = b === false || b === "false" || b === "f";
-          eq = (aTruthy && bTruthy) || (aFalsy && bFalsy);
+          // 0 TOLERANCE PER G0.1 FINAL RULE: boolean must STRICTLY match (exact boolean identity).
+          //    Accept boolean || "t"/"true" text PG repr only as an identity match.
+          const aBool = a === true || a === "true" || a === "t" ? true : a === false || a === "false" || a === "f" ? false : a;
+          const bBool = b === true || b === "true" || b === "t" ? true : b === false || b === "false" || b === "f" ? false : b;
+          eq = aBool === bBool && typeof aBool === "boolean" && typeof bBool === "boolean";
         } else if (col === "sort_order") {
           eq = Number(a) === Number(b ?? 0);
+        } else if (col === "status") {
+          // 0 TOLERANCE PER G0.1 FINAL RULE: string EXACT identity (no null/empty collapsing).
+          eq = String(a) === String(b);
         } else if (col === "parent_feature_key" || col === "route_hint" || col === "description") {
-          const aS = a == null ? null : String(a);
-          const bS = b == null ? null : String(b);
-          eq = aS === bS || (aS === "" && bS == null) || (bS === "" && aS == null);
+          // 0 TOLERANCE PER G0.1 FINAL RULE: null vs "" are DIFFERENT — no OR-tolerance collapsing.
+          //    Exact string match after null-coalesce to self only.
+          if (a == null && b == null) eq = true;
+          else if (a == null || b == null) eq = false;
+          else eq = String(a) === String(b);
         } else {
           eq = JSON.stringify(a) === JSON.stringify(b);
         }
@@ -310,11 +359,17 @@ describe("G0.1 Execution-based 13-field strict parity (real 0151 SQL in PGlite)"
     expect(inBoth.length).toBe(FEATURE_REGISTRY.length);
     expect(mismatches).toEqual([]);
 
-    // 7) Report unknown extra feature keys in DB that are not in canonical.
+    // 7) Report + ASSERT unknown extra feature keys in DB that are not in canonical.
+    //    Per G0.1 FINAL RULE: unknown extras MUST survive parity run (not auto-deleted).
     const extras = all.filter((r) => !canonicalKeys.includes(String(r.feature_key))).map((r) => String(r.feature_key));
-    if (extras.length > 0) {
+    // Known extra we deliberately injected. If others appear, report them via failing assertion.
+    expect(extras.length >= 1).toBe(true); // at least the phantom
+    expect(extras).toContain(EXTRA_PHANTOM_KEY);
+    // Any UNEXPECTED extras beyond our injected one are reported explicitly:
+    const unexpectedExtras = extras.filter((k) => k !== EXTRA_PHANTOM_KEY);
+    if (unexpectedExtras.length > 0) {
       // eslint-disable-next-line no-console
-      console.warn("[G0.1 parity] WARNING: DB contains unknown extra feature keys NOT in canonical registry (not auto-deleted). Extras=", JSON.stringify(extras));
+      console.warn("[G0.1 parity] UNEXPECTED extra DB feature keys NOT in canonical registry (not auto-deleted). Report-only per rule:", JSON.stringify(unexpectedExtras));
     }
   }, 60000);
 });

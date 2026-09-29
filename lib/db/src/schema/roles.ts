@@ -32,11 +32,16 @@ export const sessionsTable = pgTable("sessions", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   userAgent: text("user_agent"),
   ipAddress: text("ip_address"),
+  firmId: integer("firm_id"),
+  roleId: integer("role_id"),
+  userType: text("user_type"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   tokenHashUnique: uniqueIndex("sessions_token_hash_key").on(t.tokenHash),
   userIdIdx: index("idx_sessions_user").on(t.userId),
   expiresAtIdx: index("idx_sessions_expires").on(t.expiresAt),
+  firmIdIdx: index("idx_sessions_firm_id").on(t.firmId),
+  roleIdIdx: index("idx_sessions_role_id").on(t.roleId),
 }));
 
 export const insertRoleSchema = createInsertSchema(rolesTable).omit({ id: true, createdAt: true, updatedAt: true });

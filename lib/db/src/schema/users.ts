@@ -20,6 +20,8 @@ export const usersTable = pgTable("users", {
   totpEnabled: boolean("totp_enabled").notNull().default(false),
   totpLastUsedAt: timestamp("totp_last_used_at", { withTimezone: true }),
   lastLoginAt: timestamp("last_login_at", { withTimezone: true }),
+  failedLoginCount: integer("failed_login_count").notNull().default(0),
+  lockedUntil: timestamp("locked_until", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow().$onUpdate(() => new Date()),
 }, (t) => ({
@@ -27,6 +29,7 @@ export const usersTable = pgTable("users", {
   firmIdIdx: index("idx_users_firm").on(t.firmId),
   firmDeveloperIdx: index("idx_users_firm_developer").on(t.firmId, t.developerId),
   statusIdx: index("idx_users_status").on(t.status),
+  lockedUntilIdx: index("idx_users_locked_until").on(t.lockedUntil),
 }));
 
 export const insertUserSchema = createInsertSchema(usersTable).omit({ id: true, createdAt: true, updatedAt: true });

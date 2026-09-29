@@ -1,3 +1,4 @@
+import "express-async-errors";
 import express, { type Express as ExpressApplication } from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -51,8 +52,58 @@ const getApiMetaUnsafe = getApiMeta as unknown as (res: ResLike) => ReturnType<t
 const sendErrorUnsafe = sendError as unknown as (res: ResLike, err: unknown, fallback?: { status?: number; code?: string; message?: string }) => void;
 
 app.set("trust proxy", 1);
-app.use(helmet());
-app.use(cors());
+
+// ---------- G1-7: Explicit Helmet security headers ----------
+const rawCspScript = process.env.CSP_SCRIPT_SRC ?? "";
+const rawCspConnect = process.env.CSP_CONNECT_SRC ?? "";
+const cspScriptSrc = rawCspScript ? rawCspScript.split(",").filter(Boolean) : [];
+const cspConnectSrc = rawCspConnect ? rawCspConnect.split(",").filter(Boolean) : [];
+app.use(
+  helmet({
+    hsts: { maxAge: 31_536_000, includeSubDomains: true, preload: true },
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        "default-src": ["'self'"],
+        "script-src": ["'self'", ...cspScriptSrc],
+        "img-src": ["'self'", "data:", "https:"],
+        "connect-src": ["'self'", ...cspConnectSrc],
+        "style-src": ["'self'", "'unsafe-inline'"],
+      },
+    },
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+    crossOriginEmbedderPolicy: false,
+    crossOriginOpenerPolicy: { policy: "same-origin" },
+    crossOriginResourcePolicy: { policy: "same-site" },
+    frameguard: { action: "deny" },
+    noSniff: true,
+    permittedCrossDomainPolicies: { permittedPolicies: "none" },
+  }) as unknown as MiddlewareLike,
+);
+
+// ---------- G1-3: CORS whitelist driven by ALLOWED_ORIGINS ----------
+const rawAllowedOrigins = process.env.ALLOWED_ORIGINS
+  ?? "http://localhost:3000,http://localhost:5173,http://localhost:4173,http://127.0.0.1:3000,http://127.0.0.1:5173,http://127.0.0.1:4173";
+const allowedOrigins = new Set(
+  rawAllowedOrigins.split(",").map((s) => s.trim()).filter(Boolean),
+);
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      if (allowedOrigins.has(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error("CORS_NOT_ALLOWED"));
+    },
+    credentials: true,
+    maxAge: 86400,
+  }) as unknown as MiddlewareLike,
+);
 app.use(cookieParser());
 app.use(requestMetaMiddleware() as unknown as MiddlewareLike);
 app.use(((req: ReqLike, res: ResLike, next: Next) => {

@@ -4,6 +4,18 @@ import type { Application } from "express";
 import bcrypt from "bcryptjs";
 import { usersTable, sessionsTable } from "@workspace/db";
 
+function extractAuthTokenFromSetCookie(setCookie: string[] | string | undefined): string {
+  const list = Array.isArray(setCookie) ? setCookie : [setCookie ?? ""];
+  const entry = list.find((s) => typeof s === "string" && s.startsWith("auth_token="));
+  if (!entry) return "";
+  const raw = entry.slice("auth_token=".length).split(";")[0] ?? "";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 type MockDb = {
   execute: (query?: unknown) => Promise<unknown[]>;
   select: (sel?: unknown) => { from: (table: unknown) => { where: (cond?: unknown) => Promise<unknown[]> } };
@@ -77,8 +89,9 @@ describe("Auth founder bcrypt regression", () => {
       .send({ email: "lun.6923@hotmail.com", password: "CorrectPassword123!" });
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(res.body.data).toHaveProperty("token");
     const scHeader = (res.headers as Record<string, unknown>)["set-cookie"];
+    const cookieToken = extractAuthTokenFromSetCookie(scHeader as string[] | string | undefined);
+    expect(typeof cookieToken === "string" && cookieToken.length > 0).toBe(true);
     const sc = Array.isArray(scHeader) ? scHeader.join(";") : String(scHeader ?? "");
     expect(sc).toMatch(/auth_token=/);
   });

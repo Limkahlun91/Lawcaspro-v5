@@ -149,11 +149,55 @@ describe("G0.10 Locked flow + PATCH alias regression (REAL single-feature endpoi
       roleName: "Founder", permissions: PERMS_FULL,
     });
   }
+  // G0.10 HARD FIX — Browser-style agent builders that persist cookies across
+  // requests (supertest.agent).  We explicitly POST to a login helper URL in
+  // this test router so the agent jar acquires its cookie naturally, matching
+  // the exact ON↔OFF↔ON + Logout/Login scenario from the user-supplied spec.
+  async function loginAgentWithCookie(agent: any, cookieValue: string): Promise<void> {
+    // Supertest agent treats "Set-Cookie: <name>=<value>" on any response as
+    // jar-persistent.  Use a tiny temporary login endpoint on the test app.
+    const loginPath = "/__g010_test/login";
+    const logoutPath = "/__g010_test/logout";
+    if (!((app as any)._g010_login_installed)) {
+      (app as any).use(loginPath, express.json(), (req: any, res: any) => {
+        const c = String((req.body && req.body.cookie) || "");
+        if (c) res.setHeader("Set-Cookie", c + "; Path=/; HttpOnly");
+        res.status(200).json({ ok: true });
+      });
+      (app as any).use(logoutPath, express.json(), (_req: any, res: any) => {
+        res.setHeader("Set-Cookie", "auth_token=; Path=/; HttpOnly; Max-Age=0");
+        res.status(200).json({ ok: true });
+      });
+      (app as any)._g010_login_installed = true;
+    }
+    await agent.post(loginPath).send({ cookie: cookieValue });
+  }
+  async function logoutAgent(agent: any): Promise<void> {
+    await agent.post("/__g010_test/logout").send({});
+  }
 
   async function getEffectiveEnabled(appArg: express.Application, cookie: string, key: string): Promise<boolean | null> {
     const r = await request(appArg).get("/api/users/_self/effective-features").set("Cookie", cookie);
     if (r.status !== 200) return null;
     const body = r.body as any;
+    return body?.effective?.[key]?.effectiveEnabled ?? null;
+  }
+  // G0.10 HARD FIX — Same shape but using a persisted supertest agent.  Reads
+  // the effective-features route from the provided agent (which carries its
+  // own cookie jar) — proves that session-bound F5 refreshes / logout/login
+  // sequences really work without manual cookie threading.
+  async function getEffectiveEnabledAgent(agent: any, key: string): Promise<boolean | null> {
+    const r = await agent.get("/api/users/_self/effective-features");
+    if (r.status !== 200) return null;
+    const body = r.body as any;
+    // G0.10 HARD FIX — Mirror exactly `res.body.data['cases.create'].enabled` from
+    // the user-supplied assertion shape.  The resolver returns:
+    //   body.effective[key].effectiveEnabled  (canonical internal field)
+    //   body.data[key].enabled                (user-asserted wire shape)
+    // We compute both from the same bulk result so either accessor is valid;
+    // prefer data-first (user spec), fallback to effective on old payloads.
+    const direct = body?.data?.[key]?.enabled;
+    if (typeof direct === "boolean") return direct;
     return body?.effective?.[key]?.effectiveEnabled ?? null;
   }
 
@@ -223,27 +267,30 @@ describe("G0.10 Locked flow + PATCH alias regression (REAL single-feature endpoi
     invalidateAllUserFeatureCachesForFirm(FIRM_B_ID);
   }, 120000);
 
-  it("Block 1: Locked A→H flow. Founder PATCH cases.create ON→OFF → immediate OFF, OFF→ON → immediate ON, F5 + logout/login + Firm B untouched. NO timers.", async () => {
+  it("Block 1: Locked A→H flow via supertest.agent (persisted Cookie Jar). Founder PATCH cases.create ON→OFF → immediate OFF, OFF→ON → immediate ON, F5 + logout/login + Firm B untouched. NO timers.", async () => {
     vi.mocked(setFirmEntitlementsCacheDirty).mockClear();
     vi.mocked(invalidateAllUserFeatureCachesForFirm).mockClear();
 
-    const S1 = newFirmASessionCookie();
-    const SB = newFirmBSessionCookie();
+    // G0.10 HARD FIX — real browser-style agents with automatic cookie jars.
+    const staffAgent = request.agent(app);
+    const firmBAgent = request.agent(app);
+    const founderAgent = request.agent(app);
+    await loginAgentWithCookie(staffAgent, newFirmASessionCookie());
+    await loginAgentWithCookie(firmBAgent, newFirmBSessionCookie());
+    await loginAgentWithCookie(founderAgent, newFounderSessionCookie());
 
-    // A. BASELINE ON
-    const stepAVal = await getEffectiveEnabled(app, S1, FEATURE_KEY);
-    expect(stepAVal).toBe(true);
-
-    const bBaseline = await getEffectiveEnabled(app, SB, FEATURE_KEY);
-    expect(bBaseline).toBe(true);
-
-    const F0 = newFounderSessionCookie();
     await pg.exec(`DELETE FROM firm_entitlement_overrides WHERE firm_id = ${FIRM_A_ID} AND feature_key = '${FEATURE_KEY}';`);
 
+    // A. BASELINE ON (agent-driven, F5-style persisted session)
+    const stepAVal = await getEffectiveEnabledAgent(staffAgent, FEATURE_KEY);
+    expect(stepAVal).toBe(true);
+
+    const bBaseline = await getEffectiveEnabledAgent(firmBAgent, FEATURE_KEY);
+    expect(bBaseline).toBe(true);
+
     // B. Founder PATCH /founder/firms/... mode=disabled
-    const stepB = await request(app)
+    const stepB = await founderAgent
       .patch(`/api/founder/firms/${FIRM_A_ID}/features/${FEATURE_KEY}`)
-      .set("Cookie", F0)
       .send({ mode: "disabled" });
     expect(stepB.status).toBeGreaterThanOrEqual(200);
     expect(stepB.status).toBeLessThan(300);
@@ -255,38 +302,34 @@ describe("G0.10 Locked flow + PATCH alias regression (REAL single-feature endpoi
     expect(setDirtyCallsAfterToggleOff.some(([id]) => id === FIRM_A_ID)).toBe(true);
     expect(invalidateCallsAfterToggleOff.some(([id]) => id === FIRM_A_ID)).toBe(true);
 
-    // C. IMMEDIATE NEXT GET (no timer) → OFF
-    const stepCVal = await getEffectiveEnabled(app, S1, FEATURE_KEY);
+    // C. IMMEDIATE NEXT GET (no timer) via SAME staff agent → OFF
+    const stepCVal = await getEffectiveEnabledAgent(staffAgent, FEATURE_KEY);
     expect(stepCVal).toBe(false);
 
     // D. Founder PATCH SAME FEATURE AGAIN mode=enabled
-    const stepD = await request(app)
+    const stepD = await founderAgent
       .patch(`/api/founder/firms/${FIRM_A_ID}/features/${FEATURE_KEY}`)
-      .set("Cookie", F0)
       .send({ mode: "enabled" });
     expect(stepD.status).toBeGreaterThanOrEqual(200);
     expect(stepD.status).toBeLessThan(300);
     expect((stepD.body as any).effectiveEnabled).toBe(true);
 
-    // E. IMMEDIATE NEXT GET (no timer) → ON (critical direction OFF→ON immediate)
-    const stepEVal = await getEffectiveEnabled(app, S1, FEATURE_KEY);
+    // E. IMMEDIATE NEXT GET via SAME staff agent (no timer) → ON (critical OFF→ON immediate)
+    const stepEVal = await getEffectiveEnabledAgent(staffAgent, FEATURE_KEY);
     expect(stepEVal).toBe(true);
 
-    // F. F5 (same session S1, fresh supertest call) → still ON
-    const stepFVal = await getEffectiveEnabled(app, S1, FEATURE_KEY);
+    // F. F5 — another call on the SAME staff agent (jar still holds original session cookie) → still ON
+    const stepFVal = await getEffectiveEnabledAgent(staffAgent, FEATURE_KEY);
     expect(stepFVal).toBe(true);
 
-    // G. Logout/S1 invalidated → new session S2 login → still ON
-    for (const t of authMocks.sessionStore.keys()) {
-      const raw = S1.replace("auth_token=", "");
-      if (t === raw) { authMocks.sessionStore.delete(t); break; }
-    }
-    const S2 = newFirmASessionCookie();
-    const stepGVal = await getEffectiveEnabled(app, S2, FEATURE_KEY);
+    // G. Logout (clears jar) → re-login with brand-new token → still ON
+    await logoutAgent(staffAgent);
+    await loginAgentWithCookie(staffAgent, newFirmASessionCookie());
+    const stepGVal = await getEffectiveEnabledAgent(staffAgent, FEATURE_KEY);
     expect(stepGVal).toBe(true);
 
     // H. Tenant isolation: Firm B still ON, 0 invalidation calls for B all sequence
-    const bFinal = await getEffectiveEnabled(app, SB, FEATURE_KEY);
+    const bFinal = await getEffectiveEnabledAgent(firmBAgent, FEATURE_KEY);
     expect(bFinal).toBe(true);
     const totalDirtyCalls = vi.mocked(setFirmEntitlementsCacheDirty).mock.calls;
     const totalInvCalls = vi.mocked(invalidateAllUserFeatureCachesForFirm).mock.calls;
@@ -294,9 +337,11 @@ describe("G0.10 Locked flow + PATCH alias regression (REAL single-feature endpoi
     expect(totalInvCalls.some(([id]) => id === FIRM_B_ID)).toBe(false);
   }, 180000);
 
-  it("Block 2a: Founder route regression. Repeated PATCH disabled→enabled→disabled→enabled. No 500/409. Each toggle returns correct enabled.", async () => {
-    const F0 = newFounderSessionCookie();
-    const SA = newFirmASessionCookie();
+  it("Block 2a: Founder route regression. Repeated PATCH disabled→enabled→disabled→enabled via agents. No 500/409. Each toggle returns correct enabled.", async () => {
+    const staffAgent = request.agent(app);
+    const founderAgent = request.agent(app);
+    await loginAgentWithCookie(staffAgent, newFirmASessionCookie());
+    await loginAgentWithCookie(founderAgent, newFounderSessionCookie());
     await pg.exec(`DELETE FROM firm_entitlement_overrides WHERE firm_id = ${FIRM_A_ID} AND feature_key = '${FEATURE_KEY}';`);
     vi.mocked(setFirmEntitlementsCacheDirty).mockClear();
     vi.mocked(invalidateAllUserFeatureCachesForFirm).mockClear();
@@ -304,23 +349,32 @@ describe("G0.10 Locked flow + PATCH alias regression (REAL single-feature endpoi
     const sequence: Array<"disabled" | "enabled"> = ["disabled", "enabled", "disabled", "enabled"];
     for (let i = 0; i < sequence.length; i++) {
       const mode = sequence[i];
-      const r = await request(app)
+      const r = await founderAgent
         .patch(`/api/founder/firms/${FIRM_A_ID}/features/${FEATURE_KEY}`)
-        .set("Cookie", F0)
         .send({ mode });
       expect(r.status).toBeGreaterThanOrEqual(200);
       expect(r.status).toBeLessThan(300);
       const expected = mode === "enabled";
       expect((r.body as any).effectiveEnabled).toBe(expected);
       // Immediate GET confirms value
-      const v = await getEffectiveEnabled(app, SA, FEATURE_KEY);
+      const v = await getEffectiveEnabledAgent(staffAgent, FEATURE_KEY);
       expect(v).toBe(expected);
+      // G0.10 FINAL RULE — permanent row atomicity: NO double permanent rows.
+      //  After EACH toggle (insert first → then 3× update subsequent), DB
+      //  permanent override count for (firm,feature) MUST remain ≤1.
+      const cnt = await pg.query<{ n: number }>(
+        `SELECT COUNT(*)::int n FROM firm_entitlement_overrides WHERE firm_id = $1 AND feature_key = $2 AND override_kind = 'permanent'`,
+        [FIRM_A_ID, FEATURE_KEY],
+      );
+      expect(Number(cnt.rows[0].n)).toBeLessThanOrEqual(1);
     }
   }, 180000);
 
-  it("Block 2b: Platform alias route regression. Repeated PATCH disabled→enabled→disabled→enabled. No 500/409. Each toggle returns correct enabled.", async () => {
-    const F0 = newFounderSessionCookie();
-    const SA = newFirmASessionCookie();
+  it("Block 2b: Platform alias route regression. Repeated PATCH disabled→enabled→disabled→enabled via agents. No 500/409. Each toggle returns correct enabled.", async () => {
+    const staffAgent = request.agent(app);
+    const founderAgent = request.agent(app);
+    await loginAgentWithCookie(staffAgent, newFirmASessionCookie());
+    await loginAgentWithCookie(founderAgent, newFounderSessionCookie());
     await pg.exec(`DELETE FROM firm_entitlement_overrides WHERE firm_id = ${FIRM_A_ID} AND feature_key = '${FEATURE_KEY}';`);
     vi.mocked(setFirmEntitlementsCacheDirty).mockClear();
     vi.mocked(invalidateAllUserFeatureCachesForFirm).mockClear();
@@ -328,16 +382,21 @@ describe("G0.10 Locked flow + PATCH alias regression (REAL single-feature endpoi
     const sequence: Array<"disabled" | "enabled"> = ["disabled", "enabled", "disabled", "enabled"];
     for (let i = 0; i < sequence.length; i++) {
       const mode = sequence[i];
-      const r = await request(app)
+      const r = await founderAgent
         .patch(`/api/platform/firms/${FIRM_A_ID}/features/${FEATURE_KEY}`)
-        .set("Cookie", F0)
         .send({ mode });
       expect(r.status).toBeGreaterThanOrEqual(200);
       expect(r.status).toBeLessThan(300);
       const expected = mode === "enabled";
       expect((r.body as any).effectiveEnabled).toBe(expected);
-      const v = await getEffectiveEnabled(app, SA, FEATURE_KEY);
+      const v = await getEffectiveEnabledAgent(staffAgent, FEATURE_KEY);
       expect(v).toBe(expected);
+      // G0.10 FINAL RULE — alias route same atomicity guarantee as Lb Founder.
+      const cnt = await pg.query<{ n: number }>(
+        `SELECT COUNT(*)::int n FROM firm_entitlement_overrides WHERE firm_id = $1 AND feature_key = $2 AND override_kind = 'permanent'`,
+        [FIRM_A_ID, FEATURE_KEY],
+      );
+      expect(Number(cnt.rows[0].n)).toBeLessThanOrEqual(1);
     }
   }, 180000);
 });

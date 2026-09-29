@@ -124,7 +124,15 @@ describe("G0.6 Exact Denial-Code Contract (real production resolver)", () => {
     for (const r of [founder, partner]) {
       expect(r[key]).toBeDefined();
       expect(Boolean(r[key].enabled)).toBe(false);
+      // G0.6 — PRECISE DENIAL CODE ENFORCEMENT.
+      //   No regex, no .toMatch(/.../), no loose contains.  Hard equality only.
+      expect((r[key].denied) as unknown as string).toBe("feature_inactive");
       expect(String(r[key].denied)).toBe("feature_inactive");
+      // G0.6 FINAL RULE — NO feature_not_found ACCEPTABLE for registered inactive features.
+      //   Also: codes are non-interchangeable — explicitly deny the other two canonical denial codes.
+      expect(String(r[key].denied)).not.toBe("feature_not_found");
+      expect(String(r[key].denied)).not.toBe("global_emergency_disabled");
+      expect(String(r[key].denied)).not.toBe("founder_only_denied");
     }
   }, 30000);
 
@@ -154,7 +162,13 @@ describe("G0.6 Exact Denial-Code Contract (real production resolver)", () => {
       expect(thrown).toBeNull();
       for (const r of [founder, non]) {
         expect(Boolean(r[FIXTURE_KEY].enabled)).toBe(false);
+        // G0.6 — PRECISE DENIAL CODE ENFORCEMENT.
+        expect((r[FIXTURE_KEY].denied) as unknown as string).toBe("global_emergency_disabled");
         expect(String(r[FIXTURE_KEY].denied)).toBe("global_emergency_disabled");
+        // G0.6 FINAL RULE — emergency_disabled CANNOT be mistaken for inactive/founder_only/feature_not_found.
+        expect(String(r[FIXTURE_KEY].denied)).not.toBe("feature_not_found");
+        expect(String(r[FIXTURE_KEY].denied)).not.toBe("feature_inactive");
+        expect(String(r[FIXTURE_KEY].denied)).not.toBe("founder_only_denied");
       }
     });
 
@@ -179,9 +193,21 @@ describe("G0.6 Exact Denial-Code Contract (real production resolver)", () => {
     expect(founder[key]).toBeDefined();
     expect(String(founder[key].denied ?? "")).not.toBe("founder_only_denied");
     expect(founder[key].denied !== "founder_only_denied").toBe(true);
+    // G0.6 FINAL RULE — actingAsFounder passing this ceiling: denied must NOT be
+    // any of the OTHER 2 ceiling codes either; and must NOT be feature_not_found
+    // (feature is registered!).
+    expect(String(founder[key].denied ?? "")).not.toBe("feature_not_found");
+    expect(String(founder[key].denied ?? "")).not.toBe("feature_inactive");
+    expect(String(founder[key].denied ?? "")).not.toBe("global_emergency_disabled");
     for (const r of [partner, staff]) {
       expect(Boolean(r[key]?.enabled)).toBe(false);
+      // G0.6 — PRECISE DENIAL CODE ENFORCEMENT.
+      expect((r[key]?.denied) as unknown as string).toBe("founder_only_denied");
       expect(String(r[key]?.denied)).toBe("founder_only_denied");
+      // G0.6 FINAL RULE — founderOnly denied MUST NOT bleed into the other 2 ceilings.
+      expect(String(r[key]?.denied)).not.toBe("feature_not_found");
+      expect(String(r[key]?.denied)).not.toBe("feature_inactive");
+      expect(String(r[key]?.denied)).not.toBe("global_emergency_disabled");
     }
   }, 30000);
 

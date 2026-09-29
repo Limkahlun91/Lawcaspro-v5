@@ -436,7 +436,9 @@ router.get("/accounting/invoice-metrics", requireAuth, requireFirmUser, requireP
 });
 
 router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermission("accounting", "read"), async (req: AuthRequest, res: Response): Promise<void> => {
-  const topCases = await queryRows(sql`
+  const exec = (req.rlsDb ?? db) as unknown as { execute: (query: ReturnType<typeof sql>) => Promise<unknown> };
+
+  const topCases = await queryRowsFrom(exec, sql`
     SELECT c.reference_no, c.id as case_id,
       SUM(be.amount * be.quantity) as total,
       SUM(CASE WHEN be.is_paid THEN be.amount * be.quantity ELSE 0 END) as paid,
@@ -450,7 +452,7 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
     LIMIT 10
   `);
 
-  const monthly = await queryRows(sql`
+  const monthly = await queryRowsFrom(exec, sql`
     SELECT 
       TO_CHAR(created_at, 'YYYY-MM') as month,
       SUM(amount * quantity) as total,
@@ -462,7 +464,7 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
     LIMIT 12
   `);
 
-  const totals = await queryRows(sql`
+  const totals = await queryRowsFrom(exec, sql`
     SELECT 
       SUM(amount * quantity) as total,
       SUM(CASE WHEN is_paid THEN amount * quantity ELSE 0 END) as paid,
@@ -472,7 +474,7 @@ router.get("/accounting/summary", requireAuth, requireFirmUser, requirePermissio
     WHERE firm_id = ${req.firmId!}
   `);
 
-  const byCategory = await queryRows(sql`
+  const byCategory = await queryRowsFrom(exec, sql`
     SELECT category, SUM(amount * quantity) as total
     FROM case_billing_entries
     WHERE firm_id = ${req.firmId!}

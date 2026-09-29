@@ -178,8 +178,8 @@ const FULL_ACCESS_PROFILE = {
       featureKey: "accounting", label: "Accounting", state: "on",
       children: [
         { featureKey: "accounting.files", label: "File Listing", enabled: true },
-        { featureKey: "accounting.pv", label: "Payment Vouchers", enabled: true },
-        { featureKey: "accounting.quotations", label: "Quotations", enabled: true },
+        { featureKey: "accounting.payment_voucher", label: "Payment Vouchers", enabled: true },
+        { featureKey: "accounting.quotation", label: "Quotations", enabled: true },
         { featureKey: "accounting.invoices", label: "Invoices", enabled: true },
         { featureKey: "accounting.receipts", label: "Receipts", enabled: true },
       ],
@@ -201,8 +201,8 @@ const LIMIT_ACCOUNTING_PROFILE = {
       featureKey: "accounting", label: "Accounting", state: "on",
       children: [
         { featureKey: "accounting.files", label: "File Listing", enabled: true },
-        { featureKey: "accounting.pv", label: "Payment Vouchers", enabled: true },
-        { featureKey: "accounting.quotations", label: "Quotations", enabled: false },
+        { featureKey: "accounting.payment_voucher", label: "Payment Vouchers", enabled: true },
+        { featureKey: "accounting.quotation", label: "Quotations", enabled: false },
         { featureKey: "accounting.invoices", label: "Invoices", enabled: false },
         { featureKey: "accounting.receipts", label: "Receipts", enabled: false },
       ],

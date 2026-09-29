@@ -648,6 +648,12 @@ routerInternal.get("/users/_self/effective-features", requireAuth, requireFirmUs
   res.json({
     ...payload,
     timings,
+    data: Object.fromEntries(
+      Object.entries(payload.effective).map(([k, v]) => [k, {
+        featureKey: k,
+        enabled: Boolean((v as any)?.effectiveEnabled ?? false),
+      }]),
+    ),
   });
 });
 

@@ -111,6 +111,10 @@ const TAB_KEYS: Record<string, Tab> = {
   settings: "Settings",
 };
 
+const TAB_TO_SLUG: Record<Tab, keyof typeof TAB_KEYS> = Object.fromEntries(
+  Object.entries(TAB_KEYS).map(([slug, tab]) => [tab, slug])
+) as Record<Tab, keyof typeof TAB_KEYS>;
+
 const STATUS_COLORS: Record<string, string> = {
   draft: "bg-slate-100 text-slate-600",
   issued: "bg-blue-100 text-blue-700",
@@ -4556,7 +4560,7 @@ export default function Accounting() {
                 setLocation("/app/accounting/file-listing");
                 return;
               }
-              setActiveTab(tab);
+              setLocation(`/app/accounting?tab=${TAB_TO_SLUG[tab]}`);
             }}
             className={cn(
               "flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap",

@@ -3,9 +3,27 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { usersTable, sessionsTable, rolesTable, firmsTable, permissionsTable } from "@workspace/db";
 import type { Application } from "express";
 
+function extractAuthTokenFromSetCookie(setCookie: string[] | string | undefined): string {
+  const list = Array.isArray(setCookie) ? setCookie : [setCookie ?? ""];
+  const entry = list.find((s) => typeof s === "string" && s.startsWith("auth_token="));
+  if (!entry) return "";
+  const raw = entry.slice("auth_token=".length).split(";")[0] ?? "";
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
 type MockDb = {
   execute: (query?: unknown) => Promise<unknown[]>;
-  select: (sel?: unknown) => { from: (table: unknown) => { where: (cond?: unknown) => Promise<unknown[]> } };
+  select: (sel?: unknown) => {
+    from: (table: unknown) => {
+      where: (cond?: unknown) => Promise<unknown[]>;
+      leftJoin: (other?: unknown, onExpr?: unknown) => { where: (cond?: unknown) => Promise<unknown[]> };
+      innerJoin?: (other?: unknown, onExpr?: unknown) => { where: (cond?: unknown) => Promise<unknown[]> };
+    };
+  };
   insert: (table: unknown) => { values: (values: unknown) => Promise<void> };
   update: (table: unknown) => { set: (values: unknown) => { where: (cond?: unknown) => Promise<void> } };
 };
@@ -32,8 +50,8 @@ const makeDb = async (
   return {
     execute: async () => [{ reg: "public.audit_logs" }],
     select: (sel?: unknown) => ({
-      from: (table: unknown) => ({
-        where: async () => {
+      from: (table: unknown) => {
+        const runWhere = async (projection?: Record<string, unknown> | null): Promise<unknown[]> => {
           if (table === actual.sessionsTable) {
             if (opts?.kind === "app") appSessionSelectCalls += 1;
             const s = Array.from(state.sessionsByTokenHash.values())[0] ?? null;
@@ -60,8 +78,69 @@ const makeDb = async (
             return [{ module: "dashboard", action: "read", allowed: true }];
           }
           return emptyRows();
-        },
-      }),
+        };
+
+        const projectRow = (
+          projection: Record<string, unknown> | undefined | null,
+          flatRow: Record<string, unknown> | null,
+        ): unknown => {
+          if (!flatRow) return undefined;
+          if (!projection) return flatRow;
+          const out: Record<string, unknown> = {};
+          for (const alias of Object.keys(projection)) {
+            if (alias in flatRow) {
+              out[alias] = flatRow[alias];
+            } else {
+              // Fallback: map roleName → name on role side if exists
+              if (alias === "roleName" && "roleName" in flatRow) out[alias] = flatRow.roleName;
+              else if (alias === "roleName") out[alias] = flatRow.roleName ?? null;
+              else out[alias] = (flatRow as any)[alias] ?? null;
+            }
+          }
+          return out;
+        };
+
+        return {
+          where: async (_cond?: unknown) => runWhere(isRecord(sel) ? sel : null),
+          leftJoin: (_other?: unknown, _onExpr?: unknown) => ({
+            where: async (_cond?: unknown) => {
+              const projection = isRecord(sel) ? sel : null;
+              if (table === actual.sessionsTable) {
+                const base = await runWhere(projection);
+                const sess = (base[0] as Record<string, unknown> | undefined) ?? null;
+                if (!sess) return base;
+                const uid = typeof (sess as any).userId === "number" ? (sess as any).userId : null;
+                const user = uid !== null ? state.usersById.get(uid as number) ?? null : null;
+                const rid = user && typeof (user as any).roleId === "number" ? (user as any).roleId : null;
+                const role = rid !== null ? state.rolesById.get(rid as number) ?? null : null;
+                const flat: Record<string, unknown> = {
+                  ...Object.fromEntries(Object.entries(sess)),
+                  ...(user ? Object.fromEntries(Object.entries(user as Record<string, unknown>)) : {}),
+                  roleName: role ? (role as Record<string, unknown>).name ?? null : null,
+                };
+                const projected = projectRow(projection, flat);
+                return projected ? [projected] : base;
+              }
+              // users LEFT JOIN roles + firms
+              const userBase = await runWhere(projection);
+              const u = (userBase[0] as Record<string, unknown> | undefined) ?? null;
+              if (!u) return userBase;
+              const rid = typeof (u as any).roleId === "number" ? (u as any).roleId : null;
+              const role = rid !== null ? state.rolesById.get(rid as number) ?? null : null;
+              const fid = typeof (u as any).firmId === "number" ? (u as any).firmId : null;
+              const firm = fid !== null ? state.firmsById.get(fid as number) ?? null : null;
+              const flat: Record<string, unknown> = {
+                ...Object.fromEntries(Object.entries(u)),
+                roleName: role ? (role as Record<string, unknown>).name ?? null : null,
+                developerId: (u as any).developerId ?? null,
+              };
+              if (firm) Object.assign(flat, { firm: firm });
+              const projected = projectRow(projection, flat);
+              return projected ? [projected] : [flat];
+            },
+          }),
+        };
+      },
     }),
     insert: (table: unknown) => ({
       values: async (values: unknown) => {
@@ -189,8 +268,9 @@ describe("GET /api/auth/me uses auth-admin session lookup", () => {
 
     const login = await request(app).post("/api/auth/login").send({ email: "user@test.com", password: "goodpw" });
     expect(login.status).toBe(200);
-    const token = (login.body?.data?.token ?? login.body?.token) as string | undefined;
-    expect(typeof token).toBe("string");
+    const setCookieHeader = (login.headers as Record<string, unknown>)["set-cookie"] as string[] | string | undefined;
+    const token = extractAuthTokenFromSetCookie(setCookieHeader);
+    expect(typeof token === "string" && token.length > 0).toBe(true);
 
     const adminCallsAfterLogin = authAdminCalls;
     const me = await request(app).get("/api/auth/me").set("Authorization", `Bearer ${token}`);
